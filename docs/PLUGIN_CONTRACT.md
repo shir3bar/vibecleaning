@@ -28,7 +28,14 @@ The host passes:
 - `requestJSON(url, options)`
 - `fetchText(url)`
 
-Plugins should prefer the generic APIs and stay decoupled from internal storage details.
+Plugins should stay decoupled from internal storage details.
+
+There are two valid plugin styles in this repository:
+
+- core-only plugins that use only the generic APIs
+- overlay plugins that use the generic APIs plus routes owned by their application overlay
+
+The generic host does not know which overlay routes exist. Those routes are defined by the overlay, not the core.
 
 ## Recommended API Usage
 
@@ -39,5 +46,20 @@ Plugins should prefer the generic APIs and stay decoupled from internal storage 
 - `GET /api/project/{project}/artifact/{dataset_id}/{logical_name}`
 - `GET /api/project/{project}/artifact/{dataset_id}/{logical_name}/meta`
 - `GET /api/project/{project}/artifact/{dataset_id}/{logical_name}/preview`
+- `POST /api/project/{project}/analyses`
+- `POST /api/project/{project}/steps`
 
-If a plugin needs a faster derived representation for large artifacts, prefer creating an analysis output artifact rather than adding a plugin-specific backend endpoint.
+## Overlay Routes
+
+If a plugin is part of an overlay, it may also call overlay-owned routes such as:
+
+- `GET /api/project/{project}/apps/<overlay>/...`
+- `POST /api/project/{project}/apps/<overlay>/actions/...`
+
+Those routes should:
+
+- live outside the core backend
+- stay namespaced under the overlay
+- compile domain actions down to generic `analysis` or `step` executions when they persist changes
+
+For large artifacts, overlays may implement server-side summary routes instead of pushing the work into the browser.

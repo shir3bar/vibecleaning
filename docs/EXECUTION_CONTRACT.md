@@ -8,7 +8,7 @@ The current scaffold supports:
 
 - `python`
 
-The agent may call libraries or external tools from Python as needed.
+The agent or an overlay may call libraries or external tools from Python as needed.
 
 ## Environment Variables
 
@@ -81,3 +81,14 @@ Scripts receive:
 - verify output artifacts exist before adding them to the resulting dataset
 - reuse unchanged parent artifacts by reference
 - never mutate raw inputs
+
+## Overlay Actions
+
+Application overlays may expose named backend actions such as `delete-checked` or `build-summary`.
+
+Those actions should not become core framework concepts. Instead, the overlay should translate the action into a generic execution request:
+
+- `analysis` when the work is exploratory or derived-only
+- `step` when the work should create a new dataset node
+
+The persisted script, spec, summary, and outputs remain the source of truth for reproducibility.

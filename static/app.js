@@ -1,5 +1,6 @@
 let activePlugin = null;
 let plugins = [];
+const pluginImportNonce = String(Date.now());
 
 const pluginSelect = document.getElementById("plugin-select");
 const pluginSurface = document.getElementById("plugin-surface");
@@ -38,7 +39,8 @@ async function mountPlugin(pluginId) {
   pluginSurface.replaceChildren(mountEl);
 
   try {
-    const mod = await import(`${plugin.module}?v=1`);
+    const separator = plugin.module.includes("?") ? "&" : "?";
+    const mod = await import(`${plugin.module}${separator}t=${encodeURIComponent(pluginImportNonce)}`);
     if (typeof mod.createPlugin !== "function") {
       throw new Error("Plugin module does not export createPlugin()");
     }
@@ -73,7 +75,7 @@ async function mountPlugin(pluginId) {
 
 async function loadPlugins() {
   try {
-    const response = await fetch("/plugins/manifest.json");
+    const response = await fetch("/plugins/manifest.json", { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`Manifest request failed (${response.status})`);
     }

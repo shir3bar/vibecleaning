@@ -1,0 +1,10 @@
+{
+  "plugins": [
+    {
+      "id": "trajectory-example",
+      "name": "Trajectory Example",
+      "module": "/plugins/trajectories/plugin.js",
+      "description": "Trajectory viewer and delete-checked example app layered on top of the generic scaffold."
+    }
+  ]
+}

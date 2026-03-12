@@ -72,6 +72,7 @@ data/<project>/
   "script_path": ".vibecleaning/steps/step_.../transform.py",
   "spec_path": ".vibecleaning/steps/step_.../spec.json",
   "summary_path": ".vibecleaning/steps/step_.../summary.json",
+  "parameters": {},
   "input_artifacts": ["archive.zip"],
   "output_artifacts": ["archive_manifest.json"],
   "removed_artifacts": [],
@@ -93,7 +94,19 @@ data/<project>/
   "script_path": ".vibecleaning/analyses/analysis_.../analysis.py",
   "spec_path": ".vibecleaning/analyses/analysis_.../spec.json",
   "summary_path": ".vibecleaning/analyses/analysis_.../summary.json",
+  "parameters": {},
   "input_artifacts": ["archive.zip"],
   "output_artifacts": ["archive_summary.json"]
 }
 ```
+
+## Application-Specific Semantics
+
+The state model is generic. Application-specific meaning should live in one of these places:
+
+- `artifact.metadata`
+- `step.parameters`
+- `step.summary`
+- analysis outputs
+
+Do not add app-specific fields to the core state model unless they are broadly generic.

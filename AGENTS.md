@@ -32,8 +32,8 @@ This repository is a minimal substrate for agent-authored local data workflows. 
 - Use an `analysis` for exploratory, read-only work.
 - Use a `step` only when the user clearly wants to keep a change in the graph.
 - Keep the backend generic.
-- Put domain logic in agent-authored scripts or plugins, not in the core backend.
-- If a plugin needs a faster read model, prefer generating a derived analysis artifact over adding a domain-specific backend endpoint.
+- Put domain logic in agent-authored scripts, plugins, or application overlays, not in the core backend.
+- If a plugin needs large-file summaries or named mutation actions, implement them in an application overlay, not in the core backend.
 
 ## Project Bootstrap
 
@@ -47,14 +47,15 @@ On first use of a project folder:
 
 - The frontend shell should stay thin.
 - Plugins are bespoke interfaces, not workflow engines.
-- Plugins should consume generic APIs:
+- Plugins may consume generic APIs and overlay-owned APIs:
   - project state
   - graph
   - dataset manifests
   - artifact metadata
   - artifact bytes
   - preview endpoints
-- Avoid adding domain-specific endpoints to the core backend just to support one plugin.
+- overlay-owned routes under an application namespace
+- Avoid adding domain-specific endpoints to the core backend just to support one application.
 
 ## When Modifying This Repo
 
@@ -63,4 +64,4 @@ On first use of a project folder:
 - Do not reintroduce chat provider integration, LAN auth flows, or domain-specific transform catalogs into core.
 - If you need more behavior, write it as:
   - a custom script persisted through the execution harness, or
-  - a plugin that consumes the generic APIs.
+  - a plugin or application overlay that consumes the generic APIs.

@@ -4,10 +4,9 @@ const BASEMAP_STYLES = {
   "Dark Matter": "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
 };
 
-const MAX_POINTS_PER_SERIES = 2500;
 const PATH_ALPHA = 180;
 const POINT_ALPHA = 210;
-const STORAGE_VERSION = 1;
+const STORAGE_VERSION = 2;
 
 let assetPromise = null;
 
@@ -22,10 +21,10 @@ async function ensureAssetsLoaded() {
     return assetPromise;
   }
   assetPromise = Promise.all([
-    loadCss("/plugins/examples/trajectories/vendor/maplibre-gl/maplibre-gl.css"),
-    loadScript("/plugins/examples/trajectories/vendor/maplibre-gl/maplibre-gl.js"),
-    loadScript("/plugins/examples/trajectories/vendor/deckgl/deck.gl.min.js"),
-    loadScript("/plugins/examples/trajectories/vendor/deckgl/deck.gl-mapbox.min.js"),
+    loadCss("/plugins/trajectories/vendor/maplibre-gl/maplibre-gl.css"),
+    loadScript("/plugins/trajectories/vendor/maplibre-gl/maplibre-gl.js"),
+    loadScript("/plugins/trajectories/vendor/deckgl/deck.gl.min.js"),
+    loadScript("/plugins/trajectories/vendor/deckgl/deck.gl-mapbox.min.js"),
   ]);
   return assetPromise;
 }
@@ -73,11 +72,11 @@ function loadScript(src) {
 }
 
 class TrajectoryExamplePlugin {
-  constructor({ mountEl, storageKey, fetchJSON, fetchText }) {
+  constructor({ mountEl, storageKey, fetchJSON, requestJSON }) {
     this.mountEl = mountEl;
     this.storageKey = storageKey;
     this.fetchJSON = fetchJSON;
-    this.fetchText = fetchText;
+    this.requestJSON = requestJSON;
     this.uiState = this.loadUiState();
     this.projects = [];
     this.graph = null;
@@ -92,6 +91,7 @@ class TrajectoryExamplePlugin {
     this.map = null;
     this.overlay = null;
     this.mapLoaded = false;
+    this.loadRequestId = 0;
   }
 
   async init() {
@@ -131,6 +131,7 @@ class TrajectoryExamplePlugin {
         showTrain: true,
         showTest: true,
         showPoints: false,
+        selectedIndividuals: [],
       };
     }
   }
@@ -145,8 +146,17 @@ class TrajectoryExamplePlugin {
       showTrain: this.refs.showTrain.checked,
       showTest: this.refs.showTest.checked,
       showPoints: this.refs.showPoints.checked,
+      selectedIndividuals: this.getCheckedIndividuals(),
     };
     localStorage.setItem(this.storageKey, JSON.stringify(this.uiState));
+  }
+
+  getUser() {
+    return localStorage.getItem("vibecleaning_user_name") || "";
+  }
+
+  setUser(user) {
+    localStorage.setItem("vibecleaning_user_name", user);
   }
 
   renderShell() {
@@ -179,10 +189,14 @@ class TrajectoryExamplePlugin {
           color: #92a4bd;
         }
         .traj-toolbar select,
-        .traj-toolbar button {
+        .traj-toolbar button,
+        .traj-modal input,
+        .traj-modal textarea {
           font: inherit;
         }
-        .traj-toolbar select {
+        .traj-toolbar select,
+        .traj-modal input,
+        .traj-modal textarea {
           min-width: 150px;
           padding: 8px 10px;
           border-radius: 10px;
@@ -190,13 +204,26 @@ class TrajectoryExamplePlugin {
           background: rgba(15, 23, 42, 0.92);
           color: #e5edf7;
         }
-        .traj-toolbar button {
+        .traj-toolbar button,
+        .traj-modal button {
           padding: 8px 12px;
           border: none;
           border-radius: 10px;
           background: rgba(255, 255, 255, 0.08);
           color: #e5edf7;
           cursor: pointer;
+          font-size: 14px;
+          white-space: nowrap;
+        }
+        .traj-toolbar button.traj-danger,
+        .traj-modal button.traj-danger {
+          background: rgba(220, 38, 38, 0.22);
+          color: #ffe4e8;
+        }
+        .traj-toolbar button:disabled,
+        .traj-modal button:disabled {
+          cursor: not-allowed;
+          opacity: 0.45;
         }
         .traj-status {
           min-height: 24px;
@@ -204,7 +231,8 @@ class TrajectoryExamplePlugin {
           font-size: 12px;
           color: #92a4bd;
         }
-        .traj-status.error {
+        .traj-status.error,
+        .traj-modal-status.error {
           color: #ffb3c2;
         }
         .traj-main {
@@ -261,10 +289,9 @@ class TrajectoryExamplePlugin {
         }
         .traj-side {
           display: grid;
-          grid-template-rows: auto auto minmax(0, 1fr) auto;
+          grid-template-rows: auto minmax(0, 1fr) auto;
         }
         .traj-side-head,
-        .traj-side-summary,
         .traj-slider-row {
           padding: 12px 14px;
           border-bottom: 1px solid rgba(255, 255, 255, 0.05);
@@ -272,12 +299,6 @@ class TrajectoryExamplePlugin {
         .traj-side-head {
           font-size: 12px;
           color: #92a4bd;
-        }
-        .traj-side-summary {
-          display: grid;
-          gap: 6px;
-          font-size: 12px;
-          color: #dbe5f0;
         }
         .traj-individuals {
           overflow-y: auto;
@@ -291,6 +312,7 @@ class TrajectoryExamplePlugin {
           border-radius: 12px;
           background: rgba(255, 255, 255, 0.04);
           border: 1px solid rgba(255, 255, 255, 0.05);
+          cursor: pointer;
         }
         .traj-name {
           display: flex;
@@ -298,6 +320,27 @@ class TrajectoryExamplePlugin {
           gap: 10px;
           font-size: 12px;
           color: #eef4fb;
+        }
+        .traj-name-left {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          min-width: 0;
+        }
+        .traj-name-left input {
+          margin: 0;
+        }
+        .traj-name-label {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .traj-name-species {
+          color: #92a4bd;
+          font-size: 11px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
         .traj-species {
           font-size: 11px;
@@ -337,6 +380,71 @@ class TrajectoryExamplePlugin {
           color: #dbe5f0;
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         }
+        .traj-modal {
+          position: fixed;
+          inset: 0;
+          z-index: 20;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          background: rgba(2, 6, 12, 0.72);
+          backdrop-filter: blur(8px);
+        }
+        .traj-modal.hidden {
+          display: none;
+        }
+        .traj-modal-card {
+          width: min(560px, 100%);
+          border-radius: 18px;
+          overflow: hidden;
+          background: rgba(7, 11, 22, 0.96);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+        }
+        .traj-modal-head,
+        .traj-modal-foot {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 14px 16px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .traj-modal-foot {
+          border-bottom: none;
+          border-top: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .traj-modal-body {
+          display: grid;
+          gap: 14px;
+          padding: 16px;
+        }
+        .traj-modal-body label {
+          display: grid;
+          gap: 6px;
+          font-size: 12px;
+          color: #92a4bd;
+        }
+        .traj-modal textarea {
+          min-height: 88px;
+          resize: vertical;
+        }
+        .traj-selection-list {
+          max-height: 140px;
+          overflow: auto;
+          padding: 10px 12px;
+          border-radius: 12px;
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid rgba(255, 255, 255, 0.06);
+          font-size: 12px;
+          color: #dbe4ef;
+          line-height: 1.5;
+        }
+        .traj-modal-status {
+          font-size: 12px;
+          color: #92a4bd;
+        }
         @media (max-width: 980px) {
           .traj-main {
             grid-template-columns: 1fr;
@@ -353,7 +461,10 @@ class TrajectoryExamplePlugin {
           <label class="traj-toggle"><input type="checkbox" data-role="show-train"> Train</label>
           <label class="traj-toggle"><input type="checkbox" data-role="show-test"> Test</label>
           <label class="traj-toggle"><input type="checkbox" data-role="show-points"> Points</label>
-          <button type="button" data-role="reset-view">Reset View</button>
+          <button type="button" data-role="select-all">All</button>
+          <button type="button" data-role="select-none">None</button>
+          <button type="button" data-role="reset-view">Reset view</button>
+          <button type="button" class="traj-danger" data-role="delete-checked">Delete checked</button>
         </div>
         <div class="traj-status" data-role="status"></div>
         <div class="traj-main">
@@ -362,18 +473,40 @@ class TrajectoryExamplePlugin {
             <div class="traj-overlay" data-role="overlay">
               <div class="traj-overlay-card">
                 <h3>Example: Trajectories</h3>
-                <p>This read-only plugin loads one selected artifact at a time through the generic vibecleaning artifact APIs. It does not assume anything about the backend beyond projects, datasets, graph metadata, and artifact fetch endpoints.</p>
+                <p>This overlay keeps the original navigable map, scrollable individual list, and timeline slider while routing summary and mutation work through the trajectory example backend.</p>
               </div>
             </div>
           </div>
           <div class="traj-side">
             <div class="traj-side-head">Individuals and coverage</div>
-            <div class="traj-side-summary" data-role="summary"></div>
             <div class="traj-individuals" data-role="individuals"></div>
             <div class="traj-slider-row">
               <input class="traj-slider" data-role="slider" type="range" min="0" max="0" value="0" step="1">
               <div class="traj-time" data-role="time"></div>
             </div>
+          </div>
+        </div>
+      </div>
+      <div class="traj-modal hidden" data-role="delete-modal">
+        <div class="traj-modal-card">
+          <div class="traj-modal-head">
+            <h3>Delete checked individuals</h3>
+            <button type="button" data-role="delete-close">Close</button>
+          </div>
+          <div class="traj-modal-body">
+            <div data-role="delete-meta"></div>
+            <div class="traj-selection-list" data-role="delete-selection"></div>
+            <label>User
+              <input type="text" data-role="delete-user" placeholder="Name used for attribution">
+            </label>
+            <label>Reason
+              <textarea data-role="delete-reason" placeholder="Why are you removing these individuals?"></textarea>
+            </label>
+            <div class="traj-modal-status" data-role="delete-status"></div>
+          </div>
+          <div class="traj-modal-foot">
+            <span></span>
+            <button type="button" class="traj-danger" data-role="delete-submit">Create step</button>
           </div>
         </div>
       </div>
@@ -387,14 +520,24 @@ class TrajectoryExamplePlugin {
       showTrain: this.mountEl.querySelector('[data-role="show-train"]'),
       showTest: this.mountEl.querySelector('[data-role="show-test"]'),
       showPoints: this.mountEl.querySelector('[data-role="show-points"]'),
+      selectAll: this.mountEl.querySelector('[data-role="select-all"]'),
+      selectNone: this.mountEl.querySelector('[data-role="select-none"]'),
       resetView: this.mountEl.querySelector('[data-role="reset-view"]'),
+      deleteChecked: this.mountEl.querySelector('[data-role="delete-checked"]'),
       status: this.mountEl.querySelector('[data-role="status"]'),
-      summary: this.mountEl.querySelector('[data-role="summary"]'),
       individuals: this.mountEl.querySelector('[data-role="individuals"]'),
       slider: this.mountEl.querySelector('[data-role="slider"]'),
       time: this.mountEl.querySelector('[data-role="time"]'),
       map: this.mountEl.querySelector('[data-role="map"]'),
       overlay: this.mountEl.querySelector('[data-role="overlay"]'),
+      deleteModal: this.mountEl.querySelector('[data-role="delete-modal"]'),
+      deleteMeta: this.mountEl.querySelector('[data-role="delete-meta"]'),
+      deleteSelection: this.mountEl.querySelector('[data-role="delete-selection"]'),
+      deleteUser: this.mountEl.querySelector('[data-role="delete-user"]'),
+      deleteReason: this.mountEl.querySelector('[data-role="delete-reason"]'),
+      deleteStatus: this.mountEl.querySelector('[data-role="delete-status"]'),
+      deleteClose: this.mountEl.querySelector('[data-role="delete-close"]'),
+      deleteSubmit: this.mountEl.querySelector('[data-role="delete-submit"]'),
     };
 
     for (const name of Object.keys(BASEMAP_STYLES)) {
@@ -430,30 +573,58 @@ class TrajectoryExamplePlugin {
       await this.rebuildMap(true);
     });
 
-    this.refs.showTrain.addEventListener("change", () => {
-      this.saveUiState();
-      this.renderLayers();
-      this.renderIndividuals();
-    });
-    this.refs.showTest.addEventListener("change", () => {
-      this.saveUiState();
-      this.renderLayers();
-      this.renderIndividuals();
-    });
+    this.refs.showTrain.addEventListener("change", () => this.handleVisibilityChange());
+    this.refs.showTest.addEventListener("change", () => this.handleVisibilityChange());
     this.refs.showPoints.addEventListener("change", () => {
       this.saveUiState();
       this.renderLayers();
     });
+
+    this.refs.selectAll.addEventListener("click", () => {
+      if (!this.data) return;
+      this.data.selectedIndividuals = new Set(this.data.individuals);
+      this.saveUiState();
+      this.renderIndividuals();
+      this.renderLayers();
+      this.updateDeleteButton();
+    });
+
+    this.refs.selectNone.addEventListener("click", () => {
+      if (!this.data) return;
+      this.data.selectedIndividuals = new Set();
+      this.saveUiState();
+      this.renderIndividuals();
+      this.renderLayers();
+      this.updateDeleteButton();
+    });
+
     this.refs.resetView.addEventListener("click", () => this.resetView());
+    this.refs.deleteChecked.addEventListener("click", () => this.openDeleteModal());
     this.refs.slider.addEventListener("input", () => {
       this.currentTimeMs = Number(this.refs.slider.value) || 0;
       this.updateTimeLabel();
       this.renderLayers();
     });
+
+    this.refs.deleteClose.addEventListener("click", () => this.closeDeleteModal());
+    this.refs.deleteSubmit.addEventListener("click", async () => {
+      await this.submitDeleteChecked();
+    });
+    this.refs.deleteModal.addEventListener("click", event => {
+      if (event.target === this.refs.deleteModal) {
+        this.closeDeleteModal();
+      }
+    });
+  }
+
+  handleVisibilityChange() {
+    this.saveUiState();
+    this.renderLayers();
+    this.renderIndividuals();
   }
 
   async loadProjects() {
-    this.setStatus("Loading projects…");
+    this.setStatus("Loading projects...");
     let payload;
     try {
       payload = await this.fetchJSON("/api/projects");
@@ -484,7 +655,7 @@ class TrajectoryExamplePlugin {
   }
 
   async loadProject() {
-    this.setStatus(`Loading graph for ${this.currentProject}…`);
+    this.setStatus(`Loading graph for ${this.currentProject}...`);
     try {
       const [state, graph] = await Promise.all([
         this.fetchJSON(`/api/project/${encodeURIComponent(this.currentProject)}/state`),
@@ -501,9 +672,14 @@ class TrajectoryExamplePlugin {
         this.refs.dataset.appendChild(option);
       }
       const storedDataset = this.uiState.project === this.currentProject ? this.uiState.datasetId : "";
-      this.currentDatasetId = this.datasets.some(dataset => dataset.dataset_id === storedDataset)
-        ? storedDataset
-        : state.current_dataset.dataset_id;
+      const preferredDataset = this.datasets.some(dataset => dataset.dataset_id === this.currentDatasetId)
+        ? this.currentDatasetId
+        : "";
+      this.currentDatasetId = preferredDataset || (
+        this.datasets.some(dataset => dataset.dataset_id === storedDataset)
+          ? storedDataset
+          : state.current_dataset.dataset_id
+      );
       this.refs.dataset.value = this.currentDatasetId;
       await this.loadDataset();
     } catch (error) {
@@ -516,10 +692,10 @@ class TrajectoryExamplePlugin {
     this.data = null;
     this.currentDataset = null;
     this.currentArtifactEntry = null;
-    this.refs.summary.innerHTML = "";
     this.refs.individuals.innerHTML = "";
     this.renderLayers();
-    this.setStatus(`Loading dataset ${this.currentDatasetId}…`);
+    this.updateDeleteButton();
+    this.setStatus(`Loading dataset ${this.currentDatasetId}...`);
     try {
       this.currentDataset = await this.fetchJSON(
         `/api/project/${encodeURIComponent(this.currentProject)}/dataset/${encodeURIComponent(this.currentDatasetId)}`,
@@ -534,7 +710,7 @@ class TrajectoryExamplePlugin {
     for (const artifact of artifacts) {
       const option = document.createElement("option");
       option.value = artifact.logical_name;
-      option.textContent = `${artifact.logical_name} (${formatBytes(artifact.size)})`;
+      option.textContent = artifact.logical_name;
       this.refs.artifact.appendChild(option);
     }
     if (!artifacts.length) {
@@ -555,6 +731,7 @@ class TrajectoryExamplePlugin {
   }
 
   async loadArtifact() {
+    const requestId = ++this.loadRequestId;
     this.currentArtifactEntry = (this.currentDataset?.artifacts || []).find(
       artifact => artifact.logical_name === this.currentArtifact,
     ) || null;
@@ -562,46 +739,41 @@ class TrajectoryExamplePlugin {
       return;
     }
     this.saveUiState();
-    const sizeLabel = formatBytes(this.currentArtifactEntry.size);
-    this.setStatus(`Loading ${this.currentArtifact} from ${this.currentDatasetId} (${sizeLabel})…`);
+    this.setStatus(`Loading ${this.currentArtifact} from ${this.currentDatasetId}...`);
     try {
-      const text = await this.fetchText(
-        `/api/project/${encodeURIComponent(this.currentProject)}/artifact/${encodeURIComponent(this.currentDatasetId)}/${encodeURIComponent(this.currentArtifact)}`,
+      const summary = await this.fetchJSON(
+        `/api/project/${encodeURIComponent(this.currentProject)}/apps/trajectory/dataset/${encodeURIComponent(this.currentDatasetId)}/summary?${new URLSearchParams({ logical_name: this.currentArtifact }).toString()}`,
       );
-      this.data = summarizeTrajectoryCsv(text, this.currentArtifact);
+      if (requestId !== this.loadRequestId) {
+        return;
+      }
+      this.data = buildDatasetFromSummary(summary);
       this.currentTimeMs = this.data.minTimeMs;
       this.refs.slider.min = String(this.data.minTimeMs);
       this.refs.slider.max = String(this.data.maxTimeMs);
       this.refs.slider.value = String(this.currentTimeMs);
-      this.renderSummary();
+      this.data.selectedIndividuals = new Set(this.data.individuals);
+
       this.renderIndividuals();
       this.updateTimeLabel();
       this.hideOverlay();
       await this.rebuildMap(false);
+      this.resetView();
+      this.updateDeleteButton();
       this.setStatus(
         `Loaded ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}.`,
       );
     } catch (error) {
+      if (requestId !== this.loadRequestId) {
+        return;
+      }
       this.data = null;
-      this.renderSummary();
       this.renderIndividuals();
       this.renderLayers();
+      this.updateDeleteButton();
       this.setStatus(error.message, true);
       this.showOverlay(`Could not render ${this.currentArtifact}.`);
     }
-  }
-
-  renderSummary() {
-    if (!this.data) {
-      this.refs.summary.innerHTML = "";
-      return;
-    }
-    this.refs.summary.innerHTML = `
-      <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
-      <div><strong>Rows used:</strong> ${escapeHtml(formatCount(this.data.totalRows))}</div>
-      <div><strong>Individuals:</strong> ${escapeHtml(formatCount(this.data.individuals.length))}</div>
-      <div><strong>Time range:</strong> ${escapeHtml(formatTimestamp(this.data.minTimeMs))} to ${escapeHtml(formatTimestamp(this.data.maxTimeMs))}</div>
-    `;
   }
 
   renderIndividuals() {
@@ -612,22 +784,46 @@ class TrajectoryExamplePlugin {
     for (const individual of this.data.individuals) {
       const stats = this.data.stats[individual];
       const coverage = this.data.coverageByIndividual[individual] || {};
+      const isSelected = this.data.selectedIndividuals.has(individual);
       const card = document.createElement("div");
       card.className = "traj-individual";
-      card.appendChild(htmlElement(`
+      card.style.opacity = isSelected ? "1" : "0.34";
+
+      const header = htmlElement(`
         <div class="traj-name">
-          <span>${escapeHtml(individual)}</span>
+          <div class="traj-name-left">
+            <input type="checkbox" ${isSelected ? "checked" : ""}>
+            <span class="traj-name-label">${escapeHtml(individual)}</span>
+            ${this.data.speciesByIndividual[individual] ? `<span class="traj-name-species">• ${escapeHtml(this.data.speciesByIndividual[individual])}</span>` : ""}
+          </div>
           <span>${escapeHtml(formatCount(stats.rowCount))}</span>
         </div>
-      `));
-      if (this.data.speciesByIndividual[individual]) {
-        card.appendChild(htmlElement(`<div class="traj-species">${escapeHtml(this.data.speciesByIndividual[individual])}</div>`));
-      }
+      `);
+      const checkbox = header.querySelector("input");
+      const applySelection = shouldSelect => {
+        if (!this.data) return;
+        if (shouldSelect) {
+          this.data.selectedIndividuals.add(individual);
+        } else {
+          this.data.selectedIndividuals.delete(individual);
+        }
+        this.saveUiState();
+        this.renderIndividuals();
+        this.renderLayers();
+        this.updateDeleteButton();
+      };
+      checkbox.addEventListener("click", event => {
+        event.stopPropagation();
+      });
+      checkbox.addEventListener("change", () => {
+        applySelection(checkbox.checked);
+      });
+      card.appendChild(header);
       card.appendChild(htmlElement(`
         <div class="traj-stats">
-          <span>median fix ${escapeHtml(formatMaybeNumber(stats.medianFixS, "s"))}</span>
+          <span>median fix ${escapeHtml(formatDuration(stats.medianFixS))}</span>
           <span>median step ${escapeHtml(formatMaybeNumber(stats.medianStepM, "m"))}</span>
-          <span>p95 step ${escapeHtml(formatMaybeNumber(stats.p95StepM, "m"))}</span>
+          <span>q95 step ${escapeHtml(formatMaybeNumber(stats.p95StepM, "m"))}</span>
         </div>
       `));
       const track = document.createElement("div");
@@ -642,10 +838,13 @@ class TrajectoryExamplePlugin {
         el.className = "traj-bar";
         el.style.left = `${bounds.left}%`;
         el.style.width = `${bounds.width}%`;
-        el.style.background = colorCss(this.data.palette[individual], setName, 0.88);
+        el.style.background = colorCss(this.data.palette[individual], setName, isSelected ? 0.88 : 0.25);
         track.appendChild(el);
       }
       card.appendChild(track);
+      card.addEventListener("click", () => {
+        applySelection(!isSelected);
+      });
       this.refs.individuals.appendChild(card);
     }
   }
@@ -694,37 +893,37 @@ class TrajectoryExamplePlugin {
     }
     const pathData = [];
     const pointData = [];
-    for (const individual of this.data.individuals) {
+    const cursorData = [];
+    const visibleIndividuals = this.data.individuals.filter(individual => this.data.selectedIndividuals.has(individual));
+    for (const individual of visibleIndividuals) {
       for (const setName of visibleSets(this.refs.showTrain.checked, this.refs.showTest.checked)) {
         const series = this.data.seriesByIndividual[individual]?.[setName];
         if (!series) {
           continue;
         }
-        const filtered = filterSeriesByTime(series, this.currentTimeMs);
-        if (filtered.positions.length < 2) {
-          if (this.refs.showPoints.checked && filtered.positions.length === 1) {
-            pointData.push({
-              individual,
-              setName,
-              position: filtered.positions[0],
-              color: splitColor(this.data.palette[individual], setName, POINT_ALPHA),
-            });
-          }
-          continue;
+        if (series.positions.length >= 2) {
+          pathData.push({
+            individual,
+            setName,
+            path: series.positions,
+            color: splitColor(this.data.palette[individual], setName, PATH_ALPHA),
+          });
         }
-        pathData.push({
-          individual,
-          setName,
-          path: filtered.positions,
-          color: splitColor(this.data.palette[individual], setName, PATH_ALPHA),
-        });
         if (this.refs.showPoints.checked) {
-          pointData.push(...filtered.positions.map(position => ({
+          pointData.push(...series.positions.map(position => ({
             individual,
             setName,
             position,
             color: splitColor(this.data.palette[individual], setName, POINT_ALPHA),
           })));
+        }
+        const cursorPosition = interpolateSeriesPosition(series, this.currentTimeMs);
+        if (cursorPosition) {
+          cursorData.push({
+            individual,
+            setName,
+            position: cursorPosition,
+          });
         }
       }
     }
@@ -755,6 +954,25 @@ class TrajectoryExamplePlugin {
         }),
       );
     }
+
+    if (cursorData.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "trajectory-cursor",
+          data: cursorData,
+          getPosition: item => item.position,
+          getFillColor: [12, 12, 12, 255],
+          getLineColor: [255, 255, 255, 235],
+          getRadius: 64,
+          radiusMinPixels: 4,
+          radiusMaxPixels: 8,
+          lineWidthMinPixels: 1.5,
+          stroked: true,
+          filled: true,
+          pickable: false,
+        }),
+      );
+    }
     this.overlay.setProps({ layers });
   }
 
@@ -778,6 +996,105 @@ class TrajectoryExamplePlugin {
     this.refs.time.textContent = formatTimestamp(this.currentTimeMs);
   }
 
+  getCheckedIndividuals() {
+    if (!this.data || !(this.data.selectedIndividuals instanceof Set)) {
+      return [];
+    }
+    return Array.from(this.data.selectedIndividuals).sort((left, right) => left.localeCompare(right));
+  }
+
+  updateDeleteButton() {
+    this.refs.deleteChecked.disabled = !this.data || this.getCheckedIndividuals().length === 0;
+  }
+
+  openDeleteModal() {
+    const checkedIndividuals = this.getCheckedIndividuals();
+    if (!checkedIndividuals.length || !this.currentArtifact) {
+      return;
+    }
+    this.refs.deleteMeta.innerHTML = `
+      <div><strong>Project:</strong> ${escapeHtml(this.currentProject)}</div>
+      <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+      <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+      <div><strong>Checked:</strong> ${escapeHtml(formatCount(checkedIndividuals.length))} individual(s)</div>
+    `;
+    this.refs.deleteSelection.textContent = checkedIndividuals.join(", ");
+    this.refs.deleteUser.value = this.getUser();
+    this.refs.deleteReason.value = "";
+    this.refs.deleteStatus.textContent = "";
+    this.refs.deleteStatus.classList.remove("error");
+    this.refs.deleteSubmit.disabled = false;
+    this.refs.deleteClose.disabled = false;
+    this.refs.deleteModal.classList.remove("hidden");
+    this.refs.deleteReason.focus();
+  }
+
+  closeDeleteModal(force = false) {
+    if (!force && this.refs.deleteSubmit.disabled) {
+      return;
+    }
+    this.refs.deleteModal.classList.add("hidden");
+    this.refs.deleteStatus.textContent = "";
+    this.refs.deleteStatus.classList.remove("error");
+  }
+
+  async submitDeleteChecked() {
+    const checkedIndividuals = this.getCheckedIndividuals();
+    const user = this.refs.deleteUser.value.trim();
+    const reason = this.refs.deleteReason.value.trim();
+    if (!checkedIndividuals.length) {
+      return;
+    }
+    if (!user) {
+      this.refs.deleteStatus.textContent = "Attribution is required.";
+      this.refs.deleteStatus.classList.add("error");
+      this.refs.deleteUser.focus();
+      return;
+    }
+    if (!reason) {
+      this.refs.deleteStatus.textContent = "Reason is required.";
+      this.refs.deleteStatus.classList.add("error");
+      this.refs.deleteReason.focus();
+      return;
+    }
+
+    this.refs.deleteSubmit.disabled = true;
+    this.refs.deleteClose.disabled = true;
+    this.refs.deleteStatus.textContent = `Deleting ${formatCount(checkedIndividuals.length)} checked individual(s)...`;
+    this.refs.deleteStatus.classList.remove("error");
+    this.setStatus(this.refs.deleteStatus.textContent);
+
+    try {
+      const result = await this.requestJSON(
+        `/api/project/${encodeURIComponent(this.currentProject)}/apps/trajectory/actions/delete-checked`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            individuals: checkedIndividuals,
+            user,
+            reason,
+          }),
+        },
+      );
+      this.setUser(user);
+      this.currentDatasetId = result.dataset.dataset_id;
+      this.closeDeleteModal(true);
+      await this.loadProject();
+      this.currentDatasetId = result.dataset.dataset_id;
+      this.refs.dataset.value = this.currentDatasetId;
+      await this.loadDataset();
+      this.setStatus(`Created ${result.step.title} in ${result.dataset.dataset_id}.`);
+    } catch (error) {
+      this.refs.deleteStatus.textContent = error.message;
+      this.refs.deleteStatus.classList.add("error");
+      this.refs.deleteSubmit.disabled = false;
+      this.refs.deleteClose.disabled = false;
+      this.setStatus(error.message, true);
+    }
+  }
+
   setStatus(message, isError = false) {
     this.refs.status.textContent = message;
     this.refs.status.classList.toggle("error", isError);
@@ -793,312 +1110,112 @@ class TrajectoryExamplePlugin {
   }
 }
 
-function summarizeTrajectoryCsv(text, artifactName) {
-  let header = null;
-  let columns = null;
-  let totalRows = 0;
-  let minLon = Number.POSITIVE_INFINITY;
-  let maxLon = Number.NEGATIVE_INFINITY;
-  let minLat = Number.POSITIVE_INFINITY;
-  let maxLat = Number.NEGATIVE_INFINITY;
-  let minTimeMs = Number.POSITIVE_INFINITY;
-  let maxTimeMs = Number.NEGATIVE_INFINITY;
-  const speciesByIndividual = {};
-  const rowCounts = {};
-  const groups = new Map();
-  const statsByIndividual = new Map();
-
-  forEachCsvRow(text, row => {
-    if (!header) {
-      header = row;
-      columns = detectColumns(header);
-      if (!columns.individual || !columns.time || !columns.lon || !columns.lat) {
-        throw new Error(`${artifactName} is missing required trajectory columns.`);
-      }
-      return;
-    }
-    if (!row.length || row.every(value => value === "")) {
-      return;
-    }
-
-    const individual = getField(row, header, columns.individual).trim();
-    if (!individual) {
-      return;
-    }
-    const timeMs = parseTimestampMs(getField(row, header, columns.time));
-    if (timeMs == null) {
-      return;
-    }
-    const lon = Number.parseFloat(getField(row, header, columns.lon));
-    const lat = Number.parseFloat(getField(row, header, columns.lat));
-    if (!Number.isFinite(lon) || !Number.isFinite(lat) || lon < -180 || lon > 180 || lat < -90 || lat > 90) {
-      return;
-    }
-
-    const setName = normalizeSet(getField(row, header, columns.set));
-    const commonName = columns.commonName ? getField(row, header, columns.commonName).trim() : "";
-    const scientificName = columns.scientificName ? getField(row, header, columns.scientificName).trim() : "";
-    if (!speciesByIndividual[individual]) {
-      speciesByIndividual[individual] = commonName || scientificName || "Unknown species";
-    }
-
-    totalRows += 1;
-    rowCounts[individual] = (rowCounts[individual] || 0) + 1;
-    minLon = Math.min(minLon, lon);
-    maxLon = Math.max(maxLon, lon);
-    minLat = Math.min(minLat, lat);
-    maxLat = Math.max(maxLat, lat);
-    minTimeMs = Math.min(minTimeMs, timeMs);
-    maxTimeMs = Math.max(maxTimeMs, timeMs);
-
-    const groupKey = `${individual}__${setName}`;
-    const group = groups.get(groupKey) || {
-      individual,
-      setName,
-      startMs: timeMs,
-      endMs: timeMs,
-      seen: 0,
-      samples: [],
-      prev: null,
-    };
-    group.seen += 1;
-    group.startMs = Math.min(group.startMs, timeMs);
-    group.endMs = Math.max(group.endMs, timeMs);
-    reservoirAppend(group.samples, [timeMs, lon, lat], group.seen, MAX_POINTS_PER_SERIES);
-    if (group.prev && timeMs > group.prev[0]) {
-      const deltaS = (timeMs - group.prev[0]) / 1000;
-      const stepM = haversineMeters(group.prev[1], group.prev[2], lon, lat);
-      const stats = statsByIndividual.get(individual) || {
-        seenFix: 0,
-        seenStep: 0,
-        fix: [],
-        step: [],
-      };
-      stats.seenFix += 1;
-      stats.seenStep += 1;
-      reservoirAppend(stats.fix, deltaS, stats.seenFix, 5000);
-      reservoirAppend(stats.step, stepM, stats.seenStep, 5000);
-      statsByIndividual.set(individual, stats);
-    }
-    group.prev = [timeMs, lon, lat];
-    groups.set(groupKey, group);
-  });
-
-  if (!Number.isFinite(minTimeMs) || !Number.isFinite(maxTimeMs) || totalRows === 0) {
-    throw new Error(`${artifactName} did not contain usable trajectory rows.`);
+function buildDatasetFromSummary(summary) {
+  const individuals = Array.isArray(summary.individuals)
+    ? [...summary.individuals].sort((left, right) => left.localeCompare(right))
+    : [];
+  if (!individuals.length) {
+    throw new Error("Dataset summary did not contain any individuals.");
   }
 
-  const individuals = Object.keys(rowCounts).sort((left, right) => left.localeCompare(right));
   const seriesByIndividual = {};
   const coverageByIndividual = {};
-  for (const group of groups.values()) {
-    const sorted = [...group.samples].sort((left, right) => left[0] - right[0]);
-    seriesByIndividual[group.individual] ||= {};
-    seriesByIndividual[group.individual][group.setName] = {
-      times: sorted.map(item => item[0]),
-      positions: sorted.map(item => [item[1], item[2]]),
-    };
-    coverageByIndividual[group.individual] ||= {};
-    coverageByIndividual[group.individual][group.setName] = {
-      startMs: group.startMs,
-      endMs: group.endMs,
-    };
-  }
-
   const stats = {};
   const palette = {};
-  individuals.forEach((individual, index) => {
-    const item = statsByIndividual.get(individual) || { fix: [], step: [] };
+
+  Object.entries(summary.series_by_individual || {}).forEach(([individual, sets]) => {
+    seriesByIndividual[individual] = {};
+    Object.entries(sets || {}).forEach(([setName, series]) => {
+      seriesByIndividual[individual][setName] = {
+        times: Array.isArray(series?.times) ? series.times.map(value => Number(value) || 0) : [],
+        positions: Array.isArray(series?.positions)
+          ? series.positions.map(position => [Number(position?.[0]) || 0, Number(position?.[1]) || 0])
+          : [],
+      };
+    });
+  });
+
+  Object.entries(summary.coverage_by_individual || {}).forEach(([individual, sets]) => {
+    coverageByIndividual[individual] = {};
+    Object.entries(sets || {}).forEach(([setName, coverage]) => {
+      coverageByIndividual[individual][setName] = {
+        startMs: Number(coverage?.start_ms) || 0,
+        endMs: Number(coverage?.end_ms) || 0,
+      };
+    });
+  });
+
+  Object.entries(summary.stats || {}).forEach(([individual, item]) => {
     stats[individual] = {
-      rowCount: rowCounts[individual] || 0,
-      medianFixS: median(item.fix),
-      medianStepM: median(item.step),
-      p95StepM: quantile(item.step, 0.95),
+      rowCount: Number(item?.row_count) || 0,
+      medianFixS: finiteOrNull(item?.median_fix_s),
+      medianStepM: finiteOrNull(item?.median_step_m),
+      p95StepM: finiteOrNull(item?.p95_step_m),
     };
+  });
+
+  individuals.forEach((individual, index) => {
+    if (!stats[individual]) {
+      stats[individual] = {
+        rowCount: 0,
+        medianFixS: null,
+        medianStepM: null,
+        p95StepM: null,
+      };
+    }
     palette[individual] = hslToRgb((index * 137.508) % 360, 0.76, 0.54);
   });
 
   return {
-    totalRows,
+    totalRows: Number(summary.total_rows) || 0,
     individuals,
-    speciesByIndividual,
+    speciesByIndividual: summary.species_by_individual || {},
     seriesByIndividual,
     coverageByIndividual,
     stats,
     palette,
-    minTimeMs,
-    maxTimeMs,
+    minTimeMs: Number(summary.min_time_ms) || 0,
+    maxTimeMs: Number(summary.max_time_ms) || 0,
     initialView: {
-      longitude: (minLon + maxLon) / 2,
-      latitude: (minLat + maxLat) / 2,
-      zoom: spanToZoom(Math.max(maxLon - minLon, maxLat - minLat)),
+      longitude: Number(summary.initial_view?.longitude) || 0,
+      latitude: Number(summary.initial_view?.latitude) || 0,
+      zoom: Number(summary.initial_view?.zoom) || 1,
     },
+    selectedIndividuals: new Set(individuals),
   };
 }
 
-function forEachCsvRow(text, onRow) {
-  let row = [];
-  let field = "";
-  let inQuotes = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const ch = text[index];
-    const next = text[index + 1];
-    if (inQuotes) {
-      if (ch === '"' && next === '"') {
-        field += '"';
-        index += 1;
-      } else if (ch === '"') {
-        inQuotes = false;
-      } else {
-        field += ch;
-      }
+function interpolateSeriesPosition(series, currentTimeMs) {
+  if (!series || !Array.isArray(series.times) || !Array.isArray(series.positions) || !series.times.length) {
+    return null;
+  }
+  if (currentTimeMs <= series.times[0]) {
+    return series.positions[0];
+  }
+  const lastIndex = series.times.length - 1;
+  if (currentTimeMs >= series.times[lastIndex]) {
+    return series.positions[lastIndex];
+  }
+
+  for (let index = 1; index < series.times.length; index += 1) {
+    const leftTime = series.times[index - 1];
+    const rightTime = series.times[index];
+    if (currentTimeMs > rightTime) {
       continue;
     }
-    if (ch === '"') {
-      inQuotes = true;
-    } else if (ch === ",") {
-      row.push(field);
-      field = "";
-    } else if (ch === "\n") {
-      row.push(field);
-      field = "";
-      onRow(row);
-      row = [];
-    } else if (ch === "\r") {
-      continue;
-    } else {
-      field += ch;
+    const leftPos = series.positions[index - 1];
+    const rightPos = series.positions[index];
+    const span = rightTime - leftTime;
+    if (span <= 0) {
+      return rightPos;
     }
+    const ratio = (currentTimeMs - leftTime) / span;
+    return [
+      leftPos[0] + (rightPos[0] - leftPos[0]) * ratio,
+      leftPos[1] + (rightPos[1] - leftPos[1]) * ratio,
+    ];
   }
-  if (field.length || row.length) {
-    row.push(field);
-    onRow(row);
-  }
-}
-
-function normalizeHeader(header) {
-  return String(header || "").toLowerCase().replace(/[-_: ]/g, "");
-}
-
-function detectColumns(header) {
-  const normalizedMap = new Map(header.map(name => [normalizeHeader(name), name]));
-  return {
-    individual: findColumn(normalizedMap, ["individual", "individualid", "individuallocalidentifier", "animalid", "trackid", "taglocalidentifier", "id"]),
-    time: findColumn(normalizedMap, ["timestamp", "time", "datetime", "eventtime", "transmissiontimestamp"]),
-    lon: findColumn(normalizedMap, ["longitude", "lon", "locationlong", "stependlocationlong", "x"]),
-    lat: findColumn(normalizedMap, ["latitude", "lat", "locationlat", "stependlocationlat", "y"]),
-    commonName: findColumn(normalizedMap, ["individualtaxoncommonname", "taxoncommonname", "commonname", "speciescommonname", "vernacularname", "animalcommonname"]),
-    scientificName: findColumn(normalizedMap, ["individualtaxoncanonicalname", "taxoncanonicalname", "scientificname", "species", "taxon"]),
-    set: findColumn(normalizedMap, ["set", "split", "partition"]),
-  };
-}
-
-function findColumn(map, aliases) {
-  for (const alias of aliases) {
-    if (map.has(alias)) {
-      return map.get(alias);
-    }
-  }
-  return null;
-}
-
-function getField(row, header, columnName) {
-  if (!columnName) {
-    return "";
-  }
-  const index = header.indexOf(columnName);
-  return index >= 0 ? String(row[index] || "") : "";
-}
-
-function normalizeSet(value) {
-  return String(value || "").trim().toLowerCase() === "test" ? "test" : "train";
-}
-
-function parseTimestampMs(value) {
-  const text = String(value || "").trim();
-  if (!text) {
-    return null;
-  }
-  const direct = Date.parse(text);
-  if (Number.isFinite(direct)) {
-    return direct;
-  }
-  const fallback = Date.parse(text.replace(" ", "T"));
-  return Number.isFinite(fallback) ? fallback : null;
-}
-
-function reservoirAppend(sample, item, seenCount, limit) {
-  if (sample.length < limit) {
-    sample.push(item);
-    return;
-  }
-  const slot = Math.floor(Math.random() * seenCount);
-  if (slot < limit) {
-    sample[slot] = item;
-  }
-}
-
-function median(values) {
-  if (!values.length) {
-    return null;
-  }
-  const sorted = [...values].sort((left, right) => left - right);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2
-    ? sorted[mid]
-    : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
-function quantile(values, q) {
-  if (!values.length) {
-    return null;
-  }
-  const sorted = [...values].sort((left, right) => left - right);
-  const idx = (sorted.length - 1) * q;
-  const lower = Math.floor(idx);
-  const upper = Math.min(sorted.length - 1, lower + 1);
-  if (lower === upper) {
-    return sorted[lower];
-  }
-  const ratio = idx - lower;
-  return sorted[lower] + (sorted[upper] - sorted[lower]) * ratio;
-}
-
-function haversineMeters(lon1, lat1, lon2, lat2) {
-  const toRad = degrees => degrees * Math.PI / 180;
-  const phi1 = toRad(lat1);
-  const phi2 = toRad(lat2);
-  const deltaPhi = toRad(lat2 - lat1);
-  const deltaLambda = toRad(lon2 - lon1);
-  const a = Math.sin(deltaPhi / 2) ** 2 +
-    Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) ** 2;
-  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function spanToZoom(spanDegrees) {
-  if (spanDegrees <= 0) return 2;
-  if (spanDegrees > 120) return 1;
-  if (spanDegrees > 60) return 2;
-  if (spanDegrees > 30) return 3;
-  if (spanDegrees > 15) return 4;
-  if (spanDegrees > 8) return 5;
-  if (spanDegrees > 4) return 6;
-  if (spanDegrees > 2) return 7;
-  if (spanDegrees > 1) return 8;
-  if (spanDegrees > 0.5) return 9;
-  if (spanDegrees > 0.25) return 10;
-  return 11;
-}
-
-function filterSeriesByTime(series, currentTimeMs) {
-  const positions = [];
-  for (let index = 0; index < series.times.length; index += 1) {
-    if (series.times[index] > currentTimeMs) {
-      break;
-    }
-    positions.push(series.positions[index]);
-  }
-  return { positions };
+  return series.positions[lastIndex];
 }
 
 function visibleSets(showTrain, showTest) {
@@ -1155,16 +1272,6 @@ function formatDatasetLabel(dataset, currentDatasetId) {
   return `${note}[${dataset.dataset_id}]${currentSuffix}`;
 }
 
-function formatBytes(value) {
-  if (!Number.isFinite(value)) {
-    return "unknown size";
-  }
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-}
-
 function formatCount(value) {
   return new Intl.NumberFormat().format(value);
 }
@@ -1179,6 +1286,26 @@ function formatMaybeNumber(value, suffix) {
     return "n/a";
   }
   return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${suffix}`;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds)) {
+    return "n/a";
+  }
+  if (seconds < 60) {
+    return `${seconds.toFixed(seconds >= 10 ? 1 : 2)} s`;
+  }
+  if (seconds < 3600) {
+    const minutes = seconds / 60;
+    return `${minutes.toFixed(minutes >= 10 ? 1 : 2)} min`;
+  }
+  const hours = seconds / 3600;
+  return `${hours.toFixed(hours >= 10 ? 1 : 2)} hr`;
+}
+
+function finiteOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function escapeHtml(value) {

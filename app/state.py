@@ -260,6 +260,7 @@ def project_state_payload(project_dir: Path) -> dict:
     return {
         "project": project_state,
         "current_dataset": dataset_summary(current_dataset),
+        "history": history,
         "counts": {
             "datasets": len(list_datasets(project_dir)),
             "analyses": len(history["analyses"]),

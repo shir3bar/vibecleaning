@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Vibecleaning</title>
+<title>vibecleaning</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -45,12 +45,12 @@
   }
   .brand h1 {
     font-size: 18px;
-    font-weight: 650;
-  }
-  .brand p {
-    margin-top: 4px;
-    color: var(--muted);
-    font-size: 12px;
+    font-weight: 700;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    color: #7dff98;
+    letter-spacing: 0.03em;
+    text-shadow: 0 0 12px rgba(125, 255, 152, 0.28);
+    text-transform: lowercase;
   }
   .toolbar {
     display: flex;
@@ -68,9 +68,12 @@
     padding: 8px 10px;
     min-width: 220px;
   }
-  #plugin-stage,
-  #plugin-surface {
+  #plugin-stage {
     flex: 1;
+    min-height: 0;
+  }
+  #plugin-surface {
+    height: 100%;
     min-height: 0;
   }
   #plugin-surface > .plugin-surface,
@@ -109,8 +112,7 @@
 <div id="app-shell">
   <header class="topbar">
     <div class="brand">
-      <h1>Vibecleaning</h1>
-      <p>Minimal DAG-backed scaffolding for agent-built interfaces.</p>
+      <h1>vibecleaning</h1>
     </div>
     <div class="toolbar">
       <label for="plugin-select">Plugin</label>
