@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vibecleaning</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #08111b;
+    --panel: rgba(8, 17, 27, 0.88);
+    --panel-2: rgba(14, 24, 40, 0.92);
+    --border: rgba(148, 163, 184, 0.16);
+    --text: #e8eef7;
+    --muted: #92a4bd;
+    --accent: #74d4ff;
+  }
+  html, body {
+    height: 100%;
+  }
+  body {
+    background:
+      radial-gradient(circle at top left, rgba(116, 212, 255, 0.12), transparent 28%),
+      radial-gradient(circle at bottom right, rgba(63, 98, 181, 0.18), transparent 26%),
+      linear-gradient(180deg, #09111a 0%, #050911 100%);
+    color: var(--text);
+    font-family: "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+  #app-shell {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    backdrop-filter: blur(18px);
+    flex-shrink: 0;
+  }
+  .brand h1 {
+    font-size: 18px;
+    font-weight: 650;
+  }
+  .brand p {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  select {
+    font: inherit;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 8px 10px;
+    min-width: 220px;
+  }
+  #plugin-stage,
+  #plugin-surface {
+    flex: 1;
+    min-height: 0;
+  }
+  #plugin-surface > .plugin-surface,
+  .plugin-placeholder,
+  .plugin-error {
+    width: 100%;
+    height: 100%;
+  }
+  .plugin-placeholder,
+  .plugin-error {
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    text-align: center;
+    color: var(--muted);
+  }
+  .plugin-error {
+    color: #ffb3c2;
+  }
+  @media (max-width: 900px) {
+    .topbar {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .toolbar {
+      width: 100%;
+    }
+    select {
+      width: 100%;
+      min-width: 0;
+    }
+  }
+</style>
+</head>
+<body>
+<div id="app-shell">
+  <header class="topbar">
+    <div class="brand">
+      <h1>Vibecleaning</h1>
+      <p>Minimal DAG-backed scaffolding for agent-built interfaces.</p>
+    </div>
+    <div class="toolbar">
+      <label for="plugin-select">Plugin</label>
+      <select id="plugin-select"></select>
+    </div>
+  </header>
+  <main id="plugin-stage">
+    <div id="plugin-surface">
+      <div class="plugin-placeholder">Loading plugins…</div>
+    </div>
+  </main>
+</div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
