@@ -74,7 +74,9 @@ class TrajectoryExampleApp {
     this.uiState = this.loadUiState();
     this.projects = [];
     this.graph = null;
+    this.allDatasets = [];
     this.datasets = [];
+    this.stepByOutputDatasetId = new Map();
     this.currentProject = "";
     this.currentDatasetId = "";
     this.currentArtifact = "";
@@ -459,6 +461,7 @@ class TrajectoryExampleApp {
           <button type="button" data-role="select-none">None</button>
           <button type="button" data-role="reset-view">Reset view</button>
           <button type="button" class="traj-danger" data-role="delete-checked">Delete checked</button>
+          <button type="button" data-role="undo">Undo</button>
         </div>
         <div class="traj-status" data-role="status"></div>
         <div class="traj-main">
@@ -517,6 +520,7 @@ class TrajectoryExampleApp {
       selectAll: this.mountEl.querySelector('[data-role="select-all"]'),
       selectNone: this.mountEl.querySelector('[data-role="select-none"]'),
       resetView: this.mountEl.querySelector('[data-role="reset-view"]'),
+      undo: this.mountEl.querySelector('[data-role="undo"]'),
       deleteChecked: this.mountEl.querySelector('[data-role="delete-checked"]'),
       status: this.mountEl.querySelector('[data-role="status"]'),
       individuals: this.mountEl.querySelector('[data-role="individuals"]'),
@@ -544,6 +548,7 @@ class TrajectoryExampleApp {
     this.refs.showTrain.checked = this.uiState.showTrain !== false;
     this.refs.showTest.checked = this.uiState.showTest !== false;
     this.refs.showPoints.checked = this.uiState.showPoints === true;
+    this.updateActionButtons();
   }
 
   bindEvents() {
@@ -559,6 +564,7 @@ class TrajectoryExampleApp {
 
     this.refs.artifact.addEventListener("change", async () => {
       this.currentArtifact = this.refs.artifact.value;
+      this.refreshDatasetOptions(this.currentDatasetId);
       await this.loadArtifact();
     });
 
@@ -580,7 +586,7 @@ class TrajectoryExampleApp {
       this.saveUiState();
       this.renderIndividuals();
       this.renderLayers();
-      this.updateDeleteButton();
+      this.updateActionButtons();
     });
 
     this.refs.selectNone.addEventListener("click", () => {
@@ -589,10 +595,13 @@ class TrajectoryExampleApp {
       this.saveUiState();
       this.renderIndividuals();
       this.renderLayers();
-      this.updateDeleteButton();
+      this.updateActionButtons();
     });
 
     this.refs.resetView.addEventListener("click", () => this.resetView());
+    this.refs.undo.addEventListener("click", async () => {
+      await this.undoCurrentHead();
+    });
     this.refs.deleteChecked.addEventListener("click", () => this.openDeleteModal());
     this.refs.slider.addEventListener("input", () => {
       this.currentTimeMs = Number(this.refs.slider.value) || 0;
@@ -656,30 +665,73 @@ class TrajectoryExampleApp {
         this.fetchJSON(`/api/project/${encodeURIComponent(this.currentProject)}/graph`),
       ]);
       this.graph = graph;
-      this.datasets = [...(Array.isArray(graph.datasets) ? graph.datasets : [])]
+      this.allDatasets = [...(Array.isArray(graph.datasets) ? graph.datasets : [])]
         .sort((left, right) => String(right.created_at || "").localeCompare(String(left.created_at || "")));
-      this.refs.dataset.innerHTML = "";
-      for (const dataset of this.datasets) {
-        const option = document.createElement("option");
-        option.value = dataset.dataset_id;
-        option.textContent = formatDatasetLabel(dataset, graph.current_dataset_id);
-        this.refs.dataset.appendChild(option);
-      }
+      this.stepByOutputDatasetId = new Map(
+        (Array.isArray(graph.steps) ? graph.steps : []).map(step => [step.output_dataset_id, step]),
+      );
       const storedDataset = this.uiState.project === this.currentProject ? this.uiState.datasetId : "";
-      const preferredDataset = this.datasets.some(dataset => dataset.dataset_id === this.currentDatasetId)
+      const preferredDataset = this.allDatasets.some(dataset => dataset.dataset_id === this.currentDatasetId)
         ? this.currentDatasetId
         : "";
-      this.currentDatasetId = preferredDataset || (
-        this.datasets.some(dataset => dataset.dataset_id === storedDataset)
+      this.refreshDatasetOptions(preferredDataset || (
+        this.allDatasets.some(dataset => dataset.dataset_id === storedDataset)
           ? storedDataset
           : state.current_dataset.dataset_id
-      );
-      this.refs.dataset.value = this.currentDatasetId;
+      ));
       await this.loadDataset();
     } catch (error) {
       this.setStatus(error.message, true);
       this.showOverlay(`Could not load ${this.currentProject}.`);
     }
+  }
+
+  refreshDatasetOptions(preferredDatasetId = this.currentDatasetId) {
+    this.datasets = this.filteredDatasets(preferredDatasetId);
+    this.refs.dataset.innerHTML = "";
+    for (const dataset of this.datasets) {
+      const option = document.createElement("option");
+      option.value = dataset.dataset_id;
+      option.textContent = formatDatasetLabel(dataset, this.graph?.current_dataset_id || "");
+      this.refs.dataset.appendChild(option);
+    }
+    if (!this.datasets.length) {
+      this.currentDatasetId = "";
+      return;
+    }
+    const nextDatasetId = this.datasets.some(dataset => dataset.dataset_id === preferredDatasetId)
+      ? preferredDatasetId
+      : this.datasets[0].dataset_id;
+    this.currentDatasetId = nextDatasetId;
+    this.refs.dataset.value = nextDatasetId;
+  }
+
+  filteredDatasets(preferredDatasetId) {
+    if (!this.currentArtifact) {
+      return [...this.allDatasets];
+    }
+    return this.allDatasets.filter(dataset => this.datasetMatchesCurrentArtifact(dataset, preferredDatasetId));
+  }
+
+  datasetMatchesCurrentArtifact(dataset, preferredDatasetId) {
+    if (!dataset) {
+      return false;
+    }
+    if (!Array.isArray(dataset.artifact_names)) {
+      return true;
+    }
+    const hasArtifact = dataset.artifact_names.includes(this.currentArtifact);
+    if (!hasArtifact) {
+      return false;
+    }
+    if (dataset.dataset_id === preferredDatasetId) {
+      return true;
+    }
+    const producingStep = this.stepByOutputDatasetId.get(dataset.dataset_id);
+    if (!producingStep) {
+      return true;
+    }
+    return stepTouchesArtifact(producingStep, this.currentArtifact);
   }
 
   async loadDataset() {
@@ -688,12 +740,13 @@ class TrajectoryExampleApp {
     this.currentArtifactEntry = null;
     this.refs.individuals.innerHTML = "";
     this.renderLayers();
-    this.updateDeleteButton();
+    this.updateActionButtons();
     this.setStatus(`Loading dataset ${this.currentDatasetId}...`);
     try {
       this.currentDataset = await this.fetchJSON(
         `/api/project/${encodeURIComponent(this.currentProject)}/dataset/${encodeURIComponent(this.currentDatasetId)}`,
       );
+      this.updateActionButtons();
     } catch (error) {
       this.setStatus(error.message, true);
       this.showOverlay(`Could not load dataset ${this.currentDatasetId}.`);
@@ -709,6 +762,7 @@ class TrajectoryExampleApp {
     }
     if (!artifacts.length) {
       this.currentArtifact = "";
+      this.updateActionButtons();
       this.showOverlay(`Dataset ${this.currentDatasetId} does not contain artifacts.`);
       this.setStatus("Selected dataset has no artifacts.", true);
       return;
@@ -721,6 +775,7 @@ class TrajectoryExampleApp {
       ? storedArtifact
       : artifacts[0].logical_name;
     this.refs.artifact.value = this.currentArtifact;
+    this.refreshDatasetOptions(this.currentDatasetId);
     await this.loadArtifact();
   }
 
@@ -753,7 +808,7 @@ class TrajectoryExampleApp {
       this.hideOverlay();
       await this.rebuildMap(false);
       this.resetView();
-      this.updateDeleteButton();
+      this.updateActionButtons();
       this.setStatus(
         `Loaded ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}.`,
       );
@@ -764,7 +819,7 @@ class TrajectoryExampleApp {
       this.data = null;
       this.renderIndividuals();
       this.renderLayers();
-      this.updateDeleteButton();
+      this.updateActionButtons();
       this.setStatus(error.message, true);
       this.showOverlay(`Could not render ${this.currentArtifact}.`);
     }
@@ -804,7 +859,7 @@ class TrajectoryExampleApp {
         this.saveUiState();
         this.renderIndividuals();
         this.renderLayers();
-        this.updateDeleteButton();
+        this.updateActionButtons();
       };
       checkbox.addEventListener("click", event => {
         event.stopPropagation();
@@ -997,8 +1052,38 @@ class TrajectoryExampleApp {
     return Array.from(this.data.selectedIndividuals).sort((left, right) => left.localeCompare(right));
   }
 
+  updateActionButtons() {
+    this.updateDeleteButton();
+    this.updateUndoButton();
+  }
+
   updateDeleteButton() {
     this.refs.deleteChecked.disabled = !this.data || this.getCheckedIndividuals().length === 0;
+  }
+
+  updateUndoButton() {
+    const currentHeadDatasetId = this.graph?.current_dataset_id || "";
+    const selectedIsCurrentHead = Boolean(currentHeadDatasetId) && this.currentDatasetId === currentHeadDatasetId;
+    const canUndo = selectedIsCurrentHead && Boolean(this.currentDataset?.parent_dataset_id);
+    this.refs.undo.disabled = !canUndo;
+    if (!currentHeadDatasetId) {
+      this.refs.undo.title = "Undo is available after a project version is loaded.";
+      return;
+    }
+    if (!selectedIsCurrentHead) {
+      this.refs.undo.title = "Undo applies to the current head version.";
+      return;
+    }
+    if (!this.currentDataset?.parent_dataset_id) {
+      this.refs.undo.title = "Current head has no parent dataset.";
+      return;
+    }
+    this.refs.undo.title = "Undo to the parent dataset.";
+  }
+
+  async loadProjectAtDataset(datasetId) {
+    this.currentDatasetId = datasetId;
+    await this.loadProject();
   }
 
   openDeleteModal() {
@@ -1073,12 +1158,8 @@ class TrajectoryExampleApp {
         },
       );
       this.setUser(user);
-      this.currentDatasetId = result.dataset.dataset_id;
       this.closeDeleteModal(true);
-      await this.loadProject();
-      this.currentDatasetId = result.dataset.dataset_id;
-      this.refs.dataset.value = this.currentDatasetId;
-      await this.loadDataset();
+      await this.loadProjectAtDataset(result.dataset.dataset_id);
       this.setStatus(`Created ${result.step.title} in ${result.dataset.dataset_id}.`);
     } catch (error) {
       this.refs.deleteStatus.textContent = error.message;
@@ -1086,6 +1167,27 @@ class TrajectoryExampleApp {
       this.refs.deleteSubmit.disabled = false;
       this.refs.deleteClose.disabled = false;
       this.setStatus(error.message, true);
+    }
+  }
+
+  async undoCurrentHead() {
+    if (this.refs.undo.disabled) {
+      return;
+    }
+
+    this.refs.undo.disabled = true;
+    this.setStatus(`Undoing ${this.currentDatasetId}...`);
+
+    try {
+      const result = await this.requestJSON(
+        `/api/project/${encodeURIComponent(this.currentProject)}/undo`,
+        { method: "POST" },
+      );
+      await this.loadProjectAtDataset(result.dataset.dataset_id);
+      this.setStatus(`Undid to ${result.dataset.dataset_id}.`);
+    } catch (error) {
+      this.setStatus(error.message, true);
+      this.updateUndoButton();
     }
   }
 
@@ -1258,6 +1360,18 @@ function rangeToPercent(min, max, start, end) {
   const left = ((start - min) / span) * 100;
   const width = Math.max(0.8, ((end - start) / span) * 100);
   return { left, width };
+}
+
+function stepTouchesArtifact(step, logicalName) {
+  if (!step) {
+    return false;
+  }
+  const stepArtifacts = [
+    ...(Array.isArray(step.input_artifacts) ? step.input_artifacts : []),
+    ...(Array.isArray(step.output_artifacts) ? step.output_artifacts : []),
+    ...(Array.isArray(step.removed_artifacts) ? step.removed_artifacts : []),
+  ];
+  return stepArtifacts.includes(logicalName);
 }
 
 function formatDatasetLabel(dataset, currentDatasetId) {

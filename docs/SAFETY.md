@@ -9,7 +9,7 @@ The framework is intentionally strict about a small number of invariants.
 - Do not create a persistent change without a recorded user attribution string.
 - Do not create a persistent change without persisting script, spec, and summary files.
 - Do not rewrite unchanged artifacts unnecessarily.
-- Do not add domain-specific transformation logic to the core backend when the same behavior can live in an agent-authored script or self-contained application.
+- Do not add domain-specific transformation logic to the core backend when the same behavior can live in an agent-authored script, the root starter app, or a separate reference app.
 
 ## Determinism
 

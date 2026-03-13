@@ -1,6 +1,6 @@
 # Architecture
 
-Vibecleaning is organized as five layers.
+Vibecleaning is organized around five layers.
 
 ## 1. Lineage Core
 
@@ -19,7 +19,7 @@ It does not own domain logic.
 
 ## 2. Execution Harness
 
-The execution harness accepts an analysis or step request, writes the stored script/spec/summary files, runs the script, and records the result.
+The execution harness accepts an analysis or step request, writes the stored script, spec, and summary files, runs the script, and records the result.
 
 The harness is intentionally generic:
 
@@ -46,32 +46,37 @@ The core HTTP layer exposes reusable generic routes for:
 - changing the current head
 - undoing to the parent dataset
 
-The core app is created through an app factory so applications can compose with it without the core importing them.
+The core app is created through an app factory in `app/web.py`.
 
-## 4. Applications
+## 4. Default Starter App
 
-A self-contained application is a domain-specific package that imports the core app and adds:
+The default starter app lives at the repo root:
 
-- app-owned backend routes
-- app-owned frontend assets
-- app-owned action handlers
-- app-owned summary or preview logic for large artifacts
+- `server.py`
+- `static/index.html`
+- `static/app.js`
 
-An application may expose named UI actions like `Delete checked`, but those actions should compile down to generic `analysis` or `step` executions.
+This is the default thing a new user should extend with Codex.
+
+The starter app should stay small. Its job is to provide an editable baseline UI on top of the generic APIs, not to become a second core framework.
+
+If the starter app needs domain-specific routes or mutation actions, add them at the app layer, not in `app/`.
+
+## 5. Reference Apps
+
+`examples/` contains richer apps that demonstrate what can be built on top of the scaffold.
+
+These apps may own:
+
+- their own frontend
+- their own backend routes
+- large-file summary logic
+- named UI actions that compile down to generic `analysis` or `step` executions
 
 Dependency direction is one-way:
 
-1. core knows nothing about applications
-2. applications import the core
-3. application frontends talk to either generic core routes or their application's routes
+1. `app/` knows nothing about the starter app or examples
+2. the starter app and examples import or call the core
+3. app-specific behavior stays outside `app/`
 
-## 5. Agent Contracts
-
-The markdown files in `docs/` and `AGENTS.md` are part of the product. They define the invariants that an AI agent should preserve when extending the repo.
-
-The intended system behavior is:
-
-1. the user interacts with an AI agent
-2. the agent reads the local contracts
-3. the agent generates bespoke scripts, frontend code, or application code
-4. the backend persists lineage and execution records
+The trajectory app under `examples/trajectory/` is the first reference app in this model.

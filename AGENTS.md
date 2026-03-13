@@ -1,6 +1,6 @@
 # Vibecleaning Agent Guide
 
-This repository is a minimal substrate for agent-authored local data workflows. The agent is expected to create the domain logic. The framework is only responsible for lineage, execution, and a thin application scaffold.
+This repository is a minimal substrate for agent-authored local data workflows. The framework is responsible for lineage, execution, and a small default starter app. The agent is expected to create the domain logic.
 
 ## Product Model
 
@@ -32,8 +32,10 @@ This repository is a minimal substrate for agent-authored local data workflows. 
 - Use an `analysis` for exploratory, read-only work.
 - Use a `step` only when the user clearly wants to keep a change in the graph.
 - Keep the backend generic.
-- Put domain logic in agent-authored scripts or self-contained applications, not in the core backend.
-- If an application needs large-file summaries or named mutation actions, implement them in the application, not in the core backend.
+- By default, extend the starter app at `server.py` and `static/`.
+- Use `examples/trajectory/` as a reference when the user wants a richer example or a separate app.
+- Put domain logic in agent-authored scripts or app-owned routes, not in the core backend.
+- If the user needs large-file summaries or named mutation actions, add them in the starter app or in a separate app, not in `app/`.
 
 ## Project Bootstrap
 
@@ -43,25 +45,22 @@ On first use of a project folder:
 - Ignore nested directories unless the user explicitly asks to model them.
 - Store the initial dataset node automatically under `.vibecleaning/datasets/`.
 
-## Application Philosophy
+## Starter App Philosophy
 
-- Frontends should stay thin.
-- Applications are bespoke interfaces, not workflow engines.
-- Applications may consume generic APIs and app-owned APIs:
-  - project state
-  - graph
-  - dataset manifests
-  - artifact metadata
-  - artifact bytes
-  - preview endpoints
-- application-owned routes under an application namespace
-- Avoid adding domain-specific endpoints to the core backend just to support one application.
+- The default UI lives in `static/`.
+- The default server entrypoint is `server.py`.
+- Keep the starter app small and easy to edit.
+- Use the generic APIs directly for common controls like project browsing, head changes, and undo.
+- Add app-specific routes only when the UI needs domain-specific summaries or named actions.
+- Keep those app-specific routes outside `app/`.
 
 ## When Modifying This Repo
 
 - Keep the codebase small and inspectable.
 - Prefer plain files and explicit JSON over abstraction-heavy infrastructure.
 - Do not reintroduce chat provider integration, LAN auth flows, or domain-specific transform catalogs into core.
+- Do not move domain logic into `app/` just because the starter app needs it.
 - If you need more behavior, write it as:
   - a custom script persisted through the execution harness, or
-  - a self-contained application that consumes the generic APIs.
+  - starter-app code at the repo root, or
+  - a separate reference app under `examples/`.

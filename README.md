@@ -1,60 +1,65 @@
 # Vibecleaning
 
-Vibecleaning is a minimal, agent-centered framework for local data work backed by a reproducible dataset graph.
+Vibecleaning is a minimal substrate for agent-authored local data apps backed by a reproducible dataset DAG.
 
-The repository is split into:
+The repository is organized around three layers:
 
-- a generic core scaffold
-- self-contained applications layered on top of that scaffold
+- `app/`: scaffold internals for lineage, execution, previews, and generic HTTP routes
+- `server.py` + `static/`: the default starter app that users are expected to extend in place
+- `examples/`: richer reference apps that show what can be built on top of the scaffold
 
-The core intentionally does not assume CSVs, tables, or any domain-specific transforms. Its responsibilities are:
+## Default Workflow
 
-- persist project state under `data/<project>/.vibecleaning/`
-- represent dataset lineage as dataset nodes plus step edges
-- run agent-authored analysis and step scripts with a stable execution contract
-- expose generic project, dataset, artifact, and preview APIs
-- serve a minimal landing page for the generic scaffold
+1. Install dependencies.
 
-Applications built on top of the scaffold are expected to modify data. They may add domain-specific backend routes and frontend code, but that logic should live outside the core.
+```bash
+pip install -r requirements.txt
+```
 
-This repository ships a trajectory example application under `examples/trajectory/`. It demonstrates:
-
-- a server-side summary route for large CSVs
-- a self-contained domain-specific frontend
-- a concrete UI action, `Delete checked`, that creates a DAG step through the generic execution harness
-
-## Run
+2. Create a project under `data/<project>/` and add top-level input files there.
+3. Run the starter app.
 
 ```bash
 python server.py
 ```
 
-This starts the generic scaffold server.
+4. Open Codex in this repo and describe the app or transformation you want.
+5. By default, extend the root starter files:
+   `server.py`, `static/index.html`, and `static/app.js`.
+
+On first use of a project, the top-level non-hidden files under `data/<project>/` become the initial dataset automatically.
+
+## Reference Example
+
+This repository also ships one richer example app:
 
 ```bash
 python examples/trajectory/server.py
 ```
 
-This starts the trajectory example app with its own frontend and app-specific routes.
+The trajectory app is a reference implementation, not the default starting point. It demonstrates:
 
-The default URL is `http://127.0.0.1:8420` in both cases.
+- a domain-specific frontend
+- app-owned routes for large-file summaries
+- a named UI action, `Delete checked`, that compiles down to a generic DAG step
+- direct use of generic core controls like `Undo`
 
 ## Layout
 
 ```text
-app/                  generic backend state, execution, previews, and app factory
-static/               generic landing page for the scaffold
-examples/             self-contained example applications
-data/<project>/       raw project inputs plus .vibecleaning metadata
+app/                  scaffold internals
+server.py             default starter app entrypoint
+static/               default starter app frontend
+examples/trajectory/  richer reference app
+data/<project>/       raw inputs plus .vibecleaning state
 docs/                 architecture and contract docs
 ```
 
-## Key Concepts
+## Core Concepts
 
 - `analysis`: exploratory execution that records code, spec, and summary without creating a new dataset node
 - `step`: persistent execution that creates a new dataset node in the graph
 - `logical_name`: dataset-level artifact identifier, separate from physical storage path
-- `current_dataset_id`: the active head for a project; the full lineage can still branch
-- application: a self-contained package that imports the core scaffold, adds routes and frontend code, and compiles UI actions down to generic `analysis` or `step` executions
+- `current_dataset_id`: the active head for a project; older and alternate datasets still remain in the DAG
 
-See [docs/ARCHITECTURE.md](/Users/justinkay/vibecleaning/docs/ARCHITECTURE.md), [docs/APP_CONTRACT.md](/Users/justinkay/vibecleaning/docs/APP_CONTRACT.md), [docs/STATE_MODEL.md](/Users/justinkay/vibecleaning/docs/STATE_MODEL.md), and [AGENTS.md](/Users/justinkay/vibecleaning/AGENTS.md) for the normative contracts.
+See [docs/ARCHITECTURE.md](/Users/justinkay/vibecleaning/docs/ARCHITECTURE.md), [docs/APP_CONTRACT.md](/Users/justinkay/vibecleaning/docs/APP_CONTRACT.md), [docs/STATE_MODEL.md](/Users/justinkay/vibecleaning/docs/STATE_MODEL.md), and [AGENTS.md](/Users/justinkay/vibecleaning/AGENTS.md) for the repo contracts.

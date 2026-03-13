@@ -1,18 +1,31 @@
 # Application Contract
 
-Applications in this repository are self-contained packages that import the generic Vibecleaning core.
+Vibecleaning has a default starter app at the repo root. New users should usually extend that app in place first.
 
-An application may own:
+## Default Starter App
 
-- its own `server.py` entrypoint
-- its own `static/` frontend assets
-- app-specific backend routes
-- named UI actions
-- summary or preview routes for large artifacts
+The default starter app is:
 
-The core does not discover or mount applications dynamically. An application imports the core app factory and composes on top of it.
+```text
+server.py
+static/
+  index.html
+  app.js
+```
 
-## Recommended Layout
+This app should:
+
+- use the generic core APIs directly
+- stay easy for an agent to modify quickly
+- hold app-specific UI code at the root instead of pushing it into `app/`
+
+If the starter app needs a domain-specific summary route or named action, add it at the app layer and keep the core backend generic.
+
+## Optional Separate Apps
+
+If the user wants a separate app, place it under `examples/<app>/` or another app-owned directory and compose it on top of the core app factory.
+
+Recommended layout:
 
 ```text
 examples/<app>/
@@ -25,9 +38,15 @@ examples/<app>/
     vendor/
 ```
 
+Separate apps are for:
+
+- richer reference implementations
+- domain-specific interfaces that would clutter the starter app
+- experiments that deserve isolation from the default root app
+
 ## Route Boundaries
 
-Applications may call the generic core APIs:
+Starter apps and separate apps may call the generic core APIs:
 
 - `GET /api/projects`
 - `GET /api/project/{project}/state`
@@ -41,19 +60,21 @@ Applications may call the generic core APIs:
 - `POST /api/project/{project}/head`
 - `POST /api/project/{project}/undo`
 
-Applications may also define their own namespaced routes such as:
+Common controls like head changes and undo should use these generic routes directly.
+
+Apps may also define namespaced routes such as:
 
 - `GET /api/project/{project}/apps/<app>/...`
 - `POST /api/project/{project}/apps/<app>/actions/...`
 
 Those routes should:
 
-- live outside the core backend
-- stay namespaced under the application
+- live outside `app/`
+- stay owned by the app
 - translate persistent actions into generic `analysis` or `step` executions
 
 ## Large-File Behavior
 
-If an application needs a faster read model for very large artifacts, it may implement a server-side summary route or generate derived artifacts through the generic execution harness.
+If an app needs a faster read model for very large artifacts, it may implement server-side summary routes or generate derived artifacts through the generic execution harness.
 
 Do not move that domain logic into the core unless it is broadly generic.

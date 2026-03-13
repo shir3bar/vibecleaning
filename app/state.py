@@ -281,6 +281,7 @@ def graph_payload(project_dir: Path) -> dict:
             "user": dataset.get("user"),
             "note": dataset.get("note"),
             "artifact_count": len(dataset.get("artifacts", [])),
+            "artifact_names": [artifact.get("logical_name") for artifact in dataset.get("artifacts", [])],
         }
         for dataset in datasets
     ]

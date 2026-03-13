@@ -7,139 +7,165 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --panel: rgba(8, 17, 27, 0.88);
-    --panel-2: rgba(14, 24, 40, 0.92);
-    --border: rgba(148, 163, 184, 0.16);
-    --text: #e8eef7;
-    --muted: #92a4bd;
-    --accent: #74d4ff;
+    --bg-0: #070b11;
+    --bg-1: #0b1320;
+    --panel: rgba(11, 19, 30, 0.84);
+    --panel-2: rgba(16, 26, 40, 0.9);
+    --line: rgba(148, 163, 184, 0.18);
+    --line-strong: rgba(148, 163, 184, 0.3);
+    --text: #e5ecf3;
+    --muted: #91a2b7;
+    --danger: #ff9b9b;
   }
   html, body {
-    height: 100%;
+    min-height: 100%;
   }
   body {
     background:
-      radial-gradient(circle at top left, rgba(116, 212, 255, 0.12), transparent 28%),
-      radial-gradient(circle at bottom right, rgba(63, 98, 181, 0.18), transparent 26%),
-      linear-gradient(180deg, #09111a 0%, #050911 100%);
+      radial-gradient(circle at top left, rgba(116, 212, 255, 0.08), transparent 28%),
+      radial-gradient(circle at bottom right, rgba(103, 232, 249, 0.06), transparent 22%),
+      linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
     color: var(--text);
-    font-family: "Segoe UI", sans-serif;
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  #app-shell {
+  .shell {
     min-height: 100vh;
     display: flex;
     flex-direction: column;
   }
   .topbar {
     display: flex;
-    align-items: flex-start;
-    gap: 16px;
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--border);
-    background: var(--panel);
-    backdrop-filter: blur(18px);
-    flex-shrink: 0;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(6, 10, 16, 0.88);
+    backdrop-filter: blur(14px);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    flex-wrap: wrap;
   }
   .brand h1 {
-    font-size: 18px;
-    font-weight: 700;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-    color: #7dff98;
-    letter-spacing: 0.03em;
-    text-shadow: 0 0 12px rgba(125, 255, 152, 0.28);
+    color: var(--text);
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
     text-transform: lowercase;
   }
-  .content {
-    flex: 1;
+  .header-controls {
+    flex: 1 1 760px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: flex-end;
+  }
+  .field {
+    min-width: 210px;
     display: grid;
-    place-items: center;
-    padding: 24px;
+    gap: 6px;
   }
-  .panel {
-    width: min(840px, 100%);
-    padding: 28px 30px;
-    border-radius: 18px;
-    border: 1px solid var(--border);
-    background: rgba(8, 17, 27, 0.76);
-    backdrop-filter: blur(18px);
-    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.28);
-  }
-  .eyebrow {
-    margin-bottom: 10px;
+  .field label {
+    color: var(--muted);
     font-size: 11px;
-    color: var(--accent);
-    letter-spacing: 0.12em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
   }
-  h2 {
-    font-size: 28px;
-    margin-bottom: 12px;
+  select {
+    min-height: 40px;
+    width: 100%;
+    padding: 0 12px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
   }
-  p {
+  select:focus {
+    outline: none;
+    border-color: var(--line-strong);
+  }
+  .main {
+    flex: 1;
+    width: min(1440px, 100%);
+    margin: 0 auto;
+    padding: 26px 18px 32px;
+  }
+  .message {
+    max-width: 720px;
+    padding: 18px 20px;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: var(--panel);
     color: var(--muted);
     line-height: 1.6;
-    margin-bottom: 18px;
   }
-  .commands {
-    display: grid;
-    gap: 12px;
-    margin-top: 20px;
+  .message strong {
+    color: var(--text);
   }
-  .command {
-    padding: 14px 16px;
-    border-radius: 14px;
-    background: var(--panel-2);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+  .message.error {
+    color: var(--danger);
   }
-  .command strong {
-    display: block;
-    margin-bottom: 6px;
-    font-size: 13px;
-  }
-  code {
+  .message code {
+    color: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-    color: #dfffe7;
   }
-  ul {
-    margin-top: 14px;
-    padding-left: 18px;
+  .stack {
+    display: grid;
+    gap: 18px;
+  }
+  .readme-panel {
+    max-width: 960px;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .readme-header {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
     color: var(--muted);
-    line-height: 1.7;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .readme-body {
+    max-height: calc(100vh - 190px);
+    overflow: auto;
+    padding: 18px 20px 22px;
+  }
+  .readme-body pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+    line-height: 1.6;
+    font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  }
+  @media (max-width: 900px) {
+    .header-controls {
+      justify-content: stretch;
+      flex-basis: 100%;
+    }
+    .field {
+      min-width: 100%;
+    }
   }
 </style>
 </head>
 <body>
-<div id="app-shell">
+<div class="shell">
   <header class="topbar">
     <div class="brand">
       <h1>vibecleaning</h1>
     </div>
+    <div id="header-controls" class="header-controls"></div>
   </header>
-  <main class="content">
-    <section class="panel">
-      <div class="eyebrow">Core Scaffold</div>
-      <h2>Generic lineage and execution APIs for self-contained local apps.</h2>
-      <p>
-        This server exposes the reusable Vibecleaning core: project state, dataset lineage, artifact access,
-        previews, analyses, steps, head changes, and undo. Example applications now ship their own frontends
-        and routes as self-contained apps.
-      </p>
-      <div class="commands">
-        <div class="command">
-          <strong>Run the generic scaffold</strong>
-          <code>python server.py</code>
-        </div>
-        <div class="command">
-          <strong>Run the trajectory example app</strong>
-          <code>python examples/trajectory/server.py</code>
-        </div>
-      </div>
-      <ul>
-        <li>Core APIs are available under <code>/api/...</code>.</li>
-        <li>Repository contracts live in <code>README.md</code>, <code>docs/ARCHITECTURE.md</code>, and <code>docs/APP_CONTRACT.md</code>.</li>
-      </ul>
-    </section>
+  <main class="main">
+    <div id="app"></div>
   </main>
 </div>
+<script src="/static/app.js"></script>
 </body>
 </html>
