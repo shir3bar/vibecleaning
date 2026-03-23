@@ -12,6 +12,12 @@ const state = {
   readmeError: "",
 };
 
+const requestControllers = {
+  projects: null,
+  project: null,
+  dataset: null,
+};
+
 const appRoot = document.getElementById("app");
 const headerControlsRoot = document.getElementById("header-controls");
 
@@ -51,6 +57,20 @@ async function fetchJson(url, options) {
   return payload;
 }
 
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+function beginRequest(name) {
+  const existing = requestControllers[name];
+  if (existing) {
+    existing.abort();
+  }
+  const controller = new AbortController();
+  requestControllers[name] = controller;
+  return controller;
+}
+
 function makeElement(tagName, className, text) {
   const element = document.createElement(tagName);
   if (className) {
@@ -71,7 +91,11 @@ async function loadProjects(preferredProjectName = state.projectName) {
   state.error = "";
   render();
   try {
-    const payload = await fetchJson("/api/projects");
+    const controller = beginRequest("projects");
+    const payload = await fetchJson("/api/projects", { signal: controller.signal });
+    if (requestControllers.projects !== controller) {
+      return;
+    }
     state.projects = payload.projects || [];
     if (!state.projects.length) {
       state.projectName = "";
@@ -87,6 +111,9 @@ async function loadProjects(preferredProjectName = state.projectName) {
       : state.projects[0].name;
     await loadProject(nextProjectName);
   } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
     state.error = error.message;
   } finally {
     state.loading = false;
@@ -112,10 +139,22 @@ async function loadReadme() {
 async function loadProject(projectName, preferredDatasetId = state.selectedDatasetId, preferredArtifact = state.selectedArtifact) {
   state.loading = true;
   state.error = "";
+  state.projectName = projectName;
+  state.graph = null;
+  state.datasets = [];
+  state.selectedDataset = null;
+  state.selectedDatasetId = preferredDatasetId || "";
+  state.selectedArtifact = preferredArtifact || "";
   render();
   try {
-    const graph = await fetchJson(`/api/project/${encodeURIComponent(projectName)}/graph`);
-    state.projectName = projectName;
+    const controller = beginRequest("project");
+    const graph = await fetchJson(
+      `/api/project/${encodeURIComponent(projectName)}/graph`,
+      { signal: controller.signal },
+    );
+    if (requestControllers.project !== controller || state.projectName !== projectName) {
+      return;
+    }
     state.graph = graph;
     state.datasets = [...(graph.datasets || [])].sort((left, right) => {
       const leftValue = left.created_at || "";
@@ -127,6 +166,9 @@ async function loadProject(projectName, preferredDatasetId = state.selectedDatas
       : (graph.current_dataset_id || state.datasets[0]?.dataset_id || "");
     await loadDataset(nextDatasetId, preferredArtifact);
   } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
     state.error = error.message;
   } finally {
     state.loading = false;
@@ -141,13 +183,35 @@ async function loadDataset(datasetId, preferredArtifact = state.selectedArtifact
     state.selectedArtifact = "";
     return;
   }
-  const dataset = await fetchJson(`/api/project/${encodeURIComponent(state.projectName)}/dataset/${encodeURIComponent(datasetId)}`);
-  state.selectedDataset = dataset;
   state.selectedDatasetId = datasetId;
-  const nextArtifact = artifactNames().includes(preferredArtifact)
-    ? preferredArtifact
-    : (artifactNames()[0] || "");
-  state.selectedArtifact = nextArtifact;
+  state.selectedArtifact = preferredArtifact || "";
+  try {
+    const projectName = state.projectName;
+    const controller = beginRequest("dataset");
+    const dataset = await fetchJson(
+      `/api/project/${encodeURIComponent(projectName)}/dataset/${encodeURIComponent(datasetId)}`,
+      { signal: controller.signal },
+    );
+    if (
+      requestControllers.dataset !== controller
+      || state.projectName !== projectName
+      || state.selectedDatasetId !== datasetId
+    ) {
+      return;
+    }
+    state.selectedDataset = dataset;
+    const nextArtifact = artifactNames().includes(preferredArtifact)
+      ? preferredArtifact
+      : (artifactNames()[0] || "");
+    state.selectedArtifact = nextArtifact;
+  } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
+    state.selectedDataset = null;
+    state.selectedArtifact = "";
+    state.error = error.message;
+  }
 }
 
 function buildField(labelText, control) {

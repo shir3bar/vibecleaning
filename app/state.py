@@ -1,7 +1,7 @@
 import json
 import mimetypes
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -13,7 +13,7 @@ class ProjectStateError(ValueError):
 
 
 def now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def make_id(prefix: str) -> str:
@@ -86,6 +86,14 @@ def iter_source_files(project_dir: Path):
         yield candidate
 
 
+def has_project_inputs(project_dir: Path) -> bool:
+    return any(iter_source_files(project_dir))
+
+
+def resolve_project_dir(data_root: Path, project_name: str) -> Path:
+    return data_root / project_name
+
+
 def artifact_entry_for_path(project_dir: Path, source_path: Path) -> dict:
     return normalize_artifact_entry(
         {
@@ -153,6 +161,8 @@ def list_projects(data_root: Path) -> list[dict[str, object]]:
 
     for project_dir in sorted(data_root.iterdir()):
         if not project_dir.is_dir() or project_dir.name.startswith("."):
+            continue
+        if not has_project_inputs(project_dir):
             continue
         try:
             project_state = ensure_project_state(project_dir)

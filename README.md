@@ -30,13 +30,13 @@ docs/                 minimal contracts for agents
 
 Reference example:
 
-```bash
+```bashv1
 python examples/trajectory/server.py
 ```
 
 Contracts:
 
-- [AGENTS.md](/Users/justinkay/vibecleaning/AGENTS.md)
-- [docs/ARCHITECTURE.md](/Users/justinkay/vibecleaning/docs/ARCHITECTURE.md)
-- [docs/STATE_MODEL.md](/Users/justinkay/vibecleaning/docs/STATE_MODEL.md)
-- [docs/EXECUTION_CONTRACT.md](/Users/justinkay/vibecleaning/docs/EXECUTION_CONTRACT.md)
+- [AGENTS.md](AGENTS.md)
+- [docs/ARCHITECTURE.md](ARCHITECTURE.md)
+- [docs/STATE_MODEL.md](STATE_MODEL.md)
+- [docs/EXECUTION_CONTRACT.md](EXECUTION_CONTRACT.md)

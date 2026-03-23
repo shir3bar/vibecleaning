@@ -3,6 +3,7 @@ import re
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -18,6 +19,7 @@ from .state import (
     media_type_for_path,
     project_paths,
     project_state_payload,
+    resolve_project_dir,
 )
 
 
@@ -39,7 +41,7 @@ def validate_path_part(raw_value: object, *, label: str) -> str:
 
 def get_project_dir(data_root: Path, project_name: str) -> Path:
     project = validate_path_part(project_name, label="project")
-    path = (data_root / project).resolve()
+    path = resolve_project_dir(data_root, project).resolve()
     if data_root.resolve() not in path.parents:
         raise ValueError("Invalid project")
     if not path.exists() or not path.is_dir():
@@ -70,6 +72,10 @@ def create_app(*, data_root: Path, static_root: Path) -> FastAPI:
         allow_origins=["*"],
         allow_methods=["GET", "POST"],
         allow_headers=["Content-Type"],
+    )
+    app.add_middleware(
+        GZipMiddleware,
+        minimum_size=1024,
     )
 
     @app.middleware("http")
