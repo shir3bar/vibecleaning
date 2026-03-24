@@ -122,6 +122,10 @@ class MovementExampleApp {
     this.assetsLoaded = false;
     this.mapErrorMessage = "";
     this.reportDetailLoadId = 0;
+    this.thresholdState = {
+      fieldKey: "",
+      value: null,
+    };
   }
 
   async init() {
@@ -313,6 +317,135 @@ class MovementExampleApp {
         }
         .movement-legend.hidden {
           display: none;
+        }
+        .movement-threshold {
+          position: absolute;
+          right: 16px;
+          bottom: 16px;
+          z-index: 4;
+          width: min(320px, calc(100% - 32px));
+          display: grid;
+          gap: 10px;
+          padding: 12px 13px;
+          border-radius: 14px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(7, 11, 22, 0.9);
+          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
+          color: #e8eef7;
+          pointer-events: auto;
+        }
+        .movement-threshold.hidden {
+          display: none;
+        }
+        .movement-threshold-head {
+          display: grid;
+          gap: 2px;
+        }
+        .movement-threshold-title {
+          font-size: 12px;
+          font-weight: 600;
+          color: #eef4fb;
+        }
+        .movement-threshold-subtitle {
+          font-size: 11px;
+          color: #8fa5bc;
+        }
+        .movement-threshold-meta {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px 12px;
+          font-size: 11px;
+          color: #dbe5f0;
+        }
+        .movement-threshold-note {
+          font-size: 10px;
+          color: #7e93aa;
+          line-height: 1.4;
+        }
+        .movement-threshold-chart-wrap {
+          display: grid;
+          gap: 6px;
+        }
+        .movement-threshold-chart {
+          position: relative;
+          display: flex;
+          align-items: end;
+          gap: 3px;
+          height: 112px;
+          padding: 10px 8px 8px;
+          border-radius: 12px;
+          border: 1px solid rgba(255, 255, 255, 0.07);
+          background:
+            linear-gradient(180deg, rgba(76, 196, 255, 0.06), rgba(10, 17, 29, 0.08)),
+            rgba(15, 23, 42, 0.72);
+          cursor: crosshair;
+          overflow: hidden;
+        }
+        .movement-threshold-bar {
+          flex: 1 1 0;
+          min-width: 0;
+          border-radius: 999px 999px 3px 3px;
+          background: linear-gradient(180deg, rgba(87, 218, 174, 0.95), rgba(50, 160, 255, 0.82));
+        }
+        .movement-threshold-line {
+          position: absolute;
+          top: 7px;
+          bottom: 7px;
+          width: 2px;
+          margin-left: -1px;
+          border-radius: 999px;
+          background: rgba(255, 228, 122, 0.98);
+          box-shadow: 0 0 0 1px rgba(255, 228, 122, 0.16), 0 0 18px rgba(255, 228, 122, 0.34);
+        }
+        .movement-threshold-line::after {
+          content: "";
+          position: absolute;
+          left: 50%;
+          top: -4px;
+          width: 10px;
+          height: 10px;
+          transform: translateX(-50%);
+          border-radius: 999px;
+          background: rgba(255, 228, 122, 0.98);
+        }
+        .movement-threshold-range {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          font-size: 11px;
+          color: #c8d5e4;
+        }
+        .movement-threshold-actions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 8px;
+        }
+        .movement-threshold button {
+          padding: 8px 12px;
+          border: none;
+          border-radius: 10px;
+          background: rgba(255, 255, 255, 0.08);
+          color: #e5edf7;
+          cursor: pointer;
+          font: inherit;
+          font-size: 13px;
+        }
+        .movement-threshold button:disabled {
+          cursor: not-allowed;
+          opacity: 0.45;
+        }
+        .movement-threshold button.movement-emphasis {
+          background: rgba(67, 206, 162, 0.22);
+          color: #d8fff3;
+        }
+        .movement-threshold-empty {
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(255, 255, 255, 0.06);
+          background: rgba(15, 23, 42, 0.62);
+          font-size: 12px;
+          color: #9bb0c6;
+          line-height: 1.45;
         }
         .movement-legend-head {
           display: grid;
@@ -631,6 +764,7 @@ class MovementExampleApp {
           <div class="movement-map-wrap">
             <div class="movement-map" data-role="map"></div>
             <div class="movement-legend hidden" data-role="legend"></div>
+            <div class="movement-threshold hidden" data-role="threshold-pane"></div>
             <div class="movement-overlay" data-role="overlay">
               <div class="movement-overlay-card">
                 <h3>Movement Outlier Review</h3>
@@ -772,6 +906,7 @@ class MovementExampleApp {
       time: this.mountEl.querySelector('[data-role="time"]'),
       map: this.mountEl.querySelector('[data-role="map"]'),
       legend: this.mountEl.querySelector('[data-role="legend"]'),
+      thresholdPane: this.mountEl.querySelector('[data-role="threshold-pane"]'),
       overlay: this.mountEl.querySelector('[data-role="overlay"]'),
       issueModal: this.mountEl.querySelector('[data-role="issue-modal"]'),
       issueTitle: this.mountEl.querySelector('[data-role="issue-title"]'),
@@ -862,8 +997,10 @@ class MovementExampleApp {
       await this.rebuildMap(true);
     });
     this.refs.colorBy.addEventListener("change", () => {
+      this.clearThresholdState();
       this.saveUiState();
       this.renderLegend();
+      this.renderThresholdPane();
       this.renderLayers();
       this.renderSelectedFixes();
     });
@@ -875,19 +1012,23 @@ class MovementExampleApp {
     });
     this.refs.selectAll.addEventListener("click", () => {
       if (!this.data) return;
+      this.clearThresholdState();
       this.data.selectedIndividuals = new Set(this.data.individuals);
       this.saveUiState();
       this.renderIndividuals();
+      this.renderThresholdPane();
       this.renderLayers();
       this.updateActionButtons();
       void this.loadDetailForCurrentSelection();
     });
     this.refs.selectNone.addEventListener("click", () => {
       if (!this.data) return;
+      this.clearThresholdState();
       this.data.selectedIndividuals = new Set();
       this.data.selectedFixKeys = new Set();
       this.saveUiState();
       this.renderIndividuals();
+      this.renderThresholdPane();
       this.renderSelectedFixes();
       this.renderLayers();
       this.updateActionButtons();
@@ -896,6 +1037,7 @@ class MovementExampleApp {
     this.refs.selectSuspicious.addEventListener("click", () => {
       if (!this.data) return;
       this.data.selectedFixKeys = new Set(this.getSuspiciousFixes().map(fix => fix.fixKey));
+      this.renderThresholdPane();
       this.renderSelectedFixes();
       this.renderLayers();
       this.updateActionButtons();
@@ -903,6 +1045,7 @@ class MovementExampleApp {
     this.refs.clearFixes.addEventListener("click", () => {
       if (!this.data) return;
       this.data.selectedFixKeys = new Set();
+      this.renderThresholdPane();
       this.renderSelectedFixes();
       this.renderLayers();
       this.updateActionButtons();
@@ -920,6 +1063,7 @@ class MovementExampleApp {
       this.updateTimeLabel();
       this.renderLayers();
     });
+    this.refs.thresholdPane.addEventListener("click", event => this.handleThresholdPaneClick(event));
 
     this.refs.issueClose.addEventListener("click", () => this.closeModal(this.refs.issueModal, this.refs.issueSubmit));
     this.refs.issueSubmit.addEventListener("click", async () => this.submitIssueAction());
@@ -1020,8 +1164,10 @@ class MovementExampleApp {
   }
 
   handleVisibilityChange() {
+    this.clearThresholdState();
     this.saveUiState();
     this.renderIndividuals();
+    this.renderThresholdPane();
     this.renderLayers();
   }
 
@@ -1040,6 +1186,7 @@ class MovementExampleApp {
   }
 
   clearLoadedStudyState() {
+    this.clearThresholdState();
     this.data = null;
     this.currentArtifactEntry = null;
     this.currentTimeMs = 0;
@@ -1054,6 +1201,7 @@ class MovementExampleApp {
     this.updateTimeLabel();
     this.renderLayers();
     this.renderLegend();
+    this.renderThresholdPane();
     this.updateActionButtons();
   }
 
@@ -1266,6 +1414,7 @@ class MovementExampleApp {
       this.renderIndividuals();
       this.renderSelectedFixes();
       this.renderLegend();
+      this.renderThresholdPane();
       this.updateTimeLabel();
       this.hideOverlay();
       await this.rebuildMap(false);
@@ -1423,6 +1572,7 @@ class MovementExampleApp {
       this.renderIndividuals();
       this.renderSelectedFixes();
       this.renderLegend();
+      this.renderThresholdPane();
       this.updateTimeLabel();
       this.hideOverlay();
       await this.rebuildMap(false);
@@ -1537,6 +1687,7 @@ class MovementExampleApp {
     if (!this.data) {
       return;
     }
+    this.clearThresholdState();
     if (shouldSelect) {
       this.data.selectedIndividuals.add(individual);
     } else {
@@ -1545,6 +1696,7 @@ class MovementExampleApp {
     this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(this.data.selectedFixKeys, this.getSelectedIndividuals());
     this.saveUiState();
     this.renderIndividuals();
+    this.renderThresholdPane();
     this.renderSelectedFixes();
     this.renderLayers();
     this.updateActionButtons();
@@ -1762,11 +1914,13 @@ class MovementExampleApp {
     }
 
     const visibleIndividuals = new Set(this.data.selectedIndividuals);
-    const visibleSetNames = new Set(visibleSets(this.refs.showTrain.checked, this.refs.showTest.checked));
+    const visibleSetNames = this.getVisibleSetNames();
     const pathData = [];
     const pointData = [];
+    const thresholdPointData = [];
     const selectedPointData = [];
     const cursorData = [];
+    const thresholdMatchKeys = this.getThresholdContext()?.matchKeys || new Set();
 
     for (const individual of this.data.individuals) {
       if (!visibleIndividuals.has(individual)) {
@@ -1808,6 +1962,12 @@ class MovementExampleApp {
       } else {
         pointData.push(point);
       }
+      if (!this.data.selectedFixKeys.has(fix.fixKey) && thresholdMatchKeys.has(fix.fixKey)) {
+        thresholdPointData.push({
+          fixKey: fix.fixKey,
+          position: fix.position,
+        });
+      }
     }
 
     const layers = [
@@ -1832,6 +1992,26 @@ class MovementExampleApp {
           getRadius: 80,
           radiusMinPixels: 4,
           radiusMaxPixels: 10,
+          pickable: true,
+          onClick: info => {
+            if (info.object) {
+              this.toggleFixSelection(info.object.fixKey);
+            }
+          },
+        }),
+      );
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-threshold-points",
+          data: thresholdPointData,
+          getPosition: item => item.position,
+          getLineColor: [255, 236, 148, 255],
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 2.5,
+          getRadius: 108,
+          radiusMinPixels: 6,
+          radiusMaxPixels: 12,
           pickable: true,
           onClick: info => {
             if (info.object) {
@@ -1917,6 +2097,7 @@ class MovementExampleApp {
     } else {
       this.data.selectedFixKeys.add(fixKey);
     }
+    this.renderThresholdPane();
     this.renderSelectedFixes();
     this.renderLayers();
     this.updateActionButtons();
@@ -1957,6 +2138,304 @@ class MovementExampleApp {
       return [];
     }
     return [...this.data.selectedIndividuals].sort((left, right) => left.localeCompare(right));
+  }
+
+  getVisibleSetNames() {
+    return new Set(visibleSets(this.refs.showTrain.checked, this.refs.showTest.checked));
+  }
+
+  getCurrentColorField() {
+    if (!this.data) {
+      return null;
+    }
+    return this.data.colorFieldByKey.get(this.refs.colorBy.value) || this.data.colorFields[0] || null;
+  }
+
+  getVisibleReviewFixes() {
+    if (!this.data) {
+      return [];
+    }
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    const visibleSetNames = this.getVisibleSetNames();
+    return this.data.fixes.filter(
+      fix => visibleIndividuals.has(fix.individual) && visibleSetNames.has(fix.setName),
+    );
+  }
+
+  clearThresholdState() {
+    this.thresholdState = {
+      fieldKey: "",
+      value: null,
+    };
+  }
+
+  getThresholdContext() {
+    if (!this.data) {
+      return null;
+    }
+    const field = this.getCurrentColorField();
+    const visibleFixes = this.getVisibleReviewFixes();
+    if (!field) {
+      return {
+        field: null,
+        visibleFixes,
+        numericFixes: [],
+        thresholdValue: null,
+        histogram: null,
+        matchKeys: new Set(),
+        uncheckedMatchKeys: new Set(),
+      };
+    }
+
+    const thresholdValue = this.thresholdState.fieldKey === field.key && typeof this.thresholdState.value === "number"
+      ? this.thresholdState.value
+      : null;
+    if (field.kind !== "numeric") {
+      return {
+        field,
+        visibleFixes,
+        numericFixes: [],
+        thresholdValue: null,
+        histogram: null,
+        matchKeys: new Set(),
+        uncheckedMatchKeys: new Set(),
+      };
+    }
+
+    const numericFixes = visibleFixes
+      .map(fix => ({
+        fix,
+        value: finiteOrNull(fix.attributes[field.key]),
+      }))
+      .filter(item => typeof item.value === "number");
+    if (!numericFixes.length) {
+      return {
+        field,
+        visibleFixes,
+        numericFixes,
+        thresholdValue: null,
+        histogram: null,
+        matchKeys: new Set(),
+        uncheckedMatchKeys: new Set(),
+      };
+    }
+
+    const histogram = computeHistogramBins(numericFixes.map(item => item.value), 24);
+    const activeThresholdValue = thresholdValue === null
+      ? null
+      : clampThresholdValue(thresholdValue, histogram.min, histogram.max);
+    const matchItems = activeThresholdValue === null
+      ? []
+      : numericFixes.filter(item => item.value > activeThresholdValue);
+    const matchKeys = new Set(matchItems.map(item => item.fix.fixKey));
+    const uncheckedMatchKeys = new Set(
+      matchItems
+        .map(item => item.fix.fixKey)
+        .filter(fixKey => !this.data.selectedFixKeys.has(fixKey)),
+    );
+    return {
+      field,
+      visibleFixes,
+      numericFixes,
+      histogram,
+      thresholdValue: activeThresholdValue,
+      matchKeys,
+      uncheckedMatchKeys,
+    };
+  }
+
+  renderThresholdPane() {
+    const pane = this.refs.thresholdPane;
+    if (!pane) {
+      return;
+    }
+    if (!this.data) {
+      pane.innerHTML = "";
+      pane.classList.add("hidden");
+      return;
+    }
+
+    const context = this.getThresholdContext();
+    const field = context?.field;
+    const visibleCount = context?.visibleFixes.length || 0;
+    const numericCount = context?.numericFixes.length || 0;
+    const thresholdValue = context?.thresholdValue ?? null;
+    const matchCount = context?.matchKeys?.size || 0;
+    const uncheckedCount = context?.uncheckedMatchKeys?.size || 0;
+    const histogram = context?.histogram;
+
+    let body = "";
+    if (!field) {
+      body = `
+        <div class="movement-threshold-empty">
+          Thresholding is unavailable until a color variable is loaded.
+        </div>
+      `;
+    } else if (field.kind !== "numeric") {
+      body = `
+        <div class="movement-threshold-empty">
+          Thresholding is available only for numeric color variables. Switch Color by to a numeric field to highlight high values.
+        </div>
+      `;
+    } else if (!visibleCount) {
+      body = `
+        <div class="movement-threshold-empty">
+          No visible fixes are in scope right now. Adjust the visible individuals or train/test toggles to build a threshold.
+        </div>
+      `;
+    } else if (!numericCount || !histogram) {
+      body = `
+        <div class="movement-threshold-empty">
+          The current numeric field has no usable values in the visible scope.
+        </div>
+      `;
+    } else {
+      const bars = histogram.bins
+        .map((bin, index) => {
+          const height = histogram.maxCount > 0 ? Math.max(6, (bin.count / histogram.maxCount) * 100) : 6;
+          const title = `${formatColorValue(bin.start, "numeric")} to ${formatColorValue(bin.end, "numeric")} • ${formatCount(bin.count)} fixes`;
+          return `
+            <div
+              class="movement-threshold-bar"
+              style="height:${height.toFixed(2)}%;"
+              title="${escapeHtml(title)}"
+              data-bin-index="${index}"
+            ></div>
+          `;
+        })
+        .join("");
+      const thresholdRatio = thresholdValue === null
+        ? null
+        : histogramValueToRatio(histogram, thresholdValue);
+      const thresholdLine = thresholdRatio === null
+        ? ""
+        : `<div class="movement-threshold-line" style="left:${(thresholdRatio * 100).toFixed(2)}%;"></div>`;
+      const subtitle = histogram.scaleKind === "log"
+        ? `${formatCount(numericCount)} numeric visible fixes | log-scaled for a long right tail`
+        : `${formatCount(numericCount)} numeric visible fixes`;
+      const meta = thresholdValue === null
+        ? "Click the histogram to set an upper threshold."
+        : `Threshold > ${formatColorValue(thresholdValue, "numeric")} highlights ${formatCount(matchCount)} fixes in the visible scope.`;
+      const selectionNote = uncheckedCount > 0
+        ? `${formatCount(uncheckedCount)} above-threshold fixes are not checked yet.`
+        : matchCount > 0
+          ? "All above-threshold fixes are already checked."
+          : "No fixes are above the current threshold.";
+      const histogramNote = histogram.scaleKind === "log"
+        ? "Histogram bars cover the full visible value range, with a log-like x-axis so high-value outliers do not flatten the rest of the distribution."
+        : "Histogram bars cover the full visible value range.";
+      const note = `${selectionNote} ${histogramNote}`;
+      body = `
+        <div class="movement-threshold-head">
+          <div>
+            <div class="movement-threshold-title">${escapeHtml(field.label)}</div>
+            <div class="movement-threshold-subtitle">${escapeHtml(field.source)} | ${escapeHtml(subtitle)}</div>
+          </div>
+          <div class="movement-threshold-meta">${escapeHtml(meta)}</div>
+        </div>
+        <div class="movement-threshold-chart-wrap">
+          <div
+            class="movement-threshold-chart"
+            data-role="threshold-chart"
+            data-field-key="${escapeHtml(field.key)}"
+            data-min="${escapeHtml(String(histogram.min))}"
+            data-max="${escapeHtml(String(histogram.max))}"
+          >
+            ${bars}
+            ${thresholdLine}
+          </div>
+        </div>
+        <div class="movement-threshold-range">
+          <span>${escapeHtml(formatColorValue(histogram.min, "numeric"))}</span>
+          <span>${escapeHtml(formatColorValue(histogram.max, "numeric"))}</span>
+        </div>
+        <div class="movement-threshold-note">${escapeHtml(note)}</div>
+        <div class="movement-threshold-actions">
+          <button
+            type="button"
+            class="movement-emphasis"
+            data-action="check-above-threshold"
+            ${uncheckedCount === 0 ? "disabled" : ""}
+          >Check above threshold${uncheckedCount > 0 ? ` (${escapeHtml(formatCount(uncheckedCount))})` : ""}</button>
+          <button
+            type="button"
+            data-action="clear-threshold"
+            ${thresholdValue === null ? "disabled" : ""}
+          >Clear threshold</button>
+        </div>
+      `;
+    }
+
+    pane.innerHTML = body;
+    pane.classList.remove("hidden");
+  }
+
+  handleThresholdPaneClick(event) {
+    if (!this.data) {
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) {
+      return;
+    }
+    const actionButton = target.closest("button[data-action]");
+    if (actionButton) {
+      const action = actionButton.dataset.action || "";
+      if (action === "clear-threshold") {
+        this.clearThresholdState();
+        this.renderThresholdPane();
+        this.renderLayers();
+      } else if (action === "check-above-threshold") {
+        this.checkAboveThresholdSelection();
+      }
+      return;
+    }
+
+    const chart = target.closest('[data-role="threshold-chart"]');
+    if (!chart) {
+      return;
+    }
+    const fieldKey = chart.dataset.fieldKey || "";
+    const min = Number(chart.dataset.min);
+    const max = Number(chart.dataset.max);
+    if (!fieldKey || !Number.isFinite(min) || !Number.isFinite(max)) {
+      return;
+    }
+    const rect = chart.getBoundingClientRect();
+    if (!rect.width) {
+      return;
+    }
+    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const context = this.getThresholdContext();
+    const histogram = context?.histogram;
+    const thresholdValue = histogram
+      ? histogramRatioToValue(histogram, ratio)
+      : (min === max ? min : min + ((max - min) * ratio));
+    this.thresholdState = {
+      fieldKey,
+      value: thresholdValue,
+    };
+    this.renderThresholdPane();
+    this.renderLayers();
+  }
+
+  checkAboveThresholdSelection() {
+    if (!this.data) {
+      return;
+    }
+    const context = this.getThresholdContext();
+    if (!context?.uncheckedMatchKeys?.size) {
+      return;
+    }
+    const nextSelected = new Set(this.data.selectedFixKeys);
+    for (const fixKey of context.uncheckedMatchKeys) {
+      nextSelected.add(fixKey);
+    }
+    this.data.selectedFixKeys = nextSelected;
+    this.renderSelectedFixes();
+    this.renderThresholdPane();
+    this.renderLayers();
+    this.updateActionButtons();
   }
 
   getFixesForIndividualsFrom(items, individuals) {
@@ -2022,6 +2501,7 @@ class MovementExampleApp {
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
       this.renderSelectedFixes();
+      this.renderThresholdPane();
       this.renderLayers();
       this.updateActionButtons();
       return;
@@ -2044,6 +2524,7 @@ class MovementExampleApp {
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, this.data.detailIndividuals);
       this.renderSelectedFixes();
+      this.renderThresholdPane();
       this.renderLayers();
       this.updateActionButtons();
       this.setStatus(`Loaded ${formatCount(this.data.detailReturnedFixCount)} editable fixes for ${formatCount(this.data.detailIndividuals.length)} visible individuals.`);
@@ -2055,6 +2536,7 @@ class MovementExampleApp {
     this.data.detailIndividuals = [...selectedIndividuals];
     this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, selectedIndividuals);
     this.renderSelectedFixes();
+    this.renderThresholdPane();
     this.updateActionButtons();
     this.setStatus(`Loaded overview for ${this.currentArtifact}. Loading editable fixes for ${formatCount(selectedIndividuals.length)} visible individuals...`);
 
@@ -2092,6 +2574,7 @@ class MovementExampleApp {
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, this.data.detailIndividuals);
       this.renderSelectedFixes();
+      this.renderThresholdPane();
       this.renderLayers();
       this.updateActionButtons();
       if (this.data.detailTruncated) {
@@ -2112,6 +2595,7 @@ class MovementExampleApp {
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
       this.renderSelectedFixes();
+      this.renderThresholdPane();
       this.renderLayers();
       this.updateActionButtons();
       this.setStatus(`Overview loaded, but editable fixes for ${formatCount(selectedIndividuals.length)} visible individuals failed: ${error.message}`, true);
@@ -3025,6 +3509,139 @@ function computeNumericRange(values) {
     observedMin,
     observedMax,
   };
+}
+
+function computeHistogramBins(values, requestedBinCount = 24) {
+  if (!Array.isArray(values) || !values.length) {
+    return null;
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  const observedMin = sorted[0];
+  const observedMax = sorted[sorted.length - 1];
+  const min = observedMin;
+  const max = observedMax;
+  const binCount = Math.max(1, Math.min(40, Math.floor(requestedBinCount) || 24));
+  if (observedMin === observedMax) {
+    return {
+      min: observedMin,
+      max: observedMax,
+      observedMin,
+      observedMax,
+      scaleKind: "linear",
+      scaleOffset: observedMin,
+      maxCount: values.length,
+      bins: [{ start: observedMin, end: observedMax, count: values.length }],
+    };
+  }
+  const p95 = quantile(sorted, 0.95);
+  const useLogScale = observedMin >= 0 && observedMax > observedMin && p95 > 0 && (observedMax / p95) >= 6;
+  const scaleOffset = observedMin;
+  const scaleValue = useLogScale
+    ? value => Math.log1p(Math.max(0, value - scaleOffset))
+    : value => value;
+  const unscaleValue = useLogScale
+    ? value => Math.expm1(value) + scaleOffset
+    : value => value;
+  const scaledMin = scaleValue(min);
+  const scaledMax = scaleValue(max);
+  const span = (scaledMax - scaledMin) || 1;
+  const step = span / binCount;
+  const bins = Array.from({ length: binCount }, (_, index) => ({
+    start: unscaleValue(scaledMin + (step * index)),
+    end: index === binCount - 1 ? max : unscaleValue(scaledMin + (step * (index + 1))),
+    count: 0,
+  }));
+  for (const value of values) {
+    const scaledValue = scaleValue(value);
+    let index = 0;
+    if (scaledValue <= scaledMin) {
+      index = 0;
+    } else if (scaledValue >= scaledMax) {
+      index = binCount - 1;
+    } else {
+      index = Math.floor(((scaledValue - scaledMin) / span) * binCount);
+      if (index < 0) {
+        index = 0;
+      } else if (index >= binCount) {
+        index = binCount - 1;
+      }
+    }
+    bins[index].count += 1;
+  }
+  return {
+    min,
+    max,
+    observedMin,
+    observedMax,
+    scaleKind: useLogScale ? "log" : "linear",
+    scaleOffset,
+    maxCount: Math.max(1, ...bins.map(bin => bin.count)),
+    bins,
+  };
+}
+
+function clampThresholdValue(value, min, max) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return value;
+  }
+  if (min > max) {
+    return value;
+  }
+  return Math.max(min, Math.min(max, value));
+}
+
+function histogramValueToRatio(histogram, value) {
+  if (!histogram) {
+    return 0;
+  }
+  const min = Number(histogram.min);
+  const max = Number(histogram.max);
+  const bins = Array.isArray(histogram.bins) ? histogram.bins : [];
+  if (!Number.isFinite(value) || !Number.isFinite(min) || !Number.isFinite(max) || !bins.length || min === max) {
+    return 0.5;
+  }
+  const boundedValue = clampThresholdValue(value, min, max);
+  if (boundedValue <= bins[0].start) {
+    return 0;
+  }
+  for (let index = 0; index < bins.length; index += 1) {
+    const bin = bins[index];
+    const isLast = index === bins.length - 1;
+    if (boundedValue > bin.end && !isLast) {
+      continue;
+    }
+    const start = Number(bin.start);
+    const end = Number(bin.end);
+    const localRatio = end > start
+      ? (boundedValue - start) / (end - start)
+      : 0.5;
+    return Math.max(0, Math.min(1, (index + localRatio) / bins.length));
+  }
+  return 1;
+}
+
+function histogramRatioToValue(histogram, ratio) {
+  if (!histogram) {
+    return 0;
+  }
+  const bins = Array.isArray(histogram.bins) ? histogram.bins : [];
+  const boundedRatio = Math.max(0, Math.min(1, Number(ratio) || 0));
+  if (!bins.length) {
+    return Number(histogram.min) || 0;
+  }
+  const scaledIndex = boundedRatio * bins.length;
+  const index = Math.min(bins.length - 1, Math.floor(scaledIndex));
+  const bin = bins[index];
+  const start = Number(bin.start);
+  const end = Number(bin.end);
+  const localRatio = Math.max(0, Math.min(1, scaledIndex - index));
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start === end) {
+    return start;
+  }
+  return start + ((end - start) * localRatio);
 }
 
 function interpolateNumericColor(value, range, alpha) {
