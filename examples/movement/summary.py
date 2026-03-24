@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import json
 import random
+import uuid
 from datetime import datetime
 from functools import lru_cache
 from math import isfinite
@@ -47,8 +48,8 @@ QUALITY_KEYWORDS = (
 
 MAX_SERIES_POINTS = 1500
 MAX_STAT_SAMPLES = 2000
-DEFAULT_FIX_LIMIT = 20000
-SUMMARY_CACHE_VERSION = 4
+DEFAULT_FIX_LIMIT = 1000000
+SUMMARY_CACHE_VERSION = 5
 
 
 def normalize_header(header: str | None) -> str:
@@ -121,6 +122,18 @@ def detect_columns(fieldnames: list[str]) -> dict[str, str | None]:
         "set": find_column(normalized, ["set", "split", "partition"]),
         **{name: normalized.get(normalize_header(name)) for name in REVIEW_COLUMNS},
     }
+
+
+def normalize_individual_filters(
+    *,
+    individual: str = "",
+    individuals: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> tuple[str, ...]:
+    if individuals is not None:
+        raw_values = [str(value or "").strip() for value in individuals]
+    else:
+        raw_values = [str(individual or "").strip()]
+    return tuple(sorted({value for value in raw_values if value}))
 
 
 def parse_time_ms(raw_value: object) -> int | None:
@@ -297,10 +310,16 @@ def _save_cached_response(path: Path, *, kind: str, params: dict | None, mtime_n
         "params": params or {},
         "summary": summary,
     }
-    temp_path = cache_path.parent / f"{cache_path.name}.tmp"
-    with gzip.open(temp_path, "wt", encoding="utf-8") as handle:
-        json.dump(payload, handle, separators=(",", ":"))
-    temp_path.replace(cache_path)
+    temp_path = cache_path.parent / f"{cache_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with gzip.open(temp_path, "wt", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+        temp_path.replace(cache_path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _categorical_value(raw_value: str) -> str:
@@ -563,7 +582,7 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
     stat_samples: dict[str, dict[str, list[float] | int]] = {}
     review_counts = {"suspected": 0, "confirmed": 0}
     review_counts_by_individual: dict[str, dict[str, int]] = {}
-    reviewed_fix_contexts: list[dict] = []
+    overview_fix_contexts: list[dict] = []
 
     total_rows = 0
     min_lon = float("inf")
@@ -654,8 +673,8 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
                     {"suspected": 0, "confirmed": 0},
                 )
                 individual_review_counts[review_status] += 1
-            if review:
-                reviewed_fix_contexts.append(
+            if len(overview_fix_contexts) < DEFAULT_FIX_LIMIT:
+                overview_fix_contexts.append(
                     {
                         "row_index": row_index,
                         "fix_id": valid["fix_id"],
@@ -701,7 +720,7 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
             }
         )
 
-    reviewed_fixes = [
+    overview_fixes = [
         _build_fix_record(
             row_index=context["row_index"],
             fix_id=context["fix_id"],
@@ -719,7 +738,7 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
             ),
             review=context["review"],
         )
-        for context in reviewed_fix_contexts
+        for context in overview_fix_contexts
     ]
 
     individuals = sorted(row_counts)
@@ -764,7 +783,7 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
         "series_by_individual": series_by_individual,
         "color_fields": color_fields,
         "review_counts": review_counts,
-        "fixes": reviewed_fixes,
+        "fixes": overview_fixes,
         "initial_view": {
             "longitude": float((min_lon + max_lon) / 2),
             "latitude": float((min_lat + max_lat) / 2),
@@ -774,6 +793,7 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
         "max_time_ms": int(max_time_ms),
         "detail_scope": {
             "individual": "",
+            "individuals": [],
             "start_ms": None,
             "end_ms": None,
             "review_status": "reviewed",
@@ -787,6 +807,7 @@ def build_movement_fixes(
     path: Path,
     *,
     individual: str = "",
+    individuals: list[str] | tuple[str, ...] | set[str] | None = None,
     start_ms: int | None = None,
     end_ms: int | None = None,
     review_status: str = "",
@@ -798,8 +819,10 @@ def build_movement_fixes(
     elif normalized_status not in {"", "suspected", "confirmed"}:
         raise ValueError("Invalid review status")
     limit_value = None if limit is None else max(1, int(limit))
+    normalized_individuals = normalize_individual_filters(individual=individual, individuals=individuals)
     params = {
-        "individual": individual.strip(),
+        "individual": normalized_individuals[0] if len(normalized_individuals) == 1 else "",
+        "individuals": normalized_individuals,
         "start_ms": start_ms,
         "end_ms": end_ms,
         "review_status": normalized_status,
@@ -813,7 +836,7 @@ def build_movement_fixes(
         path_str,
         mtime_ns,
         size,
-        params["individual"],
+        normalized_individuals,
         start_ms,
         end_ms,
         normalized_status,
@@ -828,7 +851,7 @@ def _build_movement_fixes_cached(
     path_str: str,
     mtime_ns: int,
     size: int,
-    individual: str,
+    individuals: tuple[str, ...],
     start_ms: int | None,
     end_ms: int | None,
     review_status: str,
@@ -841,6 +864,7 @@ def _build_movement_fixes_cached(
     matching_fix_count = 0
     truncated = False
     previous_by_group: dict[tuple[str, str], dict] = {}
+    individual_filters = set(individuals)
 
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -867,7 +891,7 @@ def _build_movement_fixes_cached(
 
             review = _compact_review(raw)
             status = str(review.get("status", "")).strip().lower()
-            if individual and item_individual != individual:
+            if individual_filters and item_individual not in individual_filters:
                 continue
             if start_ms is not None and time_ms < start_ms:
                 continue
@@ -909,7 +933,8 @@ def _build_movement_fixes_cached(
         "returned_fix_count": int(len(fixes)),
         "truncated": bool(truncated),
         "detail_scope": {
-            "individual": individual,
+            "individual": individuals[0] if len(individuals) == 1 else "",
+            "individuals": list(individuals),
             "start_ms": start_ms,
             "end_ms": end_ms,
             "review_status": review_status,

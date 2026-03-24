@@ -112,6 +112,7 @@ class MovementExampleApp {
       dataset: null,
       overview: null,
       detail: null,
+      reportDetail: null,
     };
     this.map = null;
     this.mapLoaded = false;
@@ -120,6 +121,7 @@ class MovementExampleApp {
     this.lastReportLinks = [];
     this.assetsLoaded = false;
     this.mapErrorMessage = "";
+    this.reportDetailLoadId = 0;
   }
 
   async init() {
@@ -691,6 +693,12 @@ class MovementExampleApp {
             <label>User
               <input type="text" data-role="report-user" placeholder="Name used for attribution">
             </label>
+            <label>Scope
+              <select data-role="report-scope">
+                <option value="visible">Visible individuals</option>
+                <option value="full">Full study</option>
+              </select>
+            </label>
             <label>Individual
               <select data-role="report-individual"></select>
             </label>
@@ -780,6 +788,7 @@ class MovementExampleApp {
       reportMeta: this.mountEl.querySelector('[data-role="report-meta"]'),
       reportSelection: this.mountEl.querySelector('[data-role="report-selection"]'),
       reportUser: this.mountEl.querySelector('[data-role="report-user"]'),
+      reportScope: this.mountEl.querySelector('[data-role="report-scope"]'),
       reportIndividual: this.mountEl.querySelector('[data-role="report-individual"]'),
       reportScreenshotMode: this.mountEl.querySelector('[data-role="report-screenshot-mode"]'),
       reportLinks: this.mountEl.querySelector('[data-role="report-links"]'),
@@ -915,6 +924,9 @@ class MovementExampleApp {
     this.refs.issueClose.addEventListener("click", () => this.closeModal(this.refs.issueModal, this.refs.issueSubmit));
     this.refs.issueSubmit.addEventListener("click", async () => this.submitIssueAction());
     this.refs.reportClose.addEventListener("click", () => this.closeModal(this.refs.reportModal, this.refs.reportSubmit));
+    this.refs.reportScope.addEventListener("change", () => {
+      void this.handleReportScopeChange();
+    });
     this.refs.reportIndividual.addEventListener("change", () => this.renderReportSelection());
     this.refs.reportSubmit.addEventListener("click", async () => this.submitGenerateReport());
     this.refs.removeClose.addEventListener("click", () => this.closeModal(this.refs.removeModal, this.refs.removeSubmit));
@@ -982,6 +994,7 @@ class MovementExampleApp {
       this.cancelRequest("dataset");
       this.cancelRequest("overview");
       this.cancelRequest("detail");
+      this.cancelRequest("reportDetail");
       return;
     }
     if (level === "study") {
@@ -989,17 +1002,20 @@ class MovementExampleApp {
       this.cancelRequest("dataset");
       this.cancelRequest("overview");
       this.cancelRequest("detail");
+      this.cancelRequest("reportDetail");
       return;
     }
     if (level === "dataset") {
       this.cancelRequest("dataset");
       this.cancelRequest("overview");
       this.cancelRequest("detail");
+      this.cancelRequest("reportDetail");
       return;
     }
     if (level === "artifact") {
       this.cancelRequest("overview");
       this.cancelRequest("detail");
+      this.cancelRequest("reportDetail");
     }
   }
 
@@ -1255,7 +1271,8 @@ class MovementExampleApp {
       await this.rebuildMap(false);
       this.resetView();
       this.updateActionButtons();
-      this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select exactly one individual to load detailed fixes.`);
+      this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
+      void this.loadDetailForCurrentSelection();
     } catch (error) {
       if (this.isAbortError(error)) {
         return;
@@ -1411,7 +1428,7 @@ class MovementExampleApp {
       await this.rebuildMap(false);
       this.resetView();
       this.updateActionButtons();
-      this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select exactly one individual to load detailed fixes.`);
+      this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
       void this.loadDetailForCurrentSelection({ preservedFixKeys });
     } catch (error) {
       if (this.isAbortError(error) || requestId !== this.loadRequestId) {
@@ -1525,6 +1542,7 @@ class MovementExampleApp {
     } else {
       this.data.selectedIndividuals.delete(individual);
     }
+    this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(this.data.selectedFixKeys, this.getSelectedIndividuals());
     this.saveUiState();
     this.renderIndividuals();
     this.renderSelectedFixes();
@@ -1545,11 +1563,13 @@ class MovementExampleApp {
       const empty = document.createElement("div");
       empty.className = "movement-empty";
       if (this.data.detailState === "loading") {
-        empty.textContent = `Loading detailed fixes for ${this.data.detailIndividual}...`;
+        empty.textContent = `Loading editable fixes for ${formatCount(this.data.detailIndividuals.length)} visible individuals...`;
+      } else if (!this.getSelectedIndividuals().length) {
+        empty.textContent = "Select at least one individual to review fixes.";
       } else if (!this.hasLoadedDetailSelection()) {
-        empty.textContent = "Select exactly one individual to load detailed fixes, then click map points to add fixes to the checked review list.";
+        empty.textContent = "Loading editable fixes for the current visible individuals...";
       } else if (this.data.detailState === "error") {
-        empty.textContent = "Detailed fixes could not be loaded for the current selection. Try selecting the individual again.";
+        empty.textContent = "Editable fixes could not be loaded for the current visible selection. Try selecting the individuals again.";
       } else {
         empty.textContent = "Click map points to add fixes to the checked review list.";
       }
@@ -1932,32 +1952,72 @@ class MovementExampleApp {
       .sort((left, right) => left.timeMs - right.timeMs || left.individual.localeCompare(right.individual));
   }
 
-  getSuspiciousFixes(individual = "") {
+  getSelectedIndividuals() {
     if (!this.data) {
       return [];
     }
-    return this.data.fixes
+    return [...this.data.selectedIndividuals].sort((left, right) => left.localeCompare(right));
+  }
+
+  getFixesForIndividualsFrom(items, individuals) {
+    const visibleIndividuals = new Set(individuals);
+    return (Array.isArray(items) ? items : []).filter(fix => visibleIndividuals.has(fix.individual));
+  }
+
+  filterSelectedFixKeysForIndividuals(fixKeys, individuals) {
+    if (!this.data) {
+      return new Set();
+    }
+    const visibleIndividuals = new Set(individuals);
+    return new Set(
+      [...fixKeys].filter(key => {
+        const fix = this.data.fixByKey.get(key);
+        return Boolean(fix && visibleIndividuals.has(fix.individual));
+      }),
+    );
+  }
+
+  getFixesForScope(scope, { allowPartialFull = false } = {}) {
+    if (!this.data) {
+      return [];
+    }
+    if (scope === "full") {
+      if (this.data.reportAllState === "loaded") {
+        return this.data.reportAllFixes;
+      }
+      return allowPartialFull ? this.data.overviewFixes : [];
+    }
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    return this.data.fixes.filter(fix => visibleIndividuals.has(fix.individual));
+  }
+
+  getSuspiciousFixes(individual = "", { scope = "visible", allowPartialFull = false } = {}) {
+    return this.getFixesForScope(scope, { allowPartialFull })
       .filter(fix => fix.review.status === "suspected" && (!individual || fix.individual === individual))
       .sort((left, right) => left.individual.localeCompare(right.individual) || left.timeMs - right.timeMs);
   }
 
   hasLoadedDetailSelection() {
-    if (!this.data || this.data.detailState !== "loaded" || !this.data.detailIndividual) {
+    if (!this.data || this.data.detailState !== "loaded") {
       return false;
     }
-    return this.data.selectedIndividuals.size === 1 && this.data.selectedIndividuals.has(this.data.detailIndividual);
+    return arraysEqual(this.getSelectedIndividuals(), this.data.detailIndividuals);
   }
 
   async loadDetailForCurrentSelection({ preservedFixKeys } = {}) {
     if (!this.data || !this.currentArtifact) {
       return;
     }
-    const selectedIndividuals = [...this.data.selectedIndividuals].sort((left, right) => left.localeCompare(right));
+    const selectedIndividuals = this.getSelectedIndividuals();
     const preserved = preservedFixKeys instanceof Set ? preservedFixKeys : new Set(this.data.selectedFixKeys);
-    if (selectedIndividuals.length !== 1) {
+    if (!selectedIndividuals.length) {
       this.cancelRequest("detail");
       this.data.detailState = "idle";
-      this.data.detailIndividual = "";
+      this.data.detailIndividuals = [];
+      this.data.detailLimit = null;
+      this.data.detailMatchingFixCount = 0;
+      this.data.detailReturnedFixCount = 0;
+      this.data.detailTruncated = false;
       this.data.detailFixes = [];
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
@@ -1967,19 +2027,36 @@ class MovementExampleApp {
       return;
     }
 
-    const individual = selectedIndividuals[0];
-    if (this.data.detailState === "loaded" && this.data.detailIndividual === individual) {
+    if (this.data.detailState === "loaded" && arraysEqual(this.data.detailIndividuals, selectedIndividuals)) {
       this.updateActionButtons();
+      return;
+    }
+
+    if (this.data.overviewHasAllFixes) {
+      this.cancelRequest("detail");
+      this.data.detailState = "loaded";
+      this.data.detailIndividuals = [...selectedIndividuals];
+      this.data.detailLimit = this.data.totalRows;
+      this.data.detailFixes = [];
+      this.data.detailMatchingFixCount = this.getFixesForIndividualsFrom(this.data.overviewFixes, selectedIndividuals).length;
+      this.data.detailReturnedFixCount = this.data.detailMatchingFixCount;
+      this.data.detailTruncated = false;
+      refreshMovementFixCollections(this.data);
+      this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, this.data.detailIndividuals);
+      this.renderSelectedFixes();
+      this.renderLayers();
+      this.updateActionButtons();
+      this.setStatus(`Loaded ${formatCount(this.data.detailReturnedFixCount)} editable fixes for ${formatCount(this.data.detailIndividuals.length)} visible individuals.`);
       return;
     }
 
     this.cancelRequest("detail");
     this.data.detailState = "loading";
-    this.data.detailIndividual = individual;
-    this.data.selectedFixKeys = new Set([...preserved].filter(key => this.data.fixByKey.has(key)));
+    this.data.detailIndividuals = [...selectedIndividuals];
+    this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, selectedIndividuals);
     this.renderSelectedFixes();
     this.updateActionButtons();
-    this.setStatus(`Loaded overview for ${this.currentArtifact}. Loading detailed fixes for ${individual}...`);
+    this.setStatus(`Loaded overview for ${this.currentArtifact}. Loading editable fixes for ${formatCount(selectedIndividuals.length)} visible individuals...`);
 
     const familyName = this.currentFamily;
     const studyName = this.currentStudy;
@@ -1989,7 +2066,7 @@ class MovementExampleApp {
     try {
       const controller = this.beginRequest("detail");
       const payload = await this.fetchJSON(
-        `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/dataset/${encodeURIComponent(datasetId)}/fixes?${new URLSearchParams({ logical_name: artifactName, individual }).toString()}`,
+        this.buildFixesRequestUrl({ familyName, studyName, datasetId, artifactName, individuals: selectedIndividuals }),
         { signal: controller.signal },
       );
       if (
@@ -2004,31 +2081,151 @@ class MovementExampleApp {
         return;
       }
       this.data.detailState = "loaded";
-      this.data.detailIndividual = individual;
+      this.data.detailIndividuals = Array.isArray(payload.detail_scope?.individuals)
+        ? payload.detail_scope.individuals.map(value => String(value))
+        : [...selectedIndividuals];
+      this.data.detailLimit = payload.detail_scope?.limit ?? null;
+      this.data.detailMatchingFixCount = Number(payload.matching_fix_count) || 0;
+      this.data.detailReturnedFixCount = Number(payload.returned_fix_count) || 0;
+      this.data.detailTruncated = Boolean(payload.truncated);
       this.data.detailFixes = parseMovementFixes(payload.fixes || []);
       refreshMovementFixCollections(this.data);
-      this.data.selectedFixKeys = new Set([...preserved].filter(key => this.data.fixByKey.has(key)));
+      this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, this.data.detailIndividuals);
       this.renderSelectedFixes();
       this.renderLayers();
       this.updateActionButtons();
-      this.setStatus(`Loaded detailed fixes for ${individual} (${formatCount(payload.returned_fix_count || this.data.detailFixes.length)} fixes).`);
+      if (this.data.detailTruncated) {
+        this.setStatus(`Loaded ${formatCount(this.data.detailReturnedFixCount)} of ${formatCount(this.data.detailMatchingFixCount)} editable fixes for ${formatCount(this.data.detailIndividuals.length)} visible individuals due to the ${formatCount(this.data.detailLimit)}-fix cap.`, true);
+      } else {
+        this.setStatus(`Loaded ${formatCount(this.data.detailReturnedFixCount || this.data.detailFixes.length)} editable fixes for ${formatCount(this.data.detailIndividuals.length)} visible individuals.`);
+      }
     } catch (error) {
       if (this.isAbortError(error) || requestId !== this.loadRequestId || !this.data) {
         return;
       }
       this.data.detailState = "error";
+      this.data.detailLimit = null;
+      this.data.detailMatchingFixCount = 0;
+      this.data.detailReturnedFixCount = 0;
+      this.data.detailTruncated = false;
       this.data.detailFixes = [];
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
       this.renderSelectedFixes();
       this.renderLayers();
       this.updateActionButtons();
-      this.setStatus(`Overview loaded, but detailed fixes for ${individual} failed: ${error.message}`, true);
+      this.setStatus(`Overview loaded, but editable fixes for ${formatCount(selectedIndividuals.length)} visible individuals failed: ${error.message}`, true);
+    }
+  }
+
+  buildFixesRequestUrl({ familyName, studyName, datasetId, artifactName, individuals = [], reviewStatus = "", limit } = {}) {
+    const params = new URLSearchParams({ logical_name: artifactName });
+    const normalizedIndividuals = uniqueNonEmpty(individuals).sort((left, right) => left.localeCompare(right));
+    const allIndividuals = this.data ? [...this.data.individuals].sort((left, right) => left.localeCompare(right)) : [];
+    const shouldOmitIndividuals = normalizedIndividuals.length > 0 && arraysEqual(normalizedIndividuals, allIndividuals);
+    if (!shouldOmitIndividuals) {
+      for (const individual of normalizedIndividuals) {
+        params.append("individuals", individual);
+      }
+    }
+    if (reviewStatus) {
+      params.set("review_status", reviewStatus);
+    }
+    if (limit !== undefined && limit !== null) {
+      params.set("limit", String(limit));
+    }
+    return `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/dataset/${encodeURIComponent(datasetId)}/fixes?${params.toString()}`;
+  }
+
+  async handleReportScopeChange() {
+    if (!this.data) {
+      return;
+    }
+    if (this.refs.reportScope.value === "full") {
+      await this.ensureFullReportDataLoaded();
+    }
+    this.populateReportIndividualOptions();
+    this.renderReportSelection();
+  }
+
+  async ensureFullReportDataLoaded() {
+    if (!this.data || !this.currentArtifact) {
+      return;
+    }
+    if (this.data.overviewHasAllFixes) {
+      this.data.reportAllState = "loaded";
+      this.data.reportAllFixes = [...this.data.overviewFixes];
+      this.data.reportAllLimit = this.data.totalRows;
+      this.data.reportAllMatchingFixCount = this.data.reportAllFixes.length;
+      this.data.reportAllReturnedFixCount = this.data.reportAllFixes.length;
+      this.data.reportAllTruncated = false;
+      return;
+    }
+    if (this.data.reportAllState === "loaded" || this.data.reportAllState === "loading") {
+      return;
+    }
+
+    this.cancelRequest("reportDetail");
+    this.data.reportAllState = "loading";
+    this.data.reportAllFixes = [];
+    this.data.reportAllLimit = null;
+    this.data.reportAllMatchingFixCount = 0;
+    this.data.reportAllReturnedFixCount = 0;
+    this.data.reportAllTruncated = false;
+    this.renderReportSelection();
+
+    const familyName = this.currentFamily;
+    const studyName = this.currentStudy;
+    const datasetId = this.currentDatasetId;
+    const artifactName = this.currentArtifact;
+    const requestId = ++this.reportDetailLoadId;
+    try {
+      const controller = this.beginRequest("reportDetail");
+      const payload = await this.fetchJSON(
+        this.buildFixesRequestUrl({ familyName, studyName, datasetId, artifactName }),
+        { signal: controller.signal },
+      );
+      if (
+        requestId !== this.reportDetailLoadId
+        || this.requestControllers.reportDetail !== controller
+        || familyName !== this.currentFamily
+        || studyName !== this.currentStudy
+        || datasetId !== this.currentDatasetId
+        || artifactName !== this.currentArtifact
+        || !this.data
+      ) {
+        return;
+      }
+      this.data.reportAllState = "loaded";
+      this.data.reportAllFixes = parseMovementFixes(payload.fixes || []);
+      this.data.reportAllLimit = payload.detail_scope?.limit ?? null;
+      this.data.reportAllMatchingFixCount = Number(payload.matching_fix_count) || 0;
+      this.data.reportAllReturnedFixCount = Number(payload.returned_fix_count) || 0;
+      this.data.reportAllTruncated = Boolean(payload.truncated);
+    } catch (error) {
+      if (this.isAbortError(error) || requestId !== this.reportDetailLoadId || !this.data) {
+        return;
+      }
+      this.data.reportAllState = "error";
+      this.data.reportAllFixes = [];
+      this.data.reportAllLimit = null;
+      this.data.reportAllMatchingFixCount = 0;
+      this.data.reportAllReturnedFixCount = 0;
+      this.data.reportAllTruncated = false;
+    }
+
+    if (this.refs.reportModal && !this.refs.reportModal.classList.contains("hidden")) {
+      this.populateReportIndividualOptions();
+      this.renderReportSelection();
     }
   }
 
   populateReportIndividualOptions() {
-    const suspiciousFixes = this.getSuspiciousFixes();
+    const scope = this.refs.reportScope.value || "visible";
+    const suspiciousFixes = this.getSuspiciousFixes("", {
+      scope,
+      allowPartialFull: scope === "full",
+    });
     const individuals = uniqueStrings(suspiciousFixes.map(fix => fix.individual))
       .sort((left, right) => left.localeCompare(right));
     const currentValue = this.refs.reportIndividual.value;
@@ -2042,7 +2239,10 @@ class MovementExampleApp {
     for (const individual of individuals) {
       const option = document.createElement("option");
       option.value = individual;
-      option.textContent = `${individual} (${formatCount(this.getSuspiciousFixes(individual).length)} fixes)`;
+      option.textContent = `${individual} (${formatCount(this.getSuspiciousFixes(individual, {
+        scope,
+        allowPartialFull: scope === "full",
+      }).length)} fixes)`;
       this.refs.reportIndividual.appendChild(option);
     }
 
@@ -2050,7 +2250,11 @@ class MovementExampleApp {
   }
 
   getReportFixes() {
-    return this.getSuspiciousFixes(this.refs.reportIndividual.value);
+    const scope = this.refs.reportScope.value || "visible";
+    if (scope === "full" && this.data?.reportAllState !== "loaded") {
+      return [];
+    }
+    return this.getSuspiciousFixes(this.refs.reportIndividual.value, { scope });
   }
 
   getReportSnapshotWindows() {
@@ -2106,9 +2310,11 @@ class MovementExampleApp {
     if (!this.data || !reportFixes.length) {
       return [];
     }
+    const scope = this.refs.reportScope.value || "visible";
+    const trackFixesSource = this.getFixesForScope(scope, { allowPartialFull: scope === "full" });
     const trackFixesByKey = new Map();
     const indexByFixKey = new Map();
-    for (const fix of this.data.fixes) {
+    for (const fix of trackFixesSource) {
       const trackKey = reportTrackKey(fix.individual, fix.setName);
       const group = trackFixesByKey.get(trackKey) || [];
       group.push(fix);
@@ -2200,19 +2406,55 @@ class MovementExampleApp {
   }
 
   renderReportSelection() {
+    const scope = this.refs.reportScope.value || "visible";
+    const scopeLabel = scope === "full" ? "Full study" : "Visible individuals";
+    const individualLabel = this.refs.reportIndividual.value || "All individuals";
+    if (scope === "full" && this.data?.reportAllState === "loading") {
+      this.refs.reportMeta.innerHTML = `
+        <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
+        <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
+        <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+        <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+        <div><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</div>
+        <div><strong>Individual:</strong> ${escapeHtml(individualLabel)}</div>
+      `;
+      this.refs.reportSelection.textContent = "Loading full-study report context...";
+      this.refs.reportSubmit.disabled = true;
+      return;
+    }
+    if (scope === "full" && this.data?.reportAllState === "error") {
+      this.refs.reportMeta.innerHTML = `
+        <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
+        <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
+        <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+        <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+        <div><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</div>
+        <div><strong>Individual:</strong> ${escapeHtml(individualLabel)}</div>
+      `;
+      this.refs.reportSelection.textContent = "Could not load full-study report context. Try switching scopes or reopening the report modal.";
+      this.refs.reportSubmit.disabled = true;
+      return;
+    }
+
     const reportFixes = this.getReportFixes();
     const snapshotWindows = this.getReportSnapshotWindows();
     const issueTypes = uniqueNonEmpty(reportFixes.map(fix => reportIssueType(fix)));
-    const individualLabel = this.refs.reportIndividual.value || "All individuals";
+    const scopeNote = scope === "full" && this.data?.reportAllTruncated
+      ? `Loaded ${formatCount(this.data.reportAllReturnedFixCount)} of ${formatCount(this.data.reportAllMatchingFixCount)} fixes for full-study report context due to the ${formatCount(this.data.reportAllLimit)}-fix cap.`
+      : scope === "full"
+        ? `Loaded ${formatCount(this.data?.reportAllReturnedFixCount || reportFixes.length)} fixes for full-study report context.`
+        : `Using the ${formatCount(this.getSelectedIndividuals().length)} currently visible individuals.`;
     this.refs.reportMeta.innerHTML = `
       <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
       <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+      <div><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</div>
       <div><strong>Individual:</strong> ${escapeHtml(individualLabel)}</div>
       <div><strong>Suspected fixes in report:</strong> ${escapeHtml(formatCount(reportFixes.length))}</div>
       <div><strong>Snapshot windows:</strong> ${escapeHtml(formatCount(snapshotWindows.length))}</div>
       <div><strong>Issue types in report:</strong> ${escapeHtml(issueTypes.length ? issueTypes.join(", ") : "Unspecified issue")}</div>
+      <div><strong>Scope note:</strong> ${escapeHtml(scopeNote)}</div>
     `;
     this.refs.reportSelection.textContent = snapshotWindows.length
       ? snapshotWindows
@@ -2225,9 +2467,11 @@ class MovementExampleApp {
 
   updateActionButtons() {
     const hasData = Boolean(this.data);
+    const hasSelectedIndividuals = this.getSelectedIndividuals().length > 0;
     const hasDetail = this.hasLoadedDetailSelection();
     const selectedCount = this.getSelectedFixes().length;
-    const suspiciousCount = this.getSuspiciousFixes().length;
+    const visibleSuspiciousCount = this.getSuspiciousFixes("", { scope: "visible" }).length;
+    const allSuspiciousCount = this.getSuspiciousFixes("", { scope: "full", allowPartialFull: true }).length;
     for (const button of [
       this.refs.selectSuspicious,
       this.refs.clearFixes,
@@ -2236,13 +2480,14 @@ class MovementExampleApp {
       this.refs.generateReport,
       this.refs.removeConfirmed,
     ]) {
-      button.hidden = !hasDetail;
+      button.hidden = !hasData;
     }
-    this.refs.markSuspected.disabled = !hasData || !hasDetail || selectedCount === 0;
-    this.refs.markConfirmed.disabled = !hasData || !hasDetail || selectedCount === 0;
-    this.refs.generateReport.disabled = !hasData || !hasDetail || suspiciousCount === 0;
-    this.refs.removeConfirmed.disabled = !hasData || !hasDetail || selectedCount === 0;
-    this.refs.selectSuspicious.disabled = !hasData || !hasDetail || suspiciousCount === 0;
+    this.refs.markSuspected.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
+    this.refs.markConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
+    this.refs.generateReport.disabled = !hasData || allSuspiciousCount === 0;
+    this.refs.removeConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
+    this.refs.selectSuspicious.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || visibleSuspiciousCount === 0;
+    this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
     this.updateUndoButton();
   }
 
@@ -2287,12 +2532,12 @@ class MovementExampleApp {
     if (!this.currentArtifact) {
       return;
     }
-    const suspiciousFixes = this.getSuspiciousFixes();
+    const suspiciousFixes = this.getSuspiciousFixes("", { scope: "full", allowPartialFull: true });
     if (!suspiciousFixes.length) {
       return;
     }
     this.refs.reportUser.value = this.getUser();
-    this.populateReportIndividualOptions();
+    this.refs.reportScope.value = "visible";
     this.refs.reportScreenshotMode.value = "manual";
     this.refs.reportLinks.innerHTML = this.lastReportLinks.map(link => (
       `<a href="${link.href}" target="_blank" rel="noreferrer">${escapeHtml(link.label)}</a>`
@@ -2301,6 +2546,7 @@ class MovementExampleApp {
     this.refs.reportStatus.classList.remove("error");
     this.refs.reportSubmit.disabled = false;
     this.refs.reportClose.disabled = false;
+    this.populateReportIndividualOptions();
     this.renderReportSelection();
     this.refs.reportModal.classList.remove("hidden");
   }
@@ -2568,6 +2814,7 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
   if (!individuals.length) {
     throw new Error("Dataset summary did not contain any individuals.");
   }
+  const overviewFixes = parseMovementFixes(summary.fixes || []);
 
   const seriesByIndividual = {};
   const coverageByIndividual = {};
@@ -2646,10 +2893,21 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     stats,
     fixes: [],
     fixByKey: new Map(),
-    overviewFixes: parseMovementFixes(summary.fixes || []),
+    overviewFixes,
+    overviewHasAllFixes: overviewFixes.length >= (Number(summary.total_rows) || 0),
     detailFixes: [],
     detailState: "idle",
-    detailIndividual: "",
+    detailIndividuals: [],
+    detailLimit: null,
+    detailMatchingFixCount: 0,
+    detailReturnedFixCount: 0,
+    detailTruncated: false,
+    reportAllFixes: [],
+    reportAllState: "idle",
+    reportAllLimit: null,
+    reportAllMatchingFixCount: 0,
+    reportAllReturnedFixCount: 0,
+    reportAllTruncated: false,
     selectedFixKeys: new Set(),
     selectedIndividuals: new Set(individuals),
     colorFields,
@@ -2875,6 +3133,13 @@ function uniqueStrings(values) {
 
 function uniqueNonEmpty(values) {
   return Array.from(new Set(values.filter(Boolean).map(value => String(value))));
+}
+
+function arraysEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
 }
 
 function reportIssueType(fix) {

@@ -34,15 +34,12 @@ def _build_initial_study_payload(study_dir: Path) -> dict:
     logical_name = str(artifacts[0].get("logical_name") or "").strip()
     if not logical_name:
         raise ProjectStateError("Selected dataset has no artifacts")
-    _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
-    overview = build_movement_overview(artifact_path)
     return {
         "state": state,
         "graph": graph,
         "dataset": dataset,
         "dataset_id": dataset_id,
         "logical_name": logical_name,
-        "overview": overview,
     }
 
 
@@ -1225,6 +1222,17 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             raise ValueError("Invalid individual")
         return value
 
+    def parse_optional_individuals(raw_values: list[str] | tuple[str, ...]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_value in raw_values:
+            value = parse_optional_individual(raw_value)
+            if not value or value in seen:
+                continue
+            normalized.append(value)
+            seen.add(value)
+        return normalized
+
     @app.get("/api/apps/movement/families")
     async def get_movement_families():
         return JSONResponse({"families": list_families(data_root)})
@@ -1287,6 +1295,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         family_name: str,
         study_name: str,
         dataset_id: str,
+        request: Request,
         logical_name: str,
         individual: str = "",
         start_ms: int | None = None,
@@ -1297,10 +1306,15 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         try:
             study_dir = get_study_dir(data_root, family_name, study_name)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
+            individuals = parse_optional_individuals(request.query_params.getlist("individuals"))
+            if not individuals:
+                single_individual = parse_optional_individual(individual)
+                if single_individual:
+                    individuals = [single_individual]
             payload = await run_in_threadpool(
                 build_movement_fixes,
                 artifact_path,
-                individual=parse_optional_individual(individual),
+                individuals=individuals or None,
                 start_ms=parse_optional_int(start_ms, label="start_ms"),
                 end_ms=parse_optional_int(end_ms, label="end_ms"),
                 review_status=str(review_status or "").strip().lower(),
