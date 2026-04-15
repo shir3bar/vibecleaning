@@ -8,6 +8,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+MOVEMENT_APP_JS = REPO_ROOT / "examples" / "movement" / "static" / "app.js"
+
 from app.state import load_project_state
 from app.web import create_app
 from examples.movement.routes import (
@@ -119,6 +121,15 @@ fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,120
     payload = build_movement_overview(csv_path)
 
     assert any(field["key"] == "height-above-msl" for field in payload["color_fields"])
+
+
+def test_movement_frontend_includes_osm_streets_basemap_config():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert '"OSM Streets": OSM_STREETS_STYLE' in source
+    assert "https://tile.openstreetmap.org/{z}/{x}/{y}.png" in source
+    assert 'data-role="map-attribution"' in source
+    assert '<option value="OSM Streets">OSM Streets</option>' in source
 
 
 def test_build_movement_fixes_ignores_cleared_issue_metadata(tmp_path):

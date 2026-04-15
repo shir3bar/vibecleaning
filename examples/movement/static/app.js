@@ -12,8 +12,42 @@ const LOCAL_BLANK_STYLE = {
   ],
 };
 
+const OSM_STREETS_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors';
+
+const OSM_STREETS_STYLE = {
+  version: 8,
+  sources: {
+    "osm-streets": {
+      type: "raster",
+      tiles: [
+        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+      ],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: OSM_STREETS_ATTRIBUTION,
+    },
+  },
+  layers: [
+    {
+      id: "background",
+      type: "background",
+      paint: {
+        "background-color": "#f6f4ef",
+      },
+    },
+    {
+      id: "osm-streets-raster",
+      type: "raster",
+      source: "osm-streets",
+      minzoom: 0,
+      maxzoom: 22,
+    },
+  ],
+};
+
 const BASEMAP_STYLES = {
   Blank: LOCAL_BLANK_STYLE,
+  "OSM Streets": OSM_STREETS_STYLE,
   Positron: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
   Voyager: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
   "Dark Matter": "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
@@ -305,6 +339,28 @@ class MovementExampleApp {
         .movement-map {
           width: 100%;
           height: 100%;
+        }
+        .movement-map-attribution {
+          position: absolute;
+          left: 16px;
+          top: 16px;
+          z-index: 4;
+          max-width: min(300px, calc(100% - 88px));
+          padding: 6px 9px;
+          border-radius: 10px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(7, 11, 22, 0.82);
+          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+          color: #b8c8d8;
+          font-size: 11px;
+          line-height: 1.35;
+        }
+        .movement-map-attribution.hidden {
+          display: none;
+        }
+        .movement-map-attribution a {
+          color: #d6ecff;
+          text-decoration: underline;
         }
         .movement-legend {
           position: absolute;
@@ -878,6 +934,7 @@ class MovementExampleApp {
         <div class="movement-main">
           <div class="movement-map-wrap">
             <div class="movement-map" data-role="map"></div>
+            <div class="movement-map-attribution hidden" data-role="map-attribution"></div>
             <div class="movement-legend hidden" data-role="legend"></div>
             <div class="movement-threshold hidden" data-role="threshold-pane"></div>
             <div class="movement-overlay" data-role="overlay">
@@ -971,6 +1028,7 @@ class MovementExampleApp {
             <label data-role="report-basemap-wrap">Report basemap
               <select data-role="report-basemap">
                 <option value="current">Match current map when possible</option>
+                <option value="OSM Streets">OSM Streets</option>
                 <option value="Positron">Positron</option>
                 <option value="Voyager">Voyager</option>
                 <option value="Dark Matter">Dark Matter</option>
@@ -1046,6 +1104,7 @@ class MovementExampleApp {
       slider: this.mountEl.querySelector('[data-role="slider"]'),
       time: this.mountEl.querySelector('[data-role="time"]'),
       map: this.mountEl.querySelector('[data-role="map"]'),
+      mapAttribution: this.mountEl.querySelector('[data-role="map-attribution"]'),
       legend: this.mountEl.querySelector('[data-role="legend"]'),
       thresholdPane: this.mountEl.querySelector('[data-role="threshold-pane"]'),
       overlay: this.mountEl.querySelector('[data-role="overlay"]'),
@@ -1145,6 +1204,7 @@ class MovementExampleApp {
     });
     this.refs.basemap.addEventListener("change", async () => {
       this.saveUiState();
+      this.updateMapAttribution();
       await this.rebuildMap(true);
     });
     this.refs.colorBy.addEventListener("change", () => {
@@ -2019,6 +2079,7 @@ class MovementExampleApp {
       return;
     }
     const style = BASEMAP_STYLES[this.refs.basemap.value] || BASEMAP_STYLES.Blank;
+    this.updateMapAttribution();
     if (!this.map) {
       this.map = new maplibregl.Map({
         container: this.refs.map,
@@ -2063,6 +2124,20 @@ class MovementExampleApp {
       return;
     }
     this.renderLayers();
+  }
+
+  updateMapAttribution() {
+    if (!this.refs?.mapAttribution) {
+      return;
+    }
+    const basemapName = this.refs.basemap.value || "Blank";
+    if (basemapName === "OSM Streets") {
+      this.refs.mapAttribution.innerHTML = OSM_STREETS_ATTRIBUTION;
+      this.refs.mapAttribution.classList.remove("hidden");
+      return;
+    }
+    this.refs.mapAttribution.innerHTML = "";
+    this.refs.mapAttribution.classList.add("hidden");
   }
 
   renderLayers() {
