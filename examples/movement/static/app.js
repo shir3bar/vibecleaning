@@ -941,6 +941,12 @@ class MovementExampleApp {
             <label>User
               <input type="text" data-role="report-user" placeholder="Name used for attribution">
             </label>
+            <label>Report type
+              <select data-role="report-type">
+                <option value="issue_first">Issue-first debug report</option>
+                <option value="individual_profile">Per-individual profile report</option>
+              </select>
+            </label>
             <label>Scope
               <select data-role="report-scope">
                 <option value="visible">Visible individuals</option>
@@ -950,13 +956,19 @@ class MovementExampleApp {
             <label>Individual
               <select data-role="report-individual"></select>
             </label>
-            <label>Screenshot mode
-              <select data-role="report-screenshot-mode">
-                <option value="manual">Manual placeholder</option>
-                <option value="auto">Auto snapshot of current map</option>
+            <label data-role="report-output-mode-wrap" hidden>Output mode
+              <select data-role="report-output-mode">
+                <option value="combined">Single combined report</option>
+                <option value="separate">Separate files + index</option>
               </select>
             </label>
-            <label>Report basemap
+            <label data-role="report-screenshot-mode-wrap">Screenshot mode
+              <select data-role="report-screenshot-mode">
+                <option value="auto">Auto snapshot of current map</option>
+                <option value="manual">Manual placeholder</option>
+              </select>
+            </label>
+            <label data-role="report-basemap-wrap">Report basemap
               <select data-role="report-basemap">
                 <option value="current">Match current map when possible</option>
                 <option value="Positron">Positron</option>
@@ -964,10 +976,10 @@ class MovementExampleApp {
                 <option value="Dark Matter">Dark Matter</option>
               </select>
             </label>
-            <label>Auto snapshot sample
+            <label data-role="report-snapshot-limit-wrap">Auto snapshot sample
               <input type="number" min="1" step="1" data-role="report-snapshot-limit" placeholder="All snapshot windows">
             </label>
-            <label class="movement-inline-check">
+            <label class="movement-inline-check" data-role="report-spread-individuals-wrap">
               <input type="checkbox" data-role="report-spread-individuals" checked>
               Spread auto snapshots across individuals
             </label>
@@ -1051,11 +1063,18 @@ class MovementExampleApp {
       reportModal: this.mountEl.querySelector('[data-role="report-modal"]'),
       reportMeta: this.mountEl.querySelector('[data-role="report-meta"]'),
       reportUser: this.mountEl.querySelector('[data-role="report-user"]'),
+      reportType: this.mountEl.querySelector('[data-role="report-type"]'),
       reportScope: this.mountEl.querySelector('[data-role="report-scope"]'),
       reportIndividual: this.mountEl.querySelector('[data-role="report-individual"]'),
+      reportOutputModeWrap: this.mountEl.querySelector('[data-role="report-output-mode-wrap"]'),
+      reportOutputMode: this.mountEl.querySelector('[data-role="report-output-mode"]'),
+      reportScreenshotModeWrap: this.mountEl.querySelector('[data-role="report-screenshot-mode-wrap"]'),
       reportScreenshotMode: this.mountEl.querySelector('[data-role="report-screenshot-mode"]'),
+      reportBasemapWrap: this.mountEl.querySelector('[data-role="report-basemap-wrap"]'),
       reportBasemap: this.mountEl.querySelector('[data-role="report-basemap"]'),
+      reportSnapshotLimitWrap: this.mountEl.querySelector('[data-role="report-snapshot-limit-wrap"]'),
       reportSnapshotLimit: this.mountEl.querySelector('[data-role="report-snapshot-limit"]'),
+      reportSpreadIndividualsWrap: this.mountEl.querySelector('[data-role="report-spread-individuals-wrap"]'),
       reportSpreadIndividuals: this.mountEl.querySelector('[data-role="report-spread-individuals"]'),
       reportLinks: this.mountEl.querySelector('[data-role="report-links"]'),
       reportStatus: this.mountEl.querySelector('[data-role="report-status"]'),
@@ -1202,10 +1221,14 @@ class MovementExampleApp {
     this.refs.issueClose.addEventListener("click", () => this.closeModal(this.refs.issueModal, this.refs.issueSubmit));
     this.refs.issueSubmit.addEventListener("click", async () => this.submitIssueAction());
     this.refs.reportClose.addEventListener("click", () => this.closeModal(this.refs.reportModal, this.refs.reportSubmit));
+    this.refs.reportType.addEventListener("change", () => {
+      void this.handleReportTypeChange();
+    });
     this.refs.reportScope.addEventListener("change", () => {
       void this.handleReportScopeChange();
     });
     this.refs.reportIndividual.addEventListener("change", () => this.renderReportSelection());
+    this.refs.reportOutputMode.addEventListener("change", () => this.renderReportSelection());
     this.refs.reportScreenshotMode.addEventListener("change", () => this.renderReportSelection());
     this.refs.reportBasemap.addEventListener("change", () => this.renderReportSelection());
     this.refs.reportSnapshotLimit.addEventListener("input", () => this.renderReportSelection());
@@ -3115,10 +3138,11 @@ class MovementExampleApp {
     if (!this.data) {
       return;
     }
-    if (this.refs.reportScope.value === "full") {
+    if (this.getReportType() === "issue_first" && this.refs.reportScope.value === "full") {
       await this.ensureFullReportDataLoaded();
     }
     this.populateReportIndividualOptions();
+    this.updateReportModeUi();
     this.renderReportSelection();
   }
 
@@ -3195,32 +3219,75 @@ class MovementExampleApp {
   }
 
   populateReportIndividualOptions() {
+    const reportType = this.getReportType();
     const scope = this.refs.reportScope.value || "visible";
-    const suspiciousFixes = this.getSuspiciousFixes("", {
-      scope,
-      allowPartialFull: scope === "full",
-    });
-    const individuals = uniqueStrings(suspiciousFixes.map(fix => fix.individual))
-      .sort((left, right) => left.localeCompare(right));
     const currentValue = this.refs.reportIndividual.value;
     this.refs.reportIndividual.innerHTML = "";
 
     const allOption = document.createElement("option");
     allOption.value = "";
-    allOption.textContent = `All individuals (${formatCount(suspiciousFixes.length)} fixes)`;
-    this.refs.reportIndividual.appendChild(allOption);
+    if (reportType === "issue_first") {
+      const suspiciousFixes = this.getSuspiciousFixes("", {
+        scope,
+        allowPartialFull: scope === "full",
+      });
+      const individuals = uniqueStrings(suspiciousFixes.map(fix => fix.individual))
+        .sort((left, right) => left.localeCompare(right));
+      allOption.textContent = `All individuals (${formatCount(suspiciousFixes.length)} fixes)`;
+      this.refs.reportIndividual.appendChild(allOption);
+      for (const individual of individuals) {
+        const option = document.createElement("option");
+        option.value = individual;
+        option.textContent = `${individual} (${formatCount(this.getSuspiciousFixes(individual, {
+          scope,
+          allowPartialFull: scope === "full",
+        }).length)} fixes)`;
+        this.refs.reportIndividual.appendChild(option);
+      }
+      this.refs.reportIndividual.value = individuals.includes(currentValue) ? currentValue : "";
+      return;
+    }
 
+    const individuals = this.getReportScopeIndividuals(scope);
+    allOption.textContent = `All individuals in scope (${formatCount(individuals.length)})`;
+    this.refs.reportIndividual.appendChild(allOption);
     for (const individual of individuals) {
       const option = document.createElement("option");
       option.value = individual;
-      option.textContent = `${individual} (${formatCount(this.getSuspiciousFixes(individual, {
-        scope,
-        allowPartialFull: scope === "full",
-      }).length)} fixes)`;
+      option.textContent = individual;
       this.refs.reportIndividual.appendChild(option);
     }
-
     this.refs.reportIndividual.value = individuals.includes(currentValue) ? currentValue : "";
+  }
+
+  getReportType() {
+    return this.refs.reportType.value || "issue_first";
+  }
+
+  getReportScopeIndividuals(scope = this.refs.reportScope.value || "visible") {
+    if (!this.data) {
+      return [];
+    }
+    if (scope === "full") {
+      return [...(this.data.individuals || [])].sort((left, right) => left.localeCompare(right));
+    }
+    return this.getSelectedIndividuals();
+  }
+
+  getReportIndividuals() {
+    const individuals = this.getReportScopeIndividuals();
+    const selectedIndividual = this.refs.reportIndividual.value || "";
+    if (selectedIndividual) {
+      return individuals.includes(selectedIndividual) ? [selectedIndividual] : [];
+    }
+    return individuals;
+  }
+
+  getReportOutputMode(reportIndividuals = this.getReportIndividuals()) {
+    if (reportIndividuals.length <= 1) {
+      return "combined";
+    }
+    return this.refs.reportOutputMode.value || "combined";
   }
 
   getReportFixes() {
@@ -3235,6 +3302,59 @@ class MovementExampleApp {
     return this.buildReportSnapshotWindows(this.getReportFixes());
   }
 
+  buildIndividualProfileSnapshotWindows() {
+    const reportIndividuals = this.getReportIndividuals();
+    if (!reportIndividuals.length) {
+      return [];
+    }
+    const scope = this.refs.reportScope.value || "visible";
+    const fixes = this.getFixesForScope(scope, { allowPartialFull: true });
+    return reportIndividuals
+      .map(individual => {
+        const windowFixes = fixes
+          .filter(fix => fix.individual === individual)
+          .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
+        if (!windowFixes.length) {
+          return null;
+        }
+        const suspectedFixes = windowFixes
+          .filter(fix => fix.review?.status === "suspected")
+          .map(fix => fix.fixKey);
+        const confirmedFixes = windowFixes
+          .filter(fix => fix.review?.status === "confirmed")
+          .map(fix => fix.fixKey);
+        return {
+          snapshotKey: `individual_profile::${individual}`,
+          caption: `${individual} whole track`,
+          individual,
+          setName: "all",
+          issueType: "",
+          issueTypes: [],
+          anchorFixKeys: suspectedFixes,
+          secondaryFixKeys: confirmedFixes,
+          reportFixKeys: [],
+          startFixKey: windowFixes[0]?.fixKey || "",
+          endFixKey: windowFixes[windowFixes.length - 1]?.fixKey || "",
+          startTimeMs: windowFixes[0]?.timeMs || 0,
+          endTimeMs: windowFixes[windowFixes.length - 1]?.timeMs || 0,
+          startTimeText: formatTimestamp(windowFixes[0]?.timeMs || 0),
+          endTimeText: formatTimestamp(windowFixes[windowFixes.length - 1]?.timeMs || 0),
+          windowFixCount: windowFixes.length,
+          windowFixes,
+          reportWindowFixes: [],
+          showGrid: true,
+          snapshotKind: "individual_profile",
+        };
+      })
+      .filter(Boolean);
+  }
+
+  getReviewedFixesForIndividuals(individuals, { scope = this.refs.reportScope.value || "visible", allowPartialFull = true } = {}) {
+    const visibleIndividuals = new Set(individuals);
+    return this.getFixesForScope(scope, { allowPartialFull })
+      .filter(fix => visibleIndividuals.has(fix.individual) && Boolean(fix.review.status));
+  }
+
   getRequestedReportSnapshotLimit() {
     const raw = String(this.refs.reportSnapshotLimit.value || "").trim();
     if (!raw) {
@@ -3245,6 +3365,9 @@ class MovementExampleApp {
   }
 
   getEffectiveReportSnapshotWindows() {
+    if (this.getReportType() !== "issue_first") {
+      return [];
+    }
     const snapshotWindows = this.getReportSnapshotWindows();
     const screenshotMode = this.refs.reportScreenshotMode.value || "manual";
     if (screenshotMode !== "auto") {
@@ -3266,6 +3389,26 @@ class MovementExampleApp {
       return BASEMAP_STYLES.Positron;
     }
     return BASEMAP_STYLES[choice] || BASEMAP_STYLES.Positron;
+  }
+
+  updateReportModeUi() {
+    const reportType = this.getReportType();
+    const reportIndividuals = this.getReportIndividuals();
+    const showIssueFirstControls = reportType === "issue_first";
+    this.refs.reportOutputModeWrap.hidden = reportType !== "individual_profile" || reportIndividuals.length <= 1;
+    this.refs.reportScreenshotModeWrap.hidden = !showIssueFirstControls;
+    this.refs.reportBasemapWrap.hidden = false;
+    this.refs.reportSnapshotLimitWrap.hidden = !showIssueFirstControls;
+    this.refs.reportSpreadIndividualsWrap.hidden = !showIssueFirstControls;
+  }
+
+  async handleReportTypeChange() {
+    if (this.getReportType() === "issue_first" && this.refs.reportScope.value === "full") {
+      await this.ensureFullReportDataLoaded();
+    }
+    this.populateReportIndividualOptions();
+    this.updateReportModeUi();
+    this.renderReportSelection();
   }
 
   serializeFixForReport(fix) {
@@ -3455,11 +3598,14 @@ class MovementExampleApp {
   }
 
   renderReportSelection() {
+    const reportType = this.getReportType();
     const scope = this.refs.reportScope.value || "visible";
     const scopeLabel = scope === "full" ? "Full study" : "Visible individuals";
     const individualLabel = this.refs.reportIndividual.value || "All individuals";
-    if (scope === "full" && this.data?.reportAllState === "loading") {
+    this.updateReportModeUi();
+    if (reportType === "issue_first" && scope === "full" && this.data?.reportAllState === "loading") {
       this.refs.reportMeta.innerHTML = `
+        <div><strong>Report type:</strong> Issue-first debug report</div>
         <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
         <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
         <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
@@ -3471,8 +3617,9 @@ class MovementExampleApp {
       this.refs.reportSubmit.disabled = true;
       return;
     }
-    if (scope === "full" && this.data?.reportAllState === "error") {
+    if (reportType === "issue_first" && scope === "full" && this.data?.reportAllState === "error") {
       this.refs.reportMeta.innerHTML = `
+        <div><strong>Report type:</strong> Issue-first debug report</div>
         <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
         <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
         <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
@@ -3482,6 +3629,30 @@ class MovementExampleApp {
         <div><strong>Report state:</strong> Could not load full-study report context.</div>
       `;
       this.refs.reportSubmit.disabled = true;
+      return;
+    }
+
+    if (reportType === "individual_profile") {
+      const reportIndividuals = this.getReportIndividuals();
+      const reviewedFixes = this.getReviewedFixesForIndividuals(reportIndividuals, { scope });
+      const outputMode = this.getReportOutputMode(reportIndividuals);
+      const scopeNote = scope === "full"
+        ? `Using all ${formatCount(this.getReportScopeIndividuals("full").length)} individuals in the study.`
+        : `Using the ${formatCount(this.getSelectedIndividuals().length)} currently visible individuals.`;
+      this.refs.reportMeta.innerHTML = `
+        <div><strong>Report type:</strong> Per-individual profile report</div>
+        <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
+        <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
+        <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+        <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+        <div><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</div>
+        <div><strong>Individual:</strong> ${escapeHtml(individualLabel)}</div>
+        <div><strong>Individuals in report:</strong> ${escapeHtml(formatCount(reportIndividuals.length))}</div>
+        <div><strong>Output mode:</strong> ${escapeHtml(outputMode === "combined" ? "Single combined report" : "Separate files + index")}</div>
+        <div><strong>Reviewed fixes in scope:</strong> ${escapeHtml(formatCount(reviewedFixes.length))}</div>
+        <div><strong>Scope note:</strong> ${escapeHtml(scopeNote)}</div>
+      `;
+      this.refs.reportSubmit.disabled = reportIndividuals.length === 0;
       return;
     }
 
@@ -3508,6 +3679,7 @@ class MovementExampleApp {
         ? `Auto snapshots will render ${formatCount(effectiveSnapshotWindows.length)} snapshot windows using ${reportBasemapLabel}, ${snapshotStrategy}.`
         : `Manual screenshot mode keeps ${formatCount(snapshotWindows.length)} snapshot windows without auto-rendering images.`;
     this.refs.reportMeta.innerHTML = `
+      <div><strong>Report type:</strong> Issue-first debug report</div>
       <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
       <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
@@ -3531,7 +3703,6 @@ class MovementExampleApp {
     const hasDetail = this.hasLoadedDetailSelection();
     const selectedCount = this.getSelectedFixes().length;
     const visibleSuspiciousCount = this.getSuspiciousFixes("", { scope: "visible" }).length;
-    const allSuspiciousCount = this.getSuspiciousFixes("", { scope: "full", allowPartialFull: true }).length;
     for (const button of [
       this.refs.selectSuspicious,
       this.refs.clearFixes,
@@ -3544,7 +3715,7 @@ class MovementExampleApp {
     }
     this.refs.markSuspected.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
     this.refs.markConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
-    this.refs.generateReport.disabled = !hasData || allSuspiciousCount === 0;
+    this.refs.generateReport.disabled = !hasData || !(this.data?.individuals || []).length;
     this.refs.removeConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
     this.refs.selectSuspicious.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || visibleSuspiciousCount === 0;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
@@ -3593,16 +3764,14 @@ class MovementExampleApp {
   }
 
   openReportModal() {
-    if (!this.currentArtifact) {
-      return;
-    }
-    const suspiciousFixes = this.getSuspiciousFixes("", { scope: "full", allowPartialFull: true });
-    if (!suspiciousFixes.length) {
+    if (!this.currentArtifact || !(this.data?.individuals || []).length) {
       return;
     }
     this.refs.reportUser.value = this.getUser();
+    this.refs.reportType.value = "issue_first";
     this.refs.reportScope.value = "visible";
-    this.refs.reportScreenshotMode.value = "manual";
+    this.refs.reportOutputMode.value = "combined";
+    this.refs.reportScreenshotMode.value = "auto";
     this.refs.reportBasemap.value = "current";
     this.refs.reportSpreadIndividuals.checked = true;
     this.refs.reportLinks.innerHTML = this.lastReportLinks.map(link => (
@@ -3613,6 +3782,7 @@ class MovementExampleApp {
     this.refs.reportSubmit.disabled = false;
     this.refs.reportClose.disabled = false;
     this.populateReportIndividualOptions();
+    this.updateReportModeUi();
     this.renderReportSelection();
     this.refs.reportModal.classList.remove("hidden");
   }
@@ -3711,10 +3881,17 @@ class MovementExampleApp {
   }
 
   async submitGenerateReport() {
+    const reportType = this.getReportType();
     const selectedFixes = this.getReportFixes();
-    const snapshotWindows = this.getEffectiveReportSnapshotWindows();
+    const reportIndividuals = this.getReportIndividuals();
+    const snapshotWindows = reportType === "issue_first"
+      ? this.getEffectiveReportSnapshotWindows()
+      : this.buildIndividualProfileSnapshotWindows();
     const user = this.refs.reportUser.value.trim();
-    if (!selectedFixes.length) {
+    if (reportType === "issue_first" && !selectedFixes.length) {
+      return;
+    }
+    if (reportType === "individual_profile" && !reportIndividuals.length) {
       return;
     }
     if (!user) {
@@ -3725,14 +3902,21 @@ class MovementExampleApp {
 
     this.refs.reportSubmit.disabled = true;
     this.refs.reportClose.disabled = true;
-    this.refs.reportStatus.textContent = `Generating a report for ${formatCount(selectedFixes.length)} suspected fixes...`;
+    this.refs.reportStatus.textContent = reportType === "issue_first"
+      ? `Generating a report for ${formatCount(selectedFixes.length)} suspected fixes...`
+      : `Generating profile report${reportIndividuals.length === 1 ? "" : "s"} for ${formatCount(reportIndividuals.length)} individuals...`;
     this.refs.reportStatus.classList.remove("error");
     this.setStatus(this.refs.reportStatus.textContent);
 
     try {
-      const screenshotMode = this.refs.reportScreenshotMode.value;
-      const snapshots = screenshotMode === "auto" ? await this.captureSnapshotsForSelection(snapshotWindows) : [];
-      const issueIds = uniqueNonEmpty(selectedFixes.flatMap(fix => reportIssueIds(fix)));
+      const outputMode = this.getReportOutputMode(reportIndividuals);
+      const screenshotMode = reportType === "issue_first" ? this.refs.reportScreenshotMode.value : "auto";
+      const snapshots = reportType === "issue_first"
+        ? (screenshotMode === "auto" ? await this.captureSnapshotsForSelection(snapshotWindows) : [])
+        : await this.captureSnapshotsForSelection(snapshotWindows);
+      const issueIds = reportType === "issue_first"
+        ? uniqueNonEmpty(selectedFixes.flatMap(fix => reportIssueIds(fix)))
+        : [];
       const result = await this.requestJSON(
         `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/generate-report`,
         {
@@ -3740,10 +3924,13 @@ class MovementExampleApp {
           body: JSON.stringify({
             dataset_id: this.currentDatasetId,
             logical_name: this.currentArtifact,
+            report_type: reportType,
+            output_mode: outputMode,
             fix_keys: selectedFixes.map(fix => fix.fixKey),
             issue_ids: issueIds,
-            report_fixes: selectedFixes.map(fix => this.serializeFixForReport(fix)),
-            snapshot_windows: snapshotWindows.map(window => this.serializeSnapshotWindowForReport(window)),
+            individuals: reportIndividuals,
+            report_fixes: reportType === "issue_first" ? selectedFixes.map(fix => this.serializeFixForReport(fix)) : [],
+            snapshot_windows: reportType === "issue_first" ? snapshotWindows.map(window => this.serializeSnapshotWindowForReport(window)) : [],
             screenshot_mode: screenshotMode,
             snapshots,
             user,
@@ -3752,24 +3939,16 @@ class MovementExampleApp {
       );
       this.setUser(user);
       const analysisId = result.analysis.analysis_id;
-      this.lastReportLinks = [
-        {
-          label: "Markdown Report",
-          href: `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis/${encodeURIComponent(analysisId)}/artifact/movement_outlier_report.md`,
-        },
-        {
-          label: "HTML Report",
-          href: `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis/${encodeURIComponent(analysisId)}/artifact/movement_outlier_report.html`,
-        },
-        {
-          label: "Appendix CSV",
-          href: `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis/${encodeURIComponent(analysisId)}/artifact/movement_outlier_fixes.csv`,
-        },
-      ];
+      this.lastReportLinks = buildReportLinksFromAnalysis(result.analysis, {
+        family: this.currentFamily,
+        study: this.currentStudy,
+      });
       this.refs.reportLinks.innerHTML = this.lastReportLinks.map(link => (
         `<a href="${link.href}" target="_blank" rel="noreferrer">${escapeHtml(link.label)}</a>`
       )).join("");
-      this.refs.reportStatus.textContent = `Created analysis ${analysisId}.`;
+      this.refs.reportStatus.textContent = this.lastReportLinks.length
+        ? `Created analysis ${analysisId}.`
+        : `Created analysis ${analysisId}, but no report links were returned.`;
       this.refs.reportSubmit.disabled = false;
       this.refs.reportClose.disabled = false;
       this.setStatus(`Created report analysis ${analysisId}.`);
@@ -4338,6 +4517,12 @@ function quantile(sortedValues, q) {
 }
 
 function finiteOrNull(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "string" && value.trim() === "") {
+    return null;
+  }
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -4711,6 +4896,182 @@ function reportTrackKey(individual, setName) {
   return `${String(individual)}\u0000${String(setName || "train")}`;
 }
 
+function reportLinkLabelForArtifact(logicalName) {
+  const name = String(logicalName || "").trim();
+  if (!name) {
+    return "";
+  }
+  if (name === "movement_outlier_report.md") return "Markdown Report";
+  if (name === "movement_outlier_report.html") return "HTML Report";
+  if (name === "movement_outlier_fixes.csv") return "Appendix CSV";
+  if (name === "movement_individual_reports.md") return "Markdown Report";
+  if (name === "movement_individual_reports.html") return "HTML Report";
+  if (name === "movement_individual_report_index.md") return "Markdown Index";
+  if (name === "movement_individual_report_index.html") return "HTML Index";
+  if (name.endsWith(".html")) return `HTML ${name.replace(/\.html$/, "")}`;
+  if (name.endsWith(".md")) return `Markdown ${name.replace(/\.md$/, "")}`;
+  if (name.endsWith(".csv")) return `CSV ${name.replace(/\.csv$/, "")}`;
+  return name;
+}
+
+function compareReportArtifacts(left, right) {
+  const leftName = String(left?.logical_name || "");
+  const rightName = String(right?.logical_name || "");
+  const priority = name => {
+    if (name.includes("_report_index.html")) return 1;
+    if (name.includes("_report_index.md")) return 2;
+    if (name.endsWith(".html")) return 3;
+    if (name.endsWith(".md")) return 4;
+    if (name.endsWith(".csv")) return 5;
+    return 9;
+  };
+  return priority(leftName) - priority(rightName) || leftName.localeCompare(rightName);
+}
+
+function buildReportLinksFromAnalysis(analysis, { family, study } = {}) {
+  const analysisId = String(analysis?.analysis_id || "").trim();
+  const outputs = Array.isArray(analysis?.realized_output_artifacts) ? [...analysis.realized_output_artifacts] : [];
+  if (!analysisId || !family || !study || !outputs.length) {
+    return [];
+  }
+  return outputs
+    .filter(item => {
+      const name = String(item?.logical_name || "");
+      return name.endsWith(".html") || name.endsWith(".md") || name.endsWith(".csv");
+    })
+    .sort(compareReportArtifacts)
+    .map(item => ({
+      label: reportLinkLabelForArtifact(item.logical_name),
+      href: `/api/apps/movement/family/${encodeURIComponent(family)}/study/${encodeURIComponent(study)}/analysis/${encodeURIComponent(analysisId)}/artifact/${encodeURIComponent(item.logical_name)}`,
+    }));
+}
+
+function niceSnapshotTickStep(span) {
+  if (!Number.isFinite(span) || span <= 0) {
+    return 1;
+  }
+  const rough = span / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(Math.abs(rough)));
+  for (const multiplier of [1, 2, 5, 10]) {
+    const step = magnitude * multiplier;
+    if (step >= rough) {
+      return step;
+    }
+  }
+  return magnitude * 10;
+}
+
+function buildSnapshotAxisTicks(minValue, maxValue) {
+  const span = maxValue - minValue;
+  if (!Number.isFinite(span) || span <= 0) {
+    return [minValue];
+  }
+  const step = niceSnapshotTickStep(span);
+  let start = Math.floor(minValue / step) * step;
+  if (start > minValue) {
+    start -= step;
+  }
+  const ticks = [];
+  for (let value = start; value <= maxValue + step; value += step) {
+    if (value >= minValue - (step * 0.1) && value <= maxValue + (step * 0.1)) {
+      ticks.push(Number(value.toFixed(6)));
+    }
+  }
+  return ticks.length ? ticks : [minValue, maxValue];
+}
+
+function formatSnapshotLongitude(value) {
+  const direction = value >= 0 ? "E" : "W";
+  return `${Math.abs(value).toFixed(2)}°${direction}`;
+}
+
+function formatSnapshotLatitude(value) {
+  const direction = value >= 0 ? "N" : "S";
+  return `${Math.abs(value).toFixed(2)}°${direction}`;
+}
+
+function renderSnapshotCanvasWithGrid(sourceCanvas, map) {
+  const bounds = map?.getBounds?.();
+  if (!bounds) {
+    return sourceCanvas.toDataURL("image/png");
+  }
+  const outputCanvas = document.createElement("canvas");
+  outputCanvas.width = sourceCanvas.width;
+  outputCanvas.height = sourceCanvas.height;
+  const ctx = outputCanvas.getContext("2d");
+  if (!ctx) {
+    return sourceCanvas.toDataURL("image/png");
+  }
+  ctx.drawImage(sourceCanvas, 0, 0);
+
+  const container = map.getContainer();
+  const scaleX = sourceCanvas.width / Math.max(1, container.clientWidth || sourceCanvas.width);
+  const scaleY = sourceCanvas.height / Math.max(1, container.clientHeight || sourceCanvas.height);
+  const bottomBand = 34 * scaleY;
+  const leftBand = 66 * scaleX;
+  const width = outputCanvas.width;
+  const height = outputCanvas.height;
+  const south = bounds.getSouth();
+  const north = bounds.getNorth();
+  const west = bounds.getWest();
+  const east = bounds.getEast();
+  const midLat = (south + north) / 2;
+  const midLon = (west + east) / 2;
+  const lonTicks = buildSnapshotAxisTicks(west, east);
+  const latTicks = buildSnapshotAxisTicks(south, north);
+
+  ctx.save();
+  ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
+  ctx.fillRect(0, height - bottomBand, width, bottomBand);
+  ctx.fillRect(0, 0, leftBand, height);
+  ctx.strokeStyle = "rgba(74, 98, 110, 0.65)";
+  ctx.lineWidth = Math.max(1, 1.2 * Math.min(scaleX, scaleY));
+  ctx.setLineDash([6 * scaleX, 8 * scaleY]);
+
+  for (const lon of lonTicks) {
+    const point = map.project([lon, midLat]);
+    const x = point.x * scaleX;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height - bottomBand);
+    ctx.stroke();
+  }
+  for (const lat of latTicks) {
+    const point = map.project([midLon, lat]);
+    const y = point.y * scaleY;
+    ctx.beginPath();
+    ctx.moveTo(leftBand, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+  }
+
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#243b53";
+  ctx.strokeStyle = "#243b53";
+  ctx.font = `${Math.max(12, 12 * scaleY)}px Arial, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  for (const lon of lonTicks) {
+    const point = map.project([lon, midLat]);
+    const x = point.x * scaleX;
+    ctx.beginPath();
+    ctx.moveTo(x, height - bottomBand);
+    ctx.lineTo(x, height - (bottomBand * 0.62));
+    ctx.stroke();
+    ctx.fillText(formatSnapshotLongitude(lon), x, height - (bottomBand * 0.24));
+  }
+
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (const lat of latTicks) {
+    const point = map.project([midLon, lat]);
+    const y = point.y * scaleY;
+    ctx.fillText(formatSnapshotLatitude(lat), leftBand - (8 * scaleX), y);
+  }
+  ctx.restore();
+  return outputCanvas.toDataURL("image/png");
+}
+
 async function createReportSnapshotRenderer({ style }) {
   const container = document.createElement("div");
   Object.assign(container.style, {
@@ -4756,6 +5117,9 @@ async function createReportSnapshotRenderer({ style }) {
       }
       await waitForAnimationFrames(2);
       try {
+        if (snapshotWindow?.showGrid) {
+          return renderSnapshotCanvasWithGrid(map.getCanvas(), map);
+        }
         return map.getCanvas().toDataURL("image/png");
       } catch {
         return null;
@@ -4776,10 +5140,13 @@ async function createReportSnapshotRenderer({ style }) {
 function buildReportSnapshotLayers(snapshotWindow) {
   const anchorSet = new Set(snapshotWindow.anchorFixKeys || []);
   const secondarySet = new Set(snapshotWindow.secondaryFixKeys || []);
+  const orderedFixes = (snapshotWindow.windowFixes || []).filter(fix => (
+    Number.isFinite(fix?.position?.[0]) && Number.isFinite(fix?.position?.[1])
+  ));
   const contextPoints = [];
   const secondarySuspiciousPoints = [];
   const suspiciousPoints = [];
-  for (const fix of snapshotWindow.windowFixes || []) {
+  for (const fix of orderedFixes) {
     const point = {
       position: fix.position,
       fixKey: fix.fixKey,
@@ -4792,10 +5159,27 @@ function buildReportSnapshotLayers(snapshotWindow) {
       contextPoints.push(point);
     }
   }
+  const startFix = orderedFixes[0] || null;
+  const endFix = orderedFixes[orderedFixes.length - 1] || null;
+  const markerPoints = [];
+  if (startFix) {
+    markerPoints.push({
+      position: startFix.position,
+      glyph: "\u25B2",
+      label: "start",
+    });
+  }
+  if (endFix) {
+    markerPoints.push({
+      position: endFix.position,
+      glyph: "\u25A0",
+      label: "end",
+    });
+  }
   return [
     new deck.PathLayer({
       id: `report-snapshot-path-${snapshotWindow.snapshotKey}`,
-      data: [{ path: (snapshotWindow.windowFixes || []).map(fix => fix.position) }],
+      data: [{ path: orderedFixes.map(fix => fix.position) }],
       getPath: item => item.path,
       getColor: [26, 52, 74, 190],
       getWidth: 3,
@@ -4816,26 +5200,40 @@ function buildReportSnapshotLayers(snapshotWindow) {
       id: `report-snapshot-secondary-${snapshotWindow.snapshotKey}`,
       data: secondarySuspiciousPoints,
       getPosition: item => item.position,
-      getFillColor: [245, 181, 54, 210],
-      getLineColor: [48, 64, 82, 220],
+      getFillColor: [245, 181, 54, 191],
+      getLineColor: [48, 64, 82, 191],
       stroked: true,
-      lineWidthMinPixels: 1.5,
-      getRadius: 110,
-      radiusMinPixels: 6,
-      radiusMaxPixels: 12,
+      lineWidthMinPixels: 1.25,
+      getRadius: 85,
+      radiusMinPixels: 4,
+      radiusMaxPixels: 8,
       pickable: false,
     }),
     new deck.ScatterplotLayer({
       id: `report-snapshot-anchors-${snapshotWindow.snapshotKey}`,
       data: suspiciousPoints,
       getPosition: item => item.position,
-      getFillColor: [242, 80, 103, 235],
-      getLineColor: [255, 255, 255, 255],
+      getFillColor: [242, 80, 103, 191],
+      getLineColor: [255, 255, 255, 191],
       stroked: true,
-      lineWidthMinPixels: 2,
-      getRadius: 150,
-      radiusMinPixels: 8,
-      radiusMaxPixels: 16,
+      lineWidthMinPixels: 1.5,
+      getRadius: 95,
+      radiusMinPixels: 5,
+      radiusMaxPixels: 10,
+      pickable: false,
+    }),
+    new deck.TextLayer({
+      id: `report-snapshot-marker-labels-${snapshotWindow.snapshotKey}`,
+      data: markerPoints,
+      getPosition: item => item.position,
+      getText: item => item.glyph,
+      getColor: [32, 220, 90, 255],
+      getSize: 24,
+      sizeMinPixels: 18,
+      sizeMaxPixels: 30,
+      getTextAnchor: "middle",
+      getAlignmentBaseline: "center",
+      characterSet: ["\u25B2", "\u25A0"],
       pickable: false,
     }),
   ];

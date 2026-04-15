@@ -85,6 +85,7 @@ SCRIPT_SHARED = textwrap.dedent(
         "error",
         "usedtime",
         "timetogetfix",
+        "heightabovemsl",
     )
 
 
@@ -1311,6 +1312,87 @@ def _validate_report_fixes(value: object) -> list[dict]:
     return cleaned
 
 
+def _validate_report_type(value: object) -> str:
+    if value is None:
+        return "issue_first"
+    if not isinstance(value, str):
+        raise ValueError("Invalid report type")
+    report_type = value.strip().lower()
+    if report_type not in {"issue_first", "individual_profile"}:
+        raise ValueError("Invalid report type")
+    return report_type
+
+
+def _validate_output_mode(value: object) -> str:
+    if value is None:
+        return "separate"
+    if not isinstance(value, str):
+        raise ValueError("Invalid output mode")
+    output_mode = value.strip().lower()
+    if output_mode not in {"combined", "separate"}:
+        raise ValueError("Invalid output mode")
+    return output_mode
+
+
+def _normalize_individual_name(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Invalid individual")
+    normalized = " ".join(value.strip().split())
+    if not normalized or any(ord(char) < 32 for char in normalized):
+        raise ValueError("Invalid individual")
+    return normalized
+
+
+def _validate_report_individuals(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("Invalid individuals")
+    cleaned = []
+    seen = set()
+    for item in value:
+        individual = _normalize_individual_name(item)
+        if individual in seen:
+            continue
+        cleaned.append(individual)
+        seen.add(individual)
+    return sorted(cleaned)
+
+
+def _slugify_individual_name(value: str) -> str:
+    chars = []
+    last_sep = False
+    for char in str(value or "").strip().lower():
+        if char.isalnum():
+            chars.append(char)
+            last_sep = False
+            continue
+        if not last_sep:
+            chars.append("_")
+            last_sep = True
+    slug = "".join(chars).strip("_")
+    return slug or "individual"
+
+
+def _build_individual_report_artifacts(individuals: list[str]) -> list[dict]:
+    artifacts = []
+    used = {}
+    for index, individual in enumerate(individuals, start=1):
+        slug = _slugify_individual_name(individual)
+        occurrence = used.get(slug, 0) + 1
+        used[slug] = occurrence
+        suffix = slug if occurrence == 1 else f"{slug}_{occurrence}"
+        stem = f"movement_individual_report_{index:02d}_{suffix}"
+        artifacts.append(
+            {
+                "individual": individual,
+                "markdown_name": f"{stem}.md",
+                "html_name": f"{stem}.html",
+            }
+        )
+    return artifacts
+
+
 def register_movement_routes(app: FastAPI, *, data_root: Path):
     data_root = data_root.resolve()
 
@@ -1335,14 +1417,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
     def parse_optional_individual(raw_value: object) -> str:
         if raw_value in (None, ""):
             return ""
-        if not isinstance(raw_value, str):
-            raise ValueError("Invalid individual")
-        value = " ".join(raw_value.strip().split())
-        if not value:
-            return ""
-        if any(ord(char) < 32 for char in value):
-            raise ValueError("Invalid individual")
-        return value
+        return _normalize_individual_name(raw_value)
 
     def parse_optional_individuals(raw_values: list[str] | tuple[str, ...]) -> list[str]:
         normalized: list[str] = []
@@ -1542,22 +1617,46 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             fix_keys = _validate_fix_keys(body.get("fix_keys"), allow_empty=True)
             issue_ids = _validate_issue_ids(body.get("issue_ids"))
             report_fixes = _validate_report_fixes(body.get("report_fixes"))
+            report_type = _validate_report_type(body.get("report_type"))
+            individuals = _validate_report_individuals(body.get("individuals"))
+            output_mode = _validate_output_mode(body.get("output_mode"))
             snapshot_windows = _validate_snapshot_windows(body.get("snapshot_windows"))
-            if not fix_keys and not issue_ids and not report_fixes:
+            if report_type == "issue_first" and not fix_keys and not issue_ids and not report_fixes:
                 raise ValueError("Select at least one issue or fix")
+            if report_type == "individual_profile" and not individuals:
+                raise ValueError("Select at least one individual")
             screenshot_mode = _validate_screenshot_mode(body.get("screenshot_mode"))
             snapshots = _validate_snapshots(body.get("snapshots"))
             user = body.get("user")
-            output_artifacts = [
-                "movement_outlier_report.md",
-                "movement_outlier_report.html",
-                "movement_outlier_fixes.csv",
-            ]
+            individual_report_artifacts = _build_individual_report_artifacts(individuals)
+            effective_output_mode = output_mode if len(individuals) > 1 else "combined"
+            if report_type == "issue_first":
+                output_artifacts = [
+                    "movement_outlier_report.md",
+                    "movement_outlier_report.html",
+                    "movement_outlier_fixes.csv",
+                ]
+            elif effective_output_mode == "combined":
+                output_artifacts = [
+                    "movement_individual_reports.md",
+                    "movement_individual_reports.html",
+                ]
+            else:
+                output_artifacts = [
+                    "movement_individual_report_index.md",
+                    "movement_individual_report_index.html",
+                ]
+                for item in individual_report_artifacts:
+                    output_artifacts.extend([item["markdown_name"], item["html_name"]])
             output_artifacts.extend(snapshot["artifact_name"] for snapshot in snapshots)
 
             payload = {
                 "user": user,
-                "title": f"Generate outlier report for {logical_name}",
+                "title": (
+                    f"Generate outlier report for {logical_name}"
+                    if report_type == "issue_first"
+                    else f"Generate individual profile report for {logical_name}"
+                ),
                 "kind": "python",
                 "script": GENERATE_REPORT_SCRIPT,
                 "dataset_id": dataset_id,
@@ -1566,13 +1665,17 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                 "parameters": {
                     "app": "movement",
                     "action": "generate_report",
+                    "report_type": report_type,
+                    "output_mode": effective_output_mode,
                     "target_artifact": logical_name,
                     "fix_keys": fix_keys,
                     "issue_ids": issue_ids,
+                    "individuals": individuals,
                     "report_fixes": report_fixes,
                     "snapshot_windows": snapshot_windows,
                     "screenshot_mode": screenshot_mode,
                     "snapshots": snapshots,
+                    "individual_report_artifacts": individual_report_artifacts,
                     "user": user,
                 },
             }
@@ -1682,22 +1785,46 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             fix_keys = _validate_fix_keys(body.get("fix_keys"), allow_empty=True)
             issue_ids = _validate_issue_ids(body.get("issue_ids"))
             report_fixes = _validate_report_fixes(body.get("report_fixes"))
+            report_type = _validate_report_type(body.get("report_type"))
+            individuals = _validate_report_individuals(body.get("individuals"))
+            output_mode = _validate_output_mode(body.get("output_mode"))
             snapshot_windows = _validate_snapshot_windows(body.get("snapshot_windows"))
-            if not fix_keys and not issue_ids and not report_fixes:
+            if report_type == "issue_first" and not fix_keys and not issue_ids and not report_fixes:
                 raise ValueError("Select at least one issue or fix")
+            if report_type == "individual_profile" and not individuals:
+                raise ValueError("Select at least one individual")
             screenshot_mode = _validate_screenshot_mode(body.get("screenshot_mode"))
             snapshots = _validate_snapshots(body.get("snapshots"))
             user = body.get("user")
-            output_artifacts = [
-                "movement_outlier_report.md",
-                "movement_outlier_report.html",
-                "movement_outlier_fixes.csv",
-            ]
+            individual_report_artifacts = _build_individual_report_artifacts(individuals)
+            effective_output_mode = output_mode if len(individuals) > 1 else "combined"
+            if report_type == "issue_first":
+                output_artifacts = [
+                    "movement_outlier_report.md",
+                    "movement_outlier_report.html",
+                    "movement_outlier_fixes.csv",
+                ]
+            elif effective_output_mode == "combined":
+                output_artifacts = [
+                    "movement_individual_reports.md",
+                    "movement_individual_reports.html",
+                ]
+            else:
+                output_artifacts = [
+                    "movement_individual_report_index.md",
+                    "movement_individual_report_index.html",
+                ]
+                for item in individual_report_artifacts:
+                    output_artifacts.extend([item["markdown_name"], item["html_name"]])
             output_artifacts.extend(snapshot["artifact_name"] for snapshot in snapshots)
 
             payload = {
                 "user": user,
-                "title": f"Generate outlier report for {logical_name}",
+                "title": (
+                    f"Generate outlier report for {logical_name}"
+                    if report_type == "issue_first"
+                    else f"Generate individual profile report for {logical_name}"
+                ),
                 "kind": "python",
                 "script": GENERATE_REPORT_SCRIPT,
                 "dataset_id": dataset_id,
@@ -1706,13 +1833,17 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                 "parameters": {
                     "app": "movement",
                     "action": "generate_report",
+                    "report_type": report_type,
+                    "output_mode": effective_output_mode,
                     "target_artifact": logical_name,
                     "fix_keys": fix_keys,
                     "issue_ids": issue_ids,
+                    "individuals": individuals,
                     "report_fixes": report_fixes,
                     "snapshot_windows": snapshot_windows,
                     "screenshot_mode": screenshot_mode,
                     "snapshots": snapshots,
+                    "individual_report_artifacts": individual_report_artifacts,
                     "user": user,
                 },
             }

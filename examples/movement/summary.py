@@ -47,12 +47,13 @@ QUALITY_KEYWORDS = (
     "error",
     "usedtime",
     "timetogetfix",
+    "heightabovemsl",
 )
 
 MAX_SERIES_POINTS = 1500
 MAX_STAT_SAMPLES = 2000
 DEFAULT_FIX_LIMIT = 1000000
-SUMMARY_CACHE_VERSION = 6
+SUMMARY_CACHE_VERSION = 7
 
 
 def normalize_header(header: str | None) -> str:
