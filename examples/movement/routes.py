@@ -58,6 +58,9 @@ SCRIPT_SHARED = textwrap.dedent(
         "vc_outlier_status",
         "vc_issue_id",
         "vc_issue_type",
+        "vc_issue_field",
+        "vc_issue_threshold",
+        "vc_issue_refs",
         "vc_issue_note",
         "vc_owner_question",
         "vc_review_user",
@@ -190,6 +193,68 @@ SCRIPT_SHARED = textwrap.dedent(
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+    def normalize_review_status(raw_value):
+        value = str(raw_value or "").strip().lower()
+        return value if value in {"suspected", "confirmed"} else ""
+
+
+    def clean_issue_payload(item, fallback_status=""):
+        status = normalize_review_status(item.get("status")) or normalize_review_status(fallback_status)
+        if not status:
+            return {}
+        issue = {
+            "status": status,
+            "issue_id": str(item.get("issue_id", "")).strip(),
+            "issue_type": str(item.get("issue_type", "")).strip(),
+            "issue_field": str(item.get("issue_field", "")).strip(),
+            "issue_threshold": str(item.get("issue_threshold", "")).strip(),
+            "issue_note": str(item.get("issue_note", "")).strip(),
+            "owner_question": str(item.get("owner_question", "")).strip(),
+            "review_user": str(item.get("review_user", "")).strip(),
+            "reviewed_at": str(item.get("reviewed_at", "")).strip(),
+        }
+        cleaned = {key: value for key, value in issue.items() if value}
+        if not cleaned.get("issue_id") and not cleaned.get("issue_type"):
+            return {}
+        return cleaned
+
+
+    def parse_issue_refs(raw):
+        row_status = normalize_review_status(raw.get("vc_outlier_status"))
+        raw_refs = str(raw.get("vc_issue_refs", "")).strip()
+        if raw_refs:
+            try:
+                parsed = json.loads(raw_refs)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                issues = [clean_issue_payload(item, row_status) for item in parsed if isinstance(item, dict)]
+                issues = [item for item in issues if item]
+                if issues:
+                    return issues
+        legacy = clean_issue_payload({
+            "status": raw.get("vc_outlier_status"),
+            "issue_id": raw.get("vc_issue_id"),
+            "issue_type": raw.get("vc_issue_type"),
+            "issue_field": raw.get("vc_issue_field"),
+            "issue_threshold": raw.get("vc_issue_threshold"),
+            "issue_note": raw.get("vc_issue_note"),
+            "owner_question": raw.get("vc_owner_question"),
+            "review_user": raw.get("vc_review_user"),
+            "reviewed_at": raw.get("vc_reviewed_at"),
+        }, row_status)
+        return [legacy] if legacy else []
+
+
+    def aggregate_issue_status(issues):
+        statuses = {str(item.get("status", "")).strip().lower() for item in issues if str(item.get("status", "")).strip()}
+        if "suspected" in statuses:
+            return "suspected"
+        if "confirmed" in statuses:
+            return "confirmed"
+        return ""
+
+
     def extract_quality_fields(fieldnames, columns):
         excluded = {
             value
@@ -268,6 +333,7 @@ SCRIPT_SHARED = textwrap.dedent(
             review = {}
             for name in REVIEW_COLUMNS:
                 review[name] = str(raw.get(name, "")).strip()
+            review["issues"] = parse_issue_refs(raw)
             valid_records.append(
                 {
                     "row_index": row_index,
@@ -293,7 +359,12 @@ SCRIPT_SHARED = textwrap.dedent(
         issue_ids = set(selected_issue_ids or [])
         result = []
         for record in valid_records:
-            if issue_ids and record["review"].get("vc_issue_id", "") in issue_ids:
+            review_issue_ids = {
+                str(item.get("issue_id", "")).strip()
+                for item in record["review"].get("issues", [])
+                if str(item.get("issue_id", "")).strip()
+            }
+            if issue_ids and review_issue_ids.intersection(issue_ids):
                 result.append(record)
                 continue
             if fix_keys and record["fix_key"] in fix_keys:
@@ -325,7 +396,7 @@ SCRIPT_SHARED = textwrap.dedent(
 ANNOTATE_FIXES_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
     """
 
-    def main():
+def main():
         spec_path = Path(os.environ["VIBECLEANING_SPEC_PATH"])
         summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
         spec = json.loads(spec_path.read_text())
@@ -335,6 +406,8 @@ ANNOTATE_FIXES_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
         status = str(params.get("status") or "").strip().lower()
         issue_id = str(params.get("issue_id") or "").strip()
         issue_type = str(params.get("issue_type") or "").strip()
+        issue_field = str(params.get("issue_field") or "").strip()
+        issue_threshold = str(params.get("issue_threshold") or "").strip()
         issue_note = str(params.get("issue_note") or "").strip()
         owner_question = str(params.get("owner_question") or "").strip()
         user = str(params.get("user") or "").strip()
@@ -370,6 +443,17 @@ ANNOTATE_FIXES_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
         output_path = Path(output["path"])
         output_path.parent.mkdir(parents=True, exist_ok=True)
         reviewed_at = now_iso()
+        new_issue = clean_issue_payload({
+            "status": status,
+            "issue_id": issue_id,
+            "issue_type": issue_type,
+            "issue_field": issue_field,
+            "issue_threshold": issue_threshold,
+            "issue_note": issue_note,
+            "owner_question": owner_question,
+            "review_user": user,
+            "reviewed_at": reviewed_at,
+        })
         with output_path.open("w", newline="", encoding="utf-8") as output_handle:
             writer = csv.DictWriter(output_handle, fieldnames=output_fieldnames)
             writer.writeheader()
@@ -378,9 +462,14 @@ ANNOTATE_FIXES_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
                 context = context_by_row.get(row_index)
                 if context and context["fix_key"] in selected_set:
                     matched.add(context["fix_key"])
-                    row["vc_outlier_status"] = status
+                    issues = parse_issue_refs(raw)
+                    issues.append(new_issue)
+                    row["vc_outlier_status"] = aggregate_issue_status(issues)
                     row["vc_issue_id"] = issue_id
                     row["vc_issue_type"] = issue_type
+                    row["vc_issue_field"] = issue_field
+                    row["vc_issue_threshold"] = issue_threshold
+                    row["vc_issue_refs"] = json.dumps(issues, sort_keys=True)
                     row["vc_issue_note"] = issue_note
                     row["vc_owner_question"] = owner_question
                     row["vc_review_user"] = user
@@ -397,6 +486,8 @@ ANNOTATE_FIXES_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
             "status": status,
             "issue_id": issue_id,
             "issue_type": issue_type,
+            "issue_field": issue_field,
+            "issue_threshold": issue_threshold,
             "issue_note": issue_note,
             "owner_question": owner_question,
             "selected_fix_keys": selected_fix_keys,
@@ -408,8 +499,8 @@ ANNOTATE_FIXES_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
         })
 
 
-    if __name__ == "__main__":
-        main()
+if __name__ == "__main__":
+    main()
     """
 ).strip() + "\n"
 
@@ -459,7 +550,12 @@ REMOVE_CONFIRMED_FIXES_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
 
         remove_keys = {record["fix_key"] for record in contexts}
         remove_row_indexes = {record["row_index"] for record in contexts}
-        removed_issue_ids = sorted({record["review"].get("vc_issue_id", "") for record in contexts if record["review"].get("vc_issue_id", "")})
+        removed_issue_ids = sorted({
+            str(item.get("issue_id", "")).strip()
+            for record in contexts
+            for item in record["review"].get("issues", [])
+            if str(item.get("issue_id", "")).strip()
+        })
         affected_individuals = sorted({record["individual"] for record in contexts})
 
         output_path = Path(output["path"])
@@ -581,14 +677,12 @@ GENERATE_REPORT_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
         return "\\n".join(lines).rstrip() + "\\n"
 
 
-
-
-    def build_html_report(target_artifact, user, screenshot_mode, issue_sections, snapshots_by_key, selected_count):
+def build_html_report(target_artifact, user, screenshot_mode, issue_sections, snapshots_by_key, selected_count):
         parts = [
             "<!DOCTYPE html>",
-            "<html lang=\"en\">",
+            '<html lang="en">',
             "<head>",
-            "<meta charset=\"utf-8\">",
+            '<meta charset="utf-8">',
             "<title>Movement Outlier Review Report</title>",
             "<style>",
             "body { font-family: Arial, sans-serif; line-height: 1.5; color: #1f2933; margin: 0; background: #f6f8fb; }",
@@ -613,7 +707,7 @@ GENERATE_REPORT_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
             "<main>",
             "<header>",
             "<h1>Movement Outlier Review Report</h1>",
-            "<ul class=\"meta\">",
+            '<ul class="meta">',
             f"<li><strong>Artifact:</strong> <code>{html_escape(target_artifact)}</code></li>",
             f"<li><strong>Generated by:</strong> {html_escape(user)}</li>",
             f"<li><strong>Screenshot mode:</strong> {html_escape(screenshot_mode)}</li>",
@@ -646,12 +740,12 @@ GENERATE_REPORT_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
                     caption = window_snapshot.get("caption", "").strip() or window_snapshot["artifact_name"]
                     snapshot_markup = (
                         "<figure>"
-                        f"<img src=\"{html_escape(window_snapshot['artifact_name'])}\" alt=\"{html_escape(caption)}\">"
+                        f'<img src="{html_escape(window_snapshot["artifact_name"])}" alt="{html_escape(caption)}">'
                         f"<figcaption>{html_escape(caption)}</figcaption>"
                         "</figure>"
                     )
                 else:
-                    snapshot_markup = "<p class=\"placeholder\">[Add snapshot of the relevant 50-fix context window here.]</p>"
+                    snapshot_markup = '<p class="placeholder">[Add snapshot of the relevant 50-fix context window here.]</p>'
 
                 evidence_items = []
                 for name in quality_fields[:6]:
@@ -661,7 +755,7 @@ GENERATE_REPORT_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
                             f"<li><strong>{html_escape(name)}:</strong> {html_escape(', '.join(values[:8]))}</li>"
                         )
                 if evidence_items:
-                    evidence_markup = "<ul class=\"evidence\">" + "".join(evidence_items) + "</ul>"
+                    evidence_markup = '<ul class="evidence">' + "".join(evidence_items) + "</ul>"
                 else:
                     evidence_markup = "<p>No additional quality fields were populated for these fixes.</p>"
 
@@ -672,19 +766,19 @@ GENERATE_REPORT_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
                         f"<td><code>{html_escape(record['fix_key'])}</code></td>"
                         f"<td>{html_escape(record['individual'])}</td>"
                         f"<td>{html_escape(record['time_text'])}</td>"
-                        f"<td class=\"numeric\">{record['lon']:.6f}</td>"
-                        f"<td class=\"numeric\">{record['lat']:.6f}</td>"
-                        f"<td class=\"numeric\">{(record['step_length_m'] or 0.0):.2f}</td>"
-                        f"<td class=\"numeric\">{(record['speed_mps'] or 0.0):.3f}</td>"
+                        f'<td class="numeric">{record["lon"]:.6f}</td>'
+                        f'<td class="numeric">{record["lat"]:.6f}</td>'
+                        f'<td class="numeric">{(record["step_length_m"] or 0.0):.2f}</td>'
+                        f'<td class="numeric">{(record["speed_mps"] or 0.0):.3f}</td>'
                         f"<td>{html_escape(record['review'].get('vc_outlier_status', '').strip() or 'unreviewed')}</td>"
                         f"<td>{html_escape(record['review'].get('vc_issue_id', '').strip() or 'n/a')}</td>"
                         "</tr>"
                     )
 
                 parts.extend([
-                    "<section class=\"window\">",
+                    '<section class="window">',
                     f"<h3>{html_escape(window['individual'])} | {html_escape(window['start_time_text'])} to {html_escape(window['end_time_text'])}</h3>",
-                    "<ul class=\"meta\">",
+                    '<ul class="meta">',
                     f"<li><strong>Track:</strong> {html_escape(window['set_name'])}</li>",
                     f"<li><strong>Window fixes on map:</strong> {window['window_fix_count']}</li>",
                     f"<li><strong>Suspicious fixes in this section:</strong> {len(records)}</li>",
@@ -718,7 +812,9 @@ GENERATE_REPORT_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
             "</body>",
             "</html>",
         ])
-        return "\n".join(parts).rstrip() + "\n"
+        return "\\n".join(parts).rstrip() + "\\n"
+
+
     def normalize_report_records(items):
         normalized = []
         for item in items or []:
@@ -1006,6 +1102,10 @@ GENERATE_REPORT_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
     """
 ).strip() + "\n"
 
+REPORT_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("report_analysis_template.py")
+GENERATE_REPORT_SCRIPT = REPORT_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+compile(GENERATE_REPORT_SCRIPT, str(REPORT_ANALYSIS_TEMPLATE_PATH), "exec")
+
 
 def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]:
     if value is None and allow_empty:
@@ -1153,6 +1253,11 @@ def _validate_report_fixes(value: object) -> list[dict]:
         attributes = item.get("attributes") or {}
         if not isinstance(review, dict) or not isinstance(attributes, dict):
             raise ValueError("Invalid report fixes payload")
+        raw_issues = review.get("issues") or []
+        if raw_issues is None:
+            raw_issues = []
+        if not isinstance(raw_issues, list):
+            raise ValueError("Invalid report fixes payload")
         cleaned_attributes = {}
         for key, raw_value in attributes.items():
             name = _validate_optional_text(key, label="Attribute name", max_length=120)
@@ -1179,6 +1284,23 @@ def _validate_report_fixes(value: object) -> list[dict]:
                     "status": _validate_optional_text(review.get("status"), label="Status", max_length=40),
                     "issue_id": _validate_optional_text(review.get("issue_id"), label="Issue id", max_length=120),
                     "issue_type": _validate_optional_text(review.get("issue_type"), label="Issue type", max_length=120),
+                    "issue_field": _validate_optional_text(review.get("issue_field"), label="Issue field", max_length=120),
+                    "issue_threshold": _validate_optional_text(review.get("issue_threshold"), label="Issue threshold", max_length=120),
+                    "issues": [
+                        {
+                            "status": _validate_optional_text(issue.get("status"), label="Status", max_length=40),
+                            "issue_id": _validate_optional_text(issue.get("issue_id"), label="Issue id", max_length=120),
+                            "issue_type": _validate_optional_text(issue.get("issue_type"), label="Issue type", max_length=120),
+                            "issue_field": _validate_optional_text(issue.get("issue_field"), label="Issue field", max_length=120),
+                            "issue_threshold": _validate_optional_text(issue.get("issue_threshold"), label="Issue threshold", max_length=120),
+                            "issue_note": _validate_optional_text(issue.get("issue_note"), label="Issue note", max_length=1200),
+                            "owner_question": _validate_optional_text(issue.get("owner_question"), label="Owner question", max_length=600),
+                            "review_user": _validate_optional_text(issue.get("review_user"), label="Review user", max_length=120),
+                            "reviewed_at": _validate_optional_text(issue.get("reviewed_at"), label="Reviewed at", max_length=120),
+                        }
+                        for issue in raw_issues
+                        if isinstance(issue, dict)
+                    ],
                     "issue_note": _validate_optional_text(review.get("issue_note"), label="Issue note", max_length=1200),
                     "owner_question": _validate_optional_text(review.get("owner_question"), label="Owner question", max_length=600),
                     "review_user": _validate_optional_text(review.get("review_user"), label="Review user", max_length=120),
@@ -1373,6 +1495,8 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             fix_keys = _validate_fix_keys(body.get("fix_keys"))
             status = _validate_status(body.get("status"))
             issue_type = _validate_required_text(body.get("issue_type"), label="Issue type", max_length=120)
+            issue_field = _validate_optional_text(body.get("issue_field"), label="Issue field", max_length=120)
+            issue_threshold = _validate_optional_text(body.get("issue_threshold"), label="Issue threshold", max_length=120)
             issue_note = _validate_required_text(body.get("issue_note"), label="Issue note", max_length=1200)
             owner_question = _validate_required_text(body.get("owner_question"), label="Owner question", max_length=600)
             user = body.get("user")
@@ -1391,6 +1515,8 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                     "status": status,
                     "issue_id": issue_id,
                     "issue_type": issue_type,
+                    "issue_field": issue_field,
+                    "issue_threshold": issue_threshold,
                     "issue_note": issue_note,
                     "owner_question": owner_question,
                     "user": user,
@@ -1509,6 +1635,8 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             fix_keys = _validate_fix_keys(body.get("fix_keys"))
             status = _validate_status(body.get("status"))
             issue_type = _validate_required_text(body.get("issue_type"), label="Issue type", max_length=120)
+            issue_field = _validate_optional_text(body.get("issue_field"), label="Issue field", max_length=120)
+            issue_threshold = _validate_optional_text(body.get("issue_threshold"), label="Issue threshold", max_length=120)
             issue_note = _validate_required_text(body.get("issue_note"), label="Issue note", max_length=1200)
             owner_question = _validate_required_text(body.get("owner_question"), label="Owner question", max_length=600)
             user = body.get("user")
@@ -1527,6 +1655,8 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                     "status": status,
                     "issue_id": issue_id,
                     "issue_type": issue_type,
+                    "issue_field": issue_field,
+                    "issue_threshold": issue_threshold,
                     "issue_note": issue_note,
                     "owner_question": owner_question,
                     "user": user,

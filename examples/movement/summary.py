@@ -14,6 +14,9 @@ REVIEW_COLUMNS = [
     "vc_outlier_status",
     "vc_issue_id",
     "vc_issue_type",
+    "vc_issue_field",
+    "vc_issue_threshold",
+    "vc_issue_refs",
     "vc_issue_note",
     "vc_owner_question",
     "vc_review_user",
@@ -49,7 +52,7 @@ QUALITY_KEYWORDS = (
 MAX_SERIES_POINTS = 1500
 MAX_STAT_SAMPLES = 2000
 DEFAULT_FIX_LIMIT = 1000000
-SUMMARY_CACHE_VERSION = 5
+SUMMARY_CACHE_VERSION = 6
 
 
 def normalize_header(header: str | None) -> str:
@@ -364,6 +367,27 @@ def _normalize_review_status(raw_value: object) -> str:
     return value if value in {"suspected", "confirmed"} else ""
 
 
+def _normalize_issue_payload(item: dict, *, fallback_status: str = "") -> dict:
+    status = _normalize_review_status(item.get("status")) or _normalize_review_status(fallback_status)
+    if not status:
+        return {}
+    issue = {
+        "status": status,
+        "issue_id": str(item.get("issue_id", "")).strip(),
+        "issue_type": str(item.get("issue_type", "")).strip(),
+        "issue_field": str(item.get("issue_field", "")).strip(),
+        "issue_threshold": str(item.get("issue_threshold", "")).strip(),
+        "issue_note": str(item.get("issue_note", "")).strip(),
+        "owner_question": str(item.get("owner_question", "")).strip(),
+        "review_user": str(item.get("review_user", "")).strip(),
+        "reviewed_at": str(item.get("reviewed_at", "")).strip(),
+    }
+    cleaned = {key: value for key, value in issue.items() if _is_present(value)}
+    if not cleaned.get("issue_id") and not cleaned.get("issue_type"):
+        return {}
+    return cleaned
+
+
 def _prepare_scan_context(path: Path) -> tuple[list[str], dict[str, str | None], dict[str, dict]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -444,16 +468,58 @@ def _build_color_fields(fieldnames: list[str], columns: dict[str, str | None], f
 
 
 def _compact_review(raw: dict) -> dict:
+    issues = _review_issues(raw)
+    status = _normalize_review_status(raw.get("vc_outlier_status"))
+    has_active_review = bool(status or issues)
     review = {
-        "status": _normalize_review_status(raw.get("vc_outlier_status")),
-        "issue_id": str(raw.get("vc_issue_id", "")).strip(),
-        "issue_type": str(raw.get("vc_issue_type", "")).strip(),
-        "issue_note": str(raw.get("vc_issue_note", "")).strip(),
-        "owner_question": str(raw.get("vc_owner_question", "")).strip(),
-        "review_user": str(raw.get("vc_review_user", "")).strip(),
-        "reviewed_at": str(raw.get("vc_reviewed_at", "")).strip(),
+        "status": status,
+        "issue_id": str(raw.get("vc_issue_id", "")).strip() if has_active_review else "",
+        "issue_type": str(raw.get("vc_issue_type", "")).strip() if has_active_review else "",
+        "issue_field": str(raw.get("vc_issue_field", "")).strip() if has_active_review else "",
+        "issue_threshold": str(raw.get("vc_issue_threshold", "")).strip() if has_active_review else "",
+        "issue_note": str(raw.get("vc_issue_note", "")).strip() if has_active_review else "",
+        "owner_question": str(raw.get("vc_owner_question", "")).strip() if has_active_review else "",
+        "review_user": str(raw.get("vc_review_user", "")).strip() if has_active_review else "",
+        "reviewed_at": str(raw.get("vc_reviewed_at", "")).strip() if has_active_review else "",
     }
+    if issues:
+        review["issues"] = issues
     return {key: value for key, value in review.items() if _is_present(value)}
+
+
+def _review_issues(raw: dict) -> list[dict]:
+    row_status = _normalize_review_status(raw.get("vc_outlier_status"))
+    raw_refs = str(raw.get("vc_issue_refs", "")).strip()
+    if raw_refs:
+        try:
+            parsed = json.loads(raw_refs)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            issues = []
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                cleaned = _normalize_issue_payload(item, fallback_status=row_status)
+                if cleaned:
+                    issues.append(cleaned)
+            if issues:
+                return issues
+    legacy_issue = _normalize_issue_payload(
+        {
+            "status": row_status,
+            "issue_id": str(raw.get("vc_issue_id", "")).strip(),
+            "issue_type": str(raw.get("vc_issue_type", "")).strip(),
+            "issue_field": str(raw.get("vc_issue_field", "")).strip(),
+            "issue_threshold": str(raw.get("vc_issue_threshold", "")).strip(),
+            "issue_note": str(raw.get("vc_issue_note", "")).strip(),
+            "owner_question": str(raw.get("vc_owner_question", "")).strip(),
+            "review_user": str(raw.get("vc_review_user", "")).strip(),
+            "reviewed_at": str(raw.get("vc_reviewed_at", "")).strip(),
+        },
+        fallback_status=row_status,
+    )
+    return [legacy_issue] if legacy_issue else []
 
 
 def _build_attributes(raw: dict, *, color_fields: list[dict], step_length_m, speed_mps, time_delta_s) -> dict:

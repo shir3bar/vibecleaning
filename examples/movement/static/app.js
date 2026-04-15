@@ -26,6 +26,7 @@ const MAX_SELECTED_FIXES_SHOWN = 150;
 const DEFAULT_FAMILY = "movement_clean";
 const NUMERIC_COLOR_MIN_QUANTILE = 0.01;
 const NUMERIC_COLOR_MAX_QUANTILE = 0.99;
+const REPORT_SNAPSHOT_IDLE_TIMEOUT_MS = 12000;
 
 let assetPromise = null;
 
@@ -125,7 +126,13 @@ class MovementExampleApp {
     this.thresholdState = {
       fieldKey: "",
       value: null,
+      reverse: false,
+      selectedLevels: [],
+      histogramMode: "full",
+      histogramMin: null,
+      histogramMax: null,
     };
+    this.thresholdInputPendingBlur = false;
   }
 
   async init() {
@@ -415,10 +422,92 @@ class MovementExampleApp {
           font-size: 11px;
           color: #c8d5e4;
         }
+        .movement-threshold-zoom {
+          display: inline-flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .movement-threshold-zoom button {
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          background: rgba(255, 255, 255, 0.04);
+          color: #dce7f3;
+          font-size: 12px;
+        }
+        .movement-threshold-zoom button.is-active {
+          background: rgba(80, 180, 255, 0.18);
+          border-color: rgba(80, 180, 255, 0.35);
+        }
+        .movement-threshold-inline-input,
+        .movement-threshold-range-input {
+          min-width: 0;
+          width: 88px;
+          padding: 5px 8px;
+          border-radius: 10px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(15, 23, 42, 0.92);
+          color: #e5edf7;
+          font: inherit;
+          font-size: 12px;
+        }
+        .movement-threshold-inline-input {
+          width: 96px;
+          margin-left: 4px;
+        }
         .movement-threshold-actions {
           display: flex;
           justify-content: flex-end;
           gap: 8px;
+        }
+        .movement-threshold-toggle {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          font-size: 12px;
+          color: #c8d5e4;
+          cursor: pointer;
+        }
+        .movement-threshold-toggle input {
+          margin: 0;
+        }
+        .movement-threshold-levels {
+          display: grid;
+          gap: 8px;
+          max-height: 220px;
+          overflow: auto;
+          padding-right: 4px;
+        }
+        .movement-threshold-level {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 8px;
+          padding: 8px 10px;
+          border-radius: 10px;
+          border: 1px solid rgba(255, 255, 255, 0.06);
+          background: rgba(15, 23, 42, 0.58);
+          font-size: 12px;
+          color: #e5edf7;
+          cursor: pointer;
+        }
+        .movement-threshold-level input {
+          margin: 0;
+        }
+        .movement-threshold-level-label {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .movement-threshold-level-count {
+          color: #9bb0c6;
+          font-variant-numeric: tabular-nums;
+        }
+        .movement-threshold-range-label {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
         }
         .movement-threshold button {
           padding: 8px 12px;
@@ -673,6 +762,9 @@ class MovementExampleApp {
         }
         .movement-modal-card {
           width: min(620px, 100%);
+          max-height: min(88vh, 900px);
+          display: flex;
+          flex-direction: column;
           border-radius: 18px;
           overflow: hidden;
           background: rgba(7, 11, 22, 0.96);
@@ -694,14 +786,24 @@ class MovementExampleApp {
         }
         .movement-modal-body {
           display: grid;
+          flex: 1 1 auto;
           gap: 14px;
           padding: 16px;
+          overflow: auto;
         }
         .movement-modal-body label {
           display: grid;
           gap: 6px;
           font-size: 12px;
           color: #9bb0c6;
+        }
+        .movement-modal-body label.movement-inline-check {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .movement-modal-body label.movement-inline-check input {
+          min-width: 0;
         }
         .movement-modal textarea {
           min-height: 88px;
@@ -734,6 +836,19 @@ class MovementExampleApp {
           }
           .movement-side {
             grid-template-rows: auto minmax(220px, 0.7fr) auto minmax(220px, 0.9fr) auto;
+          }
+        }
+        @media (max-width: 560px) {
+          .movement-threshold-range {
+            flex-direction: column;
+            align-items: stretch;
+          }
+          .movement-threshold-range-label {
+            justify-content: space-between;
+          }
+          .movement-threshold-inline-input,
+          .movement-threshold-range-input {
+            width: 100%;
           }
         }
       </style>
@@ -823,7 +938,6 @@ class MovementExampleApp {
           </div>
           <div class="movement-modal-body">
             <div data-role="report-meta"></div>
-            <div class="movement-selection-list" data-role="report-selection"></div>
             <label>User
               <input type="text" data-role="report-user" placeholder="Name used for attribution">
             </label>
@@ -841,6 +955,21 @@ class MovementExampleApp {
                 <option value="manual">Manual placeholder</option>
                 <option value="auto">Auto snapshot of current map</option>
               </select>
+            </label>
+            <label>Report basemap
+              <select data-role="report-basemap">
+                <option value="current">Match current map when possible</option>
+                <option value="Positron">Positron</option>
+                <option value="Voyager">Voyager</option>
+                <option value="Dark Matter">Dark Matter</option>
+              </select>
+            </label>
+            <label>Auto snapshot sample
+              <input type="number" min="1" step="1" data-role="report-snapshot-limit" placeholder="All snapshot windows">
+            </label>
+            <label class="movement-inline-check">
+              <input type="checkbox" data-role="report-spread-individuals" checked>
+              Spread auto snapshots across individuals
             </label>
             <div class="movement-links" data-role="report-links"></div>
             <div class="movement-modal-status" data-role="report-status"></div>
@@ -921,11 +1050,13 @@ class MovementExampleApp {
       issueSubmit: this.mountEl.querySelector('[data-role="issue-submit"]'),
       reportModal: this.mountEl.querySelector('[data-role="report-modal"]'),
       reportMeta: this.mountEl.querySelector('[data-role="report-meta"]'),
-      reportSelection: this.mountEl.querySelector('[data-role="report-selection"]'),
       reportUser: this.mountEl.querySelector('[data-role="report-user"]'),
       reportScope: this.mountEl.querySelector('[data-role="report-scope"]'),
       reportIndividual: this.mountEl.querySelector('[data-role="report-individual"]'),
       reportScreenshotMode: this.mountEl.querySelector('[data-role="report-screenshot-mode"]'),
+      reportBasemap: this.mountEl.querySelector('[data-role="report-basemap"]'),
+      reportSnapshotLimit: this.mountEl.querySelector('[data-role="report-snapshot-limit"]'),
+      reportSpreadIndividuals: this.mountEl.querySelector('[data-role="report-spread-individuals"]'),
       reportLinks: this.mountEl.querySelector('[data-role="report-links"]'),
       reportStatus: this.mountEl.querySelector('[data-role="report-status"]'),
       reportClose: this.mountEl.querySelector('[data-role="report-close"]'),
@@ -947,6 +1078,7 @@ class MovementExampleApp {
       this.refs.basemap.appendChild(option);
     }
     this.refs.basemap.value = BASEMAP_STYLES[this.uiState.basemap] ? this.uiState.basemap : "Blank";
+    this.refs.reportBasemap.value = "current";
     this.refs.showTrain.checked = this.uiState.showTrain !== false;
     this.refs.showTest.checked = this.uiState.showTest !== false;
     this.refs.showPoints.checked = this.uiState.showPoints !== false;
@@ -1064,6 +1196,8 @@ class MovementExampleApp {
       this.renderLayers();
     });
     this.refs.thresholdPane.addEventListener("click", event => this.handleThresholdPaneClick(event));
+    this.refs.thresholdPane.addEventListener("change", event => this.handleThresholdPaneChange(event));
+    this.refs.thresholdPane.addEventListener("focusin", event => this.handleThresholdPaneFocusIn(event));
 
     this.refs.issueClose.addEventListener("click", () => this.closeModal(this.refs.issueModal, this.refs.issueSubmit));
     this.refs.issueSubmit.addEventListener("click", async () => this.submitIssueAction());
@@ -1072,6 +1206,10 @@ class MovementExampleApp {
       void this.handleReportScopeChange();
     });
     this.refs.reportIndividual.addEventListener("change", () => this.renderReportSelection());
+    this.refs.reportScreenshotMode.addEventListener("change", () => this.renderReportSelection());
+    this.refs.reportBasemap.addEventListener("change", () => this.renderReportSelection());
+    this.refs.reportSnapshotLimit.addEventListener("input", () => this.renderReportSelection());
+    this.refs.reportSpreadIndividuals.addEventListener("change", () => this.renderReportSelection());
     this.refs.reportSubmit.addEventListener("click", async () => this.submitGenerateReport());
     this.refs.removeClose.addEventListener("click", () => this.closeModal(this.refs.removeModal, this.refs.removeSubmit));
     this.refs.removeSubmit.addEventListener("click", async () => this.submitRemoveConfirmed());
@@ -1768,7 +1906,8 @@ class MovementExampleApp {
       if (fix.review.issueType || fix.review.issueNote) {
         const note = document.createElement("div");
         note.className = "movement-fix-note";
-        note.textContent = `${fix.review.issueType || "Issue"}: ${fix.review.issueNote || fix.review.ownerQuestion || ""}`;
+        const issueTypes = reportIssueTypes(fix);
+        note.textContent = `${issueTypes.join(", ") || "Issue"}: ${fix.review.issueNote || fix.review.ownerQuestion || ""}`;
         card.appendChild(note);
       }
 
@@ -1918,6 +2057,7 @@ class MovementExampleApp {
     const pathData = [];
     const pointData = [];
     const thresholdPointData = [];
+    const selectedThresholdPointData = [];
     const selectedPointData = [];
     const cursorData = [];
     const thresholdMatchKeys = this.getThresholdContext()?.matchKeys || new Set();
@@ -1959,14 +2099,20 @@ class MovementExampleApp {
       };
       if (this.data.selectedFixKeys.has(fix.fixKey)) {
         selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
+        if (thresholdMatchKeys.has(fix.fixKey)) {
+          selectedThresholdPointData.push({
+            fixKey: fix.fixKey,
+            position: fix.position,
+          });
+        }
       } else {
         pointData.push(point);
-      }
-      if (!this.data.selectedFixKeys.has(fix.fixKey) && thresholdMatchKeys.has(fix.fixKey)) {
+        if (thresholdMatchKeys.has(fix.fixKey)) {
         thresholdPointData.push({
           fixKey: fix.fixKey,
           position: fix.position,
         });
+        }
       }
     }
 
@@ -2018,6 +2164,21 @@ class MovementExampleApp {
               this.toggleFixSelection(info.object.fixKey);
             }
           },
+        }),
+      );
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-selected-threshold-points",
+          data: selectedThresholdPointData,
+          getPosition: item => item.position,
+          getLineColor: [255, 236, 148, 255],
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 3,
+          getRadius: 156,
+          radiusMinPixels: 9,
+          radiusMaxPixels: 18,
+          pickable: false,
         }),
       );
       layers.push(
@@ -2166,6 +2327,11 @@ class MovementExampleApp {
     this.thresholdState = {
       fieldKey: "",
       value: null,
+      reverse: false,
+      selectedLevels: [],
+      histogramMode: "full",
+      histogramMin: null,
+      histogramMax: null,
     };
   }
 
@@ -2190,15 +2356,52 @@ class MovementExampleApp {
     const thresholdValue = this.thresholdState.fieldKey === field.key && typeof this.thresholdState.value === "number"
       ? this.thresholdState.value
       : null;
+    const reverse = this.thresholdState.fieldKey === field.key && this.thresholdState.reverse === true;
+    const histogramMode = this.thresholdState.fieldKey === field.key && this.thresholdState.histogramMode === "clipped"
+      ? "clipped"
+      : "full";
+    const manualHistogramMin = this.thresholdState.fieldKey === field.key
+      ? finiteOrNull(this.thresholdState.histogramMin)
+      : null;
+    const manualHistogramMax = this.thresholdState.fieldKey === field.key
+      ? finiteOrNull(this.thresholdState.histogramMax)
+      : null;
+    const selectedLevels = this.thresholdState.fieldKey === field.key && Array.isArray(this.thresholdState.selectedLevels)
+      ? uniqueNonEmpty(this.thresholdState.selectedLevels)
+      : [];
     if (field.kind !== "numeric") {
+      const levelCounts = new Map();
+      for (const fix of visibleFixes) {
+        const level = discreteFieldLevelLabel(field, fix.attributes[field.key]);
+        levelCounts.set(level, (levelCounts.get(level) || 0) + 1);
+      }
+      const levelOptions = Array.from(levelCounts.entries())
+        .map(([level, count]) => ({ level, count }))
+        .sort((left, right) => right.count - left.count || left.level.localeCompare(right.level, undefined, { sensitivity: "base" }));
+      const selectedLevelSet = new Set(selectedLevels);
+      const matchItems = selectedLevelSet.size
+        ? visibleFixes.filter(fix => selectedLevelSet.has(discreteFieldLevelLabel(field, fix.attributes[field.key])))
+        : [];
+      const matchKeys = new Set(matchItems.map(item => item.fixKey));
+      const uncheckedMatchKeys = new Set(
+        matchItems
+          .map(item => item.fixKey)
+          .filter(fixKey => !this.data.selectedFixKeys.has(fixKey)),
+      );
       return {
         field,
         visibleFixes,
         numericFixes: [],
         thresholdValue: null,
         histogram: null,
-        matchKeys: new Set(),
-        uncheckedMatchKeys: new Set(),
+        reverse,
+        histogramMode,
+        histogramInputMin: null,
+        histogramInputMax: null,
+        selectedLevels,
+        levelOptions,
+        matchKeys,
+        uncheckedMatchKeys,
       };
     }
 
@@ -2215,18 +2418,36 @@ class MovementExampleApp {
         numericFixes,
         thresholdValue: null,
         histogram: null,
+        reverse,
+        histogramMode,
+        selectedLevels: [],
+        levelOptions: [],
         matchKeys: new Set(),
         uncheckedMatchKeys: new Set(),
       };
     }
 
-    const histogram = computeHistogramBins(numericFixes.map(item => item.value), 24);
+    const colorRange = this.data.colorStyles.get(field.key)?.range || null;
+    const defaultHistogramMin = Number.isFinite(colorRange?.min) ? colorRange.min : null;
+    const defaultHistogramMax = Number.isFinite(colorRange?.max) ? colorRange.max : null;
+    const useCustomHistogramBounds = manualHistogramMin !== null || manualHistogramMax !== null;
+    const clippedMin = useCustomHistogramBounds
+      ? (manualHistogramMin ?? defaultHistogramMin)
+      : defaultHistogramMin;
+    const clippedMax = useCustomHistogramBounds
+      ? (manualHistogramMax ?? defaultHistogramMax)
+      : defaultHistogramMax;
+    const histogram = computeHistogramBins(numericFixes.map(item => item.value), 24, {
+      mode: (histogramMode === "clipped" || useCustomHistogramBounds) ? "clipped" : "full",
+      clippedMin,
+      clippedMax,
+    });
     const activeThresholdValue = thresholdValue === null
       ? null
       : clampThresholdValue(thresholdValue, histogram.min, histogram.max);
     const matchItems = activeThresholdValue === null
       ? []
-      : numericFixes.filter(item => item.value > activeThresholdValue);
+      : numericFixes.filter(item => (reverse ? item.value < activeThresholdValue : item.value > activeThresholdValue));
     const matchKeys = new Set(matchItems.map(item => item.fix.fixKey));
     const uncheckedMatchKeys = new Set(
       matchItems
@@ -2239,6 +2460,12 @@ class MovementExampleApp {
       numericFixes,
       histogram,
       thresholdValue: activeThresholdValue,
+      reverse,
+      histogramMode: histogram?.mode === "clipped" ? "clipped" : "full",
+      histogramInputMin: manualHistogramMin ?? (histogram?.mode === "clipped" ? histogram.min : histogram.observedMin),
+      histogramInputMax: manualHistogramMax ?? (histogram?.mode === "clipped" ? histogram.max : histogram.observedMax),
+      selectedLevels: [],
+      levelOptions: [],
       matchKeys,
       uncheckedMatchKeys,
     };
@@ -2260,9 +2487,15 @@ class MovementExampleApp {
     const visibleCount = context?.visibleFixes.length || 0;
     const numericCount = context?.numericFixes.length || 0;
     const thresholdValue = context?.thresholdValue ?? null;
+    const reverse = context?.reverse === true;
+    const selectedLevels = context?.selectedLevels || [];
+    const levelOptions = context?.levelOptions || [];
     const matchCount = context?.matchKeys?.size || 0;
     const uncheckedCount = context?.uncheckedMatchKeys?.size || 0;
     const histogram = context?.histogram;
+    const histogramMode = context?.histogramMode === "clipped" ? "clipped" : "full";
+    const histogramInputMin = finiteOrNull(context?.histogramInputMin);
+    const histogramInputMax = finiteOrNull(context?.histogramInputMax);
 
     let body = "";
     if (!field) {
@@ -2271,16 +2504,57 @@ class MovementExampleApp {
           Thresholding is unavailable until a color variable is loaded.
         </div>
       `;
-    } else if (field.kind !== "numeric") {
-      body = `
-        <div class="movement-threshold-empty">
-          Thresholding is available only for numeric color variables. Switch Color by to a numeric field to highlight high values.
-        </div>
-      `;
     } else if (!visibleCount) {
       body = `
         <div class="movement-threshold-empty">
           No visible fixes are in scope right now. Adjust the visible individuals or train/test toggles to build a threshold.
+        </div>
+      `;
+    } else if (field.kind !== "numeric") {
+      const subtitle = `${formatCount(levelOptions.length)} levels in the visible fixes`;
+      const meta = selectedLevels.length
+        ? `${formatCount(matchCount)} fixes match ${formatCount(selectedLevels.length)} selected levels.`
+        : "Choose one or more levels to highlight matching fixes.";
+      const selectionNote = uncheckedCount > 0
+        ? `${formatCount(uncheckedCount)} matching fixes are not checked yet.`
+        : matchCount > 0
+          ? "All fixes from the selected levels are already checked."
+          : "No levels are selected yet.";
+      body = `
+        <div class="movement-threshold-head">
+          <div>
+            <div class="movement-threshold-title">${escapeHtml(field.label)}</div>
+            <div class="movement-threshold-subtitle">${escapeHtml(field.source)} | ${escapeHtml(subtitle)}</div>
+          </div>
+          <div class="movement-threshold-meta">${escapeHtml(meta)}</div>
+        </div>
+        <div class="movement-threshold-levels">
+          ${levelOptions.map(option => `
+            <label class="movement-threshold-level">
+              <input
+                type="checkbox"
+                data-action="toggle-threshold-level"
+                data-level="${escapeHtml(option.level)}"
+                ${selectedLevels.includes(option.level) ? "checked" : ""}
+              >
+              <span class="movement-threshold-level-label">${escapeHtml(option.level)}</span>
+              <span class="movement-threshold-level-count">${escapeHtml(formatCount(option.count))}</span>
+            </label>
+          `).join("")}
+        </div>
+        <div class="movement-threshold-note">${escapeHtml(selectionNote)} Select levels to gather those fixes for review.</div>
+        <div class="movement-threshold-actions">
+          <button
+            type="button"
+            class="movement-emphasis"
+            data-action="check-above-threshold"
+            ${uncheckedCount === 0 ? "disabled" : ""}
+          >Check selected levels${uncheckedCount > 0 ? ` (${escapeHtml(formatCount(uncheckedCount))})` : ""}</button>
+          <button
+            type="button"
+            data-action="clear-threshold"
+            ${selectedLevels.length === 0 ? "disabled" : ""}
+          >Clear selection</button>
         </div>
       `;
     } else if (!numericCount || !histogram) {
@@ -2310,28 +2584,49 @@ class MovementExampleApp {
       const thresholdLine = thresholdRatio === null
         ? ""
         : `<div class="movement-threshold-line" style="left:${(thresholdRatio * 100).toFixed(2)}%;"></div>`;
-      const subtitle = histogram.scaleKind === "log"
-        ? `${formatCount(numericCount)} numeric visible fixes | log-scaled for a long right tail`
-        : `${formatCount(numericCount)} numeric visible fixes`;
-      const meta = thresholdValue === null
-        ? "Click the histogram to set an upper threshold."
-        : `Threshold > ${formatColorValue(thresholdValue, "numeric")} highlights ${formatCount(matchCount)} fixes in the visible scope.`;
-      const selectionNote = uncheckedCount > 0
-        ? `${formatCount(uncheckedCount)} above-threshold fixes are not checked yet.`
-        : matchCount > 0
-          ? "All above-threshold fixes are already checked."
-          : "No fixes are above the current threshold.";
-      const histogramNote = histogram.scaleKind === "log"
-        ? "Histogram bars cover the full visible value range, with a log-like x-axis so high-value outliers do not flatten the rest of the distribution."
-        : "Histogram bars cover the full visible value range.";
-      const note = `${selectionNote} ${histogramNote}`;
+      const subtitle = `${formatCount(numericCount)} visible fixes`;
+      const thresholdPrompt = thresholdValue === null
+        ? `Click the histogram or type a ${reverse ? "lower-tail" : "upper-tail"} threshold`
+        : "Threshold";
+      const selectionNote = thresholdValue === null
+        ? "No threshold set"
+        : matchCount === 0
+          ? "No matches"
+          : uncheckedCount > 0
+            ? `${formatCount(matchCount)} matches • ${formatCount(uncheckedCount)} unchecked`
+            : `${formatCount(matchCount)} matches • all checked`;
       body = `
         <div class="movement-threshold-head">
           <div>
             <div class="movement-threshold-title">${escapeHtml(field.label)}</div>
             <div class="movement-threshold-subtitle">${escapeHtml(field.source)} | ${escapeHtml(subtitle)}</div>
           </div>
-          <div class="movement-threshold-meta">${escapeHtml(meta)}</div>
+          <div class="movement-threshold-meta">
+            <span>${escapeHtml(thresholdPrompt)}</span>
+            <span>${reverse ? "&lt;" : "&gt;"}</span>
+            <input
+              class="movement-threshold-inline-input"
+              type="number"
+              step="any"
+              data-action="set-threshold-value"
+              placeholder="value"
+              value="${thresholdValue === null ? "" : escapeHtml(String(thresholdValue))}"
+            >
+          </div>
+        </div>
+        <div class="movement-threshold-zoom">
+          <button
+            type="button"
+            data-action="set-histogram-mode"
+            data-mode="clipped"
+            class="${histogramMode === "clipped" ? "is-active" : ""}"
+          >Zoom in</button>
+          <button
+            type="button"
+            data-action="set-histogram-mode"
+            data-mode="full"
+            class="${histogramMode === "full" ? "is-active" : ""}"
+          >Zoom out</button>
         </div>
         <div class="movement-threshold-chart-wrap">
           <div
@@ -2346,28 +2641,69 @@ class MovementExampleApp {
           </div>
         </div>
         <div class="movement-threshold-range">
-          <span>${escapeHtml(formatColorValue(histogram.min, "numeric"))}</span>
-          <span>${escapeHtml(formatColorValue(histogram.max, "numeric"))}</span>
+          <label class="movement-threshold-range-label">
+            <span>Min</span>
+            <input
+              class="movement-threshold-range-input"
+              type="number"
+              step="any"
+              data-action="set-histogram-min"
+              value="${histogramInputMin === null ? "" : escapeHtml(String(histogramInputMin))}"
+            >
+          </label>
+          <label class="movement-threshold-range-label">
+            <span>Max</span>
+            <input
+              class="movement-threshold-range-input"
+              type="number"
+              step="any"
+              data-action="set-histogram-max"
+              value="${histogramInputMax === null ? "" : escapeHtml(String(histogramInputMax))}"
+            >
+          </label>
         </div>
-        <div class="movement-threshold-note">${escapeHtml(note)}</div>
+        <label class="movement-threshold-toggle">
+          <input
+            type="checkbox"
+            data-action="toggle-threshold-reverse"
+            ${reverse ? "checked" : ""}
+          >
+          Reverse threshold: highlight values below the line
+        </label>
+        <div class="movement-threshold-note">${escapeHtml(selectionNote)}</div>
         <div class="movement-threshold-actions">
           <button
             type="button"
             class="movement-emphasis"
             data-action="check-above-threshold"
             ${uncheckedCount === 0 ? "disabled" : ""}
-          >Check above threshold${uncheckedCount > 0 ? ` (${escapeHtml(formatCount(uncheckedCount))})` : ""}</button>
+          >Check ${reverse ? "below" : "above"} threshold</button>
           <button
             type="button"
             data-action="clear-threshold"
             ${thresholdValue === null ? "disabled" : ""}
           >Clear threshold</button>
+          <button
+            type="button"
+            data-action="reset-histogram-limits"
+            ${(this.thresholdState.fieldKey !== field.key || (this.thresholdState.histogramMin === null && this.thresholdState.histogramMax === null && histogramMode === "full")) ? "disabled" : ""}
+          >Reset limits</button>
         </div>
       `;
     }
 
     pane.innerHTML = body;
     pane.classList.remove("hidden");
+  }
+
+  handleThresholdPaneFocusIn(event) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) {
+      return;
+    }
+    if (target.closest('input[data-action="set-histogram-min"], input[data-action="set-histogram-max"], input[data-action="set-threshold-value"]')) {
+      this.thresholdInputPendingBlur = true;
+    }
   }
 
   handleThresholdPaneClick(event) {
@@ -2381,8 +2717,45 @@ class MovementExampleApp {
     const actionButton = target.closest("button[data-action]");
     if (actionButton) {
       const action = actionButton.dataset.action || "";
-      if (action === "clear-threshold") {
-        this.clearThresholdState();
+      if (action === "set-histogram-mode") {
+        const field = this.getCurrentColorField();
+        const mode = actionButton.dataset.mode === "clipped" ? "clipped" : "full";
+        const colorRange = this.data?.colorStyles.get(field?.key || "")?.range || null;
+        this.thresholdState = {
+          fieldKey: field?.key || this.thresholdState.fieldKey || "",
+          value: this.thresholdState.value,
+          reverse: this.thresholdState.reverse === true,
+          selectedLevels: [],
+          histogramMode: mode,
+          histogramMin: mode === "clipped" ? (Number.isFinite(colorRange?.min) ? colorRange.min : null) : null,
+          histogramMax: mode === "clipped" ? (Number.isFinite(colorRange?.max) ? colorRange.max : null) : null,
+        };
+        this.renderThresholdPane();
+        this.renderLayers();
+      } else if (action === "clear-threshold") {
+        const field = this.getCurrentColorField();
+        this.thresholdState = {
+          fieldKey: field?.key || "",
+          value: null,
+          reverse: false,
+          selectedLevels: [],
+          histogramMode: this.thresholdState.histogramMode === "clipped" ? "clipped" : "full",
+          histogramMin: this.thresholdState.histogramMin,
+          histogramMax: this.thresholdState.histogramMax,
+        };
+        this.renderThresholdPane();
+        this.renderLayers();
+      } else if (action === "reset-histogram-limits") {
+        const field = this.getCurrentColorField();
+        this.thresholdState = {
+          fieldKey: field?.key || this.thresholdState.fieldKey || "",
+          value: this.thresholdState.value,
+          reverse: this.thresholdState.reverse === true,
+          selectedLevels: [],
+          histogramMode: "full",
+          histogramMin: null,
+          histogramMax: null,
+        };
         this.renderThresholdPane();
         this.renderLayers();
       } else if (action === "check-above-threshold") {
@@ -2392,6 +2765,11 @@ class MovementExampleApp {
     }
 
     const chart = target.closest('[data-role="threshold-chart"]');
+    if (chart && this.thresholdInputPendingBlur) {
+      this.thresholdInputPendingBlur = false;
+      return;
+    }
+    this.thresholdInputPendingBlur = false;
     if (!chart) {
       return;
     }
@@ -2414,6 +2792,118 @@ class MovementExampleApp {
     this.thresholdState = {
       fieldKey,
       value: thresholdValue,
+      reverse: this.thresholdState.fieldKey === fieldKey && this.thresholdState.reverse === true,
+      selectedLevels: [],
+      histogramMode: this.thresholdState.fieldKey === fieldKey && this.thresholdState.histogramMode === "clipped" ? "clipped" : "full",
+      histogramMin: this.thresholdState.fieldKey === fieldKey ? this.thresholdState.histogramMin : null,
+      histogramMax: this.thresholdState.fieldKey === fieldKey ? this.thresholdState.histogramMax : null,
+    };
+    this.renderThresholdPane();
+    this.renderLayers();
+  }
+
+  handleThresholdPaneChange(event) {
+    if (!this.data) {
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) {
+      return;
+    }
+    const numericInput = target.closest('input[data-action="set-histogram-min"], input[data-action="set-histogram-max"], input[data-action="set-threshold-value"]');
+    if (numericInput) {
+      this.thresholdInputPendingBlur = false;
+      const field = this.getCurrentColorField();
+      if (!field || field.kind !== "numeric") {
+        return;
+      }
+      const action = numericInput.dataset.action || "";
+      const raw = String(numericInput.value || "").trim();
+      const parsedValue = raw === "" ? null : finiteOrNull(raw);
+      const context = this.getThresholdContext();
+      const fallbackMin = Number.isFinite(context?.histogram?.observedMin) ? context.histogram.observedMin : null;
+      const fallbackMax = Number.isFinite(context?.histogram?.observedMax) ? context.histogram.observedMax : null;
+      let nextHistogramMin = this.thresholdState.fieldKey === field.key ? this.thresholdState.histogramMin : null;
+      let nextHistogramMax = this.thresholdState.fieldKey === field.key ? this.thresholdState.histogramMax : null;
+      let nextThresholdValue = this.thresholdState.fieldKey === field.key ? this.thresholdState.value : null;
+      if (raw !== "" && parsedValue === null) {
+        this.setStatus("Threshold inputs must be valid numbers.", true);
+        this.renderThresholdPane();
+        return;
+      }
+      if (action === "set-histogram-min") {
+        nextHistogramMin = parsedValue;
+      } else if (action === "set-histogram-max") {
+        nextHistogramMax = parsedValue;
+      } else if (action === "set-threshold-value") {
+        nextThresholdValue = parsedValue;
+      }
+      const effectiveMin = nextHistogramMin ?? fallbackMin;
+      const effectiveMax = nextHistogramMax ?? fallbackMax;
+      if (
+        Number.isFinite(effectiveMin)
+        && Number.isFinite(effectiveMax)
+        && effectiveMin >= effectiveMax
+      ) {
+        this.setStatus("Histogram min must be smaller than histogram max.", true);
+        this.renderThresholdPane();
+        return;
+      }
+      if (action === "set-threshold-value" && parsedValue !== null && Number.isFinite(effectiveMin) && Number.isFinite(effectiveMax)) {
+        nextThresholdValue = clampThresholdValue(parsedValue, effectiveMin, effectiveMax);
+      }
+      const hasCustomBounds = nextHistogramMin !== null || nextHistogramMax !== null;
+      this.thresholdState = {
+        fieldKey: field.key,
+        value: nextThresholdValue,
+        reverse: this.thresholdState.fieldKey === field.key && this.thresholdState.reverse === true,
+        selectedLevels: [],
+        histogramMode: hasCustomBounds ? "clipped" : (this.thresholdState.histogramMode === "clipped" ? "clipped" : "full"),
+        histogramMin: nextHistogramMin,
+        histogramMax: nextHistogramMax,
+      };
+      this.renderThresholdPane();
+      this.renderLayers();
+      return;
+    }
+    const checkbox = target.closest('input[data-action="toggle-threshold-reverse"]');
+    if (checkbox) {
+      const field = this.getCurrentColorField();
+      this.thresholdState = {
+        fieldKey: field?.key || this.thresholdState.fieldKey || "",
+        value: this.thresholdState.value,
+        reverse: checkbox.checked,
+        selectedLevels: [],
+        histogramMode: this.thresholdState.histogramMode === "clipped" ? "clipped" : "full",
+        histogramMin: this.thresholdState.histogramMin,
+        histogramMax: this.thresholdState.histogramMax,
+      };
+      this.renderThresholdPane();
+      this.renderLayers();
+      return;
+    }
+    const levelInput = target.closest('input[data-action="toggle-threshold-level"]');
+    if (!levelInput) {
+      return;
+    }
+    const field = this.getCurrentColorField();
+    const currentLevels = this.thresholdState.fieldKey === (field?.key || "") && Array.isArray(this.thresholdState.selectedLevels)
+      ? new Set(uniqueNonEmpty(this.thresholdState.selectedLevels))
+      : new Set();
+    const level = String(levelInput.dataset.level || "");
+    if (levelInput.checked) {
+      currentLevels.add(level);
+    } else {
+      currentLevels.delete(level);
+    }
+    this.thresholdState = {
+      fieldKey: field?.key || this.thresholdState.fieldKey || "",
+      value: null,
+      reverse: false,
+      selectedLevels: [...currentLevels],
+      histogramMode: this.thresholdState.histogramMode === "clipped" ? "clipped" : "full",
+      histogramMin: this.thresholdState.histogramMin,
+      histogramMax: this.thresholdState.histogramMax,
     };
     this.renderThresholdPane();
     this.renderLayers();
@@ -2745,6 +3235,39 @@ class MovementExampleApp {
     return this.buildReportSnapshotWindows(this.getReportFixes());
   }
 
+  getRequestedReportSnapshotLimit() {
+    const raw = String(this.refs.reportSnapshotLimit.value || "").trim();
+    if (!raw) {
+      return null;
+    }
+    const value = Math.floor(Number(raw));
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  getEffectiveReportSnapshotWindows() {
+    const snapshotWindows = this.getReportSnapshotWindows();
+    const screenshotMode = this.refs.reportScreenshotMode.value || "manual";
+    if (screenshotMode !== "auto") {
+      return snapshotWindows;
+    }
+    const limit = this.getRequestedReportSnapshotLimit();
+    return sampleReportSnapshotWindows(snapshotWindows, limit, {
+      spreadIndividuals: this.refs.reportSpreadIndividuals.checked,
+    });
+  }
+
+  getSelectedReportBasemapStyle() {
+    const choice = this.refs.reportBasemap.value || "current";
+    if (choice === "current") {
+      const currentName = this.refs.basemap.value || "Blank";
+      if (currentName !== "Blank" && BASEMAP_STYLES[currentName]) {
+        return BASEMAP_STYLES[currentName];
+      }
+      return BASEMAP_STYLES.Positron;
+    }
+    return BASEMAP_STYLES[choice] || BASEMAP_STYLES.Positron;
+  }
+
   serializeFixForReport(fix) {
     return {
       fix_key: fix.fixKey,
@@ -2762,6 +3285,19 @@ class MovementExampleApp {
         status: fix.review.status || "",
         issue_id: fix.review.issueId || "",
         issue_type: fix.review.issueType || "",
+        issue_field: fix.review.issueField || "",
+        issue_threshold: fix.review.issueThreshold || "",
+        issues: (fix.review.issues || []).map(issue => ({
+          status: issue.status || "",
+          issue_id: issue.issueId || "",
+          issue_type: issue.issueType || "",
+          issue_field: issue.issueField || "",
+          issue_threshold: issue.issueThreshold || "",
+          issue_note: issue.issueNote || "",
+          owner_question: issue.ownerQuestion || "",
+          review_user: issue.reviewUser || "",
+          reviewed_at: issue.reviewedAt || "",
+        })),
         issue_note: fix.review.issueNote || "",
         owner_question: fix.review.ownerQuestion || "",
         review_user: fix.review.reviewUser || "",
@@ -2794,6 +3330,10 @@ class MovementExampleApp {
     if (!this.data || !reportFixes.length) {
       return [];
     }
+    const currentField = this.getCurrentColorField();
+    const thresholdFieldKey = this.thresholdState.fieldKey || "";
+    const thresholdValue = typeof this.thresholdState.value === "number" ? this.thresholdState.value : null;
+    const thresholdReverse = this.thresholdState.reverse === true;
     const scope = this.refs.reportScope.value || "visible";
     const trackFixesSource = this.getFixesForScope(scope, { allowPartialFull: scope === "full" });
     const trackFixesByKey = new Map();
@@ -2849,7 +3389,8 @@ class MovementExampleApp {
       merged.push({ ...candidate });
     }
 
-    return merged.map((window, index) => {
+    const windows = [];
+    for (const window of merged) {
       const trackFixes = trackFixesByKey.get(window.trackKey) || [];
       const windowFixes = trackFixes.slice(window.startIndex, window.endIndex + 1);
       const reportFixKeys = windowFixes
@@ -2859,34 +3400,58 @@ class MovementExampleApp {
         .map(fixKey => reportFixMap.get(fixKey))
         .filter(Boolean)
         .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
-      const anchorFixKeys = uniqueNonEmpty(window.anchorFixes.map(fix => fix.fixKey)).sort((left, right) => {
-        const leftFix = reportFixMap.get(left);
-        const rightFix = reportFixMap.get(right);
-        return (leftFix?.timeMs || 0) - (rightFix?.timeMs || 0) || left.localeCompare(right);
-      });
-      const issueTypes = uniqueNonEmpty(reportWindowFixes.map(fix => reportIssueType(fix))).sort((left, right) => left.localeCompare(right));
       const firstWindowFix = windowFixes[0];
       const lastWindowFix = windowFixes[windowFixes.length - 1];
-      return {
-        snapshotKey: `snapshot_${String(index + 1).padStart(2, "0")}`,
-        caption: `${issueTypes.join(", ")} | ${window.individual} | ${formatTimestamp(firstWindowFix?.timeMs)} to ${formatTimestamp(lastWindowFix?.timeMs)}`,
-        individual: window.individual,
-        setName: window.setName,
-        issueType: issueTypes[0] || "Unspecified issue",
-        issueTypes,
-        anchorFixKeys,
-        reportFixKeys,
-        startFixKey: firstWindowFix?.fixKey || "",
-        endFixKey: lastWindowFix?.fixKey || "",
-        startTimeMs: firstWindowFix?.timeMs || 0,
-        endTimeMs: lastWindowFix?.timeMs || 0,
-        startTimeText: formatTimestamp(firstWindowFix?.timeMs || 0),
-        endTimeText: formatTimestamp(lastWindowFix?.timeMs || 0),
-        windowFixCount: windowFixes.length,
-        windowFixes,
-        reportWindowFixes,
-      };
-    });
+      const issueTypes = uniqueNonEmpty(reportWindowFixes.flatMap(fix => reportIssueTypes(fix))).sort((left, right) => left.localeCompare(right));
+      for (const issueType of issueTypes) {
+        const focalFixes = reportWindowFixes
+          .filter(fix => reportIssueTypes(fix).includes(issueType))
+          .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
+        if (!focalFixes.length) {
+          continue;
+        }
+        const focalFixKeys = focalFixes.map(fix => fix.fixKey);
+        const secondaryFixKeys = reportWindowFixes
+          .filter(fix => !reportIssueTypes(fix).includes(issueType))
+          .map(fix => fix.fixKey)
+          .sort((left, right) => left.localeCompare(right));
+        const sampleValue = deriveReportSampleValue(
+          focalFixes,
+          currentField,
+          this.data.colorFieldByKey,
+          {
+            thresholdFieldKey,
+            thresholdValue,
+            thresholdReverse,
+          },
+        );
+        windows.push({
+          snapshotKey: "",
+          caption: `${issueType} | ${window.individual} | ${formatTimestamp(firstWindowFix?.timeMs)} to ${formatTimestamp(lastWindowFix?.timeMs)}`,
+          individual: window.individual,
+          setName: window.setName,
+          issueType,
+          issueTypes: [issueType],
+          anchorFixKeys: focalFixKeys,
+          secondaryFixKeys,
+          reportFixKeys: focalFixKeys,
+          startFixKey: firstWindowFix?.fixKey || "",
+          endFixKey: lastWindowFix?.fixKey || "",
+          startTimeMs: firstWindowFix?.timeMs || 0,
+          endTimeMs: lastWindowFix?.timeMs || 0,
+          startTimeText: formatTimestamp(firstWindowFix?.timeMs || 0),
+          endTimeText: formatTimestamp(lastWindowFix?.timeMs || 0),
+          windowFixCount: windowFixes.length,
+          windowFixes,
+          reportWindowFixes: focalFixes,
+          sampleValue,
+        });
+      }
+    }
+    return windows.map((window, index) => ({
+      ...window,
+      snapshotKey: `snapshot_${String(index + 1).padStart(2, "0")}`,
+    }));
   }
 
   renderReportSelection() {
@@ -2901,8 +3466,8 @@ class MovementExampleApp {
         <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
         <div><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</div>
         <div><strong>Individual:</strong> ${escapeHtml(individualLabel)}</div>
+        <div><strong>Report state:</strong> Loading full-study report context...</div>
       `;
-      this.refs.reportSelection.textContent = "Loading full-study report context...";
       this.refs.reportSubmit.disabled = true;
       return;
     }
@@ -2914,20 +3479,34 @@ class MovementExampleApp {
         <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
         <div><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</div>
         <div><strong>Individual:</strong> ${escapeHtml(individualLabel)}</div>
+        <div><strong>Report state:</strong> Could not load full-study report context.</div>
       `;
-      this.refs.reportSelection.textContent = "Could not load full-study report context. Try switching scopes or reopening the report modal.";
       this.refs.reportSubmit.disabled = true;
       return;
     }
 
     const reportFixes = this.getReportFixes();
     const snapshotWindows = this.getReportSnapshotWindows();
-    const issueTypes = uniqueNonEmpty(reportFixes.map(fix => reportIssueType(fix)));
+    const effectiveSnapshotWindows = this.getEffectiveReportSnapshotWindows();
+    const screenshotMode = this.refs.reportScreenshotMode.value || "manual";
+    const samplingLimit = this.getRequestedReportSnapshotLimit();
+    const issueTypes = uniqueNonEmpty(reportFixes.flatMap(fix => reportIssueTypes(fix)));
+    const reportBasemapLabel = this.refs.reportBasemap.value === "current"
+      ? ((this.refs.basemap.value && this.refs.basemap.value !== "Blank") ? `${this.refs.basemap.value} (current)` : "Positron (fallback from Blank)")
+      : (this.refs.reportBasemap.value || "Positron");
     const scopeNote = scope === "full" && this.data?.reportAllTruncated
       ? `Loaded ${formatCount(this.data.reportAllReturnedFixCount)} of ${formatCount(this.data.reportAllMatchingFixCount)} fixes for full-study report context due to the ${formatCount(this.data.reportAllLimit)}-fix cap.`
       : scope === "full"
         ? `Loaded ${formatCount(this.data?.reportAllReturnedFixCount || reportFixes.length)} fixes for full-study report context.`
         : `Using the ${formatCount(this.getSelectedIndividuals().length)} currently visible individuals.`;
+    const snapshotStrategy = this.refs.reportSpreadIndividuals.checked
+      ? "ensuring issue coverage first, then spreading remaining examples across individuals"
+      : "ensuring issue coverage first, then sampling the remaining windows across the full list";
+    const snapshotNote = screenshotMode === "auto" && samplingLimit && effectiveSnapshotWindows.length < snapshotWindows.length
+      ? `Auto snapshots will sample ${formatCount(effectiveSnapshotWindows.length)} of ${formatCount(snapshotWindows.length)} snapshot windows, ${snapshotStrategy}.`
+      : screenshotMode === "auto"
+        ? `Auto snapshots will render ${formatCount(effectiveSnapshotWindows.length)} snapshot windows using ${reportBasemapLabel}, ${snapshotStrategy}.`
+        : `Manual screenshot mode keeps ${formatCount(snapshotWindows.length)} snapshot windows without auto-rendering images.`;
     this.refs.reportMeta.innerHTML = `
       <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
       <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
@@ -2935,17 +3514,14 @@ class MovementExampleApp {
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
       <div><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</div>
       <div><strong>Individual:</strong> ${escapeHtml(individualLabel)}</div>
+      <div><strong>Snapshot basemap:</strong> ${escapeHtml(reportBasemapLabel)}</div>
       <div><strong>Suspected fixes in report:</strong> ${escapeHtml(formatCount(reportFixes.length))}</div>
       <div><strong>Snapshot windows:</strong> ${escapeHtml(formatCount(snapshotWindows.length))}</div>
+      <div><strong>Auto snapshots to render:</strong> ${escapeHtml(formatCount(effectiveSnapshotWindows.length))}</div>
+      <div><strong>Snapshot plan:</strong> ${escapeHtml(snapshotNote)}</div>
       <div><strong>Issue types in report:</strong> ${escapeHtml(issueTypes.length ? issueTypes.join(", ") : "Unspecified issue")}</div>
       <div><strong>Scope note:</strong> ${escapeHtml(scopeNote)}</div>
     `;
-    this.refs.reportSelection.textContent = snapshotWindows.length
-      ? snapshotWindows
-        .slice(0, 25)
-        .map(window => `${window.individual} • ${window.startTimeText} to ${window.endTimeText} • ${window.windowFixCount} fixes • ${window.issueTypes.join(", ")}`)
-        .join("\n")
-      : "No suspected fixes match this selection.";
     this.refs.reportSubmit.disabled = reportFixes.length === 0;
   }
 
@@ -2987,6 +3563,8 @@ class MovementExampleApp {
     if (!selectedFixes.length || !this.currentArtifact) {
       return;
     }
+    const field = this.getCurrentColorField();
+    const issueThreshold = this.getCurrentIssueThreshold();
     this.pendingIssueStatus = status;
     this.refs.issueTitle.textContent = `Mark fixes as ${status}`;
     this.refs.issueMeta.innerHTML = `
@@ -2995,6 +3573,8 @@ class MovementExampleApp {
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
       <div><strong>Checked fixes:</strong> ${escapeHtml(formatCount(selectedFixes.length))}</div>
+      <div><strong>Issue variable:</strong> ${escapeHtml(field?.label || "Not set")}</div>
+      <div><strong>Issue threshold:</strong> ${escapeHtml(issueThreshold || "Not set")}</div>
     `;
     this.refs.issueSelection.textContent = selectedFixes
       .slice(0, 25)
@@ -3023,6 +3603,8 @@ class MovementExampleApp {
     this.refs.reportUser.value = this.getUser();
     this.refs.reportScope.value = "visible";
     this.refs.reportScreenshotMode.value = "manual";
+    this.refs.reportBasemap.value = "current";
+    this.refs.reportSpreadIndividuals.checked = true;
     this.refs.reportLinks.innerHTML = this.lastReportLinks.map(link => (
       `<a href="${link.href}" target="_blank" rel="noreferrer">${escapeHtml(link.label)}</a>`
     )).join("");
@@ -3068,10 +3650,17 @@ class MovementExampleApp {
     modal.classList.add("hidden");
   }
 
+  getCurrentIssueThreshold() {
+    const field = this.getCurrentColorField();
+    return getIssueThresholdFromState(field, this.thresholdState);
+  }
+
   async submitIssueAction() {
     const selectedFixes = this.getSelectedFixes();
     const user = this.refs.issueUser.value.trim();
     const issueType = this.refs.issueType.value.trim();
+    const issueField = this.getCurrentColorField()?.key || "";
+    const issueThreshold = this.getCurrentIssueThreshold();
     const issueNote = this.refs.issueNote.value.trim();
     const ownerQuestion = this.refs.issueQuestion.value.trim();
     if (!selectedFixes.length) {
@@ -3100,6 +3689,8 @@ class MovementExampleApp {
             fix_keys: selectedFixes.map(fix => fix.fixKey),
             status: this.pendingIssueStatus,
             issue_type: issueType,
+            issue_field: issueField,
+            issue_threshold: issueThreshold,
             issue_note: issueNote,
             owner_question: ownerQuestion,
             user,
@@ -3121,7 +3712,7 @@ class MovementExampleApp {
 
   async submitGenerateReport() {
     const selectedFixes = this.getReportFixes();
-    const snapshotWindows = this.getReportSnapshotWindows();
+    const snapshotWindows = this.getEffectiveReportSnapshotWindows();
     const user = this.refs.reportUser.value.trim();
     if (!selectedFixes.length) {
       return;
@@ -3141,7 +3732,7 @@ class MovementExampleApp {
     try {
       const screenshotMode = this.refs.reportScreenshotMode.value;
       const snapshots = screenshotMode === "auto" ? await this.captureSnapshotsForSelection(snapshotWindows) : [];
-      const issueIds = uniqueNonEmpty(selectedFixes.map(fix => fix.review.issueId));
+      const issueIds = uniqueNonEmpty(selectedFixes.flatMap(fix => reportIssueIds(fix)));
       const result = await this.requestJSON(
         `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/generate-report`,
         {
@@ -3242,16 +3833,27 @@ class MovementExampleApp {
       return [];
     }
     const renderer = await createReportSnapshotRenderer({
-      style: BASEMAP_STYLES[this.refs.basemap.value] || BASEMAP_STYLES.Positron,
+      style: this.getSelectedReportBasemapStyle(),
     });
     try {
       const snapshots = [];
+      let skippedCount = 0;
       for (let index = 0; index < snapshotWindows.length; index += 1) {
         const window = snapshotWindows[index];
         this.refs.reportStatus.textContent = `Rendering snapshot ${index + 1} of ${snapshotWindows.length}...`;
         this.setStatus(this.refs.reportStatus.textContent);
-        const dataUrl = await renderer.capture(window);
+        let dataUrl = null;
+        try {
+          dataUrl = await renderer.capture(window);
+        } catch (error) {
+          skippedCount += 1;
+          this.refs.reportStatus.textContent = `Skipped snapshot ${index + 1} of ${snapshotWindows.length}: ${error.message}`;
+          this.refs.reportStatus.classList.add("error");
+          this.setStatus(this.refs.reportStatus.textContent, true);
+          continue;
+        }
         if (!dataUrl) {
+          skippedCount += 1;
           continue;
         }
         snapshots.push({
@@ -3259,6 +3861,10 @@ class MovementExampleApp {
           caption: window.caption,
           data_url: dataUrl,
         });
+      }
+      if (skippedCount > 0) {
+        this.refs.reportStatus.textContent = `Rendered ${formatCount(snapshots.length)} snapshots and skipped ${formatCount(skippedCount)} that timed out or failed.`;
+        this.refs.reportStatus.classList.add("error");
       }
       return snapshots;
     } finally {
@@ -3423,12 +4029,48 @@ function parseMovementFixes(items) {
       status: String(item?.review?.status || ""),
       issueId: String(item?.review?.issue_id || ""),
       issueType: String(item?.review?.issue_type || ""),
+      issueField: String(item?.review?.issue_field || ""),
+      issueThreshold: String(item?.review?.issue_threshold || ""),
+      issues: normalizeReviewIssues(item?.review),
       issueNote: String(item?.review?.issue_note || ""),
       ownerQuestion: String(item?.review?.owner_question || ""),
       reviewUser: String(item?.review?.review_user || ""),
       reviewedAt: String(item?.review?.reviewed_at || ""),
     },
   })).filter(item => item.fixKey) : [];
+}
+
+function normalizeReviewIssues(review) {
+  const issues = Array.isArray(review?.issues) ? review.issues : [];
+  const cleaned = issues
+    .filter(item => item && typeof item === "object")
+    .map(item => ({
+      status: String(item.status || "").trim(),
+      issueId: String(item.issue_id || item.issueId || "").trim(),
+      issueType: String(item.issue_type || item.issueType || "").trim(),
+      issueField: String(item.issue_field || item.issueField || "").trim(),
+      issueThreshold: String(item.issue_threshold || item.issueThreshold || "").trim(),
+      issueNote: String(item.issue_note || item.issueNote || "").trim(),
+      ownerQuestion: String(item.owner_question || item.ownerQuestion || "").trim(),
+      reviewUser: String(item.review_user || item.reviewUser || "").trim(),
+      reviewedAt: String(item.reviewed_at || item.reviewedAt || "").trim(),
+    }))
+    .filter(item => item.issueId || item.issueType);
+  if (cleaned.length) {
+    return cleaned;
+  }
+  const legacyIssue = {
+    status: String(review?.status || "").trim(),
+    issueId: String(review?.issue_id || review?.issueId || "").trim(),
+    issueType: String(review?.issue_type || review?.issueType || "").trim(),
+    issueField: String(review?.issue_field || review?.issueField || "").trim(),
+    issueThreshold: String(review?.issue_threshold || review?.issueThreshold || "").trim(),
+    issueNote: String(review?.issue_note || review?.issueNote || "").trim(),
+    ownerQuestion: String(review?.owner_question || review?.ownerQuestion || "").trim(),
+    reviewUser: String(review?.review_user || review?.reviewUser || "").trim(),
+    reviewedAt: String(review?.reviewed_at || review?.reviewedAt || "").trim(),
+  };
+  return legacyIssue.issueId || legacyIssue.issueType ? [legacyIssue] : [];
 }
 
 function refreshMovementFixCollections(data) {
@@ -3511,15 +4153,19 @@ function computeNumericRange(values) {
   };
 }
 
-function computeHistogramBins(values, requestedBinCount = 24) {
+function computeHistogramBins(values, requestedBinCount = 24, { mode = "full", clippedMin = null, clippedMax = null } = {}) {
   if (!Array.isArray(values) || !values.length) {
     return null;
   }
   const sorted = [...values].sort((left, right) => left - right);
   const observedMin = sorted[0];
   const observedMax = sorted[sorted.length - 1];
-  const min = observedMin;
-  const max = observedMax;
+  const useClippedRange = mode === "clipped"
+    && Number.isFinite(clippedMin)
+    && Number.isFinite(clippedMax)
+    && clippedMin < clippedMax;
+  const min = useClippedRange ? clippedMin : observedMin;
+  const max = useClippedRange ? clippedMax : observedMax;
   const binCount = Math.max(1, Math.min(40, Math.floor(requestedBinCount) || 24));
   if (observedMin === observedMax) {
     return {
@@ -3533,7 +4179,10 @@ function computeHistogramBins(values, requestedBinCount = 24) {
       bins: [{ start: observedMin, end: observedMax, count: values.length }],
     };
   }
-  const p95 = quantile(sorted, 0.95);
+  const rangeValues = useClippedRange
+    ? sorted.filter(value => value >= min && value <= max)
+    : sorted;
+  const p95 = quantile(rangeValues.length ? rangeValues : sorted, 0.95);
   const useLogScale = observedMin >= 0 && observedMax > observedMin && p95 > 0 && (observedMax / p95) >= 6;
   const scaleOffset = observedMin;
   const scaleValue = useLogScale
@@ -3573,6 +4222,7 @@ function computeHistogramBins(values, requestedBinCount = 24) {
     max,
     observedMin,
     observedMax,
+    mode: useClippedRange ? "clipped" : "full",
     scaleKind: useLogScale ? "log" : "linear",
     scaleOffset,
     maxCount: Math.max(1, ...bins.map(bin => bin.count)),
@@ -3752,6 +4402,248 @@ function uniqueNonEmpty(values) {
   return Array.from(new Set(values.filter(Boolean).map(value => String(value))));
 }
 
+function sampleItemsEvenly(items, limit) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  if (!Number.isFinite(limit) || limit === null || limit <= 0 || items.length <= limit) {
+    return [...items];
+  }
+  if (limit === 1) {
+    return [items[0]];
+  }
+  const sampled = [];
+  const maxIndex = items.length - 1;
+  for (let index = 0; index < limit; index += 1) {
+    const itemIndex = Math.round((index / (limit - 1)) * maxIndex);
+    sampled.push(items[itemIndex]);
+  }
+  return sampled.filter((item, index) => index === 0 || item !== sampled[index - 1]);
+}
+
+function snapshotWindowIssueTypes(window) {
+  const issueTypes = uniqueNonEmpty(Array.isArray(window?.issueTypes) ? window.issueTypes : []);
+  if (issueTypes.length) {
+    return issueTypes;
+  }
+  return [String(window?.issueType || "Unspecified issue")];
+}
+
+function mostCommonIssueField(fixes) {
+  const counts = new Map();
+  for (const fix of Array.isArray(fixes) ? fixes : []) {
+    const key = String(fix?.review?.issueField || "").trim();
+    if (!key) {
+      continue;
+    }
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  let bestKey = "";
+  let bestCount = -1;
+  for (const [key, count] of counts.entries()) {
+    if (count > bestCount || (count === bestCount && key.localeCompare(bestKey) < 0)) {
+      bestKey = key;
+      bestCount = count;
+    }
+  }
+  return bestKey;
+}
+
+function deriveReportSampleValue(
+  focalFixes,
+  fallbackField,
+  colorFieldByKey,
+  { thresholdFieldKey = "", thresholdValue = null, thresholdReverse = false } = {},
+) {
+  const issueFieldKey = mostCommonIssueField(focalFixes);
+  const effectiveField = (issueFieldKey && colorFieldByKey?.get(issueFieldKey)) || fallbackField;
+  if (!effectiveField || effectiveField.kind !== "numeric") {
+    return null;
+  }
+  const values = (Array.isArray(focalFixes) ? focalFixes : [])
+    .map(fix => finiteOrNull(fix?.attributes?.[effectiveField.key]))
+    .filter(value => typeof value === "number");
+  if (!values.length) {
+    return null;
+  }
+  if (effectiveField.key === thresholdFieldKey && typeof thresholdValue === "number") {
+    const edgeValue = thresholdReverse ? Math.min(...values) : Math.max(...values);
+    return Math.abs(edgeValue - thresholdValue);
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  return quantile(sorted, 0.5);
+}
+
+function buildIssueSampleBuckets(indexed) {
+  const bucketByIndex = new Map();
+  const byIssueType = new Map();
+  for (const candidate of indexed) {
+    const issueType = candidate.issueTypes[0] || "Unspecified issue";
+    const bucket = byIssueType.get(issueType) || [];
+    bucket.push(candidate);
+    byIssueType.set(issueType, bucket);
+  }
+  for (const candidates of byIssueType.values()) {
+    const withValues = candidates
+      .filter(candidate => Number.isFinite(candidate.sampleValue))
+      .sort((left, right) => left.sampleValue - right.sampleValue || left.index - right.index);
+    if (!withValues.length) {
+      for (const candidate of candidates) {
+        bucketByIndex.set(candidate.index, "default");
+      }
+      continue;
+    }
+    const lowCut = quantile(withValues.map(candidate => candidate.sampleValue), 1 / 3);
+    const highCut = quantile(withValues.map(candidate => candidate.sampleValue), 2 / 3);
+    for (const candidate of candidates) {
+      if (!Number.isFinite(candidate.sampleValue)) {
+        bucketByIndex.set(candidate.index, "default");
+      } else if (candidate.sampleValue <= lowCut) {
+        bucketByIndex.set(candidate.index, "low");
+      } else if (candidate.sampleValue >= highCut) {
+        bucketByIndex.set(candidate.index, "high");
+      } else {
+        bucketByIndex.set(candidate.index, "mid");
+      }
+    }
+  }
+  return bucketByIndex;
+}
+
+function sampleReportSnapshotWindows(snapshotWindows, limit, { spreadIndividuals = false } = {}) {
+  if (!Array.isArray(snapshotWindows)) {
+    return [];
+  }
+  if (!Number.isFinite(limit) || limit === null || limit <= 0 || snapshotWindows.length <= limit) {
+    return [...snapshotWindows];
+  }
+
+  const indexed = snapshotWindows.map((window, index) => ({
+    window,
+    index,
+    issueTypes: snapshotWindowIssueTypes(window),
+    individual: String(window?.individual || ""),
+    sampleValue: Number.isFinite(window?.sampleValue) ? Number(window.sampleValue) : null,
+  }));
+  const sampled = [];
+  const sampledIndexes = new Set();
+  const sampledIssueCounts = new Map();
+  const sampledIssueBucketCounts = new Map();
+  const sampledIndividuals = new Map();
+  const sampleBuckets = buildIssueSampleBuckets(indexed);
+  while (sampled.length < limit) {
+    const eligibleIssueTypes = uniqueNonEmpty(
+      indexed
+        .filter(candidate => !sampledIndexes.has(candidate.index))
+        .flatMap(candidate => candidate.issueTypes),
+    );
+    if (!eligibleIssueTypes.length) {
+      break;
+    }
+    eligibleIssueTypes.sort((left, right) => {
+      const leftCount = sampledIssueCounts.get(left) || 0;
+      const rightCount = sampledIssueCounts.get(right) || 0;
+      return leftCount - rightCount || left.localeCompare(right);
+    });
+    const targetIssueType = eligibleIssueTypes[0];
+
+    let best = null;
+    for (const candidate of indexed) {
+      if (sampledIndexes.has(candidate.index) || !candidate.issueTypes.includes(targetIssueType)) {
+        continue;
+      }
+      const issueCounts = candidate.issueTypes.map(issueType => sampledIssueCounts.get(issueType) || 0);
+      const lowIssueCoverage = issueCounts.filter(count => count === (sampledIssueCounts.get(targetIssueType) || 0)).length;
+      const issueLoad = issueCounts.reduce((sum, count) => sum + count, 0);
+      const individualLoad = sampledIndividuals.get(candidate.individual) || 0;
+      const sampleBucket = sampleBuckets.get(candidate.index) || "default";
+      const issueBucketKey = `${targetIssueType}\u0000${sampleBucket}`;
+      const issueBucketLoad = sampledIssueBucketCounts.get(issueBucketKey) || 0;
+      if (
+        !best
+        || lowIssueCoverage > best.lowIssueCoverage
+        || (lowIssueCoverage === best.lowIssueCoverage && issueBucketLoad < best.issueBucketLoad)
+        || (lowIssueCoverage === best.lowIssueCoverage && issueBucketLoad === best.issueBucketLoad && issueLoad < best.issueLoad)
+        || (lowIssueCoverage === best.lowIssueCoverage && issueBucketLoad === best.issueBucketLoad && issueLoad === best.issueLoad && spreadIndividuals && individualLoad < best.individualLoad)
+        || (
+          lowIssueCoverage === best.lowIssueCoverage
+          && issueBucketLoad === best.issueBucketLoad
+          && issueLoad === best.issueLoad
+          && (!spreadIndividuals || individualLoad === best.individualLoad)
+          && candidate.index < best.index
+        )
+      ) {
+        best = {
+          ...candidate,
+          lowIssueCoverage,
+          issueBucketLoad,
+          issueLoad,
+          individualLoad,
+        };
+      }
+    }
+    if (!best) {
+      break;
+    }
+    sampled.push(best);
+    sampledIndexes.add(best.index);
+    sampledIndividuals.set(best.individual, (sampledIndividuals.get(best.individual) || 0) + 1);
+    for (const issueType of best.issueTypes) {
+      sampledIssueCounts.set(issueType, (sampledIssueCounts.get(issueType) || 0) + 1);
+      const sampleBucket = sampleBuckets.get(best.index) || "default";
+      const issueBucketKey = `${issueType}\u0000${sampleBucket}`;
+      sampledIssueBucketCounts.set(issueBucketKey, (sampledIssueBucketCounts.get(issueBucketKey) || 0) + 1);
+    }
+  }
+
+  return sampled
+    .sort((left, right) => left.index - right.index)
+    .map(item => item.window);
+}
+
+function sampleItemsEvenlyByGroup(items, limit, getGroupKey) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  if (!Number.isFinite(limit) || limit === null || limit <= 0 || items.length <= limit) {
+    return [...items];
+  }
+  const groups = new Map();
+  for (const item of items) {
+    const groupKey = String(getGroupKey(item) || "");
+    const bucket = groups.get(groupKey) || [];
+    bucket.push(item);
+    groups.set(groupKey, bucket);
+  }
+  if (groups.size <= 1) {
+    return sampleItemsEvenly(items, limit);
+  }
+  const groupEntries = Array.from(groups.entries()).map(([key, groupItems]) => ({
+    key,
+    items: sampleItemsEvenly(groupItems, Math.min(groupItems.length, limit)),
+    index: 0,
+  }));
+  const sampled = [];
+  while (sampled.length < limit) {
+    let addedInPass = false;
+    for (const entry of groupEntries) {
+      if (sampled.length >= limit) {
+        break;
+      }
+      if (entry.index >= entry.items.length) {
+        continue;
+      }
+      sampled.push(entry.items[entry.index]);
+      entry.index += 1;
+      addedInPass = true;
+    }
+    if (!addedInPass) {
+      break;
+    }
+  }
+  return sampled;
+}
+
 function arraysEqual(left, right) {
   if (left.length !== right.length) {
     return false;
@@ -3759,9 +4651,60 @@ function arraysEqual(left, right) {
   return left.every((value, index) => value === right[index]);
 }
 
-function reportIssueType(fix) {
+function reportIssueTypes(fix) {
+  const issues = Array.isArray(fix?.review?.issues) ? fix.review.issues : [];
+  const issueTypes = uniqueNonEmpty(issues.map(issue => issue.issueType || ""));
+  if (issueTypes.length) {
+    return issueTypes.map(issueType => issueType || "Unspecified issue");
+  }
   const issueType = String(fix?.review?.issueType || "").trim();
-  return issueType || "Unspecified issue";
+  return [issueType || "Unspecified issue"];
+}
+
+function reportIssueType(fix) {
+  return reportIssueTypes(fix)[0] || "Unspecified issue";
+}
+
+function reportIssueIds(fix) {
+  const issues = Array.isArray(fix?.review?.issues) ? fix.review.issues : [];
+  const issueIds = uniqueNonEmpty(issues.map(issue => issue.issueId || ""));
+  if (issueIds.length) {
+    return issueIds;
+  }
+  const issueId = String(fix?.review?.issueId || "").trim();
+  return issueId ? [issueId] : [];
+}
+
+function formatIssueThresholdSummary(field, { value = null, reverse = false, selectedLevels = [] } = {}) {
+  if (!field) {
+    return "";
+  }
+  if (field.kind === "numeric") {
+    if (typeof value !== "number") {
+      return "";
+    }
+    return `${reverse ? "<" : ">"} ${formatColorValue(value, "numeric")}`;
+  }
+  const levels = uniqueNonEmpty(selectedLevels);
+  if (!levels.length) {
+    return "";
+  }
+  if (levels.length === 1) {
+    return `= ${levels[0]}`;
+  }
+  const preview = levels.slice(0, 3).join(", ");
+  return levels.length <= 3 ? `in ${preview}` : `in ${preview}, +${levels.length - 3} more`;
+}
+
+function getIssueThresholdFromState(field, thresholdState) {
+  if (!field || !thresholdState || thresholdState.fieldKey !== field.key) {
+    return "";
+  }
+  return formatIssueThresholdSummary(field, {
+    value: typeof thresholdState.value === "number" ? thresholdState.value : null,
+    reverse: thresholdState.reverse === true,
+    selectedLevels: Array.isArray(thresholdState.selectedLevels) ? thresholdState.selectedLevels : [],
+  });
 }
 
 function reportTrackKey(individual, setName) {
@@ -3794,7 +4737,7 @@ async function createReportSnapshotRenderer({ style }) {
   });
   const overlay = new deck.MapboxOverlay({ interleaved: true, layers: [] });
   map.addControl(overlay);
-  await waitForMapReady(map);
+  await waitForMapReady(map, REPORT_SNAPSHOT_IDLE_TIMEOUT_MS);
 
   return {
     async capture(snapshotWindow) {
@@ -3807,7 +4750,10 @@ async function createReportSnapshotRenderer({ style }) {
         map.fitBounds(bounds, { padding: 70, duration: 0, maxZoom: 15 });
       }
       map.triggerRepaint();
-      await waitForMapReady(map);
+      const mapReady = await waitForMapReady(map, REPORT_SNAPSHOT_IDLE_TIMEOUT_MS);
+      if (!mapReady) {
+        throw new Error("Map idle timeout");
+      }
       await waitForAnimationFrames(2);
       try {
         return map.getCanvas().toDataURL("image/png");
@@ -3829,7 +4775,9 @@ async function createReportSnapshotRenderer({ style }) {
 
 function buildReportSnapshotLayers(snapshotWindow) {
   const anchorSet = new Set(snapshotWindow.anchorFixKeys || []);
+  const secondarySet = new Set(snapshotWindow.secondaryFixKeys || []);
   const contextPoints = [];
+  const secondarySuspiciousPoints = [];
   const suspiciousPoints = [];
   for (const fix of snapshotWindow.windowFixes || []) {
     const point = {
@@ -3838,6 +4786,8 @@ function buildReportSnapshotLayers(snapshotWindow) {
     };
     if (anchorSet.has(fix.fixKey)) {
       suspiciousPoints.push(point);
+    } else if (secondarySet.has(fix.fixKey)) {
+      secondarySuspiciousPoints.push(point);
     } else {
       contextPoints.push(point);
     }
@@ -3863,6 +4813,19 @@ function buildReportSnapshotLayers(snapshotWindow) {
       pickable: false,
     }),
     new deck.ScatterplotLayer({
+      id: `report-snapshot-secondary-${snapshotWindow.snapshotKey}`,
+      data: secondarySuspiciousPoints,
+      getPosition: item => item.position,
+      getFillColor: [245, 181, 54, 210],
+      getLineColor: [48, 64, 82, 220],
+      stroked: true,
+      lineWidthMinPixels: 1.5,
+      getRadius: 110,
+      radiusMinPixels: 6,
+      radiusMaxPixels: 12,
+      pickable: false,
+    }),
+    new deck.ScatterplotLayer({
       id: `report-snapshot-anchors-${snapshotWindow.snapshotKey}`,
       data: suspiciousPoints,
       getPosition: item => item.position,
@@ -3879,14 +4842,17 @@ function buildReportSnapshotLayers(snapshotWindow) {
 }
 
 function buildWindowBounds(windowFixes) {
-  if (!windowFixes.length) {
+  const validFixes = (Array.isArray(windowFixes) ? windowFixes : []).filter(fix => (
+    Number.isFinite(fix?.position?.[0]) && Number.isFinite(fix?.position?.[1])
+  ));
+  if (!validFixes.length) {
     return null;
   }
-  let minLon = windowFixes[0].position[0];
-  let maxLon = windowFixes[0].position[0];
-  let minLat = windowFixes[0].position[1];
-  let maxLat = windowFixes[0].position[1];
-  for (const fix of windowFixes) {
+  let minLon = validFixes[0].position[0];
+  let maxLon = validFixes[0].position[0];
+  let minLat = validFixes[0].position[1];
+  let maxLat = validFixes[0].position[1];
+  for (const fix of validFixes) {
     minLon = Math.min(minLon, fix.position[0]);
     maxLon = Math.max(maxLon, fix.position[0]);
     minLat = Math.min(minLat, fix.position[1]);
@@ -3900,15 +4866,24 @@ function buildWindowBounds(windowFixes) {
   );
 }
 
-async function waitForMapReady(map) {
+async function waitForMapReady(map, timeoutMs = REPORT_SNAPSHOT_IDLE_TIMEOUT_MS) {
   if (!map) {
-    return;
+    return false;
   }
-  if (map.loaded()) {
-    await new Promise(resolve => map.once("idle", resolve));
-    return;
+  const startMs = Date.now();
+  while ((Date.now() - startMs) < timeoutMs) {
+    const loaded = typeof map.loaded === "function" ? map.loaded() : true;
+    const styleLoaded = typeof map.isStyleLoaded === "function" ? map.isStyleLoaded() : loaded;
+    const tilesLoaded = typeof map.areTilesLoaded === "function" ? map.areTilesLoaded() : loaded;
+    const moving = typeof map.isMoving === "function" ? map.isMoving() : false;
+    const zooming = typeof map.isZooming === "function" ? map.isZooming() : false;
+    const rotating = typeof map.isRotating === "function" ? map.isRotating() : false;
+    if (loaded && styleLoaded && tilesLoaded && !moving && !zooming && !rotating) {
+      return true;
+    }
+    await new Promise(resolve => window.setTimeout(resolve, 50));
   }
-  await new Promise(resolve => map.once("idle", resolve));
+  return false;
 }
 
 async function waitForAnimationFrames(count) {
@@ -4027,6 +5002,18 @@ function formatColorValue(value, kind) {
   }
   if (kind === "numeric") {
     return formatMaybeNumber(Number(value), "");
+  }
+  return String(value);
+}
+
+function discreteFieldLevelLabel(field, value) {
+  if (field?.kind === "boolean") {
+    if (value === true) return "True";
+    if (value === false) return "False";
+    return "Missing";
+  }
+  if (value === null || value === undefined || value === "") {
+    return "Missing";
   }
   return String(value);
 }
