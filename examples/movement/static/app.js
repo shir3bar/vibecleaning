@@ -3587,6 +3587,7 @@ class MovementExampleApp {
           windowFixCount: windowFixes.length,
           windowFixes,
           reportWindowFixes: focalFixes,
+          showGrid: true,
           sampleValue,
         });
       }
@@ -5072,6 +5073,18 @@ function renderSnapshotCanvasWithGrid(sourceCanvas, map) {
   return outputCanvas.toDataURL("image/png");
 }
 
+function getReportSnapshotFitPadding(snapshotWindow) {
+  if (snapshotWindow?.showGrid) {
+    return {
+      top: 22,
+      right: 22,
+      bottom: 50,
+      left: 78,
+    };
+  }
+  return 36;
+}
+
 async function createReportSnapshotRenderer({ style }) {
   const container = document.createElement("div");
   Object.assign(container.style, {
@@ -5105,10 +5118,16 @@ async function createReportSnapshotRenderer({ style }) {
       if (!snapshotWindow?.windowFixes?.length) {
         return null;
       }
-      const bounds = buildWindowBounds(snapshotWindow.windowFixes);
+      const bounds = buildWindowBounds(snapshotWindow.windowFixes, {
+        tight: snapshotWindow?.snapshotKind === "individual_profile",
+      });
       overlay.setProps({ layers: buildReportSnapshotLayers(snapshotWindow) });
       if (bounds) {
-        map.fitBounds(bounds, { padding: 70, duration: 0, maxZoom: 15 });
+        map.fitBounds(bounds, {
+          padding: getReportSnapshotFitPadding(snapshotWindow),
+          duration: 0,
+          maxZoom: 15,
+        });
       }
       map.triggerRepaint();
       const mapReady = await waitForMapReady(map, REPORT_SNAPSHOT_IDLE_TIMEOUT_MS);
@@ -5239,7 +5258,7 @@ function buildReportSnapshotLayers(snapshotWindow) {
   ];
 }
 
-function buildWindowBounds(windowFixes) {
+function buildWindowBounds(windowFixes, { tight = false } = {}) {
   const validFixes = (Array.isArray(windowFixes) ? windowFixes : []).filter(fix => (
     Number.isFinite(fix?.position?.[0]) && Number.isFinite(fix?.position?.[1])
   ));
@@ -5256,8 +5275,10 @@ function buildWindowBounds(windowFixes) {
     minLat = Math.min(minLat, fix.position[1]);
     maxLat = Math.max(maxLat, fix.position[1]);
   }
-  const lonPad = Math.max((maxLon - minLon) * 0.15, 0.002);
-  const latPad = Math.max((maxLat - minLat) * 0.15, 0.002);
+  const padFraction = tight ? 0.08 : 0.15;
+  const minPad = tight ? 0.001 : 0.002;
+  const lonPad = Math.max((maxLon - minLon) * padFraction, minPad);
+  const latPad = Math.max((maxLat - minLat) * padFraction, minPad);
   return new maplibregl.LngLatBounds(
     [minLon - lonPad, minLat - latPad],
     [maxLon + lonPad, maxLat + latPad],

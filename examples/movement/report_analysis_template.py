@@ -889,15 +889,17 @@ def build_issue_sections(matched_records, snapshot_windows, fieldnames, columns)
 
     examples_by_issue_type = {}
     for window in snapshot_windows:
-        typed_records = {}
-        for fix_key in window.get("report_fix_keys", []):
-            record = record_by_fix_key.get(fix_key)
-            if not record:
-                continue
-            for issue_type in issue_types_for(record):
-                typed_records.setdefault(issue_type, []).append(record)
-        for issue_type, records in typed_records.items():
-            examples_by_issue_type.setdefault(issue_type, []).append(build_example_entry(window, records, quality_fields))
+        target_issue_type = str(window.get("issue_type") or "").strip() or "Unspecified issue"
+        records = [
+            record_by_fix_key[fix_key]
+            for fix_key in window.get("report_fix_keys", [])
+            if fix_key in record_by_fix_key
+        ]
+        if not records:
+            continue
+        examples_by_issue_type.setdefault(target_issue_type, []).append(
+            build_example_entry(window, records, quality_fields)
+        )
 
     sections = []
     for issue_type in sorted(records_by_issue_type):
@@ -1201,6 +1203,12 @@ def format_temporal_resolution(seconds):
     return f"{minutes:.1f} minutes"
 
 
+def format_speed(value_mps):
+    if value_mps is None:
+        return "n/a"
+    return f"{float(value_mps):.2f} m/s"
+
+
 def format_monitoring_span(start_ms, end_ms):
     if start_ms is None or end_ms is None:
         return "n/a"
@@ -1243,7 +1251,7 @@ def issue_breakdown_for_records(records):
 
 def build_issue_summary_lines(issue_breakdown):
     return [
-        f"{item['issue_type']}: {format_count_label(item['fix_count'], 'reviewed fix')} ({format_status_counts(item['status_counts'])})"
+        f"{item['issue_type']}: {format_count_label(item['fix_count'], 'flagged fix')} ({format_status_counts(item['status_counts'])})"
         for item in issue_breakdown[:6]
     ]
 
@@ -1279,6 +1287,8 @@ def build_individual_profile_sections(valid_records, fieldnames, columns, select
                 "bursts": set(),
                 "reviewed_records": [],
                 "intervals_s": [],
+                "speed_values_mps": [],
+                "speed_values_excluding_suspected_mps": [],
                 "start_ms": record["time_ms"],
                 "end_ms": record["time_ms"],
                 "start_text": record["time_text"],
@@ -1298,6 +1308,10 @@ def build_individual_profile_sections(valid_records, fieldnames, columns, select
             item["bursts"].add(burst_value)
         if record["time_delta_s"] is not None:
             item["intervals_s"].append(float(record["time_delta_s"]))
+        if record["speed_mps"] is not None:
+            item["speed_values_mps"].append(float(record["speed_mps"]))
+            if normalize_review_status(record["review"].get("vc_outlier_status")) != "suspected":
+                item["speed_values_excluding_suspected_mps"].append(float(record["speed_mps"]))
         if normalize_review_status(record["review"].get("vc_outlier_status")):
             item["reviewed_records"].append(record)
         if record["time_ms"] < item["start_ms"]:
@@ -1315,6 +1329,8 @@ def build_individual_profile_sections(valid_records, fieldnames, columns, select
         review_counts = summarize_status_counts(item["reviewed_records"])
         issue_breakdown = issue_breakdown_for_records(item["reviewed_records"])
         median_resolution_s = median_value(item["intervals_s"])
+        median_speed_mps = median_value(item["speed_values_mps"])
+        median_speed_excluding_suspected_mps = median_value(item["speed_values_excluding_suspected_mps"])
         study_name = most_common_non_empty(item["study_names"], "")
         study_id = most_common_non_empty(item["study_ids"], "")
         animal_id = most_common_non_empty(item["animal_ids"], individual)
@@ -1338,6 +1354,10 @@ def build_individual_profile_sections(valid_records, fieldnames, columns, select
                 "species": species,
                 "median_temporal_resolution_s": median_resolution_s,
                 "median_temporal_resolution_text": format_temporal_resolution(median_resolution_s),
+                "median_speed_mps": median_speed_mps,
+                "median_speed_text": format_speed(median_speed_mps),
+                "median_speed_excluding_suspected_mps": median_speed_excluding_suspected_mps,
+                "median_speed_excluding_suspected_text": format_speed(median_speed_excluding_suspected_mps),
                 "monitoring_start_ms": item["start_ms"],
                 "monitoring_end_ms": item["end_ms"],
                 "monitoring_text": monitoring_text,
@@ -1378,15 +1398,16 @@ def build_individual_profile_markdown_section(section, snapshots_by_key):
             f"- Animal ID: {section['animal_id']}",
             f"- Species: {section['species']}",
             f"- Median temporal resolution: {section['median_temporal_resolution_text']}",
+            f"- Median speed: {section['median_speed_text']}",
             f"- Monitoring: {section['monitoring_text']}",
-            f"- Source: {section['source']}",
+            f"- Source csv: {section['source']}",
         ]
     )
     if section["burst_count"] is not None:
         lines.append(f"- No. of bursts: {section['burst_count']}")
     lines.extend(
         [
-            f"- Valid fixes: {section['row_count']}",
+            f"- Total fixes: {section['row_count']}",
             "",
             "### Whole Track",
             "",
@@ -1403,8 +1424,8 @@ def build_individual_profile_markdown_section(section, snapshots_by_key):
                 "",
                 "### Issue Summary",
                 "",
-                f"- Reviewed fixes: {section['reviewed_fix_count']}",
-                f"- Status counts: {format_status_counts(section['review_status_counts'])}",
+                f"- Flagged fixes: {section['reviewed_fix_count']}",
+                f"- Median speed excluding suspected fixes: {section.get('median_speed_excluding_suspected_text', 'n/a')}",
             ]
         )
         for line in section["issue_summary_lines"]:
@@ -1440,13 +1461,14 @@ def build_individual_profile_html_section(section, snapshots_by_key):
             f"<li><strong>Animal ID:</strong> {html_escape(section['animal_id'])}</li>",
             f"<li><strong>Species:</strong> {html_escape(section['species'])}</li>",
             f"<li><strong>Median temporal resolution:</strong> {html_escape(section['median_temporal_resolution_text'])}</li>",
+            f"<li><strong>Median speed:</strong> {html_escape(section['median_speed_text'])}</li>",
             f"<li><strong>Monitoring:</strong> {html_escape(section['monitoring_text'])}</li>",
-            f"<li><strong>Source:</strong> {html_escape(section['source'])}</li>",
+            f"<li><strong>Source csv:</strong> {html_escape(section['source'])}</li>",
         ]
     )
     if section["burst_count"] is not None:
         meta.append(f"<li><strong>No. of bursts:</strong> {section['burst_count']}</li>")
-    meta.append(f"<li><strong>Valid fixes:</strong> {section['row_count']}</li>")
+    meta.append(f"<li><strong>Total fixes:</strong> {section['row_count']}</li>")
 
     issue_markup = ""
     if section["reviewed_fix_count"]:
@@ -1454,8 +1476,8 @@ def build_individual_profile_html_section(section, snapshots_by_key):
         issue_markup = (
             "<h3>Issue Summary</h3>"
             '<ul class="meta">'
-            f"<li><strong>Reviewed fixes:</strong> {section['reviewed_fix_count']}</li>"
-            f"<li><strong>Status counts:</strong> {html_escape(format_status_counts(section['review_status_counts']))}</li>"
+            f"<li><strong>Flagged fixes:</strong> {section['reviewed_fix_count']}</li>"
+            f"<li><strong>Median speed excluding suspected fixes:</strong> {html_escape(section.get('median_speed_excluding_suspected_text', 'n/a'))}</li>"
             "</ul>"
             f'<ul class="evidence">{items}</ul>'
         )

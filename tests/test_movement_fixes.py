@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import base64
 
 from fastapi.testclient import TestClient
 
@@ -16,7 +17,12 @@ from examples.movement.routes import (
 )
 from examples.movement.report_analysis_template import (
     build_html_report,
+    build_individual_profile_html_report,
+    build_individual_profile_sections,
     build_issue_sections,
+    format_monitoring_span,
+    format_temporal_resolution,
+    load_rows_with_context,
     normalize_report_records,
 )
 from examples.movement.summary import build_movement_fixes, build_movement_overview
@@ -29,9 +35,24 @@ fix_b_2,beta,2024-01-01T01:30:00Z,-71.1,41.1,test,suspected,issue_3,loop,hdop,be
 fix_c_1,gamma,2024-01-01T00:45:00Z,-72.0,42.0,train,,,,,,,
 """
 
+PROFILE_CSV_CONTENT = """eventid,individual-local-identifier,timestamp,longitude,latitude,study-name,study-id,individual-taxon-canonical-name,source,burst-id,vc_outlier_status,vc_issue_id,vc_issue_type,vc_issue_note,vc_owner_question
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,Study A,study_001,Cervus elaphus,movebank.mar2025,burst_a,suspected,issue_a,drift,Alpha issue,Question alpha
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,Study A,study_001,Cervus elaphus,movebank.mar2025,burst_a,,,,,
+fix_a_3,alpha,2024-01-01T02:00:00Z,-70.2,40.2,Study A,study_001,Cervus elaphus,movebank.mar2025,burst_b,,,,,
+fix_b_1,beta,2024-01-02T00:00:00Z,-71.0,41.0,Study A,study_001,Cervus elaphus,movebank.mar2025,,confirmed,issue_b,loop,Beta issue,Question beta
+fix_b_2,beta,2024-01-02T01:00:00Z,-71.1,41.1,Study A,study_001,Cervus elaphus,movebank.mar2025,,,,,,
+fix_c_1,gamma,2024-01-03T00:00:00Z,-72.0,42.0,Study A,study_001,Cervus elaphus,movebank.mar2025,,,,,,
+fix_c_2,gamma,2024-01-03T01:00:00Z,-72.1,42.1,Study A,study_001,Cervus elaphus,movebank.mar2025,,,,,,
+"""
+
 
 def write_movement_csv(path: Path) -> Path:
     path.write_text(CSV_CONTENT, encoding="utf-8")
+    return path
+
+
+def write_profile_csv(path: Path) -> Path:
+    path.write_text(PROFILE_CSV_CONTENT, encoding="utf-8")
     return path
 
 
@@ -44,7 +65,7 @@ def test_build_movement_fixes_filters_multiple_individuals(tmp_path):
     assert payload["detail_scope"]["individual"] == ""
     assert payload["returned_fix_count"] == 4
     assert {fix["individual"] for fix in payload["fixes"]} == {"alpha", "beta"}
-    review_by_key = {fix["fix_key"]: fix["review"] for fix in payload["fixes"]}
+    review_by_key = {fix["fix_key"]: fix["review"] for fix in payload["fixes"] if "review" in fix}
     assert review_by_key["id:fix_a_1#row:1"]["issue_field"] == "speed_mps"
     assert review_by_key["id:fix_b_2#row:4"]["issue_field"] == "hdop"
     assert review_by_key["id:fix_a_1#row:1"]["issues"][0]["issue_field"] == "speed_mps"
@@ -85,6 +106,21 @@ def test_build_movement_overview_includes_fix_points_not_just_reviewed_rows(tmp_
     assert {fix["individual"] for fix in payload["fixes"]} == {"alpha", "beta", "gamma"}
 
 
+def test_build_movement_overview_includes_height_above_msl_in_color_fields(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,height-above-msl
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,100
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,120
+""",
+        encoding="utf-8",
+    )
+
+    payload = build_movement_overview(csv_path)
+
+    assert any(field["key"] == "height-above-msl" for field in payload["color_fields"])
+
+
 def test_build_movement_fixes_ignores_cleared_issue_metadata(tmp_path):
     csv_path = tmp_path / "movement.csv"
     csv_path.write_text(
@@ -100,11 +136,11 @@ fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,,issue_old,drift,"[{""issue_
     assert "review" not in payload["fixes"][0]
 
 
-def create_movement_test_client(tmp_path: Path) -> tuple[TestClient, str]:
+def create_movement_test_client(tmp_path: Path, *, csv_content: str = CSV_CONTENT) -> tuple[TestClient, str]:
     data_root = tmp_path / "data"
     study_dir = data_root / "movement_clean" / "test_study"
     study_dir.mkdir(parents=True)
-    write_movement_csv(study_dir / "movement.csv")
+    (study_dir / "movement.csv").write_text(csv_content, encoding="utf-8")
 
     app = create_app(
         data_root=data_root,
@@ -307,6 +343,65 @@ def test_build_issue_sections_adds_issue_field_summary_per_individual():
     assert sections[0]["individual_rows"][0]["issue_field_summary"] == "median 5.000; range 2.000 to 8.000"
 
 
+def test_build_issue_sections_keeps_window_examples_with_their_captured_issue_type():
+    matched_records = [
+        {
+            "fix_key": "fix_a",
+            "individual": "alpha",
+            "set_name": "train",
+            "time_ms": 1,
+            "time_text": "2024-01-01T00:00:00Z",
+            "lon": -70.0,
+            "lat": 40.0,
+            "step_length_m": 100.0,
+            "speed_mps": 2.0,
+            "time_delta_s": 50.0,
+            "review": {
+                "vc_outlier_status": "suspected",
+                "vc_issue_id": "issue_1",
+                "vc_issue_type": "gps",
+                "issues": [
+                    {"status": "suspected", "issue_id": "issue_1", "issue_type": "gps"},
+                    {"status": "suspected", "issue_id": "issue_2", "issue_type": "speed"},
+                ],
+                "vc_issue_note": "Issue note",
+                "vc_owner_question": "Owner question",
+            },
+            "raw": {"hdop": "9.9"},
+        }
+    ]
+    snapshot_windows = [
+        {
+            "snapshot_key": "snapshot_gps",
+            "caption": "gps | alpha",
+            "individual": "alpha",
+            "set_name": "train",
+            "issue_type": "gps",
+            "issue_types": ["gps"],
+            "anchor_fix_keys": ["fix_a"],
+            "report_fix_keys": ["fix_a"],
+            "start_fix_key": "fix_a",
+            "end_fix_key": "fix_a",
+            "start_time_ms": 1,
+            "end_time_ms": 1,
+            "start_time_text": "2024-01-01T00:00:00Z",
+            "end_time_text": "2024-01-01T00:00:00Z",
+            "window_fix_count": 1,
+        }
+    ]
+
+    sections = build_issue_sections(
+        matched_records,
+        snapshot_windows,
+        fieldnames=["hdop", "vc_issue_type"],
+        columns={},
+    )
+
+    examples_by_issue = {section["issue_type"]: section["examples"] for section in sections}
+    assert examples_by_issue["gps"][0]["snapshot_key"] == "snapshot_gps"
+    assert examples_by_issue["speed"][0]["snapshot_key"] == ""
+
+
 def test_normalize_report_records_ignores_cleared_issue_metadata():
     records = normalize_report_records(
         [
@@ -427,3 +522,343 @@ def test_html_report_generates_svg_fallback_when_auto_snapshot_is_missing():
 
     assert "data:image/svg+xml;base64," in html
     assert "No auto-rendered map snapshot included for this example." not in html
+
+
+def test_format_individual_profile_helpers():
+    assert format_temporal_resolution(3600) == "60 minutes"
+    assert format_monitoring_span(1704067200000, 1704153600000) == "2024-01-01 to 2024-01-02"
+
+
+def test_build_individual_profile_sections_extracts_metadata_and_bursts(tmp_path):
+    csv_path = write_profile_csv(tmp_path / "movement.csv")
+
+    fieldnames, columns, _, valid_records = load_rows_with_context(csv_path)
+    sections = build_individual_profile_sections(valid_records, fieldnames, columns, ["alpha"], "movement.csv")
+
+    assert len(sections) == 1
+    section = sections[0]
+    assert section["study_name"] == "Study A"
+    assert section["study_id"] == "study_001"
+    assert section["animal_id"] == "alpha"
+    assert section["species"] == "Cervus elaphus"
+    assert section["median_temporal_resolution_text"] == "60 minutes"
+    assert section["median_speed_mps"] is not None
+    assert section["median_speed_text"].endswith("m/s")
+    assert section["median_speed_excluding_suspected_mps"] is not None
+    assert section["median_speed_excluding_suspected_text"].endswith("m/s")
+    assert section["monitoring_text"] == "2024-01-01 to 2024-01-01"
+    assert section["source"] == "movebank.mar2025"
+    assert section["burst_count"] == 2
+    assert section["reviewed_fix_count"] == 1
+    assert section["map_data_url"].startswith("data:image/svg+xml;base64,")
+    encoded = section["map_data_url"].split(",", 1)[1]
+    svg = base64.b64decode(encoded).decode("utf-8")
+    assert "Longitude" in svg
+    assert "stroke-dasharray" in svg
+    assert "°W" in svg or "°E" in svg
+
+
+def test_build_individual_profile_html_report_omits_optional_fields_when_missing():
+    sections = [
+        {
+            "individual": "alpha",
+            "study_name": "Study A",
+            "study_id": "",
+            "animal_id": "alpha",
+            "species": "Cervus elaphus",
+            "median_temporal_resolution_s": 3600.0,
+            "median_temporal_resolution_text": "60 minutes",
+            "median_speed_mps": 4.2,
+            "median_speed_text": "4.20 m/s",
+            "median_speed_excluding_suspected_mps": 3.8,
+            "median_speed_excluding_suspected_text": "3.80 m/s",
+            "monitoring_start_ms": 1,
+            "monitoring_end_ms": 2,
+            "monitoring_text": "2024-01-01 to 2024-01-01",
+            "source": "movement.csv",
+            "burst_count": None,
+            "row_count": 2,
+            "reviewed_fix_count": 0,
+            "review_status_counts": {},
+            "issue_breakdown": [],
+            "issue_summary_lines": [],
+            "map_data_url": "data:image/svg+xml;base64,abc",
+        }
+    ]
+
+    html = build_individual_profile_html_report("movement.csv", "tester", sections)
+
+    assert "Study ID" not in html
+    assert "No. of bursts" not in html
+    assert "<strong>Median speed:</strong> 4.20 m/s" in html
+    assert "<strong>Source csv:</strong> movement.csv" in html
+    assert "<strong>Total fixes:</strong> 2" in html
+    assert "<strong>Median speed excluding suspected fixes:</strong> 3.80 m/s" not in html
+    assert "Issue Summary" not in html
+
+
+def test_build_individual_profile_html_report_prefers_snapshot_artifact_when_available():
+    sections = [
+        {
+            "individual": "alpha",
+            "snapshot_key": "individual_profile::alpha",
+            "study_name": "Study A",
+            "study_id": "study_001",
+            "animal_id": "alpha",
+            "species": "Cervus elaphus",
+            "median_temporal_resolution_s": 3600.0,
+            "median_temporal_resolution_text": "60 minutes",
+            "median_speed_mps": 4.2,
+            "median_speed_text": "4.20 m/s",
+            "median_speed_excluding_suspected_mps": 3.8,
+            "median_speed_excluding_suspected_text": "3.80 m/s",
+            "monitoring_start_ms": 1,
+            "monitoring_end_ms": 2,
+            "monitoring_text": "2024-01-01 to 2024-01-01",
+            "source": "movement.csv",
+            "burst_count": None,
+            "row_count": 2,
+            "reviewed_fix_count": 0,
+            "review_status_counts": {},
+            "issue_breakdown": [],
+            "issue_summary_lines": [],
+            "map_data_url": "data:image/svg+xml;base64,fallback",
+        }
+    ]
+
+    html = build_individual_profile_html_report(
+        "movement.csv",
+        "tester",
+        sections,
+        {"individual_profile::alpha": {"artifact_name": "movement_snapshot_01.png"}},
+    )
+
+    assert 'src="movement_snapshot_01.png"' in html
+
+
+def test_build_individual_profile_html_report_collapses_reviewed_fix_summary():
+    sections = [
+        {
+            "individual": "alpha",
+            "snapshot_key": "individual_profile::alpha",
+            "study_name": "Study A",
+            "study_id": "study_001",
+            "animal_id": "alpha",
+            "species": "Cervus elaphus",
+            "median_temporal_resolution_s": 3600.0,
+            "median_temporal_resolution_text": "60 minutes",
+            "median_speed_mps": 4.2,
+            "median_speed_text": "4.20 m/s",
+            "median_speed_excluding_suspected_mps": 3.8,
+            "median_speed_excluding_suspected_text": "3.80 m/s",
+            "monitoring_start_ms": 1,
+            "monitoring_end_ms": 2,
+            "monitoring_text": "2024-01-01 to 2024-01-01",
+            "source": "movement.csv",
+            "burst_count": None,
+            "row_count": 3,
+            "reviewed_fix_count": 2,
+            "review_status_counts": {"suspected": 1, "confirmed": 1},
+            "issue_breakdown": [],
+            "issue_summary_lines": [],
+            "map_data_url": "data:image/svg+xml;base64,abc",
+        }
+    ]
+
+    html = build_individual_profile_html_report("movement.csv", "tester", sections)
+
+    assert "<strong>Flagged fixes:</strong> 2" in html
+    assert "<strong>Median speed excluding suspected fixes:</strong> 3.80 m/s" in html
+    assert "Reviewed fixes" not in html
+    assert "Status counts" not in html
+
+
+def test_movement_generate_report_route_keeps_issue_first_behavior(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/generate-report",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "report_type": "issue_first",
+            "fix_keys": ["id:fix_a_1#row:1"],
+            "issue_ids": ["issue_1"],
+            "report_fixes": [
+                {
+                    "fix_key": "id:fix_a_1#row:1",
+                    "individual": "alpha",
+                    "set_name": "train",
+                    "time_ms": 1704067200000,
+                    "time_text": "2024-01-01T00:00:00Z",
+                    "lon": -70.0,
+                    "lat": 40.0,
+                    "step_length_m": None,
+                    "speed_mps": None,
+                    "time_delta_s": None,
+                    "attributes": {},
+                    "review": {
+                        "status": "suspected",
+                        "issue_id": "issue_1",
+                        "issue_type": "drift",
+                        "issue_field": "speed_mps",
+                        "issue_threshold": "",
+                        "issues": [],
+                        "issue_note": "first alpha issue",
+                        "owner_question": "question 1",
+                        "review_user": "reviewer",
+                        "reviewed_at": "2024-01-02T00:00:00Z",
+                    },
+                }
+            ],
+            "snapshot_windows": [],
+            "screenshot_mode": "manual",
+            "snapshots": [],
+            "user": "tester",
+        },
+    )
+
+    assert response.status_code == 200
+    analysis_id = response.json()["analysis"]["analysis_id"]
+    html_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/analysis/{analysis_id}/artifact/movement_outlier_report.html"
+    )
+    appendix_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/analysis/{analysis_id}/artifact/movement_outlier_fixes.csv"
+    )
+    assert html_response.status_code == 200
+    assert appendix_response.status_code == 200
+    assert "Movement Outlier Review Report" in html_response.text
+
+
+def test_movement_generate_report_route_supports_single_individual_profile(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=PROFILE_CSV_CONTENT)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/generate-report",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "report_type": "individual_profile",
+            "individuals": ["gamma"],
+            "user": "tester",
+        },
+    )
+
+    assert response.status_code == 200
+    analysis_id = response.json()["analysis"]["analysis_id"]
+    html_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/analysis/{analysis_id}/artifact/movement_individual_reports.html"
+    )
+    markdown_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/analysis/{analysis_id}/artifact/movement_individual_reports.md"
+    )
+    assert html_response.status_code == 200
+    assert markdown_response.status_code == 200
+    assert "Movement Individual Profile Report" in html_response.text
+    assert "Individual: gamma" in html_response.text
+    assert "data:image/svg+xml;base64," in html_response.text
+    assert "Study ID" in html_response.text
+    assert "Issue Summary" not in html_response.text
+
+
+def test_movement_generate_report_route_supports_combined_multi_individual_profile(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=PROFILE_CSV_CONTENT)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/generate-report",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "report_type": "individual_profile",
+            "individuals": ["beta", "alpha"],
+            "output_mode": "combined",
+            "user": "tester",
+        },
+    )
+
+    assert response.status_code == 200
+    analysis_id = response.json()["analysis"]["analysis_id"]
+    html_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/analysis/{analysis_id}/artifact/movement_individual_reports.html"
+    )
+    assert html_response.status_code == 200
+    assert "Individual: alpha" in html_response.text
+    assert "Individual: beta" in html_response.text
+    assert html_response.text.count("Issue Summary") == 2
+
+
+def test_movement_generate_report_route_supports_separate_multi_individual_profile(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=PROFILE_CSV_CONTENT)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/generate-report",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "report_type": "individual_profile",
+            "individuals": ["alpha", "beta"],
+            "output_mode": "separate",
+            "user": "tester",
+        },
+    )
+
+    assert response.status_code == 200
+    analysis = response.json()["analysis"]
+    analysis_id = analysis["analysis_id"]
+    realized = {item["logical_name"] for item in analysis["realized_output_artifacts"]}
+    assert "movement_individual_report_index.html" in realized
+    alpha_html = next(name for name in realized if name.endswith("_alpha.html"))
+    index_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/analysis/{analysis_id}/artifact/movement_individual_report_index.html"
+    )
+    alpha_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/analysis/{analysis_id}/artifact/{alpha_html}"
+    )
+    assert index_response.status_code == 200
+    assert alpha_response.status_code == 200
+    assert alpha_html in index_response.text
+    assert "Individual: alpha" in alpha_response.text
+
+
+def test_movement_generate_report_route_validates_individual_profile_inputs(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=PROFILE_CSV_CONTENT)
+
+    missing_individuals = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/generate-report",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "report_type": "individual_profile",
+            "individuals": [],
+            "user": "tester",
+        },
+    )
+    invalid_type = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/generate-report",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "report_type": "bad_mode",
+            "individuals": ["alpha"],
+            "user": "tester",
+        },
+    )
+    invalid_output_mode = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/generate-report",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "report_type": "individual_profile",
+            "individuals": ["alpha"],
+            "output_mode": "bad_mode",
+            "user": "tester",
+        },
+    )
+
+    assert missing_individuals.status_code == 400
+    assert missing_individuals.json()["error"] == "Select at least one individual"
+    assert invalid_type.status_code == 400
+    assert invalid_type.json()["error"] == "Invalid report type"
+    assert invalid_output_mode.status_code == 400
+    assert invalid_output_mode.json()["error"] == "Invalid output mode"
