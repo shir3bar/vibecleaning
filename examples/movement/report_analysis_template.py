@@ -20,6 +20,19 @@ REVIEW_COLUMNS = [
     "vc_reviewed_at",
 ]
 
+SEGMENT_REVIEW_COLUMNS = [
+    "vc_segment_status",
+    "vc_segment_id",
+    "vc_segment_type",
+    "vc_segment_note",
+    "vc_segment_owner_question",
+    "vc_segment_review_user",
+    "vc_segment_reviewed_at",
+    "vc_segment_refs",
+]
+
+ALL_REVIEW_COLUMNS = REVIEW_COLUMNS + SEGMENT_REVIEW_COLUMNS
+
 QUALITY_KEYWORDS = (
     "gps",
     "quality",
@@ -135,7 +148,7 @@ def detect_columns(fieldnames):
         ]),
         "set": find_column(normalized, ["set", "split", "partition"]),
     }
-    for name in REVIEW_COLUMNS:
+    for name in ALL_REVIEW_COLUMNS:
         columns[name] = normalized.get(normalize_header(name))
     return columns
 
@@ -191,6 +204,11 @@ def normalize_review_status(raw_value):
     return value if value in {"suspected", "confirmed"} else ""
 
 
+def normalize_segment_status(raw_value):
+    value = str(raw_value or "").strip().lower()
+    return value if value in {"suspected", "confirmed"} else ""
+
+
 def clean_issue_payload(item, fallback_status=""):
     status = normalize_review_status(item.get("status")) or normalize_review_status(fallback_status)
     if not status:
@@ -239,15 +257,61 @@ def parse_issue_refs(raw):
     return [legacy] if legacy else []
 
 
+def clean_segment_payload(item, fallback_status=""):
+    status = normalize_segment_status(item.get("status")) or normalize_segment_status(fallback_status)
+    if not status:
+        return {}
+    segment = {
+        "status": status,
+        "segment_id": str(item.get("segment_id", "")).strip(),
+        "issue_type": str(item.get("issue_type", "")).strip(),
+        "start_fix_key": str(item.get("start_fix_key", "")).strip(),
+        "end_fix_key": str(item.get("end_fix_key", "")).strip(),
+        "issue_note": str(item.get("issue_note", "")).strip(),
+        "owner_question": str(item.get("owner_question", "")).strip(),
+        "review_user": str(item.get("review_user", "")).strip(),
+        "reviewed_at": str(item.get("reviewed_at", "")).strip(),
+    }
+    cleaned = {key: value for key, value in segment.items() if value}
+    if not cleaned.get("segment_id") and not cleaned.get("issue_type"):
+        return {}
+    return cleaned
+
+
+def parse_segment_refs(raw):
+    row_status = normalize_segment_status(raw.get("vc_segment_status"))
+    raw_refs = str(raw.get("vc_segment_refs", "")).strip()
+    if raw_refs:
+        try:
+            parsed = json.loads(raw_refs)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            segments = [clean_segment_payload(item, row_status) for item in parsed if isinstance(item, dict)]
+            segments = [item for item in segments if item]
+            if segments:
+                return segments
+    legacy = clean_segment_payload({
+        "status": raw.get("vc_segment_status"),
+        "segment_id": raw.get("vc_segment_id"),
+        "issue_type": raw.get("vc_segment_type"),
+        "issue_note": raw.get("vc_segment_note"),
+        "owner_question": raw.get("vc_segment_owner_question"),
+        "review_user": raw.get("vc_segment_review_user"),
+        "reviewed_at": raw.get("vc_segment_reviewed_at"),
+    }, row_status)
+    return [legacy] if legacy else []
+
+
 def extract_quality_fields(fieldnames, columns):
     excluded = {
         value
         for key, value in columns.items()
-        if value and key not in REVIEW_COLUMNS
+        if value and key not in ALL_REVIEW_COLUMNS
     }
     result = []
     for name in fieldnames:
-        if name in excluded or name in REVIEW_COLUMNS:
+        if name in excluded or name in ALL_REVIEW_COLUMNS:
             continue
         normalized = normalize_header(name)
         if any(keyword in normalized for keyword in QUALITY_KEYWORDS):
@@ -318,6 +382,7 @@ def load_rows_with_context(source_path):
         for name in REVIEW_COLUMNS:
             review[name] = str(raw.get(name, "")).strip()
         review["issues"] = parse_issue_refs(raw)
+        segments = parse_segment_refs(raw)
         valid_records.append(
             {
                 "row_index": row_index,
@@ -330,6 +395,7 @@ def load_rows_with_context(source_path):
                 "time_text": str(raw.get(columns["time"], "")).strip(),
                 "raw": dict(raw),
                 "review": review,
+                "segments": segments,
                 "step_length_m": step_length_m,
                 "speed_mps": speed_mps,
                 "time_delta_s": time_delta_s,
@@ -1384,13 +1450,12 @@ def profile_snapshot_href(section, snapshot):
             return data_url
     return section.get("map_data_url", "")
 
-
 def build_individual_profile_markdown_section(section, snapshots_by_key):
     lines = [
         f"## Individual: {section['individual']}",
         "",
-        f"- Study name: {section['study_name'] or 'n/a'}",
     ]
+    lines.append(f"- Study name: {section['study_name'] or 'n/a'}")
     if section["study_id"]:
         lines.append(f"- Study ID: {section['study_id']}")
     lines.extend(
@@ -1494,9 +1559,13 @@ def build_individual_profile_html_section(section, snapshots_by_key):
         [
             '<section class="issue">',
             f"<h2>Individual: {html_escape(section['individual'])}</h2>",
+            '<div class="profile-summary">',
+            '<div class="profile-summary-body">',
             '<ul class="meta">',
             *meta,
             "</ul>",
+            "</div>",
+            "</div>",
             "<h3>Whole Track</h3>",
             map_markup,
             issue_markup,
@@ -1519,6 +1588,8 @@ def build_individual_profile_html_report(target_artifact, user, sections, snapsh
         "header { margin-bottom: 28px; }",
         "h1, h2, h3 { color: #102a43; margin-bottom: 0.5rem; }",
         "h2 { margin-top: 2rem; padding-bottom: 0.35rem; border-bottom: 2px solid #d9e2ec; }",
+        ".profile-summary { display: block; }",
+        ".profile-summary-body { flex: 1 1 auto; min-width: 0; }",
         "ul.meta, ul.evidence { margin: 0.5rem 0 1rem 1.25rem; padding: 0; }",
         "figure { margin: 1rem 0; }",
         "figure img { max-width: 100%; height: auto; border: 1px solid #bcccdc; border-radius: 8px; background: #ffffff; }",
@@ -1648,6 +1719,12 @@ def normalize_report_records(items):
             for item in review["issues"]
             if item
         ] or parse_issue_refs(review)
+        segments = [
+            clean_segment_payload(item)
+            for item in (item.get("segments") or [])
+            if isinstance(item, dict)
+        ]
+        segments = [item for item in segments if item]
         raw = {}
         for key, value in attributes_in.items():
             name = str(key).strip()
@@ -1655,6 +1732,18 @@ def normalize_report_records(items):
                 continue
             raw[name] = "" if value is None else str(value)
         raw.update(review)
+        if segments:
+            primary_segment = segments[0]
+            raw.update({
+                "vc_segment_status": primary_segment.get("status", ""),
+                "vc_segment_id": primary_segment.get("segment_id", ""),
+                "vc_segment_type": primary_segment.get("issue_type", ""),
+                "vc_segment_note": primary_segment.get("issue_note", ""),
+                "vc_segment_owner_question": primary_segment.get("owner_question", ""),
+                "vc_segment_review_user": primary_segment.get("review_user", ""),
+                "vc_segment_reviewed_at": primary_segment.get("reviewed_at", ""),
+                "vc_segment_refs": json.dumps(segments, sort_keys=True),
+            })
         normalized.append(
             {
                 "fix_key": str(item.get("fix_key", "")).strip(),
@@ -1668,6 +1757,7 @@ def normalize_report_records(items):
                 "speed_mps": try_float(item.get("speed_mps")),
                 "time_delta_s": try_float(item.get("time_delta_s")),
                 "review": review,
+                "segments": segments,
                 "raw": raw,
             }
         )
@@ -1838,6 +1928,13 @@ def main():
             appendix_fields = [
                 "issue_id",
                 "issue_type",
+                "segment_id",
+                "segment_status",
+                "segment_issue_type",
+                "segment_start_fix_key",
+                "segment_end_fix_key",
+                "segment_owner_question",
+                "segment_note",
                 "fix_key",
                 "individual",
                 "timestamp",
@@ -1858,9 +1955,17 @@ def main():
                 writer = csv.DictWriter(output_handle, fieldnames=appendix_fields)
                 writer.writeheader()
                 for record in matched_records:
+                    primary_segment = record.get("segments", [None])[0] if record.get("segments") else None
                     row = {
                         "issue_id": record["review"].get("vc_issue_id", "").strip(),
                         "issue_type": record["review"].get("vc_issue_type", "").strip(),
+                        "segment_id": str((primary_segment or {}).get("segment_id", "")).strip(),
+                        "segment_status": str((primary_segment or {}).get("status", "")).strip(),
+                        "segment_issue_type": str((primary_segment or {}).get("issue_type", "")).strip(),
+                        "segment_start_fix_key": str((primary_segment or {}).get("start_fix_key", "")).strip(),
+                        "segment_end_fix_key": str((primary_segment or {}).get("end_fix_key", "")).strip(),
+                        "segment_owner_question": str((primary_segment or {}).get("owner_question", "")).strip(),
+                        "segment_note": str((primary_segment or {}).get("issue_note", "")).strip(),
                         "fix_key": record["fix_key"],
                         "individual": record["individual"],
                         "timestamp": record["time_text"],

@@ -1,3 +1,4 @@
+import json
 import textwrap
 import uuid
 from pathlib import Path
@@ -66,6 +67,19 @@ SCRIPT_SHARED = textwrap.dedent(
         "vc_review_user",
         "vc_reviewed_at",
     ]
+
+    SEGMENT_REVIEW_COLUMNS = [
+        "vc_segment_status",
+        "vc_segment_id",
+        "vc_segment_type",
+        "vc_segment_note",
+        "vc_segment_owner_question",
+        "vc_segment_review_user",
+        "vc_segment_reviewed_at",
+        "vc_segment_refs",
+    ]
+
+    ALL_REVIEW_COLUMNS = REVIEW_COLUMNS + SEGMENT_REVIEW_COLUMNS
 
     QUALITY_KEYWORDS = (
         "gps",
@@ -143,7 +157,7 @@ SCRIPT_SHARED = textwrap.dedent(
             ]),
             "set": find_column(normalized, ["set", "split", "partition"]),
         }
-        for name in REVIEW_COLUMNS:
+        for name in ALL_REVIEW_COLUMNS:
             columns[name] = normalized.get(normalize_header(name))
         return columns
 
@@ -220,6 +234,27 @@ SCRIPT_SHARED = textwrap.dedent(
         return cleaned
 
 
+    def clean_segment_payload(item, fallback_status=""):
+        status = normalize_review_status(item.get("status")) or normalize_review_status(fallback_status)
+        if not status:
+            return {}
+        segment = {
+            "status": status,
+            "segment_id": str(item.get("segment_id", "")).strip(),
+            "issue_type": str(item.get("issue_type", "")).strip(),
+            "start_fix_key": str(item.get("start_fix_key", "")).strip(),
+            "end_fix_key": str(item.get("end_fix_key", "")).strip(),
+            "issue_note": str(item.get("issue_note", "")).strip(),
+            "owner_question": str(item.get("owner_question", "")).strip(),
+            "review_user": str(item.get("review_user", "")).strip(),
+            "reviewed_at": str(item.get("reviewed_at", "")).strip(),
+        }
+        cleaned = {key: value for key, value in segment.items() if value}
+        if not cleaned.get("segment_id"):
+            return {}
+        return cleaned
+
+
     def parse_issue_refs(raw):
         row_status = normalize_review_status(raw.get("vc_outlier_status"))
         raw_refs = str(raw.get("vc_issue_refs", "")).strip()
@@ -256,15 +291,40 @@ SCRIPT_SHARED = textwrap.dedent(
         return ""
 
 
+    def parse_segment_refs(raw):
+        row_status = normalize_review_status(raw.get("vc_segment_status"))
+        raw_refs = str(raw.get("vc_segment_refs", "")).strip()
+        if raw_refs:
+            try:
+                parsed = json.loads(raw_refs)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                segments = [clean_segment_payload(item, row_status) for item in parsed if isinstance(item, dict)]
+                segments = [item for item in segments if item]
+                if segments:
+                    return segments
+        legacy = clean_segment_payload({
+            "status": raw.get("vc_segment_status"),
+            "segment_id": raw.get("vc_segment_id"),
+            "issue_type": raw.get("vc_segment_type"),
+            "issue_note": raw.get("vc_segment_note"),
+            "owner_question": raw.get("vc_segment_owner_question"),
+            "review_user": raw.get("vc_segment_review_user"),
+            "reviewed_at": raw.get("vc_segment_reviewed_at"),
+        }, row_status)
+        return [legacy] if legacy else []
+
+
     def extract_quality_fields(fieldnames, columns):
         excluded = {
             value
             for key, value in columns.items()
-            if value and key not in REVIEW_COLUMNS
+            if value and key not in ALL_REVIEW_COLUMNS
         }
         result = []
         for name in fieldnames:
-            if name in excluded or name in REVIEW_COLUMNS:
+            if name in excluded or name in ALL_REVIEW_COLUMNS:
                 continue
             normalized = normalize_header(name)
             if any(keyword in normalized for keyword in QUALITY_KEYWORDS):
@@ -335,6 +395,7 @@ SCRIPT_SHARED = textwrap.dedent(
             for name in REVIEW_COLUMNS:
                 review[name] = str(raw.get(name, "")).strip()
             review["issues"] = parse_issue_refs(raw)
+            segments = parse_segment_refs(raw)
             valid_records.append(
                 {
                     "row_index": row_index,
@@ -347,6 +408,7 @@ SCRIPT_SHARED = textwrap.dedent(
                     "time_text": str(raw.get(columns["time"], "")).strip(),
                     "raw": dict(raw),
                     "review": review,
+                    "segments": segments,
                     "step_length_m": step_length_m,
                     "speed_mps": speed_mps,
                     "time_delta_s": time_delta_s,
@@ -390,6 +452,47 @@ SCRIPT_SHARED = textwrap.dedent(
 
     def html_escape(value):
         return html.escape(str(value or ""), quote=True)
+
+
+    def validate_segment_range(valid_records, start_fix_key, end_fix_key, selected_fix_keys):
+        if not start_fix_key or not end_fix_key:
+            raise SystemExit("A start and end fix are required")
+        by_fix_key = {record["fix_key"]: record for record in valid_records}
+        start_record = by_fix_key.get(start_fix_key)
+        end_record = by_fix_key.get(end_fix_key)
+        if start_record is None or end_record is None:
+            raise SystemExit("Selected segment endpoints were not found in the current dataset")
+        if (
+            start_record["individual"] != end_record["individual"]
+            or start_record["set_name"] != end_record["set_name"]
+        ):
+            raise SystemExit("Segment endpoints must belong to the same track")
+
+        track_records = [
+            record
+            for record in valid_records
+            if record["individual"] == start_record["individual"] and record["set_name"] == start_record["set_name"]
+        ]
+        track_records.sort(key=lambda record: (record["time_ms"], record["row_index"], record["fix_key"]))
+        index_by_fix_key = {record["fix_key"]: index for index, record in enumerate(track_records)}
+        if start_fix_key not in index_by_fix_key or end_fix_key not in index_by_fix_key:
+            raise SystemExit("Segment endpoints could not be resolved in track order")
+        start_index = min(index_by_fix_key[start_fix_key], index_by_fix_key[end_fix_key])
+        end_index = max(index_by_fix_key[start_fix_key], index_by_fix_key[end_fix_key])
+        range_records = track_records[start_index:end_index + 1]
+        range_fix_keys = [record["fix_key"] for record in range_records]
+        selected_set = set(selected_fix_keys or [])
+        if selected_set and set(range_fix_keys) != selected_set:
+            raise SystemExit("Selected fixes must form one contiguous range on a single track")
+        overlapping_segment_ids = sorted({
+            str(segment.get("segment_id", "")).strip()
+            for record in range_records
+            for segment in record.get("segments", [])
+            if str(segment.get("segment_id", "")).strip()
+        })
+        if overlapping_segment_ids:
+            raise SystemExit("This track range already belongs to a flagged segment")
+        return range_records
     """
 ).strip() + "\n"
 
@@ -495,6 +598,118 @@ def main():
             "matched_fix_keys": sorted(matched),
             "missing_fix_keys": sorted(selected_set - matched),
             "annotated_fix_count": len(matched),
+            "reviewed_at": reviewed_at,
+            "review_user": user,
+        })
+
+
+if __name__ == "__main__":
+    main()
+    """
+).strip() + "\n"
+
+
+ANNOTATE_SEGMENT_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
+    """
+
+def main():
+        spec_path = Path(os.environ["VIBECLEANING_SPEC_PATH"])
+        summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
+        spec = json.loads(spec_path.read_text())
+        params = dict(spec["step"].get("parameters") or {})
+        target_artifact = str(params.get("target_artifact") or "").strip()
+        selected_fix_keys = sorted({str(item).strip() for item in params.get("selected_fix_keys", []) if str(item).strip()})
+        start_fix_key = str(params.get("start_fix_key") or "").strip()
+        end_fix_key = str(params.get("end_fix_key") or "").strip()
+        status = str(params.get("status") or "").strip().lower()
+        segment_id = str(params.get("segment_id") or "").strip()
+        issue_type = str(params.get("issue_type") or "").strip()
+        issue_note = str(params.get("issue_note") or "").strip()
+        owner_question = str(params.get("owner_question") or "").strip()
+        user = str(params.get("user") or "").strip()
+        if status not in {"suspected", "confirmed"}:
+            raise SystemExit("Invalid segment status")
+        if not target_artifact:
+            raise SystemExit("Missing target artifact")
+        if not segment_id:
+            raise SystemExit("Missing segment id")
+        if not issue_type:
+            raise SystemExit("Missing segment issue type")
+
+        source = None
+        for artifact in spec.get("input_artifacts", []):
+            if artifact.get("logical_name") == target_artifact:
+                source = artifact
+                break
+        output = None
+        for artifact in spec.get("output_artifacts", []):
+            if artifact.get("logical_name") == target_artifact:
+                output = artifact
+                break
+        if source is None or output is None:
+            raise SystemExit("Missing input or output artifact")
+
+        fieldnames, _, rows, valid_records = load_rows_with_context(source["path"])
+        range_records = validate_segment_range(valid_records, start_fix_key, end_fix_key, selected_fix_keys)
+        context_by_row = {record["row_index"]: record for record in valid_records}
+        range_row_indexes = {record["row_index"] for record in range_records}
+        output_fieldnames = list(fieldnames)
+        for name in SEGMENT_REVIEW_COLUMNS:
+            if name not in output_fieldnames:
+                output_fieldnames.append(name)
+
+        reviewed_at = now_iso()
+        new_segment = clean_segment_payload({
+            "status": status,
+            "segment_id": segment_id,
+            "issue_type": issue_type,
+            "start_fix_key": range_records[0]["fix_key"],
+            "end_fix_key": range_records[-1]["fix_key"],
+            "issue_note": issue_note,
+            "owner_question": owner_question,
+            "review_user": user,
+            "reviewed_at": reviewed_at,
+        })
+
+        output_path = Path(output["path"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", newline="", encoding="utf-8") as output_handle:
+            writer = csv.DictWriter(output_handle, fieldnames=output_fieldnames)
+            writer.writeheader()
+            for row_index, raw in enumerate(rows, start=1):
+                row = dict(raw)
+                context = context_by_row.get(row_index)
+                if context and row_index in range_row_indexes:
+                    segments = parse_segment_refs(raw)
+                    segments.append(new_segment)
+                    row["vc_segment_status"] = status
+                    row["vc_segment_id"] = segment_id
+                    row["vc_segment_type"] = issue_type
+                    row["vc_segment_note"] = issue_note
+                    row["vc_segment_owner_question"] = owner_question
+                    row["vc_segment_review_user"] = user
+                    row["vc_segment_reviewed_at"] = reviewed_at
+                    row["vc_segment_refs"] = json.dumps(segments, sort_keys=True)
+                writer.writerow({name: row.get(name, "") for name in output_fieldnames})
+
+        write_json(summary_path, {
+            "app": "movement",
+            "action": "annotate_segment",
+            "target_artifact": target_artifact,
+            "segment_id": segment_id,
+            "status": status,
+            "issue_type": issue_type,
+            "issue_note": issue_note,
+            "owner_question": owner_question,
+            "start_fix_key": range_records[0]["fix_key"],
+            "end_fix_key": range_records[-1]["fix_key"],
+            "selected_fix_keys": selected_fix_keys,
+            "segment_fix_keys": [record["fix_key"] for record in range_records],
+            "segment_fix_count": len(range_records),
+            "individual": range_records[0]["individual"],
+            "set_name": range_records[0]["set_name"],
+            "start_time_text": range_records[0]["time_text"],
+            "end_time_text": range_records[-1]["time_text"],
             "reviewed_at": reviewed_at,
             "review_user": user,
         })
@@ -1127,6 +1342,10 @@ def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]
     return unique
 
 
+def _validate_fix_key(value: object, *, label: str) -> str:
+    return _validate_required_text(value, label=label, max_length=240)
+
+
 def _validate_issue_ids(value: object) -> list[str]:
     if value is None:
         return []
@@ -1605,6 +1824,53 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/annotate-segment")
+    async def post_movement_annotate_segment(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            selected_fix_keys = _validate_fix_keys(body.get("selected_fix_keys"))
+            start_fix_key = _validate_fix_key(body.get("start_fix_key"), label="Start fix key")
+            end_fix_key = _validate_fix_key(body.get("end_fix_key"), label="End fix key")
+            status = _validate_status(body.get("status"))
+            issue_type = _validate_required_text(body.get("issue_type"), label="Issue type", max_length=120)
+            issue_note = _validate_required_text(body.get("issue_note"), label="Issue note", max_length=1200)
+            owner_question = _validate_required_text(body.get("owner_question"), label="Owner question", max_length=600)
+            user = body.get("user")
+            segment_id = f"segment_{uuid.uuid4().hex[:12]}"
+
+            payload = {
+                "user": user,
+                "title": f"Mark segment in {logical_name} as {status}",
+                "kind": "python",
+                "script": ANNOTATE_SEGMENT_SCRIPT,
+                "parameters": {
+                    "app": "movement",
+                    "action": "annotate_segment",
+                    "target_artifact": logical_name,
+                    "selected_fix_keys": selected_fix_keys,
+                    "start_fix_key": start_fix_key,
+                    "end_fix_key": end_fix_key,
+                    "status": status,
+                    "segment_id": segment_id,
+                    "issue_type": issue_type,
+                    "issue_note": issue_note,
+                    "owner_question": owner_question,
+                    "user": user,
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": [logical_name],
+                "set_as_head": True,
+            }
+            return JSONResponse(create_step(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/generate-report")
     async def post_movement_generate_report(family_name: str, study_name: str, request: Request):
         body = await parse_json_body(request)
@@ -1760,6 +2026,53 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                     "issue_type": issue_type,
                     "issue_field": issue_field,
                     "issue_threshold": issue_threshold,
+                    "issue_note": issue_note,
+                    "owner_question": owner_question,
+                    "user": user,
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": [logical_name],
+                "set_as_head": True,
+            }
+            return JSONResponse(create_step(project_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/project/{project_name}/apps/movement/actions/annotate-segment")
+    async def post_annotate_segment(project_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            project_dir = get_project_dir(data_root, project_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            selected_fix_keys = _validate_fix_keys(body.get("selected_fix_keys"))
+            start_fix_key = _validate_fix_key(body.get("start_fix_key"), label="Start fix key")
+            end_fix_key = _validate_fix_key(body.get("end_fix_key"), label="End fix key")
+            status = _validate_status(body.get("status"))
+            issue_type = _validate_required_text(body.get("issue_type"), label="Issue type", max_length=120)
+            issue_note = _validate_required_text(body.get("issue_note"), label="Issue note", max_length=1200)
+            owner_question = _validate_required_text(body.get("owner_question"), label="Owner question", max_length=600)
+            user = body.get("user")
+            segment_id = f"segment_{uuid.uuid4().hex[:12]}"
+
+            payload = {
+                "user": user,
+                "title": f"Mark segment in {logical_name} as {status}",
+                "kind": "python",
+                "script": ANNOTATE_SEGMENT_SCRIPT,
+                "parameters": {
+                    "app": "movement",
+                    "action": "annotate_segment",
+                    "target_artifact": logical_name,
+                    "selected_fix_keys": selected_fix_keys,
+                    "start_fix_key": start_fix_key,
+                    "end_fix_key": end_fix_key,
+                    "status": status,
+                    "segment_id": segment_id,
+                    "issue_type": issue_type,
                     "issue_note": issue_note,
                     "owner_question": owner_question,
                     "user": user,

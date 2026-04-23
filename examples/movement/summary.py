@@ -23,6 +23,19 @@ REVIEW_COLUMNS = [
     "vc_reviewed_at",
 ]
 
+SEGMENT_REVIEW_COLUMNS = [
+    "vc_segment_status",
+    "vc_segment_id",
+    "vc_segment_type",
+    "vc_segment_note",
+    "vc_segment_owner_question",
+    "vc_segment_review_user",
+    "vc_segment_reviewed_at",
+    "vc_segment_refs",
+]
+
+ALL_REVIEW_COLUMNS = REVIEW_COLUMNS + SEGMENT_REVIEW_COLUMNS
+
 DERIVED_FIELDS = [
     {"key": "step_length_m", "label": "Step length (m)", "kind": "numeric", "source": "derived"},
     {"key": "speed_mps", "label": "Speed (m/s)", "kind": "numeric", "source": "derived"},
@@ -53,7 +66,7 @@ QUALITY_KEYWORDS = (
 MAX_SERIES_POINTS = 1500
 MAX_STAT_SAMPLES = 2000
 DEFAULT_FIX_LIMIT = 1000000
-SUMMARY_CACHE_VERSION = 7
+SUMMARY_CACHE_VERSION = 8
 
 
 def normalize_header(header: str | None) -> str:
@@ -124,7 +137,7 @@ def detect_columns(fieldnames: list[str]) -> dict[str, str | None]:
             "taxon",
         ]),
         "set": find_column(normalized, ["set", "split", "partition"]),
-        **{name: normalized.get(normalize_header(name)) for name in REVIEW_COLUMNS},
+        **{name: normalized.get(normalize_header(name)) for name in ALL_REVIEW_COLUMNS},
     }
 
 
@@ -350,7 +363,7 @@ def _candidate_field_kind(stats: dict) -> str | None:
 
 def _should_include_quality_field(fieldname: str, stats: dict) -> bool:
     normalized = normalize_header(fieldname)
-    if fieldname in REVIEW_COLUMNS:
+    if fieldname in ALL_REVIEW_COLUMNS:
         return True
     if any(keyword in normalized for keyword in QUALITY_KEYWORDS):
         return True
@@ -366,6 +379,10 @@ def _make_fix_key(row_index: int, fix_id: str, individual: str, time_ms: int) ->
 def _normalize_review_status(raw_value: object) -> str:
     value = str(raw_value or "").strip().lower()
     return value if value in {"suspected", "confirmed"} else ""
+
+
+def _normalize_segment_status(raw_value: object) -> str:
+    return _normalize_review_status(raw_value)
 
 
 def _normalize_issue_payload(item: dict, *, fallback_status: str = "") -> dict:
@@ -385,6 +402,27 @@ def _normalize_issue_payload(item: dict, *, fallback_status: str = "") -> dict:
     }
     cleaned = {key: value for key, value in issue.items() if _is_present(value)}
     if not cleaned.get("issue_id") and not cleaned.get("issue_type"):
+        return {}
+    return cleaned
+
+
+def _normalize_segment_payload(item: dict, *, fallback_status: str = "") -> dict:
+    status = _normalize_segment_status(item.get("status")) or _normalize_segment_status(fallback_status)
+    if not status:
+        return {}
+    segment = {
+        "status": status,
+        "segment_id": str(item.get("segment_id", "")).strip(),
+        "issue_type": str(item.get("issue_type", "")).strip(),
+        "start_fix_key": str(item.get("start_fix_key", "")).strip(),
+        "end_fix_key": str(item.get("end_fix_key", "")).strip(),
+        "issue_note": str(item.get("issue_note", "")).strip(),
+        "owner_question": str(item.get("owner_question", "")).strip(),
+        "review_user": str(item.get("review_user", "")).strip(),
+        "reviewed_at": str(item.get("reviewed_at", "")).strip(),
+    }
+    cleaned = {key: value for key, value in segment.items() if _is_present(value)}
+    if not cleaned.get("segment_id"):
         return {}
     return cleaned
 
@@ -432,7 +470,7 @@ def _build_color_fields(fieldnames: list[str], columns: dict[str, str | None], f
     excluded_fields = {
         value
         for key, value in columns.items()
-        if value and key not in REVIEW_COLUMNS
+        if value and key not in ALL_REVIEW_COLUMNS
     }
     color_fields = list(DERIVED_FIELDS)
     for review_field in REVIEW_COLUMNS:
@@ -448,7 +486,7 @@ def _build_color_fields(fieldnames: list[str], columns: dict[str, str | None], f
             )
 
     for fieldname in fieldnames:
-        if fieldname in excluded_fields or fieldname in REVIEW_COLUMNS:
+        if fieldname in excluded_fields or fieldname in ALL_REVIEW_COLUMNS:
             continue
         stats = field_stats[fieldname]
         if not _should_include_quality_field(fieldname, stats):
@@ -523,6 +561,39 @@ def _review_issues(raw: dict) -> list[dict]:
     return [legacy_issue] if legacy_issue else []
 
 
+def _segment_memberships(raw: dict) -> list[dict]:
+    row_status = _normalize_segment_status(raw.get("vc_segment_status"))
+    raw_refs = str(raw.get("vc_segment_refs", "")).strip()
+    if raw_refs:
+        try:
+            parsed = json.loads(raw_refs)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            segments = []
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                cleaned = _normalize_segment_payload(item, fallback_status=row_status)
+                if cleaned:
+                    segments.append(cleaned)
+            if segments:
+                return segments
+    legacy_segment = _normalize_segment_payload(
+        {
+            "status": row_status,
+            "segment_id": str(raw.get("vc_segment_id", "")).strip(),
+            "issue_type": str(raw.get("vc_segment_type", "")).strip(),
+            "issue_note": str(raw.get("vc_segment_note", "")).strip(),
+            "owner_question": str(raw.get("vc_segment_owner_question", "")).strip(),
+            "review_user": str(raw.get("vc_segment_review_user", "")).strip(),
+            "reviewed_at": str(raw.get("vc_segment_reviewed_at", "")).strip(),
+        },
+        fallback_status=row_status,
+    )
+    return [legacy_segment] if legacy_segment else []
+
+
 def _build_attributes(raw: dict, *, color_fields: list[dict], step_length_m, speed_mps, time_delta_s) -> dict:
     attributes = {
         "step_length_m": step_length_m,
@@ -555,6 +626,7 @@ def _build_fix_record(
     lat: float,
     attributes: dict,
     review: dict,
+    segment_memberships: list[dict],
 ) -> dict:
     fix = {
         "fix_key": _make_fix_key(row_index, fix_id, individual, time_ms),
@@ -569,7 +641,92 @@ def _build_fix_record(
         fix["attributes"] = attributes
     if review:
         fix["review"] = review
+    if segment_memberships:
+        fix["segments"] = [dict(item) for item in segment_memberships]
     return fix
+
+
+def _accumulate_segments(
+    *,
+    segments_by_id: dict[str, dict],
+    row_index: int,
+    fix_key: str,
+    individual: str,
+    set_name: str,
+    time_ms: int,
+    lon: float,
+    lat: float,
+    memberships: list[dict],
+):
+    for membership in memberships:
+        segment_id = str(membership.get("segment_id", "")).strip()
+        if not segment_id:
+            continue
+        segment = segments_by_id.setdefault(
+            segment_id,
+            {
+                "segment_id": segment_id,
+                "status": str(membership.get("status", "")).strip(),
+                "issue_type": str(membership.get("issue_type", "")).strip(),
+                "issue_note": str(membership.get("issue_note", "")).strip(),
+                "owner_question": str(membership.get("owner_question", "")).strip(),
+                "review_user": str(membership.get("review_user", "")).strip(),
+                "reviewed_at": str(membership.get("reviewed_at", "")).strip(),
+                "start_fix_key": str(membership.get("start_fix_key", "")).strip(),
+                "end_fix_key": str(membership.get("end_fix_key", "")).strip(),
+                "individual": individual,
+                "set_name": set_name,
+                "rows": [],
+            },
+        )
+        segment["rows"].append(
+            {
+                "row_index": row_index,
+                "fix_key": fix_key,
+                "time_ms": int(time_ms),
+                "position": [float(lon), float(lat)],
+            }
+        )
+
+
+def _finalize_segments(segments_by_id: dict[str, dict]) -> list[dict]:
+    segments = []
+    for segment in segments_by_id.values():
+        rows = sorted(
+            segment.get("rows", []),
+            key=lambda item: (item["time_ms"], item["row_index"], item["fix_key"]),
+        )
+        if not rows:
+            continue
+        segments.append(
+            {
+                "segment_id": segment["segment_id"],
+                "individual": segment.get("individual", ""),
+                "set_name": segment.get("set_name", "train") or "train",
+                "start_fix_key": segment.get("start_fix_key") or rows[0]["fix_key"],
+                "end_fix_key": segment.get("end_fix_key") or rows[-1]["fix_key"],
+                "start_time_ms": int(rows[0]["time_ms"]),
+                "end_time_ms": int(rows[-1]["time_ms"]),
+                "fix_count": len(rows),
+                "status": segment.get("status", ""),
+                "issue_type": segment.get("issue_type", ""),
+                "issue_note": segment.get("issue_note", ""),
+                "owner_question": segment.get("owner_question", ""),
+                "review_user": segment.get("review_user", ""),
+                "reviewed_at": segment.get("reviewed_at", ""),
+                "fix_keys": [row["fix_key"] for row in rows],
+                "path": [row["position"] for row in rows],
+            }
+        )
+    segments.sort(
+        key=lambda item: (
+            item["individual"],
+            item["set_name"],
+            item["start_time_ms"],
+            item["segment_id"],
+        )
+    )
+    return segments
 
 
 def _valid_movement_row(raw: dict, columns: dict[str, str | None]) -> dict | None:
@@ -596,6 +753,8 @@ def _valid_movement_row(raw: dict, columns: dict[str, str | None]) -> dict | Non
         "lon": float(lon),
         "lat": float(lat),
         "set_name": set_name,
+        "common_name": common_name,
+        "scientific_name": scientific_name,
         "species": common_name or scientific_name or "Unknown species",
     }
 
@@ -624,7 +783,7 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
     excluded_fields = {
         value
         for key, value in columns.items()
-        if value and key not in REVIEW_COLUMNS
+        if value and key not in ALL_REVIEW_COLUMNS
     }
     overview_quality_fields = [
         fieldname
@@ -650,6 +809,7 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
     review_counts = {"suspected": 0, "confirmed": 0}
     review_counts_by_individual: dict[str, dict[str, int]] = {}
     overview_fix_contexts: list[dict] = []
+    overview_segments_by_id: dict[str, dict] = {}
 
     total_rows = 0
     min_lon = float("inf")
@@ -732,6 +892,20 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
             group["prev"] = {"time_ms": time_ms, "lon": lon, "lat": lat}
 
             review = _compact_review(raw)
+            segment_memberships = _segment_memberships(raw)
+            fix_key = _make_fix_key(row_index, valid["fix_id"], individual, time_ms)
+            if segment_memberships:
+                _accumulate_segments(
+                    segments_by_id=overview_segments_by_id,
+                    row_index=row_index,
+                    fix_key=fix_key,
+                    individual=individual,
+                    set_name=set_name,
+                    time_ms=time_ms,
+                    lon=lon,
+                    lat=lat,
+                    memberships=segment_memberships,
+                )
             review_status = str(review.get("status", "")).strip().lower()
             if review_status in review_counts:
                 review_counts[review_status] += 1
@@ -755,6 +929,7 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
                         "speed_mps": speed_mps,
                         "time_delta_s": time_delta_s,
                         "review": review,
+                        "segment_memberships": segment_memberships,
                     }
                 )
 
@@ -804,9 +979,11 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
                 time_delta_s=context["time_delta_s"],
             ),
             review=context["review"],
+            segment_memberships=context["segment_memberships"],
         )
         for context in overview_fix_contexts
     ]
+    overview_segments = _finalize_segments(overview_segments_by_id)
 
     individuals = sorted(row_counts)
     series_by_individual: dict[str, dict[str, dict[str, list]]] = {}
@@ -851,6 +1028,7 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
         "color_fields": color_fields,
         "review_counts": review_counts,
         "fixes": overview_fixes,
+        "segments": overview_segments,
         "initial_view": {
             "longitude": float((min_lon + max_lon) / 2),
             "latitude": float((min_lat + max_lat) / 2),
@@ -928,6 +1106,7 @@ def _build_movement_fixes_cached(
     fieldnames, columns, field_stats = _prepare_scan_context_cached(path_str, mtime_ns, size)
     color_fields = _build_color_fields(fieldnames, columns, field_stats)
     fixes: list[dict] = []
+    segments_by_id: dict[str, dict] = {}
     matching_fix_count = 0
     truncated = False
     previous_by_group: dict[tuple[str, str], dict] = {}
@@ -957,6 +1136,7 @@ def _build_movement_fixes_cached(
             previous_by_group[group_key] = {"time_ms": time_ms, "lon": lon, "lat": lat}
 
             review = _compact_review(raw)
+            segment_memberships = _segment_memberships(raw)
             status = str(review.get("status", "")).strip().lower()
             if individual_filters and item_individual not in individual_filters:
                 continue
@@ -964,6 +1144,19 @@ def _build_movement_fixes_cached(
                 continue
             if end_ms is not None and time_ms > end_ms:
                 continue
+            fix_key = _make_fix_key(row_index, valid["fix_id"], item_individual, time_ms)
+            if segment_memberships:
+                _accumulate_segments(
+                    segments_by_id=segments_by_id,
+                    row_index=row_index,
+                    fix_key=fix_key,
+                    individual=item_individual,
+                    set_name=set_name,
+                    time_ms=time_ms,
+                    lon=lon,
+                    lat=lat,
+                    memberships=segment_memberships,
+                )
             if review_status == "reviewed" and not review:
                 continue
             if review_status in {"suspected", "confirmed"} and status != review_status:
@@ -991,11 +1184,13 @@ def _build_movement_fixes_cached(
                         time_delta_s=time_delta_s,
                     ),
                     review=review,
+                    segment_memberships=segment_memberships,
                 )
             )
 
     return {
         "fixes": fixes,
+        "segments": _finalize_segments(segments_by_id),
         "matching_fix_count": int(matching_fix_count),
         "returned_fix_count": int(len(fixes)),
         "truncated": bool(truncated),
@@ -1016,6 +1211,7 @@ def build_movement_summary(path: Path) -> dict:
     full_detail = build_movement_fixes(path, limit=None)
     payload = dict(overview)
     payload["fixes"] = full_detail["fixes"]
+    payload["segments"] = full_detail["segments"]
     payload["detail_scope"] = full_detail["detail_scope"]
     payload["detail_loaded"] = True
     return payload

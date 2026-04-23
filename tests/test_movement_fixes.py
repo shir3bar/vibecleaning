@@ -56,8 +56,6 @@ def write_movement_csv(path: Path) -> Path:
 def write_profile_csv(path: Path) -> Path:
     path.write_text(PROFILE_CSV_CONTENT, encoding="utf-8")
     return path
-
-
 def test_build_movement_fixes_filters_multiple_individuals(tmp_path):
     csv_path = write_movement_csv(tmp_path / "movement.csv")
 
@@ -645,7 +643,6 @@ def test_build_individual_profile_html_report_prefers_snapshot_artifact_when_ava
     )
 
     assert 'src="movement_snapshot_01.png"' in html
-
 
 def test_build_individual_profile_html_report_collapses_reviewed_fix_summary():
     sections = [

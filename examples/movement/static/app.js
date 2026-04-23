@@ -13,54 +13,173 @@ const LOCAL_BLANK_STYLE = {
 };
 
 const OSM_STREETS_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors';
+const OSM_STREETS_ATTRIBUTION_TEXT = "© OpenStreetMap contributors";
+const CARTO_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>';
+const CARTO_ATTRIBUTION_TEXT = "© OpenStreetMap contributors © CARTO";
+const ESRI_WORLD_IMAGERY_ATTRIBUTION = 'Imagery &copy; <a href="https://www.esri.com/" target="_blank" rel="noreferrer">Esri</a>, Maxar, Earthstar Geographics, and the GIS User Community';
+const ESRI_WORLD_IMAGERY_ATTRIBUTION_TEXT = "Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community";
+const OPENTOPO_ATTRIBUTION = 'Map data: &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors, map style: &copy; <a href="https://opentopomap.org" target="_blank" rel="noreferrer">OpenTopoMap</a>';
+const OPENTOPO_ATTRIBUTION_TEXT = "Map data © OpenStreetMap contributors, style © OpenTopoMap";
 
-const OSM_STREETS_STYLE = {
-  version: 8,
+function buildRasterStyle({ backgroundColor = "#08111b", sources = {}, layerIds = [] } = {}) {
+  return {
+    version: 8,
+    sources,
+    layers: [
+      {
+        id: "background",
+        type: "background",
+        paint: {
+          "background-color": backgroundColor,
+        },
+      },
+      ...layerIds.map(layerId => ({
+        id: `${layerId}-raster`,
+        type: "raster",
+        source: layerId,
+        minzoom: 0,
+        maxzoom: 22,
+      })),
+    ],
+  };
+}
+
+const OSM_STREETS_STYLE = buildRasterStyle({
+  backgroundColor: "#f6f4ef",
   sources: {
     "osm-streets": {
       type: "raster",
-      tiles: [
-        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-      ],
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
       tileSize: 256,
       maxzoom: 19,
       attribution: OSM_STREETS_ATTRIBUTION,
     },
   },
-  layers: [
-    {
-      id: "background",
-      type: "background",
-      paint: {
-        "background-color": "#f6f4ef",
-      },
-    },
-    {
-      id: "osm-streets-raster",
-      type: "raster",
-      source: "osm-streets",
-      minzoom: 0,
-      maxzoom: 22,
-    },
-  ],
-};
+  layerIds: ["osm-streets"],
+});
 
-const BASEMAP_STYLES = {
-  Blank: LOCAL_BLANK_STYLE,
-  "OSM Streets": OSM_STREETS_STYLE,
-  Positron: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-  Voyager: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
-  "Dark Matter": "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+const SATELLITE_STYLE = buildRasterStyle({
+  backgroundColor: "#09111a",
+  sources: {
+    "esri-world-imagery": {
+      type: "raster",
+      tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    },
+  },
+  layerIds: ["esri-world-imagery"],
+});
+
+const SATELLITE_LABELS_STYLE = buildRasterStyle({
+  backgroundColor: "#09111a",
+  sources: {
+    "esri-world-imagery": {
+      type: "raster",
+      tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    },
+    "esri-world-transportation": {
+      type: "raster",
+      tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}"],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    },
+    "esri-world-boundaries": {
+      type: "raster",
+      tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    },
+  },
+  layerIds: ["esri-world-imagery", "esri-world-transportation", "esri-world-boundaries"],
+});
+
+const TOPOGRAPHIC_STYLE = buildRasterStyle({
+  backgroundColor: "#dde4d1",
+  sources: {
+    "open-topo": {
+      type: "raster",
+      tiles: ["https://tile.opentopomap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      maxzoom: 17,
+      attribution: OPENTOPO_ATTRIBUTION,
+    },
+  },
+  layerIds: ["open-topo"],
+});
+
+const BASEMAP_PRESETS = {
+  Blank: {
+    name: "Blank",
+    style: LOCAL_BLANK_STYLE,
+    snapshotStyle: LOCAL_BLANK_STYLE,
+    attributionHtml: "",
+    attributionText: "",
+  },
+  Positron: {
+    name: "Positron",
+    style: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+    snapshotStyle: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+    attributionHtml: CARTO_ATTRIBUTION,
+    attributionText: CARTO_ATTRIBUTION_TEXT,
+  },
+  "OSM Streets": {
+    name: "OSM Streets",
+    style: OSM_STREETS_STYLE,
+    snapshotStyle: OSM_STREETS_STYLE,
+    attributionHtml: OSM_STREETS_ATTRIBUTION,
+    attributionText: OSM_STREETS_ATTRIBUTION_TEXT,
+  },
+  Satellite: {
+    name: "Satellite",
+    style: SATELLITE_STYLE,
+    snapshotStyle: SATELLITE_STYLE,
+    attributionHtml: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    attributionText: ESRI_WORLD_IMAGERY_ATTRIBUTION_TEXT,
+  },
+  "Satellite + labels": {
+    name: "Satellite + labels",
+    style: SATELLITE_LABELS_STYLE,
+    snapshotStyle: SATELLITE_LABELS_STYLE,
+    attributionHtml: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    attributionText: ESRI_WORLD_IMAGERY_ATTRIBUTION_TEXT,
+  },
+  Topographic: {
+    name: "Topographic",
+    style: TOPOGRAPHIC_STYLE,
+    snapshotStyle: TOPOGRAPHIC_STYLE,
+    attributionHtml: OPENTOPO_ATTRIBUTION,
+    attributionText: OPENTOPO_ATTRIBUTION_TEXT,
+  },
 };
 
 const PATH_ALPHA = 110;
 const POINT_ALPHA = 215;
-const STORAGE_VERSION = 3;
+const STORAGE_VERSION = 4;
 const MAX_SELECTED_FIXES_SHOWN = 150;
 const DEFAULT_FAMILY = "movement_clean";
 const NUMERIC_COLOR_MIN_QUANTILE = 0.01;
 const NUMERIC_COLOR_MAX_QUANTILE = 0.99;
 const REPORT_SNAPSHOT_IDLE_TIMEOUT_MS = 12000;
+const TABLE_INITIAL_ROW_LIMIT = 250;
+const TABLE_ROW_INCREMENT = 250;
+const FIX_POPUP_DEFAULT_FIELDS = [
+  "set",
+  "fix_key",
+  "review.status",
+  "review.issue_type",
+  "step_length_m",
+  "speed_mps",
+  "time_delta_s",
+];
+const FIX_POPUP_OFFSET_PX = 14;
+const FIX_POPUP_EDGE_PADDING_PX = 12;
 
 let assetPromise = null;
 
@@ -167,6 +286,17 @@ class MovementExampleApp {
       histogramMax: null,
     };
     this.thresholdInputPendingBlur = false;
+    this.activeFixPopup = null;
+    this.pendingIssueContext = null;
+    this.tableSelection = {
+      anchorFixKey: "",
+      focusFixKey: "",
+      selectedFixKeys: new Set(),
+    };
+    this.tableRenderState = {
+      signature: "",
+      rowLimit: TABLE_INITIAL_ROW_LIMIT,
+    };
   }
 
   async init() {
@@ -202,11 +332,16 @@ class MovementExampleApp {
         version: STORAGE_VERSION,
         family: familyPresetFromLocation() || DEFAULT_FAMILY,
         study: "",
-        basemap: "Blank",
+        basemap: "Positron",
         showTrain: true,
         showTest: true,
         showPoints: true,
         colorBy: "step_length_m",
+        sideSheet: "individuals",
+        tableMode: "fixes",
+        tableSort: "track_time",
+        tableDescending: false,
+        tableFilter: "",
       };
     }
   }
@@ -221,6 +356,11 @@ class MovementExampleApp {
       showTest: this.refs.showTest.checked,
       showPoints: this.refs.showPoints.checked,
       colorBy: this.refs.colorBy.value,
+      sideSheet: this.refs.sideSheetTabs?.dataset.activeSheet || "individuals",
+      tableMode: this.refs.tableMode?.value || "fixes",
+      tableSort: this.refs.tableSort?.value || "track_time",
+      tableDescending: this.refs.tableSortDirection?.dataset.direction === "desc",
+      tableFilter: this.refs.tableFilter?.value || "",
     };
     localStorage.setItem("vibecleaning_movement_example_state", JSON.stringify(this.uiState));
   }
@@ -231,6 +371,31 @@ class MovementExampleApp {
 
   setUser(user) {
     localStorage.setItem("vibecleaning_user_name", user);
+  }
+
+  setSideSheet(sheet, { save = true } = {}) {
+    const nextSheet = sheet === "table" ? "table" : "individuals";
+    if (this.refs?.sideSheetTabs) {
+      this.refs.sideSheetTabs.dataset.activeSheet = nextSheet;
+    }
+    if (this.refs?.sideTabIndividuals) {
+      this.refs.sideTabIndividuals.classList.toggle("is-active", nextSheet === "individuals");
+    }
+    if (this.refs?.sideTabTable) {
+      this.refs.sideTabTable.classList.toggle("is-active", nextSheet === "table");
+    }
+    if (this.refs?.sideSheetIndividuals) {
+      this.refs.sideSheetIndividuals.classList.toggle("hidden", nextSheet !== "individuals");
+    }
+    if (this.refs?.sideSheetTable) {
+      this.refs.sideSheetTable.classList.toggle("hidden", nextSheet !== "table");
+    }
+    if (save && this.refs) {
+      this.saveUiState();
+    }
+    if (nextSheet === "table") {
+      this.renderTableSheet();
+    }
   }
 
   renderShell() {
@@ -399,6 +564,71 @@ class MovementExampleApp {
         }
         .movement-threshold.hidden {
           display: none;
+        }
+        .movement-fix-popup {
+          position: absolute;
+          z-index: 5;
+          width: min(320px, calc(100% - 24px));
+          display: grid;
+          gap: 10px;
+          padding: 12px 13px;
+          border-radius: 14px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          background: rgba(7, 11, 22, 0.94);
+          box-shadow: 0 20px 46px rgba(0, 0, 0, 0.36);
+          color: #e8eef7;
+          pointer-events: auto;
+        }
+        .movement-fix-popup.hidden {
+          display: none;
+        }
+        .movement-fix-popup-head {
+          display: flex;
+          align-items: start;
+          justify-content: space-between;
+          gap: 10px;
+        }
+        .movement-fix-popup-title {
+          font-size: 12px;
+          font-weight: 600;
+          color: #eef4fb;
+        }
+        .movement-fix-popup-subtitle {
+          font-size: 11px;
+          color: #8fa5bc;
+        }
+        .movement-fix-popup-close {
+          flex: 0 0 auto;
+          width: 24px;
+          height: 24px;
+          padding: 0;
+          border: none;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.08);
+          color: #e8eef7;
+          cursor: pointer;
+          font: inherit;
+          font-size: 14px;
+          line-height: 1;
+        }
+        .movement-fix-popup-fields {
+          display: grid;
+          gap: 7px;
+        }
+        .movement-fix-popup-row {
+          display: grid;
+          grid-template-columns: minmax(78px, auto) minmax(0, 1fr);
+          gap: 8px;
+          align-items: start;
+          font-size: 11px;
+        }
+        .movement-fix-popup-label {
+          color: #8fa5bc;
+          white-space: nowrap;
+        }
+        .movement-fix-popup-value {
+          color: #eef4fb;
+          overflow-wrap: anywhere;
         }
         .movement-threshold-head {
           display: grid;
@@ -682,7 +912,46 @@ class MovementExampleApp {
         }
         .movement-side {
           display: grid;
-          grid-template-rows: auto minmax(0, 0.95fr) auto minmax(0, 1.05fr) auto;
+          grid-template-rows: auto minmax(0, 1fr) auto;
+        }
+        .movement-side-tabs {
+          display: flex;
+          gap: 8px;
+          padding: 12px 14px 10px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .movement-side-tab {
+          padding: 7px 12px;
+          border-radius: 999px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(255, 255, 255, 0.04);
+          color: #d5e1ee;
+          cursor: pointer;
+          font: inherit;
+          font-size: 12px;
+        }
+        .movement-side-tab.is-active {
+          background: rgba(67, 206, 162, 0.22);
+          border-color: rgba(67, 206, 162, 0.34);
+          color: #d8fff3;
+        }
+        .movement-side-content {
+          min-height: 0;
+          overflow: hidden;
+        }
+        .movement-side-sheet {
+          display: grid;
+          min-height: 100%;
+          height: 100%;
+        }
+        .movement-side-sheet.hidden {
+          display: none;
+        }
+        .movement-side-sheet.individuals {
+          grid-template-rows: auto minmax(0, 0.95fr) auto minmax(0, 1.05fr);
+        }
+        .movement-side-sheet.table {
+          grid-template-rows: auto auto minmax(0, 1fr);
         }
         .movement-side-head,
         .movement-slider-row {
@@ -695,6 +964,136 @@ class MovementExampleApp {
         .movement-fixes {
           overflow-y: auto;
           padding: 10px 12px;
+        }
+        .movement-table-toolbar {
+          display: grid;
+          gap: 10px;
+          padding: 12px 14px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+          background: rgba(255, 255, 255, 0.02);
+        }
+        .movement-table-toolbar-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          align-items: center;
+        }
+        .movement-table-toolbar label {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 12px;
+          color: #9bb0c6;
+        }
+        .movement-table-toolbar input,
+        .movement-table-toolbar select,
+        .movement-table-toolbar button {
+          font: inherit;
+        }
+        .movement-table-toolbar input,
+        .movement-table-toolbar select {
+          min-width: 0;
+          padding: 7px 9px;
+          border-radius: 10px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(15, 23, 42, 0.92);
+          color: #e5edf7;
+        }
+        .movement-table-toolbar button {
+          padding: 7px 10px;
+          border: none;
+          border-radius: 10px;
+          background: rgba(255, 255, 255, 0.08);
+          color: #e5edf7;
+          cursor: pointer;
+        }
+        .movement-table-toolbar button:disabled {
+          cursor: not-allowed;
+          opacity: 0.45;
+        }
+        .movement-table-toolbar button.movement-emphasis {
+          background: rgba(67, 206, 162, 0.22);
+          color: #d8fff3;
+        }
+        .movement-table-meta {
+          padding: 10px 14px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+          font-size: 11px;
+          color: #95a8bb;
+          line-height: 1.45;
+        }
+        .movement-table-wrap {
+          min-height: 0;
+          overflow: auto;
+        }
+        .movement-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 11px;
+        }
+        .movement-table thead th {
+          position: sticky;
+          top: 0;
+          z-index: 1;
+          padding: 10px 8px;
+          text-align: left;
+          font-weight: 600;
+          color: #dce8f5;
+          background: rgba(11, 18, 30, 0.98);
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .movement-table tbody td {
+          padding: 9px 8px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+          color: #c9d7e4;
+          vertical-align: top;
+        }
+        .movement-table tbody tr {
+          cursor: pointer;
+        }
+        .movement-table tbody tr:hover {
+          background: rgba(255, 255, 255, 0.03);
+        }
+        .movement-table tbody tr.is-anchor {
+          background: rgba(96, 165, 250, 0.14);
+        }
+        .movement-table tbody tr.is-selected-range {
+          background: rgba(67, 206, 162, 0.12);
+        }
+        .movement-table tbody tr.is-checked-fix {
+          box-shadow: inset 3px 0 0 rgba(255, 236, 148, 0.95);
+        }
+        .movement-table tbody tr.is-segment-row {
+          background: rgba(255, 255, 255, 0.015);
+        }
+        .movement-table-cell-mono {
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-variant-numeric: tabular-nums;
+        }
+        .movement-table-cell-actions {
+          white-space: nowrap;
+        }
+        .movement-table-cell-actions button {
+          padding: 5px 8px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 8px;
+          background: rgba(255, 255, 255, 0.04);
+          color: #e8eef7;
+          cursor: pointer;
+          font: inherit;
+          font-size: 11px;
+        }
+        .movement-table-empty {
+          padding: 18px 14px;
+          color: #8ea1b7;
+          font-size: 12px;
+          line-height: 1.5;
+        }
+        .movement-table-more-row td.movement-table-more-cell {
+          padding: 12px 8px;
+          text-align: center;
+          color: #8ea1b7;
+          font-style: italic;
         }
         .movement-card {
           display: grid;
@@ -891,7 +1290,7 @@ class MovementExampleApp {
             grid-template-rows: minmax(320px, 1fr) minmax(320px, 1fr);
           }
           .movement-side {
-            grid-template-rows: auto minmax(220px, 0.7fr) auto minmax(220px, 0.9fr) auto;
+            grid-template-rows: auto minmax(320px, 1fr) auto;
           }
         }
         @media (max-width: 560px) {
@@ -905,6 +1304,9 @@ class MovementExampleApp {
           .movement-threshold-inline-input,
           .movement-threshold-range-input {
             width: 100%;
+          }
+          .movement-table-toolbar-row {
+            align-items: stretch;
           }
         }
       </style>
@@ -937,6 +1339,7 @@ class MovementExampleApp {
             <div class="movement-map-attribution hidden" data-role="map-attribution"></div>
             <div class="movement-legend hidden" data-role="legend"></div>
             <div class="movement-threshold hidden" data-role="threshold-pane"></div>
+            <div class="movement-fix-popup hidden" data-role="fix-popup"></div>
             <div class="movement-overlay" data-role="overlay">
               <div class="movement-overlay-card">
                 <h3>Movement Outlier Review</h3>
@@ -945,10 +1348,50 @@ class MovementExampleApp {
             </div>
           </div>
           <div class="movement-side">
-            <div class="movement-side-head" data-role="individual-head">Individuals and coverage</div>
-            <div class="movement-individuals" data-role="individuals"></div>
-            <div class="movement-side-head" data-role="fix-head">Checked fixes</div>
-            <div class="movement-fixes" data-role="selected-fixes"></div>
+            <div class="movement-side-tabs" data-role="side-sheet-tabs">
+              <button type="button" class="movement-side-tab is-active" data-role="side-tab-individuals">Individuals</button>
+              <button type="button" class="movement-side-tab" data-role="side-tab-table">Table</button>
+            </div>
+            <div class="movement-side-content">
+              <div class="movement-side-sheet individuals" data-role="side-sheet-individuals">
+                <div class="movement-side-head" data-role="individual-head">Individuals and coverage</div>
+                <div class="movement-individuals" data-role="individuals"></div>
+                <div class="movement-side-head" data-role="fix-head">Checked fixes</div>
+                <div class="movement-fixes" data-role="selected-fixes"></div>
+              </div>
+              <div class="movement-side-sheet table hidden" data-role="side-sheet-table">
+                <div class="movement-table-toolbar">
+                  <div class="movement-table-toolbar-row">
+                    <label>Mode
+                      <select data-role="table-mode">
+                        <option value="fixes">Fix rows</option>
+                        <option value="segments">Flagged segments</option>
+                      </select>
+                    </label>
+                    <label>Search
+                      <input type="search" data-role="table-filter" placeholder="Individual, issue, fix key">
+                    </label>
+                    <label>Sort
+                      <select data-role="table-sort">
+                        <option value="track_time">Track order</option>
+                        <option value="time_desc">Newest first</option>
+                        <option value="time_asc">Oldest first</option>
+                        <option value="status">Status</option>
+                        <option value="issue_type">Issue type</option>
+                      </select>
+                    </label>
+                    <button type="button" data-role="table-sort-direction" data-direction="asc">Ascending</button>
+                  </div>
+                  <div class="movement-table-toolbar-row">
+                    <button type="button" data-role="segment-clear">Clear range</button>
+                    <button type="button" class="movement-emphasis" data-role="segment-suspected">Mark segment suspected</button>
+                    <button type="button" class="movement-emphasis" data-role="segment-confirmed">Mark segment confirmed</button>
+                  </div>
+                </div>
+                <div class="movement-table-meta" data-role="table-meta"></div>
+                <div class="movement-table-wrap" data-role="table-wrap"></div>
+              </div>
+            </div>
             <div class="movement-slider-row">
               <input class="movement-slider" data-role="slider" type="range" min="0" max="0" value="0" step="1">
               <div class="movement-time" data-role="time"></div>
@@ -1028,10 +1471,11 @@ class MovementExampleApp {
             <label data-role="report-basemap-wrap">Report basemap
               <select data-role="report-basemap">
                 <option value="current">Match current map when possible</option>
-                <option value="OSM Streets">OSM Streets</option>
                 <option value="Positron">Positron</option>
-                <option value="Voyager">Voyager</option>
-                <option value="Dark Matter">Dark Matter</option>
+                <option value="OSM Streets">OSM Streets</option>
+                <option value="Satellite">Satellite</option>
+                <option value="Satellite + labels">Satellite + labels</option>
+                <option value="Topographic">Topographic</option>
               </select>
             </label>
             <label data-role="report-snapshot-limit-wrap">Auto snapshot sample
@@ -1097,16 +1541,31 @@ class MovementExampleApp {
       removeConfirmed: this.mountEl.querySelector('[data-role="remove-confirmed"]'),
       undo: this.mountEl.querySelector('[data-role="undo"]'),
       status: this.mountEl.querySelector('[data-role="status"]'),
+      sideSheetTabs: this.mountEl.querySelector('[data-role="side-sheet-tabs"]'),
+      sideTabIndividuals: this.mountEl.querySelector('[data-role="side-tab-individuals"]'),
+      sideTabTable: this.mountEl.querySelector('[data-role="side-tab-table"]'),
+      sideSheetIndividuals: this.mountEl.querySelector('[data-role="side-sheet-individuals"]'),
+      sideSheetTable: this.mountEl.querySelector('[data-role="side-sheet-table"]'),
       individuals: this.mountEl.querySelector('[data-role="individuals"]'),
       individualHead: this.mountEl.querySelector('[data-role="individual-head"]'),
       fixHead: this.mountEl.querySelector('[data-role="fix-head"]'),
       selectedFixes: this.mountEl.querySelector('[data-role="selected-fixes"]'),
+      tableMode: this.mountEl.querySelector('[data-role="table-mode"]'),
+      tableFilter: this.mountEl.querySelector('[data-role="table-filter"]'),
+      tableSort: this.mountEl.querySelector('[data-role="table-sort"]'),
+      tableSortDirection: this.mountEl.querySelector('[data-role="table-sort-direction"]'),
+      tableMeta: this.mountEl.querySelector('[data-role="table-meta"]'),
+      tableWrap: this.mountEl.querySelector('[data-role="table-wrap"]'),
+      segmentClear: this.mountEl.querySelector('[data-role="segment-clear"]'),
+      segmentSuspected: this.mountEl.querySelector('[data-role="segment-suspected"]'),
+      segmentConfirmed: this.mountEl.querySelector('[data-role="segment-confirmed"]'),
       slider: this.mountEl.querySelector('[data-role="slider"]'),
       time: this.mountEl.querySelector('[data-role="time"]'),
       map: this.mountEl.querySelector('[data-role="map"]'),
       mapAttribution: this.mountEl.querySelector('[data-role="map-attribution"]'),
       legend: this.mountEl.querySelector('[data-role="legend"]'),
       thresholdPane: this.mountEl.querySelector('[data-role="threshold-pane"]'),
+      fixPopup: this.mountEl.querySelector('[data-role="fix-popup"]'),
       overlay: this.mountEl.querySelector('[data-role="overlay"]'),
       issueModal: this.mountEl.querySelector('[data-role="issue-modal"]'),
       issueTitle: this.mountEl.querySelector('[data-role="issue-title"]'),
@@ -1149,21 +1608,34 @@ class MovementExampleApp {
       removeSubmit: this.mountEl.querySelector('[data-role="remove-submit"]'),
     };
 
-    for (const name of Object.keys(BASEMAP_STYLES)) {
+    for (const name of Object.keys(BASEMAP_PRESETS)) {
       const option = document.createElement("option");
       option.value = name;
       option.textContent = name;
       this.refs.basemap.appendChild(option);
     }
-    this.refs.basemap.value = BASEMAP_STYLES[this.uiState.basemap] ? this.uiState.basemap : "Blank";
+    const storedBasemap = BASEMAP_PRESETS[this.uiState.basemap]
+      ? this.uiState.basemap
+      : "Positron";
+    this.refs.basemap.value = (storedBasemap === "Blank" || storedBasemap === "OSM Streets")
+      ? "Positron"
+      : storedBasemap;
     this.refs.reportBasemap.value = "current";
     this.refs.showTrain.checked = this.uiState.showTrain !== false;
     this.refs.showTest.checked = this.uiState.showTest !== false;
     this.refs.showPoints.checked = this.uiState.showPoints !== false;
+    this.refs.tableMode.value = this.uiState.tableMode || "fixes";
+    this.refs.tableSort.value = this.uiState.tableSort || "track_time";
+    this.refs.tableFilter.value = this.uiState.tableFilter || "";
+    this.refs.tableSortDirection.dataset.direction = this.uiState.tableDescending ? "desc" : "asc";
+    this.refs.tableSortDirection.textContent = this.uiState.tableDescending ? "Descending" : "Ascending";
+    this.setSideSheet(this.uiState.sideSheet || "individuals", { save: false });
     this.updateActionButtons();
   }
 
   bindEvents() {
+    this.refs.sideTabIndividuals.addEventListener("click", () => this.setSideSheet("individuals"));
+    this.refs.sideTabTable.addEventListener("click", () => this.setSideSheet("table"));
     this.refs.family.addEventListener("change", async () => {
       try {
         await this.switchFamily(this.refs.family.value);
@@ -1220,6 +1692,13 @@ class MovementExampleApp {
     this.refs.showPoints.addEventListener("change", () => {
       this.saveUiState();
       this.renderLayers();
+      this.renderTableSheet();
+    });
+    this.refs.fixPopup.addEventListener("click", event => {
+      const closeButton = event.target.closest('[data-role="fix-popup-close"]');
+      if (closeButton) {
+        this.closeFixPopup();
+      }
     });
     this.refs.selectAll.addEventListener("click", () => {
       if (!this.data) return;
@@ -1277,6 +1756,30 @@ class MovementExampleApp {
     this.refs.thresholdPane.addEventListener("click", event => this.handleThresholdPaneClick(event));
     this.refs.thresholdPane.addEventListener("change", event => this.handleThresholdPaneChange(event));
     this.refs.thresholdPane.addEventListener("focusin", event => this.handleThresholdPaneFocusIn(event));
+    this.refs.tableMode.addEventListener("change", () => {
+      this.saveUiState();
+      this.renderTableSheet();
+    });
+    this.refs.tableFilter.addEventListener("input", () => {
+      this.saveUiState();
+      this.renderTableSheet();
+    });
+    this.refs.tableSort.addEventListener("change", () => {
+      this.saveUiState();
+      this.renderTableSheet();
+    });
+    this.refs.tableSortDirection.addEventListener("click", () => {
+      const nextDirection = this.refs.tableSortDirection.dataset.direction === "desc" ? "asc" : "desc";
+      this.refs.tableSortDirection.dataset.direction = nextDirection;
+      this.refs.tableSortDirection.textContent = nextDirection === "desc" ? "Descending" : "Ascending";
+      this.saveUiState();
+      this.renderTableSheet();
+    });
+    this.refs.segmentClear.addEventListener("click", () => this.clearTableSelection());
+    this.refs.segmentSuspected.addEventListener("click", () => this.openSegmentModal("suspected"));
+    this.refs.segmentConfirmed.addEventListener("click", () => this.openSegmentModal("confirmed"));
+    this.refs.tableWrap.addEventListener("click", event => this.handleTableWrapClick(event));
+    this.refs.tableWrap.addEventListener("scroll", () => this.handleTableWrapScroll());
 
     this.refs.issueClose.addEventListener("click", () => this.closeModal(this.refs.issueModal, this.refs.issueSubmit));
     this.refs.issueSubmit.addEventListener("click", async () => this.submitIssueAction());
@@ -1408,6 +1911,17 @@ class MovementExampleApp {
 
   clearLoadedStudyState() {
     this.clearThresholdState();
+    this.activeFixPopup = null;
+    this.pendingIssueContext = null;
+    this.tableSelection = {
+      anchorFixKey: "",
+      focusFixKey: "",
+      selectedFixKeys: new Set(),
+    };
+    this.tableRenderState = {
+      signature: "",
+      rowLimit: TABLE_INITIAL_ROW_LIMIT,
+    };
     this.data = null;
     this.currentArtifactEntry = null;
     this.currentTimeMs = 0;
@@ -2004,6 +2518,574 @@ class MovementExampleApp {
     }
   }
 
+  getVisibleDetailFixes() {
+    if (!this.data) {
+      return [];
+    }
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    const visibleSetNames = this.getVisibleSetNames();
+    const source = this.hasLoadedDetailSelection() && (this.data.detailFixes || []).length
+      ? this.data.detailFixes
+      : (this.data.overviewFixes || []);
+    return source.filter(
+      fix => visibleIndividuals.has(fix.individual) && visibleSetNames.has(fix.setName),
+    );
+  }
+
+  getVisibleSegments() {
+    if (!this.data) {
+      return [];
+    }
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    const visibleSetNames = this.getVisibleSetNames();
+    return (this.data.segments || []).filter(
+      segment => visibleIndividuals.has(segment.individual) && visibleSetNames.has(segment.setName),
+    );
+  }
+
+  getFilteredTableSegments() {
+    const filterText = String(this.refs.tableFilter.value || "").trim().toLowerCase();
+    const segments = this.getVisibleSegments().slice();
+    const filtered = filterText
+      ? segments.filter(segment => {
+        const haystack = [
+          segment.individual,
+          segment.setName,
+          segment.segmentId,
+          segment.status,
+          segment.issueType,
+          segment.startFixKey,
+          segment.endFixKey,
+          segment.issueNote,
+          segment.ownerQuestion,
+        ].join(" ").toLowerCase();
+        return haystack.includes(filterText);
+      })
+      : segments;
+    const direction = this.refs.tableSortDirection.dataset.direction === "desc" ? -1 : 1;
+    const sortKey = this.refs.tableSort.value || "track_time";
+    filtered.sort((left, right) => {
+      if (sortKey === "status") {
+        return direction * (
+          String(left.status || "").localeCompare(String(right.status || ""))
+          || left.startTimeMs - right.startTimeMs
+        );
+      }
+      if (sortKey === "issue_type") {
+        return direction * (
+          String(left.issueType || "").localeCompare(String(right.issueType || ""))
+          || left.startTimeMs - right.startTimeMs
+        );
+      }
+      if (sortKey === "time_desc") {
+        return direction * ((right.startTimeMs - left.startTimeMs) || left.segmentId.localeCompare(right.segmentId));
+      }
+      if (sortKey === "time_asc") {
+        return direction * ((left.startTimeMs - right.startTimeMs) || left.segmentId.localeCompare(right.segmentId));
+      }
+      return direction * (
+        left.individual.localeCompare(right.individual)
+        || left.setName.localeCompare(right.setName)
+        || left.startTimeMs - right.startTimeMs
+        || left.segmentId.localeCompare(right.segmentId)
+      );
+    });
+    return filtered;
+  }
+
+  buildTableRenderSignature(mode, totalRows) {
+    const selectedIndividuals = this.getSelectedIndividuals().join("|");
+    const direction = this.refs.tableSortDirection.dataset.direction || "asc";
+    return [
+      this.currentDatasetId,
+      this.currentArtifact,
+      mode,
+      totalRows,
+      this.refs.tableFilter.value || "",
+      this.refs.tableSort.value || "track_time",
+      direction,
+      this.refs.showTrain.checked ? "train" : "",
+      this.refs.showTest.checked ? "test" : "",
+      selectedIndividuals,
+      this.data?.detailState || "idle",
+      this.data?.detailReturnedFixCount || 0,
+    ].join("::");
+  }
+
+  getRenderedTableRows(rows, mode) {
+    const totalRows = Array.isArray(rows) ? rows.length : 0;
+    const signature = this.buildTableRenderSignature(mode, totalRows);
+    if (this.tableRenderState.signature !== signature) {
+      this.tableRenderState.signature = signature;
+      this.tableRenderState.rowLimit = TABLE_INITIAL_ROW_LIMIT;
+    }
+    const renderedCount = mode === "fixes"
+      ? Math.min(totalRows, this.tableRenderState.rowLimit)
+      : totalRows;
+    return {
+      rows: rows.slice(0, renderedCount),
+      renderedCount,
+      totalRows,
+      hasMore: renderedCount < totalRows,
+    };
+  }
+
+  extendRenderedTableRowsToInclude(fixKey) {
+    if (!fixKey || this.refs.tableMode.value !== "fixes") {
+      return;
+    }
+    const rows = this.getFilteredTableFixRows();
+    const index = rows.findIndex(fix => fix.fixKey === fixKey);
+    if (index < 0) {
+      return;
+    }
+    const requiredCount = index + 1;
+    if (requiredCount <= this.tableRenderState.rowLimit) {
+      return;
+    }
+    this.tableRenderState.rowLimit = Math.ceil(requiredCount / TABLE_ROW_INCREMENT) * TABLE_ROW_INCREMENT;
+  }
+
+  handleTableWrapScroll() {
+    if (!this.data || this.refs.tableMode.value !== "fixes") {
+      return;
+    }
+    const wrap = this.refs.tableWrap;
+    if (!wrap) {
+      return;
+    }
+    const thresholdPx = 240;
+    const distanceFromBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight;
+    if (distanceFromBottom > thresholdPx) {
+      return;
+    }
+    const rows = this.getFilteredTableFixRows();
+    if (this.tableRenderState.rowLimit >= rows.length) {
+      return;
+    }
+    this.tableRenderState.rowLimit = Math.min(rows.length, this.tableRenderState.rowLimit + TABLE_ROW_INCREMENT);
+    this.renderTableSheet();
+  }
+
+  getTrackOrderedVisibleFixes() {
+    return this.getVisibleDetailFixes()
+      .slice()
+      .sort((left, right) => (
+        left.individual.localeCompare(right.individual)
+        || left.setName.localeCompare(right.setName)
+        || left.timeMs - right.timeMs
+        || left.fixKey.localeCompare(right.fixKey)
+      ));
+  }
+
+  getFilteredTableFixRows() {
+    const filterText = String(this.refs.tableFilter.value || "").trim().toLowerCase();
+    const rows = this.getVisibleDetailFixes();
+    const filtered = filterText
+      ? rows.filter(fix => {
+        const segmentText = (fix.segments || []).map(segment => (
+          `${segment.segmentId} ${segment.issueType} ${segment.status}`
+        )).join(" ").toLowerCase();
+        const haystack = [
+          fix.individual,
+          fix.setName,
+          fix.fixKey,
+          fix.review?.status || "",
+          fix.review?.issueType || "",
+          segmentText,
+        ].join(" ").toLowerCase();
+        return haystack.includes(filterText);
+      })
+      : rows;
+    const direction = this.refs.tableSortDirection.dataset.direction === "desc" ? -1 : 1;
+    const sortKey = this.refs.tableSort.value || "track_time";
+    filtered.sort((left, right) => {
+      if (sortKey === "status") {
+        return direction * (
+          String(left.review?.status || "").localeCompare(String(right.review?.status || ""))
+          || left.timeMs - right.timeMs
+        );
+      }
+      if (sortKey === "issue_type") {
+        return direction * (
+          String(left.review?.issueType || "").localeCompare(String(right.review?.issueType || ""))
+          || left.timeMs - right.timeMs
+        );
+      }
+      if (sortKey === "time_desc") {
+        return direction * ((right.timeMs - left.timeMs) || left.fixKey.localeCompare(right.fixKey));
+      }
+      if (sortKey === "time_asc") {
+        return direction * ((left.timeMs - right.timeMs) || left.fixKey.localeCompare(right.fixKey));
+      }
+      return direction * (
+        left.individual.localeCompare(right.individual)
+        || left.setName.localeCompare(right.setName)
+        || left.timeMs - right.timeMs
+        || left.fixKey.localeCompare(right.fixKey)
+      );
+    });
+    return filtered;
+  }
+
+  resolveSegmentSelection(anchorFixKey, targetFixKey) {
+    if (!anchorFixKey || !targetFixKey) {
+      return null;
+    }
+    const ordered = this.getTrackOrderedVisibleFixes();
+    const byFixKey = new Map(ordered.map(fix => [fix.fixKey, fix]));
+    const anchor = byFixKey.get(anchorFixKey);
+    const target = byFixKey.get(targetFixKey);
+    if (!anchor || !target) {
+      return null;
+    }
+    if (anchor.individual !== target.individual || anchor.setName !== target.setName) {
+      return null;
+    }
+    const track = ordered.filter(fix => fix.individual === anchor.individual && fix.setName === anchor.setName);
+    const anchorIndex = track.findIndex(fix => fix.fixKey === anchorFixKey);
+    const targetIndex = track.findIndex(fix => fix.fixKey === targetFixKey);
+    if (anchorIndex < 0 || targetIndex < 0) {
+      return null;
+    }
+    const startIndex = Math.min(anchorIndex, targetIndex);
+    const endIndex = Math.max(anchorIndex, targetIndex);
+    const fixes = track.slice(startIndex, endIndex + 1);
+    return {
+      anchorFixKey,
+      startFixKey: fixes[0]?.fixKey || anchorFixKey,
+      endFixKey: fixes[fixes.length - 1]?.fixKey || targetFixKey,
+      selectedFixKeys: new Set(fixes.map(fix => fix.fixKey)),
+      fixes,
+      individual: anchor.individual,
+      setName: anchor.setName,
+    };
+  }
+
+  setTableSelection({ anchorFixKey = "", focusFixKey = "", selectedFixKeys = [] } = {}) {
+    const normalizedKeys = selectedFixKeys instanceof Set
+      ? new Set(selectedFixKeys)
+      : new Set(Array.isArray(selectedFixKeys) ? selectedFixKeys : []);
+    const anchor = normalizedKeys.has(anchorFixKey) ? anchorFixKey : (normalizedKeys.size ? [...normalizedKeys][0] : "");
+    const focus = normalizedKeys.has(focusFixKey) ? focusFixKey : (normalizedKeys.has(anchor) ? anchor : "");
+    this.tableSelection = {
+      anchorFixKey: anchor,
+      focusFixKey: focus,
+      selectedFixKeys: normalizedKeys,
+    };
+  }
+
+  applyTableSelectionInteraction(fixKey, { additive = false, range = false } = {}) {
+    if (!this.data?.fixByKey?.has(fixKey)) {
+      return;
+    }
+    if (range && this.tableSelection.anchorFixKey) {
+      const selection = this.resolveSegmentSelection(this.tableSelection.anchorFixKey, fixKey);
+      if (!selection) {
+        this.setStatus("Segment ranges must stay within one visible track.", true);
+        return;
+      }
+      this.setTableSelection({
+        anchorFixKey: selection.anchorFixKey,
+        focusFixKey: fixKey,
+        selectedFixKeys: selection.selectedFixKeys,
+      });
+      return;
+    }
+    if (additive) {
+      const nextKeys = new Set(this.tableSelection.selectedFixKeys || []);
+      if (nextKeys.has(fixKey)) {
+        nextKeys.delete(fixKey);
+      } else {
+        nextKeys.add(fixKey);
+      }
+      this.setTableSelection({
+        anchorFixKey: this.tableSelection.anchorFixKey || fixKey,
+        focusFixKey: fixKey,
+        selectedFixKeys: nextKeys,
+      });
+      return;
+    }
+    this.setTableSelection({
+      anchorFixKey: fixKey,
+      focusFixKey: fixKey,
+      selectedFixKeys: [fixKey],
+    });
+  }
+
+  clearTableSelection() {
+    this.setTableSelection();
+    this.renderTableSheet();
+    this.renderLayers();
+    this.updateActionButtons();
+  }
+
+  getCurrentSegmentSelection() {
+    if (!this.tableSelection.anchorFixKey || !this.tableSelection.focusFixKey || !this.tableSelection.selectedFixKeys.size) {
+      return null;
+    }
+    const selected = this.resolveSegmentSelection(
+      this.tableSelection.anchorFixKey,
+      this.tableSelection.focusFixKey,
+    );
+    if (!selected) {
+      return null;
+    }
+    if (selected.selectedFixKeys.size !== this.tableSelection.selectedFixKeys.size) {
+      return null;
+    }
+    for (const fixKey of selected.selectedFixKeys) {
+      if (!this.tableSelection.selectedFixKeys.has(fixKey)) {
+        return null;
+      }
+    }
+    return selected;
+  }
+
+  getVisibleTableSelectionFixes() {
+    const visibleSetNames = this.getVisibleSetNames();
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    return [...(this.tableSelection.selectedFixKeys || new Set())]
+      .map(fixKey => this.data?.fixByKey?.get(fixKey))
+      .filter(fix => Boolean(fix) && visibleIndividuals.has(fix.individual) && visibleSetNames.has(fix.setName));
+  }
+
+  revealFixInTable(fixKey, { align = "center" } = {}) {
+    if (!fixKey || this.refs?.sideSheetTabs?.dataset.activeSheet !== "table") {
+      return;
+    }
+    if (this.refs.tableMode.value !== "fixes") {
+      this.refs.tableMode.value = "fixes";
+      this.renderTableSheet();
+    }
+    requestAnimationFrame(() => {
+      this.extendRenderedTableRowsToInclude(fixKey);
+      this.renderTableSheet();
+      let row = this.refs.tableWrap?.querySelector(`tr[data-fix-key="${cssEscape(fixKey)}"]`);
+      if (!row && this.refs.tableFilter.value) {
+        this.refs.tableFilter.value = "";
+        this.saveUiState();
+        this.extendRenderedTableRowsToInclude(fixKey);
+        this.renderTableSheet();
+        row = this.refs.tableWrap?.querySelector(`tr[data-fix-key="${cssEscape(fixKey)}"]`);
+      }
+      row?.scrollIntoView?.({ block: align, inline: "nearest" });
+    });
+  }
+
+  zoomToPath(path) {
+    if (!this.map || !Array.isArray(path) || !path.length) {
+      return;
+    }
+    const bounds = buildWindowBounds(path.map((position, index) => ({
+      fixKey: `path_${index}`,
+      position,
+    })), { tight: false });
+    if (!bounds) {
+      return;
+    }
+    this.map.fitBounds(bounds, { padding: 44, duration: 0, maxZoom: 15 });
+  }
+
+  handleTableWrapClick(event) {
+    const actionButton = event.target.closest("button[data-action]");
+    if (actionButton) {
+      const action = actionButton.dataset.action || "";
+      if (action === "zoom-fix") {
+        const fix = this.data?.fixByKey.get(actionButton.dataset.fixKey || "");
+        if (fix) {
+          this.zoomToPath([fix.position]);
+        }
+      } else if (action === "zoom-segment") {
+        const segment = this.data?.segmentById?.get(actionButton.dataset.segmentId || "");
+        if (segment) {
+          this.zoomToPath(segment.path);
+        }
+      }
+      return;
+    }
+    const row = event.target.closest("tr[data-fix-key], tr[data-segment-id]");
+    if (!row) {
+      return;
+    }
+    if (row.dataset.segmentId && this.refs.tableMode.value === "segments") {
+      const segment = this.data?.segmentById?.get(row.dataset.segmentId || "");
+      if (segment) {
+        this.zoomToPath(segment.path);
+      }
+      return;
+    }
+    if (this.refs.tableMode.value !== "fixes") {
+      return;
+    }
+    const fixKey = row.dataset.fixKey || "";
+    if (!fixKey) {
+      return;
+    }
+    this.applyTableSelectionInteraction(fixKey, {
+      additive: event.metaKey || event.ctrlKey,
+      range: event.shiftKey,
+    });
+    this.renderTableSheet();
+    this.renderLayers();
+    this.updateActionButtons();
+  }
+
+  renderTableSheet() {
+    if (!this.refs.tableWrap || !this.refs.tableMeta) {
+      return;
+    }
+    if (!this.data) {
+      this.refs.tableMeta.textContent = "Load a study to inspect fix rows and flagged segments.";
+      this.refs.tableWrap.innerHTML = '<div class="movement-table-empty">No table data yet.</div>';
+      return;
+    }
+    const mode = this.refs.tableMode.value || "fixes";
+    const hasDetail = this.hasLoadedDetailSelection() || this.data.overviewHasAllFixes;
+    const rows = mode === "fixes" ? this.getFilteredTableFixRows() : [];
+    const selection = this.getCurrentSegmentSelection();
+    this.refs.segmentClear.disabled = !this.tableSelection.selectedFixKeys.size;
+    const segmentActionDisabled = (
+      mode !== "fixes"
+      || !hasDetail
+      || !selection
+      || selection.fixes.length < 2
+    );
+    this.refs.segmentSuspected.disabled = segmentActionDisabled;
+    this.refs.segmentConfirmed.disabled = segmentActionDisabled;
+
+    if (mode === "segments") {
+      const segments = this.getFilteredTableSegments();
+      this.refs.tableMeta.textContent = `${formatCount(segments.length)} flagged segments in the current visible scope. Click a row to zoom to the full segment extent.`;
+      if (!segments.length) {
+        this.refs.tableWrap.innerHTML = '<div class="movement-table-empty">No flagged segments are visible for the current selection.</div>';
+        return;
+      }
+      this.refs.tableWrap.innerHTML = `
+        <table class="movement-table">
+          <thead>
+            <tr>
+              <th>Individual</th>
+              <th>Track</th>
+              <th>Status</th>
+              <th>Issue type</th>
+              <th>Fixes</th>
+              <th>Start</th>
+              <th>End</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${segments.map(segment => `
+              <tr class="is-segment-row" data-segment-id="${escapeHtml(segment.segmentId)}">
+                <td>${escapeHtml(segment.individual)}</td>
+                <td>${escapeHtml(segment.setName)}</td>
+                <td>${escapeHtml(segment.status || "unreviewed")}</td>
+                <td>${escapeHtml(segment.issueType || "Unspecified issue")}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(String(segment.fixCount))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(segment.startTimeMs))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(segment.endTimeMs))}</td>
+                <td class="movement-table-cell-actions"><button type="button" data-action="zoom-segment" data-segment-id="${escapeHtml(segment.segmentId)}">Zoom</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+      return;
+    }
+
+    if (!rows.length && !hasDetail) {
+      const message = this.data.detailState === "error"
+        ? "Visible fix rows could not be loaded for this selection."
+        : "Loading visible fix rows for the current selection...";
+      this.refs.tableMeta.textContent = "Fix rows depend on the visible-scope detail load.";
+      this.refs.tableWrap.innerHTML = `<div class="movement-table-empty">${escapeHtml(message)}</div>`;
+      return;
+    }
+
+    const selectedRowKeys = this.tableSelection.selectedFixKeys || new Set();
+    const anchorFixKey = this.tableSelection.anchorFixKey || "";
+    const renderedTable = this.getRenderedTableRows(rows, mode);
+    const renderedRows = renderedTable.rows;
+    const truncationNote = this.data.detailTruncated
+      ? ` Visible scope is truncated to ${formatCount(this.data.detailReturnedFixCount)} of ${formatCount(this.data.detailMatchingFixCount)} rows because of the ${formatCount(this.data.detailLimit)}-fix cap.`
+      : "";
+    const detailSourceNote = this.data.detailState === "error" && rows.length
+        ? " Showing overview rows because editable detail failed to load; segment actions stay disabled."
+        : !hasDetail && rows.length
+          ? " Showing overview rows while editable detail finishes loading; segment actions stay disabled until then."
+        : "";
+    let selectionSummary = "Click a row to set a segment anchor, then Shift-click another row on the same track to select the full inclusive range.";
+    if (anchorFixKey) {
+      selectionSummary = `Anchor set on ${anchorFixKey}. Shift-click another row on the same track to create a segment range.`;
+    }
+    if (selectedRowKeys.size === 1) {
+      selectionSummary = `${anchorFixKey} selected. Shift-click another row on the same track to create a segment range.`;
+    }
+    if (selectedRowKeys.size > 1) {
+      selectionSummary = `${formatCount(selectedRowKeys.size)} table rows selected. Shift-click within one track to turn the selection into a contiguous segment range.`;
+    }
+    if (selection && selection.fixes.length >= 2) {
+      selectionSummary = `${selection.individual} • ${selection.setName} • ${formatCount(selection.fixes.length)} fixes from ${formatTimestamp(selection.fixes[0].timeMs)} to ${formatTimestamp(selection.fixes[selection.fixes.length - 1].timeMs)}`;
+    }
+    const renderNote = renderedTable.hasMore
+      ? ` Rendering ${formatCount(renderedTable.renderedCount)} of ${formatCount(renderedTable.totalRows)} rows; scroll to load more.`
+      : "";
+    this.refs.tableMeta.textContent = `${formatCount(rows.length)} visible fix rows. ${selectionSummary}${truncationNote}${detailSourceNote}${renderNote}`;
+    if (!rows.length) {
+      this.refs.tableWrap.innerHTML = '<div class="movement-table-empty">No fix rows match the current table filters.</div>';
+      return;
+    }
+    this.refs.tableWrap.innerHTML = `
+      <table class="movement-table">
+        <thead>
+          <tr>
+            <th>Individual</th>
+            <th>Track</th>
+            <th>Timestamp</th>
+            <th>Status</th>
+            <th>Segment</th>
+            <th>Issue</th>
+            <th>Step (m)</th>
+            <th>Speed (m/s)</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${renderedRows.map(fix => {
+            const issueType = fix.review?.issueType || "Unreviewed";
+            const segmentLabel = (fix.segments || []).length
+              ? `${fix.segments[0].status || "flagged"} • ${fix.segments[0].issueType || "segment"}`
+              : "";
+            const rowClasses = [
+              anchorFixKey === fix.fixKey ? "is-anchor" : "",
+              selectedRowKeys.has(fix.fixKey) ? "is-selected-range" : "",
+              this.data.selectedFixKeys.has(fix.fixKey) ? "is-checked-fix" : "",
+            ].filter(Boolean).join(" ");
+            return `
+              <tr class="${rowClasses}" data-fix-key="${escapeHtml(fix.fixKey)}">
+                <td>${escapeHtml(fix.individual)}</td>
+                <td>${escapeHtml(fix.setName)}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(fix.timeMs))}</td>
+                <td>${escapeHtml(fix.review?.status || "unreviewed")}</td>
+                <td>${escapeHtml(segmentLabel || "—")}</td>
+                <td>${escapeHtml(issueType)}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(fix.attributes?.step_length_m, "m"))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(fix.attributes?.speed_mps, "m/s"))}</td>
+                <td class="movement-table-cell-actions"><button type="button" data-action="zoom-fix" data-fix-key="${escapeHtml(fix.fixKey)}">Zoom</button></td>
+              </tr>
+            `;
+          }).join("")}
+          ${renderedTable.hasMore ? `
+            <tr class="movement-table-more-row">
+              <td colspan="9" class="movement-table-more-cell">Scroll to load more rows.</td>
+            </tr>
+          ` : ""}
+        </tbody>
+      </table>
+    `;
+  }
+
   renderLegend() {
     const legendEl = this.refs.legend;
     if (!legendEl) {
@@ -2078,61 +3160,126 @@ class MovementExampleApp {
     if (!this.assetsLoaded || !window.maplibregl || !window.deck) {
       return;
     }
-    const style = BASEMAP_STYLES[this.refs.basemap.value] || BASEMAP_STYLES.Blank;
+    const preset = BASEMAP_PRESETS[this.refs.basemap.value] || BASEMAP_PRESETS.Blank;
+    const style = preset.style;
     this.updateMapAttribution();
-    if (!this.map) {
-      this.map = new maplibregl.Map({
-        container: this.refs.map,
-        style,
-        center: this.data
-          ? [this.data.initialView.longitude, this.data.initialView.latitude]
-          : [0, 20],
-        zoom: this.data ? this.data.initialView.zoom : 1.3,
-        attributionControl: false,
-      });
-      this.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
-      this.map.on("load", () => {
-        this.mapLoaded = true;
-        this.renderLayers();
-      });
-      this.map.on("error", (event) => {
-        const message = event?.error?.message || "Map request failed";
-        if (message === this.mapErrorMessage) {
-          return;
+    if (!this.map || forceStyleReload) {
+      const currentView = this.map
+        ? {
+          center: [this.map.getCenter().lng, this.map.getCenter().lat],
+          zoom: this.map.getZoom(),
         }
-        this.mapErrorMessage = message;
-        if (this.refs.basemap.value !== "Blank") {
-          this.refs.basemap.value = "Blank";
-          this.saveUiState();
-          this.setStatus(`Map warning: ${message}. Falling back to Blank basemap.`, true);
-          void this.rebuildMap(true);
-          return;
-        }
-        this.setStatus(`Map warning: ${message}`, true);
-      });
-      this.overlay = new deck.MapboxOverlay({ interleaved: true, layers: [] });
-      this.map.addControl(this.overlay);
-      return;
-    }
-    if (forceStyleReload) {
-      this.mapLoaded = false;
-      this.map.setStyle(style);
-      this.map.once("style.load", () => {
-        this.mapLoaded = true;
-        this.renderLayers();
-      });
+        : {
+          center: this.data
+            ? [this.data.initialView.longitude, this.data.initialView.latitude]
+            : [0, 20],
+          zoom: this.data ? this.data.initialView.zoom : 1.3,
+        };
+      this.destroyMapInstance();
+      this.createMapInstance({ style, ...currentView });
       return;
     }
     this.renderLayers();
+  }
+
+  createMapInstance({ style, center, zoom }) {
+    this.mapErrorMessage = "";
+    this.mapLoaded = false;
+    this.map = new maplibregl.Map({
+      container: this.refs.map,
+      style,
+      center,
+      zoom,
+      attributionControl: false,
+    });
+    this.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    this.map.addControl(new maplibregl.ScaleControl({ unit: "metric", maxWidth: 120 }), "top-right");
+    this.map.on("load", () => {
+      this.mapLoaded = true;
+      this.renderLayers();
+    });
+    this.map.on("error", (event) => {
+      const message = event?.error?.message || "Map request failed";
+      if (message === this.mapErrorMessage) {
+        return;
+      }
+      this.mapErrorMessage = message;
+      this.setStatus(`Map warning: ${message}`, true);
+    });
+    this.ensureOverlayAttached();
+    this.map.on("click", event => this.handleMapClick(event));
+    this.map.on("contextmenu", event => this.handleMapContextMenu(event));
+  }
+
+  destroyMapInstance() {
+    this.mapLoaded = false;
+    this.activeFixPopup = null;
+    if (this.overlay) {
+      try {
+        this.overlay.finalize();
+      } catch {}
+    }
+    this.overlay = null;
+    if (this.map) {
+      try {
+        this.map.remove();
+      } catch {}
+    }
+    this.map = null;
+  }
+
+  ensureOverlayAttached() {
+    if (!this.map || !window.deck) {
+      return;
+    }
+    if (!this.overlay) {
+      this.overlay = new deck.MapboxOverlay({ interleaved: false, layers: [] });
+    }
+    try {
+      this.map.addControl(this.overlay);
+    } catch {}
+  }
+
+  detachOverlay() {
+    if (!this.map || !this.overlay) {
+      return;
+    }
+    try {
+      this.map.removeControl(this.overlay);
+    } catch {}
+  }
+
+  waitForStyleReload() {
+    if (!this.map) {
+      return;
+    }
+    let finished = false;
+    const finishReload = () => {
+      if (!this.map || finished) {
+        return;
+      }
+      finished = true;
+      this.map.off("styledata", maybeFinishReload);
+      this.mapLoaded = true;
+      this.ensureOverlayAttached();
+      this.renderLayers();
+    };
+    const maybeFinishReload = () => {
+      if (this.map?.isStyleLoaded?.()) {
+        finishReload();
+      }
+    };
+    this.map.once("style.load", finishReload);
+    this.map.on("styledata", maybeFinishReload);
   }
 
   updateMapAttribution() {
     if (!this.refs?.mapAttribution) {
       return;
     }
-    const basemapName = this.refs.basemap.value || "Blank";
-    if (basemapName === "OSM Streets") {
-      this.refs.mapAttribution.innerHTML = OSM_STREETS_ATTRIBUTION;
+    const preset = BASEMAP_PRESETS[this.refs.basemap.value || "Blank"] || BASEMAP_PRESETS.Blank;
+    if (preset.attributionHtml) {
+      this.refs.mapAttribution.innerHTML = preset.attributionHtml;
       this.refs.mapAttribution.classList.remove("hidden");
       return;
     }
@@ -2141,12 +3288,14 @@ class MovementExampleApp {
   }
 
   renderLayers() {
+    this.syncFixPopupVisibility();
     if (!this.data || !this.overlay || !this.mapLoaded) {
       if (this.overlay) {
         try {
           this.overlay.setProps({ layers: [] });
         } catch {}
       }
+      this.renderFixPopup();
       return;
     }
 
@@ -2157,7 +3306,14 @@ class MovementExampleApp {
     const thresholdPointData = [];
     const selectedThresholdPointData = [];
     const selectedPointData = [];
+    const tableSelectedPointData = [];
     const cursorData = [];
+    const visibleSegments = this.getVisibleSegments();
+    const visibleTableSelection = this.getVisibleTableSelectionFixes();
+    const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
+    const tableSelectionPath = this.getCurrentSegmentSelection()?.fixes
+      ?.filter(fix => visibleTableSelectionKeys.has(fix.fixKey))
+      .map(fix => fix.position) || [];
     const thresholdMatchKeys = this.getThresholdContext()?.matchKeys || new Set();
 
     for (const individual of this.data.individuals) {
@@ -2206,11 +3362,18 @@ class MovementExampleApp {
       } else {
         pointData.push(point);
         if (thresholdMatchKeys.has(fix.fixKey)) {
-        thresholdPointData.push({
+          thresholdPointData.push({
+            fixKey: fix.fixKey,
+            position: fix.position,
+          });
+        }
+      }
+      if (visibleTableSelectionKeys.has(fix.fixKey)) {
+        tableSelectedPointData.push({
           fixKey: fix.fixKey,
           position: fix.position,
+          color: [87, 218, 174, 220],
         });
-        }
       }
     }
 
@@ -2226,6 +3389,47 @@ class MovementExampleApp {
       }),
     ];
 
+    if (visibleSegments.length) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-segment-outline",
+          data: visibleSegments,
+          getPath: segment => segment.path,
+          getColor: [255, 255, 255, 120],
+          getWidth: segment => segment.status === "confirmed" ? 8 : 7,
+          widthMinPixels: 4,
+          pickable: false,
+        }),
+      );
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-segments",
+          data: visibleSegments,
+          getPath: segment => segment.path,
+          getColor: segment => segment.status === "confirmed"
+            ? [241, 106, 124, 210]
+            : [245, 181, 54, 210],
+          getWidth: segment => segment.status === "confirmed" ? 5.5 : 4.5,
+          widthMinPixels: 3,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (tableSelectionPath.length >= 2) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-table-selection-path",
+          data: [{ path: tableSelectionPath }],
+          getPath: item => item.path,
+          getColor: [87, 218, 174, 210],
+          getWidth: 6,
+          widthMinPixels: 3,
+          pickable: false,
+        }),
+      );
+    }
+
     if (this.refs.showPoints.checked) {
       layers.push(
         new deck.ScatterplotLayer({
@@ -2237,11 +3441,6 @@ class MovementExampleApp {
           radiusMinPixels: 4,
           radiusMaxPixels: 10,
           pickable: true,
-          onClick: info => {
-            if (info.object) {
-              this.toggleFixSelection(info.object.fixKey);
-            }
-          },
         }),
       );
       layers.push(
@@ -2257,11 +3456,6 @@ class MovementExampleApp {
           radiusMinPixels: 6,
           radiusMaxPixels: 12,
           pickable: true,
-          onClick: info => {
-            if (info.object) {
-              this.toggleFixSelection(info.object.fixKey);
-            }
-          },
         }),
       );
       layers.push(
@@ -2292,11 +3486,25 @@ class MovementExampleApp {
           radiusMinPixels: 7,
           radiusMaxPixels: 14,
           pickable: true,
-          onClick: info => {
-            if (info.object) {
-              this.toggleFixSelection(info.object.fixKey);
-            }
-          },
+        }),
+      );
+    }
+
+    if (tableSelectedPointData.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-table-selected-points",
+          data: tableSelectedPointData,
+          getPosition: item => item.position,
+          getFillColor: [0, 0, 0, 0],
+          getLineColor: item => item.color,
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 3,
+          getRadius: 190,
+          radiusMinPixels: 10,
+          radiusMaxPixels: 22,
+          pickable: false,
         }),
       );
     }
@@ -2324,6 +3532,7 @@ class MovementExampleApp {
     } catch (error) {
       this.setStatus(`Map warning: ${error.message}`, true);
     }
+    this.renderFixPopup();
   }
 
   colorForFix(fix) {
@@ -2360,6 +3569,241 @@ class MovementExampleApp {
     this.renderSelectedFixes();
     this.renderLayers();
     this.updateActionButtons();
+  }
+
+  handleMapClick(event) {
+    if (!this.overlay || !this.data) {
+      return;
+    }
+    const point = event?.point;
+    const picked = point && Number.isFinite(point.x) && Number.isFinite(point.y)
+      ? this.overlay.pickObject({
+        x: Number(point.x),
+        y: Number(point.y),
+        radius: 6,
+      })
+      : null;
+    if (!picked?.object?.fixKey) {
+      return;
+    }
+    const fixKey = picked.object.fixKey;
+    if (this.data.selectedFixKeys.has(fixKey)) {
+      this.data.selectedFixKeys.delete(fixKey);
+    } else {
+      this.data.selectedFixKeys.add(fixKey);
+    }
+    this.applyTableSelectionInteraction(fixKey, {
+      additive: event?.originalEvent?.metaKey || event?.originalEvent?.ctrlKey,
+      range: event?.originalEvent?.shiftKey,
+    });
+    this.renderThresholdPane();
+    this.renderSelectedFixes();
+    this.renderTableSheet();
+    this.renderLayers();
+    this.updateActionButtons();
+    this.revealFixInTable(fixKey);
+  }
+
+  handleMapContextMenu(event) {
+    event?.preventDefault?.();
+    event?.originalEvent?.preventDefault?.();
+    if (!this.overlay || !this.data) {
+      this.closeFixPopup();
+      return;
+    }
+    const point = event?.point;
+    const picked = point && Number.isFinite(point.x) && Number.isFinite(point.y)
+      ? this.overlay.pickObject({
+        x: Number(point.x),
+        y: Number(point.y),
+        radius: 6,
+      })
+      : null;
+    if (!picked?.object?.fixKey) {
+      this.closeFixPopup();
+      return;
+    }
+    this.openFixPopup(picked.object, {
+      x: Number(point.x),
+      y: Number(point.y),
+    });
+  }
+
+  openFixPopup(point, info) {
+    const fixKey = String(point?.fixKey || "");
+    if (!fixKey) {
+      this.closeFixPopup();
+      return;
+    }
+    this.activeFixPopup = {
+      fixKey,
+      screenX: Number.isFinite(info?.x) ? Number(info.x) : this.refs.map.clientWidth / 2,
+      screenY: Number.isFinite(info?.y) ? Number(info.y) : this.refs.map.clientHeight / 2,
+    };
+    this.renderFixPopup();
+  }
+
+  closeFixPopup() {
+    this.activeFixPopup = null;
+    this.renderFixPopup();
+  }
+
+  getPopupFix() {
+    if (!this.data || !this.activeFixPopup?.fixKey) {
+      return null;
+    }
+    return this.data.fixByKey.get(this.activeFixPopup.fixKey) || null;
+  }
+
+  isFixVisibleOnMap(fix) {
+    if (!fix || !this.data || !this.refs.showPoints.checked) {
+      return false;
+    }
+    const visibleIndividuals = this.data.selectedIndividuals instanceof Set
+      ? this.data.selectedIndividuals
+      : new Set();
+    return visibleIndividuals.has(fix.individual) && this.getVisibleSetNames().has(fix.setName);
+  }
+
+  syncFixPopupVisibility() {
+    const fix = this.getPopupFix();
+    if (!fix || !this.isFixVisibleOnMap(fix)) {
+      this.activeFixPopup = null;
+    }
+  }
+
+  renderFixPopup() {
+    const popupEl = this.refs.fixPopup;
+    if (!popupEl) {
+      return;
+    }
+    const fix = this.getPopupFix();
+    if (!this.activeFixPopup || !fix || !this.isFixVisibleOnMap(fix)) {
+      popupEl.innerHTML = "";
+      popupEl.classList.add("hidden");
+      popupEl.style.left = "";
+      popupEl.style.top = "";
+      return;
+    }
+
+    const popupFields = this.buildPopupFields(fix);
+    popupEl.innerHTML = `
+      <div class="movement-fix-popup-head">
+        <div>
+          <div class="movement-fix-popup-title">Fix details</div>
+          <div class="movement-fix-popup-subtitle">${escapeHtml(fix.individual)}</div>
+        </div>
+        <button type="button" class="movement-fix-popup-close" data-role="fix-popup-close" aria-label="Close fix details">X</button>
+      </div>
+      <div class="movement-fix-popup-fields">
+        ${popupFields.map(field => `
+          <div class="movement-fix-popup-row">
+            <div class="movement-fix-popup-label">${escapeHtml(field.label)}</div>
+            <div class="movement-fix-popup-value">${escapeHtml(field.value)}</div>
+          </div>
+        `).join("")}
+      </div>
+    `;
+    popupEl.classList.remove("hidden");
+
+    const mapWidth = this.refs.map.clientWidth || popupEl.offsetWidth || 0;
+    const mapHeight = this.refs.map.clientHeight || popupEl.offsetHeight || 0;
+    const popupWidth = popupEl.offsetWidth || 0;
+    const popupHeight = popupEl.offsetHeight || 0;
+    const preferredLeft = this.activeFixPopup.screenX + FIX_POPUP_OFFSET_PX;
+    const preferredRight = this.activeFixPopup.screenX - popupWidth - FIX_POPUP_OFFSET_PX;
+    const preferredBelow = this.activeFixPopup.screenY + FIX_POPUP_OFFSET_PX;
+    const preferredAbove = this.activeFixPopup.screenY - popupHeight - FIX_POPUP_OFFSET_PX;
+    const left = preferredLeft + popupWidth <= (mapWidth - FIX_POPUP_EDGE_PADDING_PX)
+      ? preferredLeft
+      : preferredRight >= FIX_POPUP_EDGE_PADDING_PX
+        ? preferredRight
+        : clamp(preferredLeft, FIX_POPUP_EDGE_PADDING_PX, Math.max(FIX_POPUP_EDGE_PADDING_PX, mapWidth - popupWidth - FIX_POPUP_EDGE_PADDING_PX));
+    const top = preferredBelow + popupHeight <= (mapHeight - FIX_POPUP_EDGE_PADDING_PX)
+      ? preferredBelow
+      : preferredAbove >= FIX_POPUP_EDGE_PADDING_PX
+        ? preferredAbove
+        : clamp(preferredBelow, FIX_POPUP_EDGE_PADDING_PX, Math.max(FIX_POPUP_EDGE_PADDING_PX, mapHeight - popupHeight - FIX_POPUP_EDGE_PADDING_PX));
+    popupEl.style.left = `${left}px`;
+    popupEl.style.top = `${top}px`;
+  }
+
+  buildPopupFields(fix) {
+    const rows = [];
+    const seenKeys = new Set();
+    const addRow = (id, label, value, { allowMissing = false } = {}) => {
+      if (!allowMissing && (value === null || value === undefined || value === "")) {
+        return;
+      }
+      if (seenKeys.has(id)) {
+        return;
+      }
+      rows.push({ label, value: value === null || value === undefined || value === "" ? "missing" : String(value) });
+      seenKeys.add(id);
+    };
+    addRow("individual", "Individual", fix.individual, { allowMissing: true });
+    addRow("timestamp", "Timestamp", formatTimestamp(fix.timeMs), { allowMissing: true });
+
+    for (const fieldKey of FIX_POPUP_DEFAULT_FIELDS) {
+      const resolved = this.resolvePopupFieldValue(fix, fieldKey);
+      if (!resolved) {
+        continue;
+      }
+      addRow(resolved.id, resolved.label, resolved.value, { allowMissing: resolved.allowMissing === true });
+    }
+
+    const colorField = this.getCurrentColorField();
+    if (colorField) {
+      addRow(
+        colorField.key,
+        colorField.label,
+        formatColorValue(fix.attributes?.[colorField.key], colorField.kind),
+        { allowMissing: true },
+      );
+    }
+
+    return rows;
+  }
+
+  resolvePopupFieldValue(fix, fieldKey) {
+    switch (fieldKey) {
+      case "set":
+        return { id: "set", label: "Set", value: fix.setName };
+      case "fix_key":
+        return { id: "fix_key", label: "Fix key", value: fix.fixKey };
+      case "step_length_m":
+        return fix.attributes?.step_length_m === undefined
+          ? null
+          : { id: "step_length_m", label: "Step length", value: formatMaybeNumber(fix.attributes.step_length_m, "m") };
+      case "speed_mps":
+        return fix.attributes?.speed_mps === undefined
+          ? null
+          : { id: "speed_mps", label: "Speed", value: formatMaybeNumber(fix.attributes.speed_mps, "m/s") };
+      case "time_delta_s":
+        return fix.attributes?.time_delta_s === undefined
+          ? null
+          : { id: "time_delta_s", label: "Time delta", value: formatMaybeNumber(fix.attributes.time_delta_s, "s") };
+      case "review.status": {
+        const status = String(fix.review?.status || "").trim();
+        return status ? { id: "review.status", label: "Review", value: status } : null;
+      }
+      case "review.issue_type": {
+        const issueTypes = this.getPopupIssueTypes(fix);
+        return issueTypes.length ? { id: "review.issue_type", label: "Issue type", value: issueTypes.join(", ") } : null;
+      }
+      default:
+        return null;
+    }
+  }
+
+  getPopupIssueTypes(fix) {
+    const issues = Array.isArray(fix?.review?.issues) ? fix.review.issues : [];
+    const typedIssues = uniqueNonEmpty(issues.map(issue => issue.issueType || ""));
+    if (typedIssues.length) {
+      return typedIssues;
+    }
+    const legacyType = String(fix?.review?.issueType || "").trim();
+    return legacyType ? [legacyType] : [];
   }
 
   resetView() {
@@ -3086,6 +4530,7 @@ class MovementExampleApp {
       this.data.detailReturnedFixCount = 0;
       this.data.detailTruncated = false;
       this.data.detailFixes = [];
+      this.data.detailSegments = [];
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
       this.renderSelectedFixes();
@@ -3106,6 +4551,7 @@ class MovementExampleApp {
       this.data.detailIndividuals = [...selectedIndividuals];
       this.data.detailLimit = this.data.totalRows;
       this.data.detailFixes = [];
+      this.data.detailSegments = [];
       this.data.detailMatchingFixCount = this.getFixesForIndividualsFrom(this.data.overviewFixes, selectedIndividuals).length;
       this.data.detailReturnedFixCount = this.data.detailMatchingFixCount;
       this.data.detailTruncated = false;
@@ -3159,6 +4605,7 @@ class MovementExampleApp {
       this.data.detailReturnedFixCount = Number(payload.returned_fix_count) || 0;
       this.data.detailTruncated = Boolean(payload.truncated);
       this.data.detailFixes = parseMovementFixes(payload.fixes || []);
+      this.data.detailSegments = parseMovementSegments(payload.segments || []);
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, this.data.detailIndividuals);
       this.renderSelectedFixes();
@@ -3180,6 +4627,7 @@ class MovementExampleApp {
       this.data.detailReturnedFixCount = 0;
       this.data.detailTruncated = false;
       this.data.detailFixes = [];
+      this.data.detailSegments = [];
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
       this.renderSelectedFixes();
@@ -3454,16 +4902,16 @@ class MovementExampleApp {
     });
   }
 
-  getSelectedReportBasemapStyle() {
+  getSelectedReportBasemapPreset() {
     const choice = this.refs.reportBasemap.value || "current";
     if (choice === "current") {
       const currentName = this.refs.basemap.value || "Blank";
-      if (currentName !== "Blank" && BASEMAP_STYLES[currentName]) {
-        return BASEMAP_STYLES[currentName];
+      if (currentName !== "Blank" && BASEMAP_PRESETS[currentName]) {
+        return BASEMAP_PRESETS[currentName];
       }
-      return BASEMAP_STYLES.Positron;
+      return BASEMAP_PRESETS.Positron;
     }
-    return BASEMAP_STYLES[choice] || BASEMAP_STYLES.Positron;
+    return BASEMAP_PRESETS[choice] || BASEMAP_PRESETS.Positron;
   }
 
   updateReportModeUi() {
@@ -3519,8 +4967,19 @@ class MovementExampleApp {
         issue_note: fix.review.issueNote || "",
         owner_question: fix.review.ownerQuestion || "",
         review_user: fix.review.reviewUser || "",
-        reviewed_at: fix.review.reviewedAt || "",
+      reviewed_at: fix.review.reviewedAt || "",
       },
+      segments: (fix.segments || []).map(segment => ({
+        status: segment.status || "",
+        segment_id: segment.segmentId || "",
+        issue_type: segment.issueType || "",
+        start_fix_key: segment.startFixKey || "",
+        end_fix_key: segment.endFixKey || "",
+        issue_note: segment.issueNote || "",
+        owner_question: segment.ownerQuestion || "",
+        review_user: segment.reviewUser || "",
+        reviewed_at: segment.reviewedAt || "",
+      })),
     };
   }
 
@@ -3796,6 +5255,7 @@ class MovementExampleApp {
     this.refs.selectSuspicious.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || visibleSuspiciousCount === 0;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
     this.updateUndoButton();
+    this.renderTableSheet();
   }
 
   updateUndoButton() {
@@ -3813,6 +5273,12 @@ class MovementExampleApp {
     const field = this.getCurrentColorField();
     const issueThreshold = this.getCurrentIssueThreshold();
     this.pendingIssueStatus = status;
+    this.pendingIssueContext = {
+      mode: "fixes",
+      fixes: selectedFixes,
+      issueField: field?.key || "",
+      issueThreshold,
+    };
     this.refs.issueTitle.textContent = `Mark fixes as ${status}`;
     this.refs.issueMeta.innerHTML = `
       <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
@@ -3831,6 +5297,50 @@ class MovementExampleApp {
     this.refs.issueType.value = "";
     this.refs.issueNote.value = "";
     this.refs.issueQuestion.value = "Could you confirm whether these fixes should be treated as outliers and explain the likely error source?";
+    this.refs.issueStatus.textContent = "";
+    this.refs.issueStatus.classList.remove("error");
+    this.refs.issueSubmit.disabled = false;
+    this.refs.issueClose.disabled = false;
+    this.refs.issueModal.classList.remove("hidden");
+    this.refs.issueType.focus();
+  }
+
+  openSegmentModal(status) {
+    const selection = this.getCurrentSegmentSelection();
+    if (!selection || selection.fixes.length < 2 || !this.currentArtifact) {
+      return;
+    }
+    this.pendingIssueStatus = status;
+    this.pendingIssueContext = {
+      mode: "segment",
+      fixes: selection.fixes,
+      startFixKey: selection.startFixKey,
+      endFixKey: selection.endFixKey,
+      selectedFixKeys: selection.fixes.map(fix => fix.fixKey),
+      individual: selection.individual,
+      setName: selection.setName,
+      issueField: "",
+      issueThreshold: "",
+    };
+    this.refs.issueTitle.textContent = `Mark segment as ${status}`;
+    this.refs.issueMeta.innerHTML = `
+      <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
+      <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
+      <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+      <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+      <div><strong>Track:</strong> ${escapeHtml(`${selection.individual} • ${selection.setName}`)}</div>
+      <div><strong>Segment fixes:</strong> ${escapeHtml(formatCount(selection.fixes.length))}</div>
+      <div><strong>Start:</strong> ${escapeHtml(`${formatTimestamp(selection.fixes[0].timeMs)} • ${selection.startFixKey}`)}</div>
+      <div><strong>End:</strong> ${escapeHtml(`${formatTimestamp(selection.fixes[selection.fixes.length - 1].timeMs)} • ${selection.endFixKey}`)}</div>
+    `;
+    this.refs.issueSelection.textContent = selection.fixes
+      .slice(0, 40)
+      .map(fix => `${fix.individual} • ${formatTimestamp(fix.timeMs)} • ${fix.fixKey}`)
+      .join("\n");
+    this.refs.issueUser.value = this.getUser();
+    this.refs.issueType.value = "";
+    this.refs.issueNote.value = "";
+    this.refs.issueQuestion.value = "Could you confirm whether this contiguous track segment reflects collar removal, transport, or another non-animal movement event?";
     this.refs.issueStatus.textContent = "";
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
@@ -3893,6 +5403,9 @@ class MovementExampleApp {
     if (submitButton.disabled) {
       return;
     }
+    if (modal === this.refs.issueModal) {
+      this.pendingIssueContext = null;
+    }
     modal.classList.add("hidden");
   }
 
@@ -3902,11 +5415,17 @@ class MovementExampleApp {
   }
 
   async submitIssueAction() {
-    const selectedFixes = this.getSelectedFixes();
+    const context = this.pendingIssueContext || {
+      mode: "fixes",
+      fixes: this.getSelectedFixes(),
+      issueField: this.getCurrentColorField()?.key || "",
+      issueThreshold: this.getCurrentIssueThreshold(),
+    };
+    const selectedFixes = Array.isArray(context.fixes) ? context.fixes : [];
     const user = this.refs.issueUser.value.trim();
     const issueType = this.refs.issueType.value.trim();
-    const issueField = this.getCurrentColorField()?.key || "";
-    const issueThreshold = this.getCurrentIssueThreshold();
+    const issueField = context.issueField || "";
+    const issueThreshold = context.issueThreshold || "";
     const issueNote = this.refs.issueNote.value.trim();
     const ownerQuestion = this.refs.issueQuestion.value.trim();
     if (!selectedFixes.length) {
@@ -3920,30 +5439,50 @@ class MovementExampleApp {
 
     this.refs.issueSubmit.disabled = true;
     this.refs.issueClose.disabled = true;
-    this.refs.issueStatus.textContent = `Marking ${formatCount(selectedFixes.length)} fixes as ${this.pendingIssueStatus}...`;
+    this.refs.issueStatus.textContent = context.mode === "segment"
+      ? `Marking ${formatCount(selectedFixes.length)} fixes as one ${this.pendingIssueStatus} segment...`
+      : `Marking ${formatCount(selectedFixes.length)} fixes as ${this.pendingIssueStatus}...`;
     this.refs.issueStatus.classList.remove("error");
     this.setStatus(this.refs.issueStatus.textContent);
 
     try {
+      const endpoint = context.mode === "segment"
+        ? `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/annotate-segment`
+        : `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/annotate-fixes`;
+      const body = context.mode === "segment"
+        ? {
+          dataset_id: this.currentDatasetId,
+          logical_name: this.currentArtifact,
+          selected_fix_keys: context.selectedFixKeys,
+          start_fix_key: context.startFixKey,
+          end_fix_key: context.endFixKey,
+          status: this.pendingIssueStatus,
+          issue_type: issueType,
+          issue_note: issueNote,
+          owner_question: ownerQuestion,
+          user,
+        }
+        : {
+          dataset_id: this.currentDatasetId,
+          logical_name: this.currentArtifact,
+          fix_keys: selectedFixes.map(fix => fix.fixKey),
+          status: this.pendingIssueStatus,
+          issue_type: issueType,
+          issue_field: issueField,
+          issue_threshold: issueThreshold,
+          issue_note: issueNote,
+          owner_question: ownerQuestion,
+          user,
+        };
       const result = await this.requestJSON(
-        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/annotate-fixes`,
+        endpoint,
         {
           method: "POST",
-          body: JSON.stringify({
-            dataset_id: this.currentDatasetId,
-            logical_name: this.currentArtifact,
-            fix_keys: selectedFixes.map(fix => fix.fixKey),
-            status: this.pendingIssueStatus,
-            issue_type: issueType,
-            issue_field: issueField,
-            issue_threshold: issueThreshold,
-            issue_note: issueNote,
-            owner_question: ownerQuestion,
-            user,
-          }),
+          body: JSON.stringify(body),
         },
       );
       this.setUser(user);
+      this.pendingIssueContext = null;
       this.refs.issueModal.classList.add("hidden");
       await this.loadStudyAtDataset(result.dataset.dataset_id);
       this.setStatus(`Created ${result.step.title} in ${result.dataset.dataset_id}.`);
@@ -4087,8 +5626,9 @@ class MovementExampleApp {
     if (!snapshotWindows.length) {
       return [];
     }
+    const preset = this.getSelectedReportBasemapPreset();
     const renderer = await createReportSnapshotRenderer({
-      style: this.getSelectedReportBasemapStyle(),
+      preset,
     });
     try {
       const snapshots = [];
@@ -4160,6 +5700,7 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     throw new Error("Dataset summary did not contain any individuals.");
   }
   const overviewFixes = parseMovementFixes(summary.fixes || []);
+  const overviewSegments = parseMovementSegments(summary.segments || []);
 
   const seriesByIndividual = {};
   const coverageByIndividual = {};
@@ -4238,9 +5779,13 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     stats,
     fixes: [],
     fixByKey: new Map(),
+    segments: [],
+    segmentById: new Map(),
     overviewFixes,
+    overviewSegments,
     overviewHasAllFixes: overviewFixes.length >= (Number(summary.total_rows) || 0),
     detailFixes: [],
+    detailSegments: [],
     detailState: "idle",
     detailIndividuals: [],
     detailLimit: null,
@@ -4292,7 +5837,33 @@ function parseMovementFixes(items) {
       reviewUser: String(item?.review?.review_user || ""),
       reviewedAt: String(item?.review?.reviewed_at || ""),
     },
+    segments: normalizeSegmentMemberships(item?.segments),
   })).filter(item => item.fixKey) : [];
+}
+
+function parseMovementSegments(items) {
+  return Array.isArray(items) ? items.map(item => ({
+    segmentId: String(item?.segment_id || ""),
+    individual: String(item?.individual || ""),
+    setName: String(item?.set_name || "train") || "train",
+    startFixKey: String(item?.start_fix_key || ""),
+    endFixKey: String(item?.end_fix_key || ""),
+    startTimeMs: Number(item?.start_time_ms) || 0,
+    endTimeMs: Number(item?.end_time_ms) || 0,
+    fixCount: Number(item?.fix_count) || 0,
+    status: String(item?.status || ""),
+    issueType: String(item?.issue_type || ""),
+    issueNote: String(item?.issue_note || ""),
+    ownerQuestion: String(item?.owner_question || ""),
+    reviewUser: String(item?.review_user || ""),
+    reviewedAt: String(item?.reviewed_at || ""),
+    fixKeys: Array.isArray(item?.fix_keys) ? item.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
+    path: Array.isArray(item?.path)
+      ? item.path
+        .map(position => [Number(position?.[0]) || 0, Number(position?.[1]) || 0])
+        .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]))
+      : [],
+  })).filter(item => item.segmentId) : [];
 }
 
 function normalizeReviewIssues(review) {
@@ -4328,6 +5899,24 @@ function normalizeReviewIssues(review) {
   return legacyIssue.issueId || legacyIssue.issueType ? [legacyIssue] : [];
 }
 
+function normalizeSegmentMemberships(items) {
+  return Array.isArray(items) ? items
+    .filter(item => item && typeof item === "object")
+    .map(item => ({
+      status: String(item.status || "").trim(),
+      segmentId: String(item.segment_id || item.segmentId || "").trim(),
+      issueType: String(item.issue_type || item.issueType || "").trim(),
+      startFixKey: String(item.start_fix_key || item.startFixKey || "").trim(),
+      endFixKey: String(item.end_fix_key || item.endFixKey || "").trim(),
+      issueNote: String(item.issue_note || item.issueNote || "").trim(),
+      ownerQuestion: String(item.owner_question || item.ownerQuestion || "").trim(),
+      reviewUser: String(item.review_user || item.reviewUser || "").trim(),
+      reviewedAt: String(item.reviewed_at || item.reviewedAt || "").trim(),
+    }))
+    .filter(item => item.segmentId)
+    : [];
+}
+
 function refreshMovementFixCollections(data) {
   if (!data) {
     return;
@@ -4339,6 +5928,13 @@ function refreshMovementFixCollections(data) {
   data.fixes = Array.from(merged.values())
     .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
   data.fixByKey = new Map(data.fixes.map(fix => [fix.fixKey, fix]));
+  const mergedSegments = new Map();
+  for (const segment of [...(data.overviewSegments || []), ...(data.detailSegments || [])]) {
+    mergedSegments.set(segment.segmentId, segment);
+  }
+  data.segments = Array.from(mergedSegments.values())
+    .sort((left, right) => left.startTimeMs - right.startTimeMs || left.segmentId.localeCompare(right.segmentId));
+  data.segmentById = new Map(data.segments.map(segment => [segment.segmentId, segment]));
   data.colorStyles = computeMovementColorStyles(data.colorFields, data.fixes);
 }
 
@@ -4621,6 +6217,18 @@ function formatPercent(value) {
     return "n/a";
   }
   return `${Number.isInteger(percent) ? percent.toFixed(0) : percent.toFixed(1)}th`;
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function cssEscape(value) {
+  const raw = String(value ?? "");
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(raw);
+  }
+  return raw.replace(/["\\]/g, "\\$&");
 }
 
 function formatTimestamp(timeMs) {
@@ -5066,7 +6674,42 @@ function formatSnapshotLatitude(value) {
   return `${Math.abs(value).toFixed(2)}°${direction}`;
 }
 
-function renderSnapshotCanvasWithGrid(sourceCanvas, map) {
+function metersPerCanvasPixel(map, sourceCanvas) {
+  const latitude = map?.getCenter?.()?.lat || 0;
+  const zoom = map?.getZoom?.() || 0;
+  const container = map?.getContainer?.();
+  const cssWidth = Math.max(1, container?.clientWidth || sourceCanvas.width || 1);
+  const canvasWidth = Math.max(1, sourceCanvas?.width || cssWidth);
+  const metersPerCssPixel = (156543.03392 * Math.cos((latitude * Math.PI) / 180)) / (2 ** zoom);
+  return metersPerCssPixel * (cssWidth / canvasWidth);
+}
+
+function niceScaleDistance(maxDistanceMeters) {
+  if (!Number.isFinite(maxDistanceMeters) || maxDistanceMeters <= 0) {
+    return 100;
+  }
+  const magnitude = 10 ** Math.floor(Math.log10(maxDistanceMeters));
+  let best = magnitude;
+  for (const multiplier of [1, 2, 5, 10]) {
+    const candidate = magnitude * multiplier;
+    if (candidate <= maxDistanceMeters) {
+      best = candidate;
+      continue;
+    }
+    break;
+  }
+  return best;
+}
+
+function formatScaleDistance(distanceMeters) {
+  if (distanceMeters >= 1000) {
+    const km = distanceMeters / 1000;
+    return `${Number.isInteger(km) ? km.toFixed(0) : km.toFixed(1)} km`;
+  }
+  return `${Math.round(distanceMeters)} m`;
+}
+
+function renderSnapshotCanvasWithOverlays(sourceCanvas, map, { showGrid = false, attributionText = "" } = {}) {
   const bounds = map?.getBounds?.();
   if (!bounds) {
     return sourceCanvas.toDataURL("image/png");
@@ -5083,8 +6726,8 @@ function renderSnapshotCanvasWithGrid(sourceCanvas, map) {
   const container = map.getContainer();
   const scaleX = sourceCanvas.width / Math.max(1, container.clientWidth || sourceCanvas.width);
   const scaleY = sourceCanvas.height / Math.max(1, container.clientHeight || sourceCanvas.height);
-  const bottomBand = 34 * scaleY;
-  const leftBand = 66 * scaleX;
+  const bottomBand = Math.max(34 * scaleY, 28);
+  const leftBand = showGrid ? Math.max(66 * scaleX, 56) : 0;
   const width = outputCanvas.width;
   const height = outputCanvas.height;
   const south = bounds.getSouth();
@@ -5097,52 +6740,84 @@ function renderSnapshotCanvasWithGrid(sourceCanvas, map) {
   const latTicks = buildSnapshotAxisTicks(south, north);
 
   ctx.save();
-  ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
+  ctx.fillStyle = "rgba(255, 255, 255, 0.74)";
   ctx.fillRect(0, height - bottomBand, width, bottomBand);
-  ctx.fillRect(0, 0, leftBand, height);
-  ctx.strokeStyle = "rgba(74, 98, 110, 0.65)";
-  ctx.lineWidth = Math.max(1, 1.2 * Math.min(scaleX, scaleY));
-  ctx.setLineDash([6 * scaleX, 8 * scaleY]);
+  if (showGrid) {
+    ctx.fillRect(0, 0, leftBand, height);
+    ctx.strokeStyle = "rgba(74, 98, 110, 0.65)";
+    ctx.lineWidth = Math.max(1, 1.2 * Math.min(scaleX, scaleY));
+    ctx.setLineDash([6 * scaleX, 8 * scaleY]);
 
-  for (const lon of lonTicks) {
-    const point = map.project([lon, midLat]);
-    const x = point.x * scaleX;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height - bottomBand);
-    ctx.stroke();
-  }
-  for (const lat of latTicks) {
-    const point = map.project([midLon, lat]);
-    const y = point.y * scaleY;
-    ctx.beginPath();
-    ctx.moveTo(leftBand, y);
-    ctx.lineTo(width, y);
-    ctx.stroke();
+    for (const lon of lonTicks) {
+      const point = map.project([lon, midLat]);
+      const x = point.x * scaleX;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height - bottomBand);
+      ctx.stroke();
+    }
+    for (const lat of latTicks) {
+      const point = map.project([midLon, lat]);
+      const y = point.y * scaleY;
+      ctx.beginPath();
+      ctx.moveTo(leftBand, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+    }
   }
 
   ctx.setLineDash([]);
   ctx.fillStyle = "#243b53";
   ctx.strokeStyle = "#243b53";
   ctx.font = `${Math.max(12, 12 * scaleY)}px Arial, sans-serif`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "alphabetic";
-  for (const lon of lonTicks) {
-    const point = map.project([lon, midLat]);
-    const x = point.x * scaleX;
-    ctx.beginPath();
-    ctx.moveTo(x, height - bottomBand);
-    ctx.lineTo(x, height - (bottomBand * 0.62));
-    ctx.stroke();
-    ctx.fillText(formatSnapshotLongitude(lon), x, height - (bottomBand * 0.24));
+  if (showGrid) {
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    for (const lon of lonTicks) {
+      const point = map.project([lon, midLat]);
+      const x = point.x * scaleX;
+      ctx.beginPath();
+      ctx.moveTo(x, height - bottomBand);
+      ctx.lineTo(x, height - (bottomBand * 0.62));
+      ctx.stroke();
+      ctx.fillText(formatSnapshotLongitude(lon), x, height - (bottomBand * 0.24));
+    }
+
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (const lat of latTicks) {
+      const point = map.project([midLon, lat]);
+      const y = point.y * scaleY;
+      ctx.fillText(formatSnapshotLatitude(lat), leftBand - (8 * scaleX), y);
+    }
   }
 
-  ctx.textAlign = "right";
-  ctx.textBaseline = "middle";
-  for (const lat of latTicks) {
-    const point = map.project([midLon, lat]);
-    const y = point.y * scaleY;
-    ctx.fillText(formatSnapshotLatitude(lat), leftBand - (8 * scaleX), y);
+  const maxScaleBarPx = Math.max(80, width * 0.18);
+  const metersPerPixel = metersPerCanvasPixel(map, sourceCanvas);
+  const scaleDistance = niceScaleDistance(metersPerPixel * maxScaleBarPx);
+  const scaleBarWidth = Math.max(40, scaleDistance / Math.max(metersPerPixel, 0.000001));
+  const barRight = width - (18 * scaleX);
+  const barLeft = Math.max(leftBand + (20 * scaleX), barRight - scaleBarWidth);
+  const barY = height - (bottomBand * 0.62);
+  ctx.lineWidth = Math.max(2, 2.3 * Math.min(scaleX, scaleY));
+  ctx.strokeStyle = "#102a43";
+  ctx.beginPath();
+  ctx.moveTo(barLeft, barY);
+  ctx.lineTo(barRight, barY);
+  ctx.moveTo(barLeft, barY - (6 * scaleY));
+  ctx.lineTo(barLeft, barY + (6 * scaleY));
+  ctx.moveTo(barRight, barY - (6 * scaleY));
+  ctx.lineTo(barRight, barY + (6 * scaleY));
+  ctx.stroke();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(formatScaleDistance(scaleDistance), (barLeft + barRight) / 2, barY - (8 * scaleY));
+
+  if (attributionText) {
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    ctx.font = `${Math.max(10, 10 * scaleY)}px Arial, sans-serif`;
+    ctx.fillText(attributionText, leftBand + (10 * scaleX), height - (bottomBand * 0.2));
   }
   ctx.restore();
   return outputCanvas.toDataURL("image/png");
@@ -5160,7 +6835,7 @@ function getReportSnapshotFitPadding(snapshotWindow) {
   return 36;
 }
 
-async function createReportSnapshotRenderer({ style }) {
+async function createReportSnapshotRenderer({ preset }) {
   const container = document.createElement("div");
   Object.assign(container.style, {
     position: "fixed",
@@ -5176,7 +6851,7 @@ async function createReportSnapshotRenderer({ style }) {
 
   const map = new maplibregl.Map({
     container,
-    style,
+    style: preset?.snapshotStyle || preset?.style || LOCAL_BLANK_STYLE,
     center: [0, 20],
     zoom: 2,
     attributionControl: false,
@@ -5211,10 +6886,10 @@ async function createReportSnapshotRenderer({ style }) {
       }
       await waitForAnimationFrames(2);
       try {
-        if (snapshotWindow?.showGrid) {
-          return renderSnapshotCanvasWithGrid(map.getCanvas(), map);
-        }
-        return map.getCanvas().toDataURL("image/png");
+        return renderSnapshotCanvasWithOverlays(map.getCanvas(), map, {
+          showGrid: snapshotWindow?.showGrid === true,
+          attributionText: preset?.attributionText || "",
+        });
       } catch {
         return null;
       }
