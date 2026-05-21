@@ -161,7 +161,14 @@ const BASEMAP_PRESETS = {
 
 const PATH_ALPHA = 110;
 const POINT_ALPHA = 215;
-const STORAGE_VERSION = 4;
+const STORAGE_VERSION = 5;
+const DEFAULT_BURST_GAP_MODE = "quantile";
+const DEFAULT_BURST_GAP_SECONDS = 3600;
+const DEFAULT_BURST_GAP_QUANTILE = 0.999;
+const DEFAULT_SIDE_PANE_WIDTH_PX = 420;
+const MIN_SIDE_PANE_WIDTH_PX = 300;
+const MAX_SIDE_PANE_WIDTH_RATIO = 0.55;
+const SIDE_PANE_HANDLE_WIDTH_PX = 12;
 const MAX_SELECTED_FIXES_SHOWN = 150;
 const DEFAULT_FAMILY = "movement_clean";
 const NUMERIC_COLOR_MIN_QUANTILE = 0.01;
@@ -180,6 +187,14 @@ const FIX_POPUP_DEFAULT_FIELDS = [
 ];
 const FIX_POPUP_OFFSET_PX = 14;
 const FIX_POPUP_EDGE_PADDING_PX = 12;
+const INDIVIDUAL_COLOR_FIELD_KEY = "individual";
+const INDIVIDUAL_LEGEND_MAX_ITEMS = 24;
+const INDIVIDUAL_COLOR_FIELD = Object.freeze({
+  key: INDIVIDUAL_COLOR_FIELD_KEY,
+  label: "Individual ID",
+  kind: "categorical",
+  source: "identity",
+});
 
 let assetPromise = null;
 
@@ -242,6 +257,7 @@ class MovementExampleApp {
   constructor({ mountEl }) {
     this.mountEl = mountEl;
     this.uiState = this.loadUiState();
+    this.individualSearchQuery = "";
     this.families = [];
     this.studies = [];
     this.graph = null;
@@ -297,6 +313,14 @@ class MovementExampleApp {
       signature: "",
       rowLimit: TABLE_INITIAL_ROW_LIMIT,
     };
+    this.sidePaneWidthPx = finiteOrNull(this.uiState.sidePaneWidthPx) || DEFAULT_SIDE_PANE_WIDTH_PX;
+    this.sidePaneResize = {
+      active: false,
+      pointerId: null,
+    };
+    this.handleWindowResize = () => this.handleLayoutResize();
+    this.handleSidePanePointerMove = event => this.onSidePanePointerMove(event);
+    this.handleSidePanePointerUp = event => this.onSidePanePointerUp(event);
   }
 
   async init() {
@@ -336,12 +360,17 @@ class MovementExampleApp {
         showTrain: true,
         showTest: true,
         showPoints: true,
+        showBursts: true,
+        burstGapMode: DEFAULT_BURST_GAP_MODE,
+        burstGapSeconds: DEFAULT_BURST_GAP_SECONDS,
+        burstGapQuantile: DEFAULT_BURST_GAP_QUANTILE,
         colorBy: "step_length_m",
         sideSheet: "individuals",
         tableMode: "fixes",
         tableSort: "track_time",
         tableDescending: false,
         tableFilter: "",
+        sidePaneWidthPx: DEFAULT_SIDE_PANE_WIDTH_PX,
       };
     }
   }
@@ -355,12 +384,17 @@ class MovementExampleApp {
       showTrain: this.refs.showTrain.checked,
       showTest: this.refs.showTest.checked,
       showPoints: this.refs.showPoints.checked,
+      showBursts: this.refs.showBursts.checked,
+      burstGapMode: this.getBurstGapMode(),
+      burstGapSeconds: this.getBurstGapSeconds(),
+      burstGapQuantile: this.getBurstGapQuantile(),
       colorBy: this.refs.colorBy.value,
       sideSheet: this.refs.sideSheetTabs?.dataset.activeSheet || "individuals",
       tableMode: this.refs.tableMode?.value || "fixes",
       tableSort: this.refs.tableSort?.value || "track_time",
       tableDescending: this.refs.tableSortDirection?.dataset.direction === "desc",
       tableFilter: this.refs.tableFilter?.value || "",
+      sidePaneWidthPx: this.sidePaneWidthPx,
     };
     localStorage.setItem("vibecleaning_movement_example_state", JSON.stringify(this.uiState));
   }
@@ -371,6 +405,198 @@ class MovementExampleApp {
 
   setUser(user) {
     localStorage.setItem("vibecleaning_user_name", user);
+  }
+
+  getBurstGapSeconds() {
+    const value = Number(this.refs?.burstGapSeconds?.value ?? this.uiState.burstGapSeconds);
+    return Number.isFinite(value) && value > 0 ? value : DEFAULT_BURST_GAP_SECONDS;
+  }
+
+  getBurstGapMode() {
+    const value = String(this.refs?.burstGapMode?.value ?? this.uiState.burstGapMode ?? DEFAULT_BURST_GAP_MODE).trim().toLowerCase();
+    return value === "manual" || value === "quantile" ? value : DEFAULT_BURST_GAP_MODE;
+  }
+
+  getBurstGapQuantile() {
+    const value = Number(this.refs?.burstGapQuantile?.value ?? this.uiState.burstGapQuantile);
+    return Number.isFinite(value) && value > 0 && value <= 1 ? value : DEFAULT_BURST_GAP_QUANTILE;
+  }
+
+  syncBurstGapControls() {
+    if (!this.refs?.burstGapMode || !this.refs?.burstGapQuantile || !this.refs?.burstGapSecondsLabel) {
+      return;
+    }
+    const mode = this.getBurstGapMode();
+    this.refs.burstGapMode.value = mode;
+    this.refs.burstGapSecondsLabel.textContent = mode === "quantile" ? "Fallback (s)" : "Burst gap (s)";
+    this.refs.burstGapQuantile.hidden = mode !== "quantile";
+    this.refs.burstGapQuantile.disabled = mode !== "quantile";
+  }
+
+  handleBurstGapSettingsChange() {
+    this.refs.burstGapSeconds.value = String(this.getBurstGapSeconds());
+    this.refs.burstGapQuantile.value = String(this.getBurstGapQuantile());
+    this.syncBurstGapControls();
+    this.saveUiState();
+    if (this.currentArtifact) {
+      void this.loadArtifact(new Set(this.data?.selectedFixKeys || []));
+    }
+  }
+
+  burstGapLabel() {
+    return formatBurstGapMetadata(this.data?.burstGap);
+  }
+
+  renderBurstCountIndicator(message = "") {
+    if (!this.refs?.burstCount) {
+      return;
+    }
+    if (message) {
+      this.refs.burstCount.textContent = message;
+      return;
+    }
+    if (!this.data) {
+      this.refs.burstCount.textContent = "No bursts loaded";
+      return;
+    }
+
+    const total = this.data.autoBursts.length;
+    const visible = this.getVisibleAutoBursts({ requireOverlay: false }).length;
+    const noun = total === 1 ? "burst" : "bursts";
+    const scope = this.data.overviewHasAllFixes ? "generated" : "loaded";
+    let text = `${formatCount(total)} ${noun} ${scope}`;
+    if (visible !== total) {
+      text += `, ${formatCount(visible)} visible`;
+    }
+    const gapLabel = this.burstGapLabel();
+    if (gapLabel) {
+      text += ` at ${gapLabel}`;
+    }
+    if (this.data.detailState === "loading") {
+      text += " (loading)";
+    } else if (this.data.autoBurstsTruncated && total === 0) {
+      text = "Select individuals to count bursts";
+    }
+    this.refs.burstCount.textContent = text;
+  }
+
+  normalizeIndividualSearchQuery(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  getFilteredIndividuals() {
+    if (!this.data) {
+      return [];
+    }
+    const query = this.normalizeIndividualSearchQuery(this.individualSearchQuery);
+    if (!query) {
+      return [...this.data.individuals];
+    }
+    return this.data.individuals.filter(individual => individual.toLowerCase().includes(query));
+  }
+
+  isStackedSideLayout() {
+    return window.matchMedia?.("(max-width: 1080px)")?.matches === true;
+  }
+
+  getSidePaneWidthBounds() {
+    const mainWidth = Math.max(0, this.refs?.main?.clientWidth || 0);
+    if (!mainWidth) {
+      return {
+        min: MIN_SIDE_PANE_WIDTH_PX,
+        max: Math.max(MIN_SIDE_PANE_WIDTH_PX, DEFAULT_SIDE_PANE_WIDTH_PX),
+      };
+    }
+    const maxByRatio = Math.floor(mainWidth * MAX_SIDE_PANE_WIDTH_RATIO);
+    const max = Math.max(MIN_SIDE_PANE_WIDTH_PX, maxByRatio - SIDE_PANE_HANDLE_WIDTH_PX);
+    return {
+      min: MIN_SIDE_PANE_WIDTH_PX,
+      max,
+    };
+  }
+
+  clampSidePaneWidth(width) {
+    const numericWidth = Number(width);
+    const fallback = this.sidePaneWidthPx || DEFAULT_SIDE_PANE_WIDTH_PX;
+    const requested = Number.isFinite(numericWidth) ? numericWidth : fallback;
+    const bounds = this.getSidePaneWidthBounds();
+    return Math.round(Math.min(bounds.max, Math.max(bounds.min, requested)));
+  }
+
+  applySidePaneWidth(width, { save = true, resizeMap = true } = {}) {
+    const nextWidth = this.clampSidePaneWidth(width);
+    this.sidePaneWidthPx = nextWidth;
+    if (this.refs?.main) {
+      if (this.isStackedSideLayout()) {
+        this.refs.main.style.removeProperty("--movement-side-width");
+      } else {
+        this.refs.main.style.setProperty("--movement-side-width", `${nextWidth}px`);
+      }
+    }
+    if (this.refs?.sideResize) {
+      this.refs.sideResize.setAttribute("aria-valuenow", String(nextWidth));
+    }
+    if (save && this.refs) {
+      this.saveUiState();
+    }
+    if (resizeMap && this.map) {
+      window.requestAnimationFrame(() => {
+        if (!this.map) {
+          return;
+        }
+        try {
+          this.map.resize();
+        } catch {}
+        this.renderLayers();
+      });
+    }
+  }
+
+  handleLayoutResize() {
+    this.applySidePaneWidth(this.sidePaneWidthPx, { save: false });
+  }
+
+  beginSidePaneResize(event) {
+    if (this.isStackedSideLayout()) {
+      return;
+    }
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    this.sidePaneResize.active = true;
+    this.sidePaneResize.pointerId = event.pointerId;
+    this.refs.main?.classList.add("is-resizing");
+    this.refs.sideResize?.setPointerCapture?.(event.pointerId);
+    window.addEventListener("pointermove", this.handleSidePanePointerMove);
+    window.addEventListener("pointerup", this.handleSidePanePointerUp);
+    window.addEventListener("pointercancel", this.handleSidePanePointerUp);
+  }
+
+  onSidePanePointerMove(event) {
+    if (!this.sidePaneResize.active || event.pointerId !== this.sidePaneResize.pointerId || !this.refs?.main) {
+      return;
+    }
+    const rect = this.refs.main.getBoundingClientRect();
+    if (!rect.width) {
+      return;
+    }
+    const nextWidth = rect.right - event.clientX;
+    this.applySidePaneWidth(nextWidth, { save: false });
+  }
+
+  onSidePanePointerUp(event) {
+    if (!this.sidePaneResize.active || event.pointerId !== this.sidePaneResize.pointerId) {
+      return;
+    }
+    this.sidePaneResize.active = false;
+    this.sidePaneResize.pointerId = null;
+    this.refs.main?.classList.remove("is-resizing");
+    this.refs.sideResize?.releasePointerCapture?.(event.pointerId);
+    window.removeEventListener("pointermove", this.handleSidePanePointerMove);
+    window.removeEventListener("pointerup", this.handleSidePanePointerUp);
+    window.removeEventListener("pointercancel", this.handleSidePanePointerUp);
+    this.applySidePaneWidth(this.sidePaneWidthPx, { save: true });
   }
 
   setSideSheet(sheet, { save = true } = {}) {
@@ -431,12 +657,14 @@ class MovementExampleApp {
           color: #9bb0c6;
         }
         .movement-toolbar select,
+        .movement-toolbar input,
         .movement-toolbar button,
         .movement-modal input,
         .movement-modal textarea {
           font: inherit;
         }
         .movement-toolbar select,
+        .movement-toolbar input,
         .movement-modal input,
         .movement-modal textarea {
           min-width: 150px;
@@ -445,6 +673,28 @@ class MovementExampleApp {
           border: 1px solid rgba(255, 255, 255, 0.08);
           background: rgba(15, 23, 42, 0.92);
           color: #e5edf7;
+        }
+        .movement-toolbar input[type="number"] {
+          min-width: 88px;
+          width: 96px;
+        }
+        .movement-burst-gap-control {
+          gap: 8px;
+        }
+        .movement-burst-gap-control input[data-role="burst-gap-quantile"] {
+          width: 82px;
+        }
+        .movement-burst-count {
+          display: inline-flex;
+          align-items: center;
+          min-height: 28px;
+          padding: 4px 8px;
+          border-radius: 999px;
+          border: 1px solid rgba(125, 211, 252, 0.22);
+          background: rgba(125, 211, 252, 0.08);
+          color: #c9e7f6;
+          font-size: 11px;
+          white-space: nowrap;
         }
         .movement-toolbar button,
         .movement-modal button {
@@ -483,9 +733,10 @@ class MovementExampleApp {
           color: #ffb3c2;
         }
         .movement-main {
+          --movement-side-width: 420px;
           display: grid;
-          grid-template-columns: minmax(0, 1.25fr) minmax(360px, 0.85fr);
-          gap: 12px;
+          grid-template-columns: minmax(0, 1fr) ${SIDE_PANE_HANDLE_WIDTH_PX}px minmax(${MIN_SIDE_PANE_WIDTH_PX}px, var(--movement-side-width));
+          gap: 0;
           min-height: 0;
           padding: 0 16px 14px;
         }
@@ -497,9 +748,36 @@ class MovementExampleApp {
           border: 1px solid rgba(255, 255, 255, 0.07);
           background: rgba(255, 255, 255, 0.03);
         }
+        .movement-main.is-resizing,
+        .movement-main.is-resizing * {
+          cursor: col-resize !important;
+          user-select: none;
+        }
         .movement-map-wrap {
           position: relative;
           background: #08111b;
+        }
+        .movement-side-resize {
+          position: relative;
+          display: flex;
+          align-items: stretch;
+          justify-content: center;
+          width: 100%;
+          min-height: 0;
+          cursor: col-resize;
+          touch-action: none;
+        }
+        .movement-side-resize::before {
+          content: "";
+          width: 4px;
+          margin: 8px 0;
+          border-radius: 999px;
+          background: linear-gradient(180deg, rgba(87, 218, 174, 0.2), rgba(125, 211, 252, 0.48), rgba(87, 218, 174, 0.2));
+          box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04);
+        }
+        .movement-side-resize:hover::before,
+        .movement-main.is-resizing .movement-side-resize::before {
+          background: linear-gradient(180deg, rgba(87, 218, 174, 0.38), rgba(125, 211, 252, 0.8), rgba(87, 218, 174, 0.38));
         }
         .movement-map {
           width: 100%;
@@ -948,7 +1226,7 @@ class MovementExampleApp {
           display: none;
         }
         .movement-side-sheet.individuals {
-          grid-template-rows: auto minmax(0, 0.95fr) auto minmax(0, 1.05fr);
+          grid-template-rows: auto auto minmax(0, 0.95fr) auto minmax(0, 1.05fr);
         }
         .movement-side-sheet.table {
           grid-template-rows: auto auto minmax(0, 1fr);
@@ -964,6 +1242,29 @@ class MovementExampleApp {
         .movement-fixes {
           overflow-y: auto;
           padding: 10px 12px;
+        }
+        .movement-side-search {
+          display: grid;
+          gap: 8px;
+          padding: 12px 14px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+          background: rgba(255, 255, 255, 0.02);
+        }
+        .movement-side-search label {
+          display: grid;
+          gap: 6px;
+          font-size: 12px;
+          color: #9bb0c6;
+        }
+        .movement-side-search input {
+          width: 100%;
+          min-width: 0;
+          padding: 7px 9px;
+          border-radius: 10px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(15, 23, 42, 0.92);
+          color: #e5edf7;
+          font: inherit;
         }
         .movement-table-toolbar {
           display: grid;
@@ -1065,6 +1366,18 @@ class MovementExampleApp {
         }
         .movement-table tbody tr.is-segment-row {
           background: rgba(255, 255, 255, 0.015);
+        }
+        .movement-table tbody tr.is-auto-burst-row {
+          background: rgba(125, 211, 252, 0.035);
+        }
+        .movement-burst-swatch {
+          display: inline-block;
+          width: 14px;
+          height: 14px;
+          border-radius: 999px;
+          border: 1px solid rgba(255, 255, 255, 0.58);
+          box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.06);
+          vertical-align: -2px;
         }
         .movement-table-cell-mono {
           font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1289,6 +1602,9 @@ class MovementExampleApp {
             grid-template-columns: 1fr;
             grid-template-rows: minmax(320px, 1fr) minmax(320px, 1fr);
           }
+          .movement-side-resize {
+            display: none;
+          }
           .movement-side {
             grid-template-rows: auto minmax(320px, 1fr) auto;
           }
@@ -1321,6 +1637,18 @@ class MovementExampleApp {
           <label class="movement-toggle"><input type="checkbox" data-role="show-train"> Train</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-test"> Test</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-points"> Points</label>
+          <label class="movement-toggle"><input type="checkbox" data-role="show-bursts"> Bursts</label>
+          <label>Burst gap
+            <select data-role="burst-gap-mode">
+              <option value="quantile">Quantile</option>
+              <option value="manual">Manual seconds</option>
+            </select>
+          </label>
+          <label class="movement-burst-gap-control"><span data-role="burst-gap-seconds-label">Fallback (s)</span>
+            <input type="number" min="1" step="300" data-role="burst-gap-seconds">
+            <input type="number" min="0.001" max="1" step="0.001" data-role="burst-gap-quantile" aria-label="Burst gap quantile">
+            <span class="movement-burst-count" data-role="burst-count">No bursts loaded</span>
+          </label>
           <button type="button" data-role="select-all">All individuals</button>
           <button type="button" data-role="select-none">No individuals</button>
           <button type="button" data-role="select-suspicious">Select all suspicious</button>
@@ -1347,6 +1675,14 @@ class MovementExampleApp {
               </div>
             </div>
           </div>
+          <div
+            class="movement-side-resize"
+            data-role="side-resize"
+            role="separator"
+            aria-label="Resize side pane"
+            aria-orientation="vertical"
+            aria-valuemin="${MIN_SIDE_PANE_WIDTH_PX}"
+          ></div>
           <div class="movement-side">
             <div class="movement-side-tabs" data-role="side-sheet-tabs">
               <button type="button" class="movement-side-tab is-active" data-role="side-tab-individuals">Individuals</button>
@@ -1355,6 +1691,11 @@ class MovementExampleApp {
             <div class="movement-side-content">
               <div class="movement-side-sheet individuals" data-role="side-sheet-individuals">
                 <div class="movement-side-head" data-role="individual-head">Individuals and coverage</div>
+                <div class="movement-side-search">
+                  <label>Search by individual ID
+                    <input type="search" data-role="individual-search" placeholder="Find an individual ID">
+                  </label>
+                </div>
                 <div class="movement-individuals" data-role="individuals"></div>
                 <div class="movement-side-head" data-role="fix-head">Checked fixes</div>
                 <div class="movement-fixes" data-role="selected-fixes"></div>
@@ -1366,6 +1707,7 @@ class MovementExampleApp {
                       <select data-role="table-mode">
                         <option value="fixes">Fix rows</option>
                         <option value="segments">Flagged segments</option>
+                        <option value="auto_bursts">Automatic bursts</option>
                       </select>
                     </label>
                     <label>Search
@@ -1521,6 +1863,7 @@ class MovementExampleApp {
     `;
 
     this.refs = {
+      main: this.mountEl.querySelector(".movement-main"),
       family: this.mountEl.querySelector('[data-role="family"]'),
       study: this.mountEl.querySelector('[data-role="study"]'),
       dataset: this.mountEl.querySelector('[data-role="dataset"]'),
@@ -1530,6 +1873,12 @@ class MovementExampleApp {
       showTrain: this.mountEl.querySelector('[data-role="show-train"]'),
       showTest: this.mountEl.querySelector('[data-role="show-test"]'),
       showPoints: this.mountEl.querySelector('[data-role="show-points"]'),
+      showBursts: this.mountEl.querySelector('[data-role="show-bursts"]'),
+      burstGapMode: this.mountEl.querySelector('[data-role="burst-gap-mode"]'),
+      burstGapSecondsLabel: this.mountEl.querySelector('[data-role="burst-gap-seconds-label"]'),
+      burstGapSeconds: this.mountEl.querySelector('[data-role="burst-gap-seconds"]'),
+      burstGapQuantile: this.mountEl.querySelector('[data-role="burst-gap-quantile"]'),
+      burstCount: this.mountEl.querySelector('[data-role="burst-count"]'),
       selectAll: this.mountEl.querySelector('[data-role="select-all"]'),
       selectNone: this.mountEl.querySelector('[data-role="select-none"]'),
       selectSuspicious: this.mountEl.querySelector('[data-role="select-suspicious"]'),
@@ -1546,6 +1895,8 @@ class MovementExampleApp {
       sideTabTable: this.mountEl.querySelector('[data-role="side-tab-table"]'),
       sideSheetIndividuals: this.mountEl.querySelector('[data-role="side-sheet-individuals"]'),
       sideSheetTable: this.mountEl.querySelector('[data-role="side-sheet-table"]'),
+      sideResize: this.mountEl.querySelector('[data-role="side-resize"]'),
+      individualSearch: this.mountEl.querySelector('[data-role="individual-search"]'),
       individuals: this.mountEl.querySelector('[data-role="individuals"]'),
       individualHead: this.mountEl.querySelector('[data-role="individual-head"]'),
       fixHead: this.mountEl.querySelector('[data-role="fix-head"]'),
@@ -1624,18 +1975,44 @@ class MovementExampleApp {
     this.refs.showTrain.checked = this.uiState.showTrain !== false;
     this.refs.showTest.checked = this.uiState.showTest !== false;
     this.refs.showPoints.checked = this.uiState.showPoints !== false;
+    this.refs.showBursts.checked = this.uiState.showBursts !== false;
+    this.refs.burstGapMode.value = ["manual", "quantile"].includes(this.uiState.burstGapMode)
+      ? this.uiState.burstGapMode
+      : DEFAULT_BURST_GAP_MODE;
+    this.refs.burstGapSeconds.value = String(
+      Number.isFinite(Number(this.uiState.burstGapSeconds)) && Number(this.uiState.burstGapSeconds) > 0
+        ? Number(this.uiState.burstGapSeconds)
+        : DEFAULT_BURST_GAP_SECONDS,
+    );
+    this.refs.burstGapQuantile.value = String(
+      Number.isFinite(Number(this.uiState.burstGapQuantile))
+        && Number(this.uiState.burstGapQuantile) > 0
+        && Number(this.uiState.burstGapQuantile) <= 1
+        ? Number(this.uiState.burstGapQuantile)
+        : DEFAULT_BURST_GAP_QUANTILE,
+    );
+    this.syncBurstGapControls();
+    this.renderBurstCountIndicator();
     this.refs.tableMode.value = this.uiState.tableMode || "fixes";
     this.refs.tableSort.value = this.uiState.tableSort || "track_time";
     this.refs.tableFilter.value = this.uiState.tableFilter || "";
     this.refs.tableSortDirection.dataset.direction = this.uiState.tableDescending ? "desc" : "asc";
     this.refs.tableSortDirection.textContent = this.uiState.tableDescending ? "Descending" : "Ascending";
+    this.refs.individualSearch.value = this.individualSearchQuery;
+    this.applySidePaneWidth(this.sidePaneWidthPx, { save: false, resizeMap: false });
     this.setSideSheet(this.uiState.sideSheet || "individuals", { save: false });
     this.updateActionButtons();
   }
 
   bindEvents() {
+    window.addEventListener("resize", this.handleWindowResize);
     this.refs.sideTabIndividuals.addEventListener("click", () => this.setSideSheet("individuals"));
     this.refs.sideTabTable.addEventListener("click", () => this.setSideSheet("table"));
+    this.refs.individualSearch.addEventListener("input", () => {
+      this.individualSearchQuery = this.refs.individualSearch.value || "";
+      this.renderIndividuals();
+    });
+    this.refs.sideResize.addEventListener("pointerdown", event => this.beginSidePaneResize(event));
     this.refs.family.addEventListener("change", async () => {
       try {
         await this.switchFamily(this.refs.family.value);
@@ -1694,6 +2071,14 @@ class MovementExampleApp {
       this.renderLayers();
       this.renderTableSheet();
     });
+    this.refs.showBursts.addEventListener("change", () => {
+      this.saveUiState();
+      this.renderLayers();
+      this.renderTableSheet();
+    });
+    this.refs.burstGapMode.addEventListener("change", () => this.handleBurstGapSettingsChange());
+    this.refs.burstGapSeconds.addEventListener("change", () => this.handleBurstGapSettingsChange());
+    this.refs.burstGapQuantile.addEventListener("change", () => this.handleBurstGapSettingsChange());
     this.refs.fixPopup.addEventListener("click", event => {
       const closeButton = event.target.closest('[data-role="fix-popup-close"]');
       if (closeButton) {
@@ -1934,6 +2319,7 @@ class MovementExampleApp {
     this.refs.slider.max = "0";
     this.refs.slider.value = "0";
     this.updateTimeLabel();
+    this.renderBurstCountIndicator();
     this.renderLayers();
     this.renderLegend();
     this.renderThresholdPane();
@@ -2143,7 +2529,8 @@ class MovementExampleApp {
       this.refs.slider.min = String(this.data.minTimeMs);
       this.refs.slider.max = String(this.data.maxTimeMs);
       this.refs.slider.value = String(this.currentTimeMs);
-      this.data.selectedIndividuals = new Set(this.data.individuals);
+      const initiallySelectedIndividuals = this.data.overviewTruncated ? [] : this.data.individuals;
+      this.data.selectedIndividuals = new Set(initiallySelectedIndividuals);
       this.data.selectedFixKeys = new Set();
       this.populateColorByOptions();
       this.renderIndividuals();
@@ -2155,7 +2542,11 @@ class MovementExampleApp {
       await this.rebuildMap(false);
       this.resetView();
       this.updateActionButtons();
-      this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
+      if (initiallySelectedIndividuals.length) {
+        this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
+      } else {
+        this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
+      }
       void this.loadDetailForCurrentSelection();
     } catch (error) {
       if (this.isAbortError(error)) {
@@ -2278,10 +2669,17 @@ class MovementExampleApp {
     }
     this.saveUiState();
     this.setStatus(`Loading overview for ${this.currentArtifact} from ${this.currentDatasetId}...`);
+    this.renderBurstCountIndicator("Loading bursts...");
     try {
       const controller = this.beginRequest("overview");
+      const overviewParams = new URLSearchParams({
+        logical_name: artifactName,
+        burst_gap_mode: this.getBurstGapMode(),
+        burst_gap_seconds: String(this.getBurstGapSeconds()),
+        burst_gap_quantile: String(this.getBurstGapQuantile()),
+      });
       const summary = await this.fetchJSON(
-        `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/dataset/${encodeURIComponent(datasetId)}/overview?${new URLSearchParams({ logical_name: artifactName }).toString()}`,
+        `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/dataset/${encodeURIComponent(datasetId)}/overview?${overviewParams.toString()}`,
         { signal: controller.signal },
       );
       if (
@@ -2295,11 +2693,13 @@ class MovementExampleApp {
         return;
       }
       this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
+      this.renderBurstCountIndicator();
       this.currentTimeMs = this.data.minTimeMs;
       this.refs.slider.min = String(this.data.minTimeMs);
       this.refs.slider.max = String(this.data.maxTimeMs);
       this.refs.slider.value = String(this.currentTimeMs);
-      this.data.selectedIndividuals = new Set(this.data.individuals);
+      const initiallySelectedIndividuals = this.data.overviewTruncated ? [] : this.data.individuals;
+      this.data.selectedIndividuals = new Set(initiallySelectedIndividuals);
       this.data.selectedFixKeys = new Set(
         [...preservedFixKeys].filter(key => this.data.fixByKey.has(key)),
       );
@@ -2313,7 +2713,11 @@ class MovementExampleApp {
       await this.rebuildMap(false);
       this.resetView();
       this.updateActionButtons();
-      this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
+      if (initiallySelectedIndividuals.length) {
+        this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
+      } else {
+        this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
+      }
       void this.loadDetailForCurrentSelection({ preservedFixKeys });
     } catch (error) {
       if (this.isAbortError(error) || requestId !== this.loadRequestId) {
@@ -2348,8 +2752,19 @@ class MovementExampleApp {
     if (!this.data) {
       return;
     }
-    this.refs.individualHead.textContent = `Individuals and coverage (${formatCount(this.data.individuals.length)})`;
-    for (const individual of this.data.individuals) {
+    const filteredIndividuals = this.getFilteredIndividuals();
+    const totalIndividuals = this.data.individuals.length;
+    this.refs.individualHead.textContent = filteredIndividuals.length === totalIndividuals
+      ? `Individuals and coverage (${formatCount(totalIndividuals)})`
+      : `Individuals and coverage (${formatCount(filteredIndividuals.length)} of ${formatCount(totalIndividuals)})`;
+    if (!filteredIndividuals.length) {
+      const empty = document.createElement("div");
+      empty.className = "movement-empty";
+      empty.textContent = "No individual IDs match the current search.";
+      this.refs.individuals.appendChild(empty);
+      return;
+    }
+    for (const individual of filteredIndividuals) {
       const stats = this.data.stats[individual];
       const coverage = this.data.coverageByIndividual[individual] || {};
       const isSelected = this.data.selectedIndividuals.has(individual);
@@ -2543,6 +2958,17 @@ class MovementExampleApp {
     );
   }
 
+  getVisibleAutoBursts({ requireOverlay = true } = {}) {
+    if (!this.data || (requireOverlay && !this.refs.showBursts.checked)) {
+      return [];
+    }
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    const visibleSetNames = this.getVisibleSetNames();
+    return (this.data.autoBursts || []).filter(
+      burst => visibleIndividuals.has(burst.individual) && visibleSetNames.has(burst.setName),
+    );
+  }
+
   getFilteredTableSegments() {
     const filterText = String(this.refs.tableFilter.value || "").trim().toLowerCase();
     const segments = this.getVisibleSegments().slice();
@@ -2593,6 +3019,40 @@ class MovementExampleApp {
     return filtered;
   }
 
+  getFilteredTableAutoBursts() {
+    const filterText = String(this.refs.tableFilter.value || "").trim().toLowerCase();
+    const bursts = this.getVisibleAutoBursts({ requireOverlay: false }).slice();
+    const filtered = filterText
+      ? bursts.filter(burst => {
+        const haystack = [
+          burst.individual,
+          burst.setName,
+          burst.burstId,
+          burst.startFixKey,
+          burst.endFixKey,
+        ].join(" ").toLowerCase();
+        return haystack.includes(filterText);
+      })
+      : bursts;
+    const direction = this.refs.tableSortDirection.dataset.direction === "desc" ? -1 : 1;
+    const sortKey = this.refs.tableSort.value || "track_time";
+    filtered.sort((left, right) => {
+      if (sortKey === "time_desc") {
+        return direction * ((right.startTimeMs - left.startTimeMs) || left.burstId.localeCompare(right.burstId));
+      }
+      if (sortKey === "time_asc") {
+        return direction * ((left.startTimeMs - right.startTimeMs) || left.burstId.localeCompare(right.burstId));
+      }
+      return direction * (
+        left.individual.localeCompare(right.individual)
+        || left.setName.localeCompare(right.setName)
+        || left.startTimeMs - right.startTimeMs
+        || left.burstId.localeCompare(right.burstId)
+      );
+    });
+    return filtered;
+  }
+
   buildTableRenderSignature(mode, totalRows) {
     const selectedIndividuals = this.getSelectedIndividuals().join("|");
     const direction = this.refs.tableSortDirection.dataset.direction || "asc";
@@ -2606,6 +3066,8 @@ class MovementExampleApp {
       direction,
       this.refs.showTrain.checked ? "train" : "",
       this.refs.showTest.checked ? "test" : "",
+      this.refs.showBursts.checked ? "bursts" : "",
+      this.getBurstGapSeconds(),
       selectedIndividuals,
       this.data?.detailState || "idle",
       this.data?.detailReturnedFixCount || 0,
@@ -2901,10 +3363,15 @@ class MovementExampleApp {
         if (segment) {
           this.zoomToPath(segment.path);
         }
+      } else if (action === "zoom-auto-burst") {
+        const burst = this.data?.autoBurstById?.get(actionButton.dataset.burstId || "");
+        if (burst) {
+          this.zoomToPath(burst.path);
+        }
       }
       return;
     }
-    const row = event.target.closest("tr[data-fix-key], tr[data-segment-id]");
+    const row = event.target.closest("tr[data-fix-key], tr[data-segment-id], tr[data-burst-id]");
     if (!row) {
       return;
     }
@@ -2912,6 +3379,13 @@ class MovementExampleApp {
       const segment = this.data?.segmentById?.get(row.dataset.segmentId || "");
       if (segment) {
         this.zoomToPath(segment.path);
+      }
+      return;
+    }
+    if (row.dataset.burstId && this.refs.tableMode.value === "auto_bursts") {
+      const burst = this.data?.autoBurstById?.get(row.dataset.burstId || "");
+      if (burst) {
+        this.zoomToPath(burst.path);
       }
       return;
     }
@@ -2986,6 +3460,47 @@ class MovementExampleApp {
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(segment.startTimeMs))}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(segment.endTimeMs))}</td>
                 <td class="movement-table-cell-actions"><button type="button" data-action="zoom-segment" data-segment-id="${escapeHtml(segment.segmentId)}">Zoom</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+      return;
+    }
+
+    if (mode === "auto_bursts") {
+      const bursts = this.getFilteredTableAutoBursts();
+      const overlayNote = this.refs.showBursts.checked ? "" : " Map overlay is hidden.";
+      this.refs.tableMeta.textContent = `${formatCount(bursts.length)} automatic bursts in the current visible scope at ${this.burstGapLabel() || `${formatCount(this.getBurstGapSeconds())} s`}. Click a row to zoom.${overlayNote}`;
+      if (!bursts.length) {
+        this.refs.tableWrap.innerHTML = '<div class="movement-table-empty">No automatic bursts are visible for the current selection.</div>';
+        return;
+      }
+      this.refs.tableWrap.innerHTML = `
+        <table class="movement-table">
+          <thead>
+            <tr>
+              <th>Color</th>
+              <th>Individual</th>
+              <th>Track</th>
+              <th>Burst</th>
+              <th>Fixes</th>
+              <th>Start</th>
+              <th>End</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${bursts.map(burst => `
+              <tr class="is-auto-burst-row" data-burst-id="${escapeHtml(burst.burstId)}">
+                <td><span class="movement-burst-swatch" style="background: ${escapeHtml(rgbaCss(autoBurstColor(burst, 215)))}"></span></td>
+                <td>${escapeHtml(burst.individual)}</td>
+                <td>${escapeHtml(burst.setName)}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(String(burst.burstIdx))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(String(burst.fixCount))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(burst.startTimeMs))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(burst.endTimeMs))}</td>
+                <td class="movement-table-cell-actions"><button type="button" data-action="zoom-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}">Zoom</button></td>
               </tr>
             `).join("")}
           </tbody>
@@ -3098,8 +3613,7 @@ class MovementExampleApp {
     }
 
     const field = this.data.colorFieldByKey.get(this.refs.colorBy.value) || this.data.colorFields[0];
-    const style = field ? this.data.colorStyles.get(field.key) : null;
-    if (!field || !style) {
+    if (!field) {
       legendEl.innerHTML = "";
       legendEl.classList.add("hidden");
       return;
@@ -3113,43 +3627,69 @@ class MovementExampleApp {
     `;
 
     let body = "";
-    if (style.kind === "numeric") {
-      const lowerLabel = style.range.observedMin < style.range.min
-        ? `<= ${formatColorValue(style.range.min, "numeric")}`
-        : formatColorValue(style.range.min, "numeric");
-      const upperLabel = style.range.observedMax > style.range.max
-        ? `>= ${formatColorValue(style.range.max, "numeric")}`
-        : formatColorValue(style.range.max, "numeric");
-      const observedSummary = style.range.observedMin === style.range.min && style.range.observedMax === style.range.max
-        ? "Scale uses the full observed numeric range."
-        : `Scale is clipped to the ${formatPercent(NUMERIC_COLOR_MIN_QUANTILE)}-${formatPercent(NUMERIC_COLOR_MAX_QUANTILE)} percentile range; observed range ${formatColorValue(style.range.observedMin, "numeric")} to ${formatColorValue(style.range.observedMax, "numeric")}.`;
+    if (field.key === INDIVIDUAL_COLOR_FIELD_KEY) {
+      const visibleIndividuals = this.getSelectedIndividuals();
+      const shownIndividuals = visibleIndividuals.slice(0, INDIVIDUAL_LEGEND_MAX_ITEMS);
+      const remainingCount = Math.max(0, visibleIndividuals.length - shownIndividuals.length);
+      const note = visibleIndividuals.length
+        ? remainingCount > 0
+          ? `Points use each individual's track color. Showing ${formatCount(shownIndividuals.length)} of ${formatCount(visibleIndividuals.length)} visible individuals.`
+          : `Points use each individual's track color across ${formatCount(visibleIndividuals.length)} visible individuals.`
+        : "Points use each individual's track color.";
       body = `
-        <div class="movement-legend-scale">
-          <div
-            class="movement-legend-gradient"
-            style="background: linear-gradient(90deg, ${numericLegendGradient()});"
-          ></div>
-          <div class="movement-legend-range">
-            <span>${escapeHtml(lowerLabel)}</span>
-            <span>${escapeHtml(upperLabel)}</span>
-          </div>
-          <div class="movement-legend-note">${escapeHtml(observedSummary)}</div>
-        </div>
-      `;
-    } else if (style.kind === "boolean") {
-      body = `
+        <div class="movement-legend-note">${escapeHtml(note)}</div>
         <div class="movement-legend-items">
-          ${legendItem("False", [96, 201, 170, POINT_ALPHA])}
-          ${legendItem("True", [246, 92, 110, POINT_ALPHA])}
-          ${legendItem("Missing", [120, 136, 153, 120])}
+          ${shownIndividuals.map(individual => legendItem(
+            individual,
+            [...(this.data.individualPalette[individual] || [124, 210, 255]), POINT_ALPHA],
+          )).join("")}
         </div>
       `;
     } else {
-      const items = Array.from(style.categories.entries())
-        .sort((left, right) => left[0].localeCompare(right[0], undefined, { sensitivity: "base" }))
-        .map(([label, color]) => legendItem(label, color))
-        .join("");
-      body = `<div class="movement-legend-items">${items}</div>`;
+      const style = this.data.colorStyles.get(field.key);
+      if (!style) {
+        legendEl.innerHTML = "";
+        legendEl.classList.add("hidden");
+        return;
+      }
+      if (style.kind === "numeric") {
+        const lowerLabel = style.range.observedMin < style.range.min
+          ? `<= ${formatColorValue(style.range.min, "numeric")}`
+          : formatColorValue(style.range.min, "numeric");
+        const upperLabel = style.range.observedMax > style.range.max
+          ? `>= ${formatColorValue(style.range.max, "numeric")}`
+          : formatColorValue(style.range.max, "numeric");
+        const observedSummary = style.range.observedMin === style.range.min && style.range.observedMax === style.range.max
+          ? "Scale uses the full observed numeric range."
+          : `Scale is clipped to the ${formatPercent(NUMERIC_COLOR_MIN_QUANTILE)}-${formatPercent(NUMERIC_COLOR_MAX_QUANTILE)} percentile range; observed range ${formatColorValue(style.range.observedMin, "numeric")} to ${formatColorValue(style.range.observedMax, "numeric")}.`;
+        body = `
+          <div class="movement-legend-scale">
+            <div
+              class="movement-legend-gradient"
+              style="background: linear-gradient(90deg, ${numericLegendGradient()});"
+            ></div>
+            <div class="movement-legend-range">
+              <span>${escapeHtml(lowerLabel)}</span>
+              <span>${escapeHtml(upperLabel)}</span>
+            </div>
+            <div class="movement-legend-note">${escapeHtml(observedSummary)}</div>
+          </div>
+        `;
+      } else if (style.kind === "boolean") {
+        body = `
+          <div class="movement-legend-items">
+            ${legendItem("False", [96, 201, 170, POINT_ALPHA])}
+            ${legendItem("True", [246, 92, 110, POINT_ALPHA])}
+            ${legendItem("Missing", [120, 136, 153, 120])}
+          </div>
+        `;
+      } else {
+        const items = Array.from(style.categories.entries())
+          .sort((left, right) => left[0].localeCompare(right[0], undefined, { sensitivity: "base" }))
+          .map(([label, color]) => legendItem(label, color))
+          .join("");
+        body = `<div class="movement-legend-items">${items}</div>`;
+      }
     }
 
     legendEl.innerHTML = `${header}${body}`;
@@ -3288,6 +3828,7 @@ class MovementExampleApp {
   }
 
   renderLayers() {
+    this.renderBurstCountIndicator();
     this.syncFixPopupVisibility();
     if (!this.data || !this.overlay || !this.mapLoaded) {
       if (this.overlay) {
@@ -3309,6 +3850,25 @@ class MovementExampleApp {
     const tableSelectedPointData = [];
     const cursorData = [];
     const visibleSegments = this.getVisibleSegments();
+    const visibleAutoBursts = this.getVisibleAutoBursts();
+    const suppressedBaseTrackKeys = new Set(
+      visibleAutoBursts.map(burst => movementTrackKey(burst.individual, burst.setName)),
+    );
+    const visibleAutoBurstPaths = visibleAutoBursts
+      .filter(burst => burst.path.length >= 2)
+      .map(burst => ({
+        burst,
+        path: burst.path,
+        color: autoBurstColor(burst, 185),
+      }));
+    const visibleAutoBurstPoints = visibleAutoBursts
+      .filter(burst => burst.path.length >= 1)
+      .map(burst => ({
+        burst,
+        position: burst.path[0],
+        color: autoBurstColor(burst, 220),
+        fillColor: autoBurstColor(burst, 48),
+      }));
     const visibleTableSelection = this.getVisibleTableSelectionFixes();
     const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
     const tableSelectionPath = this.getCurrentSegmentSelection()?.fixes
@@ -3321,7 +3881,10 @@ class MovementExampleApp {
         continue;
       }
       for (const setName of visibleSetNames) {
-        const series = this.data.seriesByIndividual[individual]?.[setName];
+        if (suppressedBaseTrackKeys.has(movementTrackKey(individual, setName))) {
+          continue;
+        }
+        const series = this.buildVisibleTrackSeries(individual, setName);
         if (!series) {
           continue;
         }
@@ -3388,6 +3951,39 @@ class MovementExampleApp {
         pickable: false,
       }),
     ];
+
+    if (visibleAutoBurstPaths.length) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-auto-bursts",
+          data: visibleAutoBurstPaths,
+          getPath: item => item.path,
+          getColor: item => item.color,
+          getWidth: 5,
+          widthMinPixels: 3,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (visibleAutoBurstPoints.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-auto-burst-points",
+          data: visibleAutoBurstPoints,
+          getPosition: item => item.position,
+          getFillColor: item => item.fillColor,
+          getLineColor: item => item.color,
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 2,
+          getRadius: 124,
+          radiusMinPixels: 6,
+          radiusMaxPixels: 15,
+          pickable: false,
+        }),
+      );
+    }
 
     if (visibleSegments.length) {
       layers.push(
@@ -3535,10 +4131,49 @@ class MovementExampleApp {
     this.renderFixPopup();
   }
 
+  buildVisibleTrackSeries(individual, setName) {
+    const exactFixes = this.getExactVisibleTrackFixes(individual, setName);
+    if (exactFixes.length) {
+      return {
+        source: "exact-detail",
+        times: exactFixes.map(fix => fix.timeMs),
+        positions: exactFixes.map(fix => fix.position),
+      };
+    }
+    const series = this.data?.seriesByIndividual?.[individual]?.[setName] || null;
+    if (!series) {
+      return null;
+    }
+    return {
+      source: "sampled-overview",
+      times: Array.isArray(series.times) ? series.times : [],
+      positions: Array.isArray(series.positions) ? series.positions : [],
+    };
+  }
+
+  getExactVisibleTrackFixes(individual, setName) {
+    if (!this.data || (!this.hasLoadedDetailSelection() && !this.data.overviewHasAllFixes)) {
+      return [];
+    }
+    const source = this.hasLoadedDetailSelection() && (this.data.detailFixes || []).length
+      ? this.data.detailFixes
+      : (this.data.overviewFixes || []);
+    return source
+      .filter(fix => fix.individual === individual && fix.setName === setName)
+      .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
+  }
+
   colorForFix(fix) {
     const field = this.data.colorFieldByKey.get(this.refs.colorBy.value) || this.data.colorFields[0];
     if (!field) {
       return [124, 210, 255, POINT_ALPHA];
+    }
+    if (field.key === INDIVIDUAL_COLOR_FIELD_KEY) {
+      return splitColor(
+        this.data.individualPalette[fix.individual] || [124, 210, 255],
+        fix.setName,
+        POINT_ALPHA,
+      );
     }
     const style = this.data.colorStyles.get(field.key);
     const value = fix.attributes[field.key];
@@ -3894,6 +4529,24 @@ class MovementExampleApp {
         uncheckedMatchKeys: new Set(),
       };
     }
+    if (field.key === INDIVIDUAL_COLOR_FIELD_KEY) {
+      return {
+        field,
+        visibleFixes,
+        numericFixes: [],
+        thresholdValue: null,
+        histogram: null,
+        reverse: false,
+        histogramMode: "full",
+        histogramInputMin: null,
+        histogramInputMax: null,
+        selectedLevels: [],
+        levelOptions: [],
+        disabledReason: "Threshold selection is unavailable when coloring by individual ID. Use the Individuals panel to filter tracks instead.",
+        matchKeys: new Set(),
+        uncheckedMatchKeys: new Set(),
+      };
+    }
 
     const thresholdValue = this.thresholdState.fieldKey === field.key && typeof this.thresholdState.value === "number"
       ? this.thresholdState.value
@@ -4032,6 +4685,7 @@ class MovementExampleApp {
     const reverse = context?.reverse === true;
     const selectedLevels = context?.selectedLevels || [];
     const levelOptions = context?.levelOptions || [];
+    const disabledReason = context?.disabledReason || "";
     const matchCount = context?.matchKeys?.size || 0;
     const uncheckedCount = context?.uncheckedMatchKeys?.size || 0;
     const histogram = context?.histogram;
@@ -4050,6 +4704,12 @@ class MovementExampleApp {
       body = `
         <div class="movement-threshold-empty">
           No visible fixes are in scope right now. Adjust the visible individuals or train/test toggles to build a threshold.
+        </div>
+      `;
+    } else if (disabledReason) {
+      body = `
+        <div class="movement-threshold-empty">
+          ${escapeHtml(disabledReason)}
         </div>
       `;
     } else if (field.kind !== "numeric") {
@@ -4531,6 +5191,7 @@ class MovementExampleApp {
       this.data.detailTruncated = false;
       this.data.detailFixes = [];
       this.data.detailSegments = [];
+      this.data.detailAutoBursts = [];
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
       this.renderSelectedFixes();
@@ -4552,6 +5213,7 @@ class MovementExampleApp {
       this.data.detailLimit = this.data.totalRows;
       this.data.detailFixes = [];
       this.data.detailSegments = [];
+      this.data.detailAutoBursts = [];
       this.data.detailMatchingFixCount = this.getFixesForIndividualsFrom(this.data.overviewFixes, selectedIndividuals).length;
       this.data.detailReturnedFixCount = this.data.detailMatchingFixCount;
       this.data.detailTruncated = false;
@@ -4569,6 +5231,7 @@ class MovementExampleApp {
     this.data.detailState = "loading";
     this.data.detailIndividuals = [...selectedIndividuals];
     this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, selectedIndividuals);
+    this.renderBurstCountIndicator();
     this.renderSelectedFixes();
     this.renderThresholdPane();
     this.updateActionButtons();
@@ -4604,8 +5267,10 @@ class MovementExampleApp {
       this.data.detailMatchingFixCount = Number(payload.matching_fix_count) || 0;
       this.data.detailReturnedFixCount = Number(payload.returned_fix_count) || 0;
       this.data.detailTruncated = Boolean(payload.truncated);
+      this.data.burstGap = parseMovementBurstGap(payload);
       this.data.detailFixes = parseMovementFixes(payload.fixes || []);
       this.data.detailSegments = parseMovementSegments(payload.segments || []);
+      this.data.detailAutoBursts = parseMovementAutoBursts(payload.auto_bursts || []);
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, this.data.detailIndividuals);
       this.renderSelectedFixes();
@@ -4628,6 +5293,7 @@ class MovementExampleApp {
       this.data.detailTruncated = false;
       this.data.detailFixes = [];
       this.data.detailSegments = [];
+      this.data.detailAutoBursts = [];
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
       this.renderSelectedFixes();
@@ -4640,6 +5306,9 @@ class MovementExampleApp {
 
   buildFixesRequestUrl({ familyName, studyName, datasetId, artifactName, individuals = [], reviewStatus = "", limit } = {}) {
     const params = new URLSearchParams({ logical_name: artifactName });
+    params.set("burst_gap_mode", this.getBurstGapMode());
+    params.set("burst_gap_seconds", String(this.getBurstGapSeconds()));
+    params.set("burst_gap_quantile", String(this.getBurstGapQuantile()));
     const normalizedIndividuals = uniqueNonEmpty(individuals).sort((left, right) => left.localeCompare(right));
     const allIndividuals = this.data ? [...this.data.individuals].sort((left, right) => left.localeCompare(right)) : [];
     const shouldOmitIndividuals = normalizedIndividuals.length > 0 && arraysEqual(normalizedIndividuals, allIndividuals);
@@ -5693,14 +6362,16 @@ class MovementExampleApp {
 }
 
 function buildDatasetFromSummary(summary, preferredColorBy) {
-  const individuals = Array.isArray(summary.individuals)
-    ? [...summary.individuals].sort((left, right) => left.localeCompare(right))
-    : [];
+  const individuals = collectSummaryIndividuals(summary);
   if (!individuals.length) {
     throw new Error("Dataset summary did not contain any individuals.");
   }
   const overviewFixes = parseMovementFixes(summary.fixes || []);
   const overviewSegments = parseMovementSegments(summary.segments || []);
+  const overviewAutoBursts = parseMovementAutoBursts(summary.auto_bursts || []);
+  const burstGap = parseMovementBurstGap(summary);
+  const totalRows = Number(summary.total_rows) || 0;
+  const overviewTruncated = Boolean(summary.overview_truncated) || overviewFixes.length < totalRows;
 
   const seriesByIndividual = {};
   const coverageByIndividual = {};
@@ -5742,12 +6413,14 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     };
   });
 
-  const colorFields = Array.isArray(summary.color_fields) ? summary.color_fields.map(field => ({
-    key: String(field?.key || ""),
-    label: String(field?.label || field?.key || ""),
-    kind: String(field?.kind || "categorical"),
-    source: String(field?.source || "raw"),
-  })).filter(field => field.key) : [];
+  const colorFields = buildMovementColorFields(
+    Array.isArray(summary.color_fields) ? summary.color_fields.map(field => ({
+      key: String(field?.key || ""),
+      label: String(field?.label || field?.key || ""),
+      kind: String(field?.kind || "categorical"),
+      source: String(field?.source || "raw"),
+    })).filter(field => field.key) : [],
+  );
   const colorFieldByKey = new Map(colorFields.map(field => [field.key, field]));
 
   individuals.forEach((individual, index) => {
@@ -5771,7 +6444,7 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     : colorFields[0]?.key || "step_length_m";
 
   const data = {
-    totalRows: Number(summary.total_rows) || 0,
+    totalRows,
     individuals,
     speciesByIndividual: summary.species_by_individual || {},
     seriesByIndividual,
@@ -5781,11 +6454,19 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     fixByKey: new Map(),
     segments: [],
     segmentById: new Map(),
+    autoBursts: [],
+    autoBurstById: new Map(),
     overviewFixes,
     overviewSegments,
-    overviewHasAllFixes: overviewFixes.length >= (Number(summary.total_rows) || 0),
+    overviewAutoBursts,
+    burstGap,
+    overviewTruncated,
+    overviewFixLimit: Number(summary.overview_fix_limit) || null,
+    autoBurstsTruncated: Boolean(summary.auto_bursts_truncated),
+    overviewHasAllFixes: !overviewTruncated,
     detailFixes: [],
     detailSegments: [],
+    detailAutoBursts: [],
     detailState: "idle",
     detailIndividuals: [],
     detailLimit: null,
@@ -5817,6 +6498,84 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
   return data;
 }
 
+function parseMovementBurstGap(summary) {
+  const nested = summary?.burst_gap || {};
+  const mode = String(nested.mode ?? summary?.burst_gap_mode ?? DEFAULT_BURST_GAP_MODE).trim().toLowerCase();
+  const quantile = finiteOrNull(nested.quantile ?? summary?.burst_gap_quantile) ?? DEFAULT_BURST_GAP_QUANTILE;
+  const fallbackSeconds = finiteOrNull(nested.fallback_seconds ?? summary?.burst_gap_fallback_seconds) ?? DEFAULT_BURST_GAP_SECONDS;
+  const effectiveSeconds = finiteOrNull(nested.effective_seconds ?? summary?.burst_gap_seconds) ?? fallbackSeconds;
+  const gapCount = Math.max(0, Number(nested.gap_count ?? summary?.burst_gap_gap_count) || 0);
+  return {
+    mode: mode === "manual" || mode === "quantile" ? mode : DEFAULT_BURST_GAP_MODE,
+    quantile: quantile > 0 && quantile <= 1 ? quantile : DEFAULT_BURST_GAP_QUANTILE,
+    fallbackSeconds,
+    effectiveSeconds,
+    gapCount,
+    usedFallback: Boolean(nested.used_fallback ?? summary?.burst_gap_used_fallback),
+  };
+}
+
+function formatBurstGapQuantile(value) {
+  const quantileValue = Number(value);
+  if (!Number.isFinite(quantileValue) || quantileValue <= 0 || quantileValue > 1) {
+    return "p99.9";
+  }
+  const percentile = quantileValue * 100;
+  const decimals = Math.abs(percentile - Math.round(percentile)) < 0.0001 ? 0 : 3;
+  let formatted = percentile.toFixed(decimals);
+  if (formatted.includes(".")) {
+    formatted = formatted.replace(/0+$/, "").replace(/\.$/, "");
+  }
+  return `p${formatted}`;
+}
+
+function formatBurstGapMetadata(burstGap) {
+  if (!burstGap) {
+    return "";
+  }
+  const effectiveSeconds = finiteOrNull(burstGap.effectiveSeconds);
+  if (effectiveSeconds === null) {
+    return "";
+  }
+  const secondsLabel = formatMaybeNumber(effectiveSeconds, "s");
+  if (burstGap.mode === "quantile") {
+    let label = `${formatBurstGapQuantile(burstGap.quantile)} = ${secondsLabel}`;
+    if (Number(burstGap.gapCount) > 0) {
+      label += ` from ${formatCount(burstGap.gapCount)} gaps`;
+    }
+    if (burstGap.usedFallback) {
+      label += " (fallback)";
+    }
+    return label;
+  }
+  return `${secondsLabel} manual`;
+}
+
+function collectSummaryIndividuals(summary) {
+  const names = new Set();
+  const add = value => {
+    const name = String(value || "").trim();
+    if (name) {
+      names.add(name);
+    }
+  };
+  if (Array.isArray(summary.individuals)) {
+    summary.individuals.forEach(add);
+  }
+  for (const collection of [
+    summary.stats,
+    summary.series_by_individual,
+    summary.coverage_by_individual,
+    summary.species_by_individual,
+  ]) {
+    Object.keys(collection || {}).forEach(add);
+  }
+  for (const item of [...(summary.fixes || []), ...(summary.auto_bursts || [])]) {
+    add(item?.individual);
+  }
+  return [...names].sort((left, right) => left.localeCompare(right));
+}
+
 function parseMovementFixes(items) {
   return Array.isArray(items) ? items.map(item => ({
     fixKey: String(item?.fix_key || ""),
@@ -5824,7 +6583,10 @@ function parseMovementFixes(items) {
     setName: String(item?.set || "train") || "train",
     timeMs: Number(item?.time_ms) || 0,
     position: [Number(item?.lon) || 0, Number(item?.lat) || 0],
-    attributes: { ...(item?.attributes || {}) },
+    attributes: {
+      ...(item?.attributes || {}),
+      [INDIVIDUAL_COLOR_FIELD_KEY]: String(item?.individual || ""),
+    },
     review: {
       status: String(item?.review?.status || ""),
       issueId: String(item?.review?.issue_id || ""),
@@ -5864,6 +6626,27 @@ function parseMovementSegments(items) {
         .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]))
       : [],
   })).filter(item => item.segmentId) : [];
+}
+
+function parseMovementAutoBursts(items) {
+  return Array.isArray(items) ? items.map(item => ({
+    burstId: String(item?.burst_id || ""),
+    burstIdx: Number(item?.burst_idx) || 0,
+    individual: String(item?.individual || ""),
+    setName: String(item?.set_name || "train") || "train",
+    startFixKey: String(item?.start_fix_key || ""),
+    endFixKey: String(item?.end_fix_key || ""),
+    startTimeMs: Number(item?.start_time_ms) || 0,
+    endTimeMs: Number(item?.end_time_ms) || 0,
+    fixCount: Number(item?.fix_count) || 0,
+    burstGapSeconds: Number(item?.burst_gap_seconds) || DEFAULT_BURST_GAP_SECONDS,
+    fixKeys: Array.isArray(item?.fix_keys) ? item.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
+    path: Array.isArray(item?.path)
+      ? item.path
+        .map(position => [Number(position?.[0]) || 0, Number(position?.[1]) || 0])
+        .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]))
+      : [],
+  })).filter(item => item.burstId) : [];
 }
 
 function normalizeReviewIssues(review) {
@@ -5935,7 +6718,27 @@ function refreshMovementFixCollections(data) {
   data.segments = Array.from(mergedSegments.values())
     .sort((left, right) => left.startTimeMs - right.startTimeMs || left.segmentId.localeCompare(right.segmentId));
   data.segmentById = new Map(data.segments.map(segment => [segment.segmentId, segment]));
+  const mergedAutoBursts = new Map();
+  for (const burst of [...(data.overviewAutoBursts || []), ...(data.detailAutoBursts || [])]) {
+    mergedAutoBursts.set(burst.burstId, burst);
+  }
+  data.autoBursts = Array.from(mergedAutoBursts.values())
+    .sort((left, right) => left.startTimeMs - right.startTimeMs || left.burstId.localeCompare(right.burstId));
+  data.autoBurstById = new Map(data.autoBursts.map(burst => [burst.burstId, burst]));
   data.colorStyles = computeMovementColorStyles(data.colorFields, data.fixes);
+}
+
+function buildMovementColorFields(fields) {
+  const merged = [INDIVIDUAL_COLOR_FIELD, ...(Array.isArray(fields) ? fields : [])];
+  const seen = new Set();
+  return merged.filter(field => {
+    const key = String(field?.key || "");
+    if (!key || seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function computeMovementColorStyles(colorFields, fixes) {
@@ -7095,6 +7898,16 @@ function colorCss(rgb, setName, alpha) {
 function rgbaCss(color) {
   const [r, g, b, a = 255] = color;
   return `rgba(${r}, ${g}, ${b}, ${(a / 255).toFixed(3)})`;
+}
+
+function autoBurstColor(burst, alpha = 200) {
+  const burstIdx = Number(burst?.burstIdx) || 0;
+  const rgb = hslToRgb((burstIdx * 47 + 28) % 360, 0.86, 0.58);
+  return splitColor(rgb, burst?.setName || "train", alpha);
+}
+
+function movementTrackKey(individual, setName) {
+  return `${String(individual || "")}\u0000${String(setName || "train")}`;
 }
 
 function splitColor(rgb, setName, alpha) {

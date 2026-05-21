@@ -66,7 +66,10 @@ QUALITY_KEYWORDS = (
 MAX_SERIES_POINTS = 1500
 MAX_STAT_SAMPLES = 2000
 DEFAULT_FIX_LIMIT = 1000000
-SUMMARY_CACHE_VERSION = 8
+SUMMARY_CACHE_VERSION = 12
+DEFAULT_BURST_GAP_MODE = "manual"
+DEFAULT_BURST_GAP_SECONDS = 3600.0
+DEFAULT_BURST_GAP_QUANTILE = 0.999
 
 
 def normalize_header(header: str | None) -> str:
@@ -224,6 +227,91 @@ def quantile(values: list[float], q: float) -> float | None:
     return float(sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * ratio)
 
 
+def normalize_burst_gap_seconds(value: object = None) -> float:
+    gap = DEFAULT_BURST_GAP_SECONDS if value in (None, "") else float(value)
+    if not isfinite(gap) or gap <= 0.0:
+        raise ValueError("burst_gap_seconds must be positive")
+    return float(gap)
+
+
+def normalize_burst_gap_mode(value: object = None) -> str:
+    mode = DEFAULT_BURST_GAP_MODE if value in (None, "") else str(value).strip().lower()
+    if mode not in {"manual", "quantile"}:
+        raise ValueError("burst_gap_mode must be 'manual' or 'quantile'")
+    return mode
+
+
+def normalize_burst_gap_quantile(value: object = None) -> float:
+    quantile_value = DEFAULT_BURST_GAP_QUANTILE if value in (None, "") else float(value)
+    if not isfinite(quantile_value) or quantile_value <= 0.0 or quantile_value > 1.0:
+        raise ValueError("burst_gap_quantile must satisfy 0 < q <= 1")
+    return float(quantile_value)
+
+
+def _track_gap_seconds(records_by_group: dict[tuple[str, str], list[dict]]) -> list[float]:
+    gaps: list[float] = []
+    for _group_key, sorted_records in _sorted_track_records(records_by_group):
+        previous_time_ms = None
+        for record in sorted_records:
+            time_ms = record.get("time_ms")
+            if previous_time_ms is not None:
+                gap = (time_ms - previous_time_ms) / 1000.0
+                if isfinite(gap) and gap >= 0.0:
+                    gaps.append(float(gap))
+            previous_time_ms = time_ms
+    return gaps
+
+
+def resolve_burst_gap_strategy(
+    records_by_group: dict[tuple[str, str], list[dict]],
+    *,
+    burst_gap_mode: object = DEFAULT_BURST_GAP_MODE,
+    burst_gap_seconds: object = DEFAULT_BURST_GAP_SECONDS,
+    burst_gap_quantile: object = DEFAULT_BURST_GAP_QUANTILE,
+) -> dict:
+    mode = normalize_burst_gap_mode(burst_gap_mode)
+    fallback_seconds = normalize_burst_gap_seconds(burst_gap_seconds)
+    quantile_value = normalize_burst_gap_quantile(burst_gap_quantile)
+    gaps = _track_gap_seconds(records_by_group)
+
+    effective_seconds = fallback_seconds
+    used_fallback = False
+    if mode == "quantile":
+        quantile_seconds = quantile(gaps, quantile_value)
+        if quantile_seconds is None or not isfinite(quantile_seconds) or quantile_seconds <= 0.0:
+            used_fallback = True
+        else:
+            effective_seconds = float(quantile_seconds)
+
+    return {
+        "mode": mode,
+        "quantile": float(quantile_value),
+        "fallback_seconds": float(fallback_seconds),
+        "effective_seconds": float(effective_seconds),
+        "gap_count": int(len(gaps)),
+        "used_fallback": bool(used_fallback),
+    }
+
+
+def _burst_gap_metadata(burst_gap: dict) -> dict:
+    return {
+        "burst_gap": {
+            "mode": burst_gap["mode"],
+            "quantile": float(burst_gap["quantile"]),
+            "fallback_seconds": float(burst_gap["fallback_seconds"]),
+            "effective_seconds": float(burst_gap["effective_seconds"]),
+            "gap_count": int(burst_gap["gap_count"]),
+            "used_fallback": bool(burst_gap["used_fallback"]),
+        },
+        "burst_gap_mode": burst_gap["mode"],
+        "burst_gap_quantile": float(burst_gap["quantile"]),
+        "burst_gap_fallback_seconds": float(burst_gap["fallback_seconds"]),
+        "burst_gap_gap_count": int(burst_gap["gap_count"]),
+        "burst_gap_used_fallback": bool(burst_gap["used_fallback"]),
+        "burst_gap_seconds": float(burst_gap["effective_seconds"]),
+    }
+
+
 def haversine_meters(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
     from math import atan2, cos, radians, sin, sqrt
 
@@ -279,7 +367,7 @@ def _project_root_for_path(path: Path) -> Path | None:
 
 
 def _cache_key(kind: str, params: dict | None = None) -> str:
-    payload = {"kind": kind, "params": params or {}}
+    payload = {"kind": kind, "params": params or {}, "version": SUMMARY_CACHE_VERSION}
     return hashlib.sha1(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -646,6 +734,81 @@ def _build_fix_record(
     return fix
 
 
+def _track_key(individual: str, set_name: str) -> tuple[str, str]:
+    return str(individual), str(set_name or "train")
+
+
+def _record_sort_key(record: dict) -> tuple[int, int, str]:
+    return int(record["time_ms"]), int(record["row_index"]), str(record["fix_key"])
+
+
+def _group_track_records(records: list[dict]) -> dict[tuple[str, str], list[dict]]:
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for record in records:
+        grouped.setdefault(_track_key(record["individual"], record["set_name"]), []).append(record)
+    return grouped
+
+
+def _sorted_track_records(records_by_group: dict[tuple[str, str], list[dict]]):
+    for group_key in sorted(records_by_group):
+        yield group_key, sorted(records_by_group[group_key], key=_record_sort_key)
+
+
+def _downsample_sorted_records(records: list[dict], limit: int) -> list[dict]:
+    if limit <= 0 or len(records) <= limit:
+        return records
+    if limit == 1:
+        return [records[0]]
+    last_index = len(records) - 1
+    indexes = []
+    previous_index = -1
+    for output_index in range(limit):
+        source_index = round((output_index * last_index) / (limit - 1))
+        source_index = min(last_index, max(0, int(source_index)))
+        if source_index != previous_index:
+            indexes.append(source_index)
+            previous_index = source_index
+    return [records[index] for index in indexes]
+
+
+def _compute_track_movement(
+    records_by_group: dict[tuple[str, str], list[dict]]
+) -> tuple[dict[str, dict[str, float | None]], dict[str, dict[str, list[float] | int]]]:
+    movement_by_fix_key: dict[str, dict[str, float | None]] = {}
+    stat_samples: dict[str, dict[str, list[float] | int]] = {}
+
+    for (_individual, _set_name), sorted_records in _sorted_track_records(records_by_group):
+        previous = None
+        for record in sorted_records:
+            individual = record["individual"]
+            indiv_stats = stat_samples.setdefault(
+                individual,
+                {"seen_fix": 0, "seen_step": 0, "seen_speed": 0, "fix": [], "step": [], "speed": []},
+            )
+            step_length_m = None
+            time_delta_s = None
+            speed_mps = None
+            if previous and record["time_ms"] > previous["time_ms"]:
+                time_delta_s = (record["time_ms"] - previous["time_ms"]) / 1000.0
+                step_length_m = haversine_meters(previous["lon"], previous["lat"], record["lon"], record["lat"])
+                speed_mps = step_length_m / time_delta_s if time_delta_s > 0 else None
+                indiv_stats["seen_fix"] += 1
+                indiv_stats["seen_step"] += 1
+                reservoir_append(indiv_stats["fix"], time_delta_s, indiv_stats["seen_fix"], MAX_STAT_SAMPLES)
+                reservoir_append(indiv_stats["step"], step_length_m, indiv_stats["seen_step"], MAX_STAT_SAMPLES)
+                if speed_mps is not None:
+                    indiv_stats["seen_speed"] += 1
+                    reservoir_append(indiv_stats["speed"], speed_mps, indiv_stats["seen_speed"], MAX_STAT_SAMPLES)
+            movement_by_fix_key[record["fix_key"]] = {
+                "step_length_m": step_length_m,
+                "speed_mps": speed_mps,
+                "time_delta_s": time_delta_s,
+            }
+            previous = record
+
+    return movement_by_fix_key, stat_samples
+
+
 def _accumulate_segments(
     *,
     segments_by_id: dict[str, dict],
@@ -729,6 +892,68 @@ def _finalize_segments(segments_by_id: dict[str, dict]) -> list[dict]:
     return segments
 
 
+def _build_auto_bursts(records: list[dict], *, burst_gap_seconds: float) -> list[dict]:
+    gap_seconds = normalize_burst_gap_seconds(burst_gap_seconds)
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for record in records:
+        grouped.setdefault((record["individual"], record["set_name"]), []).append(record)
+
+    bursts: list[dict] = []
+    for (individual, set_name), group_records in grouped.items():
+        sorted_records = sorted(
+            group_records,
+            key=lambda item: (item["time_ms"], item["row_index"], item["fix_key"]),
+        )
+        burst_idx = -1
+        current_rows: list[dict] = []
+        previous_time_ms = None
+        for record in sorted_records:
+            starts_new = previous_time_ms is None or ((record["time_ms"] - previous_time_ms) / 1000.0) > gap_seconds
+            if starts_new:
+                if current_rows:
+                    bursts.append(_finalize_auto_burst(individual, set_name, burst_idx, current_rows, gap_seconds))
+                burst_idx += 1
+                current_rows = []
+            current_rows.append(record)
+            previous_time_ms = record["time_ms"]
+        if current_rows:
+            bursts.append(_finalize_auto_burst(individual, set_name, burst_idx, current_rows, gap_seconds))
+
+    bursts.sort(
+        key=lambda item: (
+            item["individual"],
+            item["set_name"],
+            item["start_time_ms"],
+            item["burst_idx"],
+        )
+    )
+    return bursts
+
+
+def _finalize_auto_burst(
+    individual: str,
+    set_name: str,
+    burst_idx: int,
+    rows: list[dict],
+    burst_gap_seconds: float,
+) -> dict:
+    burst_id = f"{individual}:{set_name}:burst_{int(burst_idx):06d}"
+    return {
+        "burst_id": burst_id,
+        "burst_idx": int(burst_idx),
+        "individual": individual,
+        "set_name": set_name,
+        "start_fix_key": rows[0]["fix_key"],
+        "end_fix_key": rows[-1]["fix_key"],
+        "start_time_ms": int(rows[0]["time_ms"]),
+        "end_time_ms": int(rows[-1]["time_ms"]),
+        "fix_count": len(rows),
+        "burst_gap_seconds": float(burst_gap_seconds),
+        "fix_keys": [row["fix_key"] for row in rows],
+        "path": [row["position"] for row in rows],
+    }
+
+
 def _valid_movement_row(raw: dict, columns: dict[str, str | None]) -> dict | None:
     individual = str(raw.get(columns["individual"], "")).strip()
     if not individual:
@@ -759,19 +984,141 @@ def _valid_movement_row(raw: dict, columns: dict[str, str | None]) -> dict | Non
     }
 
 
-def build_movement_overview(path: Path) -> dict:
+def diagnose_track_topology(path: Path) -> dict:
+    """Return lightweight topology diagnostics for movement CSV development checks."""
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        columns = detect_columns(fieldnames)
+        if not columns["individual"] or not columns["time"] or not columns["lon"] or not columns["lat"]:
+            raise ValueError("CSV is missing required columns for movement visualization")
+
+        total_rows = 0
+        valid_rows = 0
+        duplicate_fix_ids: dict[str, int] = {}
+        duplicate_track_timestamps: dict[tuple[str, str, int], int] = {}
+        repeated_coordinates: dict[tuple[str, str, float, float], int] = {}
+        records_by_group: dict[tuple[str, str], list[dict]] = {}
+        previous_file_time_by_group: dict[tuple[str, str], int] = {}
+        file_order_regressions_by_group: dict[tuple[str, str], int] = {}
+
+        for row_index, raw in enumerate(reader, start=1):
+            total_rows += 1
+            valid = _valid_movement_row(raw, columns)
+            if valid is None:
+                continue
+
+            individual = valid["individual"]
+            set_name = valid["set_name"]
+            time_ms = valid["time_ms"]
+            lon = valid["lon"]
+            lat = valid["lat"]
+            group_key = _track_key(individual, set_name)
+            fix_id = valid["fix_id"]
+            fix_key = _make_fix_key(row_index, fix_id, individual, time_ms)
+
+            valid_rows += 1
+            if fix_id:
+                duplicate_fix_ids[fix_id] = duplicate_fix_ids.get(fix_id, 0) + 1
+            timestamp_key = (individual, set_name, time_ms)
+            duplicate_track_timestamps[timestamp_key] = duplicate_track_timestamps.get(timestamp_key, 0) + 1
+            coordinate_key = (individual, set_name, lon, lat)
+            repeated_coordinates[coordinate_key] = repeated_coordinates.get(coordinate_key, 0) + 1
+
+            previous_file_time = previous_file_time_by_group.get(group_key)
+            if previous_file_time is not None and time_ms < previous_file_time:
+                file_order_regressions_by_group[group_key] = file_order_regressions_by_group.get(group_key, 0) + 1
+            previous_file_time_by_group[group_key] = time_ms
+
+            records_by_group.setdefault(group_key, []).append(
+                {
+                    "row_index": row_index,
+                    "fix_key": fix_key,
+                    "individual": individual,
+                    "set_name": set_name,
+                    "time_ms": time_ms,
+                    "lon": lon,
+                    "lat": lat,
+                    "position": [float(lon), float(lat)],
+                }
+            )
+
+    coordinate_neighbors: dict[tuple[str, str, float, float], set[tuple[float, float]]] = {}
+    max_fix_topological_degree = 0
+    for (individual, set_name), sorted_records in _sorted_track_records(records_by_group):
+        max_fix_topological_degree = max(max_fix_topological_degree, 2 if len(sorted_records) > 2 else max(0, len(sorted_records) - 1))
+        for left, right in zip(sorted_records, sorted_records[1:]):
+            left_coord = (individual, set_name, left["lon"], left["lat"])
+            right_coord = (individual, set_name, right["lon"], right["lat"])
+            if left_coord == right_coord:
+                continue
+            coordinate_neighbors.setdefault(left_coord, set()).add((right["lon"], right["lat"]))
+            coordinate_neighbors.setdefault(right_coord, set()).add((left["lon"], left["lat"]))
+
+    duplicate_fix_id_values = [count for count in duplicate_fix_ids.values() if count > 1]
+    duplicate_timestamp_values = [count for count in duplicate_track_timestamps.values() if count > 1]
+    repeated_coordinate_values = [count for count in repeated_coordinates.values() if count > 1]
+    coordinate_degree_values = [len(neighbors) for neighbors in coordinate_neighbors.values()]
+    coordinate_degree_gt2_values = [degree for degree in coordinate_degree_values if degree > 2]
+
+    return {
+        "total_rows": int(total_rows),
+        "valid_rows": int(valid_rows),
+        "track_count": int(len(records_by_group)),
+        "duplicate_fix_id_count": int(len(duplicate_fix_id_values)),
+        "max_duplicate_fix_id_count": int(max(duplicate_fix_id_values, default=1)),
+        "duplicate_track_timestamp_count": int(len(duplicate_timestamp_values)),
+        "max_duplicate_track_timestamp_count": int(max(duplicate_timestamp_values, default=1)),
+        "file_order_regression_count": int(sum(file_order_regressions_by_group.values())),
+        "file_order_regression_group_count": int(len(file_order_regressions_by_group)),
+        "repeated_coordinate_count": int(len(repeated_coordinate_values)),
+        "max_fixes_at_coordinate": int(max(repeated_coordinate_values, default=1)),
+        "coordinate_degree_gt2_count": int(len(coordinate_degree_gt2_values)),
+        "max_coordinate_degree": int(max(coordinate_degree_values, default=0)),
+        "max_fix_topological_degree": int(max_fix_topological_degree),
+    }
+
+
+def build_movement_overview(
+    path: Path,
+    *,
+    burst_gap_mode: str = DEFAULT_BURST_GAP_MODE,
+    burst_gap_seconds: float = DEFAULT_BURST_GAP_SECONDS,
+    burst_gap_quantile: float = DEFAULT_BURST_GAP_QUANTILE,
+) -> dict:
+    normalized_burst_gap_mode = normalize_burst_gap_mode(burst_gap_mode)
+    normalized_burst_gap_seconds = normalize_burst_gap_seconds(burst_gap_seconds)
+    normalized_burst_gap_quantile = normalize_burst_gap_quantile(burst_gap_quantile)
     path_str, mtime_ns, size = _cache_metadata(path)
-    params = {}
+    params = {
+        "burst_gap_mode": normalized_burst_gap_mode,
+        "burst_gap_seconds": normalized_burst_gap_seconds,
+        "burst_gap_quantile": normalized_burst_gap_quantile,
+    }
     cached = _load_cached_response(path, kind="overview", params=params, mtime_ns=mtime_ns, size=size)
     if cached is not None:
         return cached
-    overview = _build_movement_overview_cached(path_str, mtime_ns, size)
+    overview = _build_movement_overview_cached(
+        path_str,
+        mtime_ns,
+        size,
+        normalized_burst_gap_mode,
+        normalized_burst_gap_seconds,
+        normalized_burst_gap_quantile,
+    )
     _save_cached_response(path, kind="overview", params=params, mtime_ns=mtime_ns, size=size, summary=overview)
     return overview
 
 
 @lru_cache(maxsize=16)
-def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> dict:
+def _build_movement_overview_cached(
+    path_str: str,
+    mtime_ns: int,
+    size: int,
+    burst_gap_mode: str,
+    burst_gap_seconds: float,
+    burst_gap_quantile: float,
+) -> dict:
     path = Path(path_str)
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -804,12 +1151,12 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
 
     species_by_individual: dict[str, str] = {}
     row_counts: dict[str, int] = {}
-    group_samples: dict[tuple[str, str], dict] = {}
-    stat_samples: dict[str, dict[str, list[float] | int]] = {}
+    track_records_by_group: dict[tuple[str, str], list[dict]] = {}
     review_counts = {"suspected": 0, "confirmed": 0}
     review_counts_by_individual: dict[str, dict[str, int]] = {}
     overview_fix_contexts: list[dict] = []
     overview_segments_by_id: dict[str, dict] = {}
+    overview_truncated = False
 
     total_rows = 0
     min_lon = float("inf")
@@ -854,46 +1201,21 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
                 if parse_bool(value) is not None:
                     stats["bool_count"] += 1
 
-            group_key = (individual, set_name)
-            group = group_samples.setdefault(
-                group_key,
-                {
-                    "seen": 0,
-                    "samples": [],
-                    "start_ms": time_ms,
-                    "end_ms": time_ms,
-                    "prev": None,
-                },
-            )
-            group["seen"] += 1
-            group["start_ms"] = min(group["start_ms"], time_ms)
-            group["end_ms"] = max(group["end_ms"], time_ms)
-            reservoir_append(group["samples"], (time_ms, lon, lat), group["seen"], MAX_SERIES_POINTS)
-
-            indiv_stats = stat_samples.setdefault(
-                individual,
-                {"seen_fix": 0, "seen_step": 0, "seen_speed": 0, "fix": [], "step": [], "speed": []},
-            )
-            step_length_m = None
-            time_delta_s = None
-            speed_mps = None
-            previous = group["prev"]
-            if previous and time_ms > previous["time_ms"]:
-                time_delta_s = (time_ms - previous["time_ms"]) / 1000.0
-                step_length_m = haversine_meters(previous["lon"], previous["lat"], lon, lat)
-                speed_mps = step_length_m / time_delta_s if time_delta_s > 0 else None
-                indiv_stats["seen_fix"] += 1
-                indiv_stats["seen_step"] += 1
-                reservoir_append(indiv_stats["fix"], time_delta_s, indiv_stats["seen_fix"], MAX_STAT_SAMPLES)
-                reservoir_append(indiv_stats["step"], step_length_m, indiv_stats["seen_step"], MAX_STAT_SAMPLES)
-                if speed_mps is not None:
-                    indiv_stats["seen_speed"] += 1
-                    reservoir_append(indiv_stats["speed"], speed_mps, indiv_stats["seen_speed"], MAX_STAT_SAMPLES)
-            group["prev"] = {"time_ms": time_ms, "lon": lon, "lat": lat}
-
             review = _compact_review(raw)
             segment_memberships = _segment_memberships(raw)
             fix_key = _make_fix_key(row_index, valid["fix_id"], individual, time_ms)
+            overview_record = {
+                "row_index": row_index,
+                "fix_key": fix_key,
+                "individual": individual,
+                "set_name": set_name,
+                "time_ms": time_ms,
+                "lon": lon,
+                "lat": lat,
+                "position": [float(lon), float(lat)],
+            }
+            track_records_by_group.setdefault(_track_key(individual, set_name), []).append(overview_record)
+
             if segment_memberships:
                 _accumulate_segments(
                     segments_by_id=overview_segments_by_id,
@@ -918,6 +1240,7 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
                 overview_fix_contexts.append(
                     {
                         "row_index": row_index,
+                        "fix_key": fix_key,
                         "fix_id": valid["fix_id"],
                         "individual": individual,
                         "set_name": set_name,
@@ -925,16 +1248,18 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
                         "lon": lon,
                         "lat": lat,
                         "raw": raw,
-                        "step_length_m": step_length_m,
-                        "speed_mps": speed_mps,
-                        "time_delta_s": time_delta_s,
                         "review": review,
                         "segment_memberships": segment_memberships,
                     }
                 )
+            elif not overview_truncated:
+                overview_fix_contexts.clear()
+                overview_truncated = True
 
     if total_rows == 0 or min_time_ms is None or max_time_ms is None:
         raise ValueError("CSV did not contain any valid movement rows")
+
+    movement_by_fix_key, stat_samples = _compute_track_movement(track_records_by_group)
 
     color_fields = list(DERIVED_FIELDS)
     for review_field in REVIEW_COLUMNS:
@@ -962,7 +1287,7 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
             }
         )
 
-    overview_fixes = [
+    overview_fixes = [] if overview_truncated else [
         _build_fix_record(
             row_index=context["row_index"],
             fix_id=context["fix_id"],
@@ -974,29 +1299,39 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
             attributes=_build_attributes(
                 context["raw"],
                 color_fields=color_fields,
-                step_length_m=context["step_length_m"],
-                speed_mps=context["speed_mps"],
-                time_delta_s=context["time_delta_s"],
+                step_length_m=movement_by_fix_key.get(context["fix_key"], {}).get("step_length_m"),
+                speed_mps=movement_by_fix_key.get(context["fix_key"], {}).get("speed_mps"),
+                time_delta_s=movement_by_fix_key.get(context["fix_key"], {}).get("time_delta_s"),
             ),
             review=context["review"],
             segment_memberships=context["segment_memberships"],
         )
-        for context in overview_fix_contexts
+        for context in sorted(overview_fix_contexts, key=_record_sort_key)
     ]
     overview_segments = _finalize_segments(overview_segments_by_id)
+    burst_gap = resolve_burst_gap_strategy(
+        track_records_by_group,
+        burst_gap_mode=burst_gap_mode,
+        burst_gap_seconds=burst_gap_seconds,
+        burst_gap_quantile=burst_gap_quantile,
+    )
+    auto_bursts = [] if overview_truncated else _build_auto_bursts(
+        [record for _, sorted_records in _sorted_track_records(track_records_by_group) for record in sorted_records],
+        burst_gap_seconds=burst_gap["effective_seconds"],
+    )
 
     individuals = sorted(row_counts)
     series_by_individual: dict[str, dict[str, dict[str, list]]] = {}
     coverage_by_individual: dict[str, dict[str, dict[str, int]]] = {}
-    for (individual, set_name), payload in group_samples.items():
-        sorted_samples = sorted(payload["samples"], key=lambda item: item[0])
+    for (individual, set_name), sorted_records in _sorted_track_records(track_records_by_group):
+        sorted_samples = _downsample_sorted_records(sorted_records, MAX_SERIES_POINTS)
         series_by_individual.setdefault(individual, {})[set_name] = {
-            "times": [int(item[0]) for item in sorted_samples],
-            "positions": [[float(item[1]), float(item[2])] for item in sorted_samples],
+            "times": [int(item["time_ms"]) for item in sorted_samples],
+            "positions": [[float(item["lon"]), float(item["lat"])] for item in sorted_samples],
         }
         coverage_by_individual.setdefault(individual, {})[set_name] = {
-            "start_ms": int(payload["start_ms"]),
-            "end_ms": int(payload["end_ms"]),
+            "start_ms": int(sorted_records[0]["time_ms"]),
+            "end_ms": int(sorted_records[-1]["time_ms"]),
         }
 
     stats = {}
@@ -1029,6 +1364,11 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
         "review_counts": review_counts,
         "fixes": overview_fixes,
         "segments": overview_segments,
+        "auto_bursts": auto_bursts,
+        "auto_bursts_truncated": bool(overview_truncated),
+        "overview_truncated": bool(overview_truncated),
+        "overview_fix_limit": int(DEFAULT_FIX_LIMIT),
+        **_burst_gap_metadata(burst_gap),
         "initial_view": {
             "longitude": float((min_lon + max_lon) / 2),
             "latitude": float((min_lat + max_lat) / 2),
@@ -1043,6 +1383,12 @@ def _build_movement_overview_cached(path_str: str, mtime_ns: int, size: int) -> 
             "end_ms": None,
             "review_status": "reviewed",
             "limit": None,
+            "burst_gap_mode": burst_gap["mode"],
+            "burst_gap_seconds": float(burst_gap["effective_seconds"]),
+            "burst_gap_fallback_seconds": float(burst_gap["fallback_seconds"]),
+            "burst_gap_quantile": float(burst_gap["quantile"]),
+            "burst_gap_gap_count": int(burst_gap["gap_count"]),
+            "burst_gap_used_fallback": bool(burst_gap["used_fallback"]),
         },
         "detail_loaded": False,
     }
@@ -1057,7 +1403,13 @@ def build_movement_fixes(
     end_ms: int | None = None,
     review_status: str = "",
     limit: int | None = DEFAULT_FIX_LIMIT,
+    burst_gap_mode: str = DEFAULT_BURST_GAP_MODE,
+    burst_gap_seconds: float = DEFAULT_BURST_GAP_SECONDS,
+    burst_gap_quantile: float = DEFAULT_BURST_GAP_QUANTILE,
 ) -> dict:
+    normalized_burst_gap_mode = normalize_burst_gap_mode(burst_gap_mode)
+    normalized_burst_gap_seconds = normalize_burst_gap_seconds(burst_gap_seconds)
+    normalized_burst_gap_quantile = normalize_burst_gap_quantile(burst_gap_quantile)
     normalized_status = str(review_status or "").strip().lower()
     if normalized_status == "reviewed":
         normalized_status = "reviewed"
@@ -1072,6 +1424,9 @@ def build_movement_fixes(
         "end_ms": end_ms,
         "review_status": normalized_status,
         "limit": limit_value,
+        "burst_gap_mode": normalized_burst_gap_mode,
+        "burst_gap_seconds": normalized_burst_gap_seconds,
+        "burst_gap_quantile": normalized_burst_gap_quantile,
     }
     path_str, mtime_ns, size = _cache_metadata(path)
     cached = _load_cached_response(path, kind="fixes", params=params, mtime_ns=mtime_ns, size=size)
@@ -1086,6 +1441,9 @@ def build_movement_fixes(
         end_ms,
         normalized_status,
         limit_value,
+        normalized_burst_gap_mode,
+        normalized_burst_gap_seconds,
+        normalized_burst_gap_quantile,
     )
     _save_cached_response(path, kind="fixes", params=params, mtime_ns=mtime_ns, size=size, summary=payload)
     return payload
@@ -1101,15 +1459,20 @@ def _build_movement_fixes_cached(
     end_ms: int | None,
     review_status: str,
     limit: int | None,
+    burst_gap_mode: str,
+    burst_gap_seconds: float,
+    burst_gap_quantile: float,
 ) -> dict:
     path = Path(path_str)
     fieldnames, columns, field_stats = _prepare_scan_context_cached(path_str, mtime_ns, size)
     color_fields = _build_color_fields(fieldnames, columns, field_stats)
     fixes: list[dict] = []
     segments_by_id: dict[str, dict] = {}
+    auto_burst_records: list[dict] = []
     matching_fix_count = 0
     truncated = False
-    previous_by_group: dict[tuple[str, str], dict] = {}
+    records: list[dict] = []
+    gap_records_by_group: dict[tuple[str, str], list[dict]] = {}
     individual_filters = set(individuals)
 
     with path.open("r", newline="", encoding="utf-8") as handle:
@@ -1124,39 +1487,68 @@ def _build_movement_fixes_cached(
             lon = valid["lon"]
             lat = valid["lat"]
             set_name = valid["set_name"]
-            group_key = (item_individual, set_name)
-            previous = previous_by_group.get(group_key)
-            step_length_m = None
-            time_delta_s = None
-            speed_mps = None
-            if previous and time_ms > previous["time_ms"]:
-                time_delta_s = (time_ms - previous["time_ms"]) / 1000.0
-                step_length_m = haversine_meters(previous["lon"], previous["lat"], lon, lat)
-                speed_mps = step_length_m / time_delta_s if time_delta_s > 0 else None
-            previous_by_group[group_key] = {"time_ms": time_ms, "lon": lon, "lat": lat}
-
-            review = _compact_review(raw)
-            segment_memberships = _segment_memberships(raw)
-            status = str(review.get("status", "")).strip().lower()
+            fix_key = _make_fix_key(row_index, valid["fix_id"], item_individual, time_ms)
+            gap_records_by_group.setdefault(_track_key(item_individual, set_name), []).append(
+                {
+                    "row_index": row_index,
+                    "fix_key": fix_key,
+                    "individual": item_individual,
+                    "set_name": set_name,
+                    "time_ms": time_ms,
+                }
+            )
             if individual_filters and item_individual not in individual_filters:
                 continue
+            records.append(
+                {
+                    "row_index": row_index,
+                    "fix_key": fix_key,
+                    "fix_id": valid["fix_id"],
+                    "individual": item_individual,
+                    "set_name": set_name,
+                    "time_ms": time_ms,
+                    "lon": lon,
+                    "lat": lat,
+                    "position": [float(lon), float(lat)],
+                    "raw": raw,
+                    "review": _compact_review(raw),
+                    "segment_memberships": _segment_memberships(raw),
+                }
+            )
+
+    records_by_group = _group_track_records(records)
+    movement_by_fix_key, _stat_samples = _compute_track_movement(records_by_group)
+    burst_gap = resolve_burst_gap_strategy(
+        gap_records_by_group,
+        burst_gap_mode=burst_gap_mode,
+        burst_gap_seconds=burst_gap_seconds,
+        burst_gap_quantile=burst_gap_quantile,
+    )
+
+    for _group_key, sorted_records in _sorted_track_records(records_by_group):
+        for record in sorted_records:
+            time_ms = record["time_ms"]
             if start_ms is not None and time_ms < start_ms:
                 continue
             if end_ms is not None and time_ms > end_ms:
                 continue
-            fix_key = _make_fix_key(row_index, valid["fix_id"], item_individual, time_ms)
+
+            auto_burst_records.append(record)
+            segment_memberships = record["segment_memberships"]
             if segment_memberships:
                 _accumulate_segments(
                     segments_by_id=segments_by_id,
-                    row_index=row_index,
-                    fix_key=fix_key,
-                    individual=item_individual,
-                    set_name=set_name,
-                    time_ms=time_ms,
-                    lon=lon,
-                    lat=lat,
+                    row_index=record["row_index"],
+                    fix_key=record["fix_key"],
+                    individual=record["individual"],
+                    set_name=record["set_name"],
+                    time_ms=record["time_ms"],
+                    lon=record["lon"],
+                    lat=record["lat"],
                     memberships=segment_memberships,
                 )
+            review = record["review"]
+            status = str(review.get("status", "")).strip().lower()
             if review_status == "reviewed" and not review:
                 continue
             if review_status in {"suspected", "confirmed"} and status != review_status:
@@ -1169,19 +1561,19 @@ def _build_movement_fixes_cached(
 
             fixes.append(
                 _build_fix_record(
-                    row_index=row_index,
-                    fix_id=valid["fix_id"],
-                    individual=item_individual,
-                    set_name=set_name,
-                    time_ms=time_ms,
-                    lon=lon,
-                    lat=lat,
+                    row_index=record["row_index"],
+                    fix_id=record["fix_id"],
+                    individual=record["individual"],
+                    set_name=record["set_name"],
+                    time_ms=record["time_ms"],
+                    lon=record["lon"],
+                    lat=record["lat"],
                     attributes=_build_attributes(
-                        raw,
+                        record["raw"],
                         color_fields=color_fields,
-                        step_length_m=step_length_m,
-                        speed_mps=speed_mps,
-                        time_delta_s=time_delta_s,
+                        step_length_m=movement_by_fix_key.get(record["fix_key"], {}).get("step_length_m"),
+                        speed_mps=movement_by_fix_key.get(record["fix_key"], {}).get("speed_mps"),
+                        time_delta_s=movement_by_fix_key.get(record["fix_key"], {}).get("time_delta_s"),
                     ),
                     review=review,
                     segment_memberships=segment_memberships,
@@ -1191,9 +1583,11 @@ def _build_movement_fixes_cached(
     return {
         "fixes": fixes,
         "segments": _finalize_segments(segments_by_id),
+        "auto_bursts": _build_auto_bursts(auto_burst_records, burst_gap_seconds=burst_gap["effective_seconds"]),
         "matching_fix_count": int(matching_fix_count),
         "returned_fix_count": int(len(fixes)),
         "truncated": bool(truncated),
+        **_burst_gap_metadata(burst_gap),
         "detail_scope": {
             "individual": individuals[0] if len(individuals) == 1 else "",
             "individuals": list(individuals),
@@ -1201,6 +1595,12 @@ def _build_movement_fixes_cached(
             "end_ms": end_ms,
             "review_status": review_status,
             "limit": limit,
+            "burst_gap_mode": burst_gap["mode"],
+            "burst_gap_seconds": float(burst_gap["effective_seconds"]),
+            "burst_gap_fallback_seconds": float(burst_gap["fallback_seconds"]),
+            "burst_gap_quantile": float(burst_gap["quantile"]),
+            "burst_gap_gap_count": int(burst_gap["gap_count"]),
+            "burst_gap_used_fallback": bool(burst_gap["used_fallback"]),
         },
         "detail_loaded": True,
     }
@@ -1212,6 +1612,7 @@ def build_movement_summary(path: Path) -> dict:
     payload = dict(overview)
     payload["fixes"] = full_detail["fixes"]
     payload["segments"] = full_detail["segments"]
+    payload["auto_bursts"] = full_detail["auto_bursts"]
     payload["detail_scope"] = full_detail["detail_scope"]
     payload["detail_loaded"] = True
     return payload

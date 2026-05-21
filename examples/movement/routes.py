@@ -1,6 +1,7 @@
 import json
 import textwrap
 import uuid
+from math import isfinite
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -21,7 +22,15 @@ from app.state import (
 from app.web import get_project_dir, json_error, parse_json_body, validate_path_part
 
 from .catalog import get_study_dir, list_families, list_studies
-from .summary import DEFAULT_FIX_LIMIT, build_movement_fixes, build_movement_overview, build_movement_summary
+from .summary import (
+    DEFAULT_BURST_GAP_MODE,
+    DEFAULT_BURST_GAP_QUANTILE,
+    DEFAULT_BURST_GAP_SECONDS,
+    DEFAULT_FIX_LIMIT,
+    build_movement_fixes,
+    build_movement_overview,
+    build_movement_summary,
+)
 
 
 def _build_initial_study_payload(study_dir: Path) -> dict:
@@ -1633,6 +1642,36 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             raise ValueError("Invalid limit")
         return value
 
+    def parse_burst_gap_seconds(raw_value: object) -> float:
+        if raw_value in (None, ""):
+            return DEFAULT_BURST_GAP_SECONDS
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid burst_gap_seconds") from exc
+        if not isfinite(value) or value <= 0:
+            raise ValueError("Invalid burst_gap_seconds")
+        return value
+
+    def parse_burst_gap_mode(raw_value: object) -> str:
+        if raw_value in (None, ""):
+            return DEFAULT_BURST_GAP_MODE
+        value = str(raw_value).strip().lower()
+        if value not in {"manual", "quantile"}:
+            raise ValueError("Invalid burst_gap_mode")
+        return value
+
+    def parse_burst_gap_quantile(raw_value: object) -> float:
+        if raw_value in (None, ""):
+            return DEFAULT_BURST_GAP_QUANTILE
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid burst_gap_quantile") from exc
+        if not isfinite(value) or value <= 0.0 or value > 1.0:
+            raise ValueError("Invalid burst_gap_quantile")
+        return value
+
     def parse_optional_individual(raw_value: object) -> str:
         if raw_value in (None, ""):
             return ""
@@ -1698,11 +1737,27 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             return json_error(str(exc), 404)
 
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}/overview")
-    async def get_movement_study_overview(family_name: str, study_name: str, dataset_id: str, logical_name: str):
+    async def get_movement_study_overview(
+        family_name: str,
+        study_name: str,
+        dataset_id: str,
+        logical_name: str,
+        burst_gap_mode: str | None = None,
+        burst_gap_seconds: float | None = None,
+        burst_gap_quantile: float | None = None,
+    ):
         try:
             study_dir = get_study_dir(data_root, family_name, study_name)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
-            return JSONResponse(await run_in_threadpool(build_movement_overview, artifact_path))
+            return JSONResponse(
+                await run_in_threadpool(
+                    build_movement_overview,
+                    artifact_path,
+                    burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
+                    burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
+                    burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
+                )
+            )
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
@@ -1718,6 +1773,9 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         end_ms: int | None = None,
         review_status: str = "",
         limit: int | None = None,
+        burst_gap_mode: str | None = None,
+        burst_gap_seconds: float | None = None,
+        burst_gap_quantile: float | None = None,
     ):
         try:
             study_dir = get_study_dir(data_root, family_name, study_name)
@@ -1735,6 +1793,9 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                 end_ms=parse_optional_int(end_ms, label="end_ms"),
                 review_status=str(review_status or "").strip().lower(),
                 limit=parse_optional_limit(limit) if limit not in (None, "") else DEFAULT_FIX_LIMIT,
+                burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
+                burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
+                burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
             )
             return JSONResponse(payload)
         except (ValueError, ProjectStateError) as exc:

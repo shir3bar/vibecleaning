@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import base64
+from math import isclose
 
 from fastapi.testclient import TestClient
 
@@ -27,7 +28,8 @@ from examples.movement.report_analysis_template import (
     load_rows_with_context,
     normalize_report_records,
 )
-from examples.movement.summary import build_movement_fixes, build_movement_overview
+import examples.movement.summary as movement_summary
+from examples.movement.summary import build_movement_fixes, build_movement_overview, diagnose_track_topology
 
 CSV_CONTENT = """eventid,individual,timestamp,longitude,latitude,set,vc_outlier_status,vc_issue_id,vc_issue_type,vc_issue_field,vc_issue_note,vc_owner_question,vc_review_user,vc_reviewed_at
 fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,suspected,issue_1,drift,speed_mps,first alpha issue,question 1,reviewer,2024-01-02T00:00:00Z
@@ -96,6 +98,168 @@ def test_build_movement_fixes_loads_all_individuals_without_filter(tmp_path):
     assert {fix["individual"] for fix in payload["fixes"]} == {"alpha", "beta", "gamma"}
 
 
+def test_build_movement_overview_includes_default_auto_bursts(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,set
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+fix_a_3,alpha,2024-01-01T02:00:01Z,-70.2,40.2,train
+fix_a_4,alpha,2024-01-01T02:20:00Z,-70.3,40.3,train
+""",
+        encoding="utf-8",
+    )
+
+    payload = build_movement_overview(csv_path)
+
+    assert [burst["fix_count"] for burst in payload["auto_bursts"]] == [2, 2]
+    assert payload["auto_bursts"][0]["burst_gap_seconds"] == 3600.0
+
+
+def test_build_movement_fixes_auto_bursts_respect_custom_gap(tmp_path):
+    csv_path = write_movement_csv(tmp_path / "movement.csv")
+
+    default_payload = build_movement_fixes(csv_path, individual="alpha")
+    custom_payload = build_movement_fixes(csv_path, individual="alpha", burst_gap_seconds=3599)
+
+    assert [burst["fix_count"] for burst in default_payload["auto_bursts"]] == [2]
+    assert [burst["fix_count"] for burst in custom_payload["auto_bursts"]] == [1, 1]
+
+
+def test_quantile_burst_gap_uses_source_wide_grouped_track_gaps(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,set
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_a_2,alpha,2024-01-01T00:00:10Z,-70.1,40.1,train
+fix_a_3,alpha,2024-01-01T00:00:40Z,-70.2,40.2,train
+fix_a_4,alpha,2024-01-02T00:00:00Z,-70.3,40.3,test
+fix_a_5,alpha,2024-01-02T02:00:00Z,-70.4,40.4,test
+fix_b_1,beta,2024-01-01T00:00:00Z,-71.0,41.0,train
+fix_b_2,beta,2024-01-01T01:00:00Z,-71.1,41.1,train
+""",
+        encoding="utf-8",
+    )
+
+    payload = build_movement_fixes(
+        csv_path,
+        individual="alpha",
+        burst_gap_mode="quantile",
+        burst_gap_seconds=60,
+        burst_gap_quantile=0.5,
+    )
+
+    assert payload["burst_gap_mode"] == "quantile"
+    assert payload["burst_gap_quantile"] == 0.5
+    assert payload["burst_gap_gap_count"] == 4
+    assert payload["burst_gap_seconds"] == 1815.0
+    assert payload["detail_scope"]["burst_gap_seconds"] == 1815.0
+    assert [burst["burst_gap_seconds"] for burst in payload["auto_bursts"]] == [1815.0, 1815.0, 1815.0]
+    assert sorted(burst["fix_count"] for burst in payload["auto_bursts"]) == [1, 1, 3]
+
+
+def test_build_movement_fixes_derives_steps_in_sorted_track_order(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,set
+fix_2,alpha,2024-01-01T02:00:00Z,-70.2,40.2,train
+fix_0,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_1,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+fix_b,beta,2024-01-01T00:00:00Z,-71.0,41.0,train
+""",
+        encoding="utf-8",
+    )
+
+    payload = build_movement_fixes(csv_path, individual="alpha")
+    fixes = payload["fixes"]
+
+    assert [fix["fix_key"] for fix in fixes] == [
+        "id:fix_0#row:2",
+        "id:fix_1#row:3",
+        "id:fix_2#row:1",
+    ]
+    assert "time_delta_s" not in fixes[0].get("attributes", {})
+    assert fixes[1]["attributes"]["time_delta_s"] == 3600.0
+    assert fixes[2]["attributes"]["time_delta_s"] == 3600.0
+    assert isclose(
+        fixes[1]["attributes"]["speed_mps"],
+        fixes[1]["attributes"]["step_length_m"] / 3600.0,
+        rel_tol=1e-12,
+    )
+
+
+def test_build_movement_overview_auto_bursts_use_sorted_track_order(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,set
+fix_2,alpha,2024-01-01T02:00:01Z,-70.2,40.2,train
+fix_0,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_1,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+fix_3,alpha,2024-01-01T02:20:00Z,-70.3,40.3,train
+""",
+        encoding="utf-8",
+    )
+
+    payload = build_movement_overview(csv_path)
+
+    assert [burst["fix_keys"] for burst in payload["auto_bursts"]] == [
+        ["id:fix_0#row:2", "id:fix_1#row:3"],
+        ["id:fix_2#row:1", "id:fix_3#row:4"],
+    ]
+
+
+def test_duplicate_timestamps_use_row_order_without_per_fix_branching(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,set
+fix_0,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_1,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+fix_2,alpha,2024-01-01T01:00:00Z,-70.2,40.2,train
+fix_3,alpha,2024-01-01T02:00:00Z,-70.3,40.3,train
+""",
+        encoding="utf-8",
+    )
+
+    payload = build_movement_fixes(csv_path, individual="alpha")
+    fixes_by_key = {fix["fix_key"]: fix for fix in payload["fixes"]}
+    diagnostics = diagnose_track_topology(csv_path)
+
+    assert [fix["fix_key"] for fix in payload["fixes"]] == [
+        "id:fix_0#row:1",
+        "id:fix_1#row:2",
+        "id:fix_2#row:3",
+        "id:fix_3#row:4",
+    ]
+    assert fixes_by_key["id:fix_1#row:2"]["attributes"]["time_delta_s"] == 3600.0
+    assert "time_delta_s" not in fixes_by_key["id:fix_2#row:3"].get("attributes", {})
+    assert fixes_by_key["id:fix_3#row:4"]["attributes"]["time_delta_s"] == 3600.0
+    assert diagnostics["duplicate_track_timestamp_count"] == 1
+    assert diagnostics["max_fix_topological_degree"] == 2
+
+
+def test_repeated_coordinates_can_create_visual_degree_above_two(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,set
+fix_0,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_1,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+fix_2,alpha,2024-01-01T02:00:00Z,-70.0,40.0,train
+fix_3,alpha,2024-01-01T03:00:00Z,-70.2,40.2,train
+fix_4,alpha,2024-01-01T04:00:00Z,-70.0,40.0,train
+fix_5,alpha,2024-01-01T05:00:00Z,-70.3,40.3,train
+""",
+        encoding="utf-8",
+    )
+
+    diagnostics = diagnose_track_topology(csv_path)
+
+    assert diagnostics["repeated_coordinate_count"] == 1
+    assert diagnostics["max_fixes_at_coordinate"] == 3
+    assert diagnostics["coordinate_degree_gt2_count"] == 1
+    assert diagnostics["max_coordinate_degree"] == 3
+    assert diagnostics["max_fix_topological_degree"] == 2
+
+
 def test_build_movement_overview_includes_fix_points_not_just_reviewed_rows(tmp_path):
     csv_path = write_movement_csv(tmp_path / "movement.csv")
 
@@ -104,6 +268,40 @@ def test_build_movement_overview_includes_fix_points_not_just_reviewed_rows(tmp_
     assert payload["detail_loaded"] is False
     assert len(payload["fixes"]) == 5
     assert {fix["individual"] for fix in payload["fixes"]} == {"alpha", "beta", "gamma"}
+    assert "auto_bursts" in payload
+
+
+def test_build_movement_overview_suppresses_initial_payload_without_dropping_individuals(tmp_path, monkeypatch):
+    csv_path = write_movement_csv(tmp_path / "movement.csv")
+    monkeypatch.setattr(movement_summary, "DEFAULT_FIX_LIMIT", 2)
+
+    payload = movement_summary.build_movement_overview(csv_path)
+
+    assert payload["total_rows"] == 5
+    assert payload["individuals"] == ["alpha", "beta", "gamma"]
+    assert payload["overview_truncated"] is True
+    assert payload["auto_bursts_truncated"] is True
+    assert payload["overview_fix_limit"] == 2
+    assert payload["fixes"] == []
+    assert payload["auto_bursts"] == []
+
+
+def test_manual_segments_and_auto_bursts_are_separate(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,set,vc_segment_status,vc_segment_id,vc_segment_type
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,suspected,manual_segment,collar
+fix_a_2,alpha,2024-01-01T00:30:00Z,-70.1,40.1,train,suspected,manual_segment,collar
+fix_a_3,alpha,2024-01-01T02:00:01Z,-70.2,40.2,train,,,
+""",
+        encoding="utf-8",
+    )
+
+    payload = build_movement_overview(csv_path)
+
+    assert payload["segments"][0]["segment_id"] == "manual_segment"
+    assert [burst["burst_idx"] for burst in payload["auto_bursts"]] == [0, 1]
+    assert "segment_id" not in payload["auto_bursts"][0]
 
 
 def test_build_movement_overview_includes_height_above_msl_in_color_fields(tmp_path):
@@ -124,10 +322,59 @@ fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,120
 def test_movement_frontend_includes_osm_streets_basemap_config():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
-    assert '"OSM Streets": OSM_STREETS_STYLE' in source
+    assert '"OSM Streets": {' in source
+    assert "style: OSM_STREETS_STYLE" in source
     assert "https://tile.openstreetmap.org/{z}/{x}/{y}.png" in source
     assert 'data-role="map-attribution"' in source
     assert '<option value="OSM Streets">OSM Streets</option>' in source
+
+
+def test_movement_frontend_includes_individual_search_and_resizable_side_pane():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert 'data-role="individual-search"' in source
+    assert 'data-role="side-resize"' in source
+    assert "sidePaneWidthPx" in source
+
+
+def test_movement_frontend_includes_auto_burst_controls():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert 'data-role="show-bursts"' in source
+    assert 'data-role="burst-gap-mode"' in source
+    assert 'data-role="burst-gap-seconds"' in source
+    assert 'data-role="burst-gap-quantile"' in source
+    assert 'data-role="burst-count"' in source
+    assert "burst_gap_mode: this.getBurstGapMode()" in source
+    assert "burst_gap_quantile: String(this.getBurstGapQuantile())" in source
+    assert "formatBurstGapMetadata" in source
+    assert '<option value="auto_bursts">Automatic bursts</option>' in source
+    assert "movement-auto-bursts" in source
+    assert "movement-auto-burst-points" in source
+    assert "autoBurstColor" in source
+    assert "renderBurstCountIndicator" in source
+    assert "getVisibleAutoBursts({ requireOverlay: false })" in source
+
+
+def test_movement_frontend_uses_canonical_track_paths_with_burst_suppression():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "buildVisibleTrackSeries(individual, setName)" in source
+    assert "getExactVisibleTrackFixes(individual, setName)" in source
+    assert 'source: "exact-detail"' in source
+    assert 'source: "sampled-overview"' in source
+    assert "suppressedBaseTrackKeys" in source
+    assert "movementTrackKey(burst.individual, burst.setName)" in source
+
+
+def test_movement_frontend_uses_on_demand_individual_loading_for_truncated_overviews():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "function collectSummaryIndividuals(summary)" in source
+    assert "summary.series_by_individual" in source
+    assert "overviewTruncated" in source
+    assert "Select individuals to load fixes on demand." in source
+    assert "this.data.overviewTruncated ? [] : this.data.individuals" in source
 
 
 def test_build_movement_fixes_ignores_cleared_issue_metadata(tmp_path):
@@ -185,14 +432,38 @@ def test_movement_fixes_route_supports_legacy_individual_query(tmp_path):
 
     response = client.get(
         f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/fixes",
-        params={"logical_name": "movement.csv", "individual": "beta"},
+        params={"logical_name": "movement.csv", "individual": "beta", "burst_gap_seconds": "3599"},
     )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["detail_scope"]["individual"] == "beta"
     assert payload["detail_scope"]["individuals"] == ["beta"]
+    assert payload["burst_gap_mode"] == "manual"
+    assert payload["burst_gap_seconds"] == 3599.0
     assert {fix["individual"] for fix in payload["fixes"]} == {"beta"}
+
+
+def test_movement_overview_route_accepts_quantile_burst_gap_params(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+
+    response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/overview",
+        params={
+            "logical_name": "movement.csv",
+            "burst_gap_mode": "quantile",
+            "burst_gap_quantile": "1",
+            "burst_gap_seconds": "99",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["burst_gap_mode"] == "quantile"
+    assert payload["burst_gap_quantile"] == 1.0
+    assert payload["burst_gap_fallback_seconds"] == 99.0
+    assert payload["burst_gap_seconds"] == 3600.0
+    assert payload["burst_gap_gap_count"] == 2
 
 
 def test_movement_fixes_route_rejects_invalid_repeated_individual(tmp_path):
