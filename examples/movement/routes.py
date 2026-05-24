@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.execution import create_analysis, create_step, undo_to_parent
+from app.query_library import get_query
 from app.state import (
     ProjectStateError,
     get_dataset_artifact,
@@ -1331,6 +1332,10 @@ REPORT_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("report_analysis_templa
 GENERATE_REPORT_SCRIPT = REPORT_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
 compile(GENERATE_REPORT_SCRIPT, str(REPORT_ANALYSIS_TEMPLATE_PATH), "exec")
 
+CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("candidate_query_analysis_template.py")
+CANDIDATE_QUERY_ANALYSIS_SCRIPT = CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+compile(CANDIDATE_QUERY_ANALYSIS_SCRIPT, str(CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH), "exec")
+
 
 def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]:
     if value is None and allow_empty:
@@ -1538,6 +1543,26 @@ def _validate_report_fixes(value: object) -> list[dict]:
             }
         )
     return cleaned
+
+
+def _validate_query_definition(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("Query definition is required")
+    evaluator = value.get("evaluator")
+    definition = value.get("definition")
+    if not isinstance(evaluator, dict) or not isinstance(definition, dict):
+        raise ValueError("Query definition must include evaluator and definition")
+    if evaluator.get("type") not in {"fix_numeric_comparison", "fix_osm_proximity"}:
+        raise ValueError("Unsupported candidate query evaluator")
+    return dict(value)
+
+
+def _validate_query_parameters(value: object) -> dict:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("Invalid query parameters")
+    return dict(value)
 
 
 def _validate_report_type(value: object) -> str:
@@ -1829,6 +1854,59 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
         return FileResponse(artifact_path, media_type=media_type_for_path(artifact_path))
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-candidate-query")
+    async def post_movement_run_candidate_query(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            user = body.get("user")
+            query_parameters = _validate_query_parameters(body.get("query_parameters", body.get("parameters")))
+            execution_scope = body.get("execution_scope")
+            preview_limit = parse_optional_limit(body.get("preview_limit"))
+
+            query_id = str(body.get("query_id") or "").strip()
+            if query_id:
+                query_version = parse_optional_int(body.get("query_version", body.get("version")), label="query_version")
+                query_definition = _validate_query_definition(get_query(data_root, query_id, version=query_version))
+            else:
+                query_definition = _validate_query_definition(body.get("query_definition"))
+
+            query_label = (
+                str(query_definition.get("name") or "").strip()
+                or str(query_definition.get("query_id") or "").strip()
+                or "inline candidate query"
+            )
+            payload = {
+                "user": user,
+                "title": f"Run candidate query {query_label} on {logical_name}",
+                "kind": "python",
+                "script": CANDIDATE_QUERY_ANALYSIS_SCRIPT,
+                "dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": ["candidate_query_results.json"],
+                "parameters": {
+                    "app": "movement",
+                    "action": "run_candidate_query",
+                    "target_artifact": logical_name,
+                    "dataset_id": dataset_id,
+                    "query_id": query_definition.get("query_id", ""),
+                    "query_version": query_definition.get("version"),
+                    "query_definition": query_definition,
+                    "query_parameters": query_parameters,
+                    "execution_scope": execution_scope,
+                    "preview_limit": preview_limit,
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
+                    "user": user,
+                },
+            }
+            return JSONResponse(create_analysis(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
 
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/undo")
     async def post_movement_study_undo(family_name: str, study_name: str):

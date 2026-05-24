@@ -1,14 +1,17 @@
 from pathlib import Path
 import re
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from .execution import create_analysis, create_step, set_current_head, undo_to_parent
+from .osm import OSMFetchError, OSMValidationError, fetch_osm_features, normalize_osm_request
 from .preview import preview_artifact
+from .query_library import get_query, list_queries, save_query
 from .state import (
     ProjectStateError,
     get_dataset_artifact,
@@ -41,6 +44,8 @@ def validate_path_part(raw_value: object, *, label: str) -> str:
 
 def get_project_dir(data_root: Path, project_name: str) -> Path:
     project = validate_path_part(project_name, label="project")
+    if project.startswith("."):
+        raise ValueError("Invalid project")
     path = resolve_project_dir(data_root, project).resolve()
     if data_root.resolve() not in path.parents:
         raise ValueError("Invalid project")
@@ -119,6 +124,43 @@ def create_app(*, data_root: Path, static_root: Path) -> FastAPI:
     @app.get("/api/projects")
     async def get_projects():
         return JSONResponse({"projects": list_projects(data_root)})
+
+    @app.get("/api/query-library/queries")
+    async def get_query_library_queries(app_name: str | None = Query(default=None, alias="app")):
+        try:
+            return JSONResponse({"queries": list_queries(data_root, app=app_name)})
+        except ProjectStateError as exc:
+            return json_error(str(exc), 400)
+
+    @app.get("/api/query-library/queries/{query_id}")
+    async def get_query_library_query(query_id: str, version: int | None = None):
+        try:
+            return JSONResponse({"query": get_query(data_root, query_id, version=version)})
+        except ProjectStateError as exc:
+            return json_error(str(exc), 404)
+
+    @app.post("/api/query-library/queries")
+    async def post_query_library_query(request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            return JSONResponse({"query": save_query(data_root, body)})
+        except ProjectStateError as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/osm/features")
+    async def post_osm_features(request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            normalized_query = normalize_osm_request(body)
+            return JSONResponse(await run_in_threadpool(fetch_osm_features, normalized_query))
+        except OSMValidationError as exc:
+            return json_error(str(exc), 400)
+        except OSMFetchError as exc:
+            return json_error(str(exc), 502)
 
     @app.get("/api/project/{project_name}/state")
     async def get_project_state(project_name: str):

@@ -10,6 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 MOVEMENT_APP_JS = REPO_ROOT / "examples" / "movement" / "static" / "app.js"
+OSM_LAYER_JS = REPO_ROOT / "examples" / "movement" / "static" / "osm_layer.js"
 
 from app.state import load_project_state
 from app.web import create_app
@@ -273,7 +274,7 @@ def test_build_movement_overview_includes_fix_points_not_just_reviewed_rows(tmp_
 
 def test_build_movement_overview_suppresses_initial_payload_without_dropping_individuals(tmp_path, monkeypatch):
     csv_path = write_movement_csv(tmp_path / "movement.csv")
-    monkeypatch.setattr(movement_summary, "DEFAULT_FIX_LIMIT", 2)
+    monkeypatch.setattr(movement_summary, "DEFAULT_OVERVIEW_FIX_LIMIT", 2)
 
     payload = movement_summary.build_movement_overview(csv_path)
 
@@ -282,7 +283,8 @@ def test_build_movement_overview_suppresses_initial_payload_without_dropping_ind
     assert payload["overview_truncated"] is True
     assert payload["auto_bursts_truncated"] is True
     assert payload["overview_fix_limit"] == 2
-    assert payload["fixes"] == []
+    assert len(payload["fixes"]) == 2
+    assert [fix["individual"] for fix in payload["fixes"]] == ["alpha", "alpha"]
     assert payload["auto_bursts"] == []
 
 
@@ -374,7 +376,44 @@ def test_movement_frontend_uses_on_demand_individual_loading_for_truncated_overv
     assert "summary.series_by_individual" in source
     assert "overviewTruncated" in source
     assert "Select individuals to load fixes on demand." in source
-    assert "this.data.overviewTruncated ? [] : this.data.individuals" in source
+    assert "initialMovementVisibleIndividuals(data)" in source
+    assert "initialMovementVisibleIndividuals(this.data)" in source
+    assert "getActiveThresholdMatchKeys()" in source
+    assert "showPoints ? this.getActiveThresholdMatchKeys() : new Set()" in source
+
+
+def test_movement_frontend_map_click_does_not_force_table_reveal():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "handleMapClick(event)" in source
+    assert "this.applyTableSelectionInteraction(fixKey" in source
+    assert "payloadIndividuals.length ? payloadIndividuals : [...selectedIndividuals]" in source
+    assert "this.revealFixInTable" not in source
+    assert "scrollTableRowIntoView" not in source
+    assert 'this.refs?.sideSheetTabs?.dataset.activeSheet === "table"' in source
+
+
+def test_movement_frontend_includes_ephemeral_osm_context_helpers():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    helper = OSM_LAYER_JS.read_text(encoding="utf-8")
+
+    assert 'from "/static/osm_layer.js"' in source
+    assert "this.osmContext = null" in source
+    assert 'this.osmContextStatus = "idle"' in source
+    assert "queryOsmContext(query" in source
+    assert 'this.setStatus("Loading OSM context...")' in source
+    assert "OSM context failed:" in source
+    assert "formatOsmContextStatus(payload)" in source
+    assert "getOsmContextMetadata()" in source
+    assert "clearOsmContext({ render = true, announce = false }" in source
+    assert "this.clearOsmContext({ render: false })" in source
+    assert "layers.push(...this.getOsmDeckLayers())" in source
+    assert "new deckInstance.GeoJsonLayer" in helper
+    assert 'fetch("/api/osm/features"' in helper
+    assert "pickable: false" in helper
+    assert "scopeFromPoint" in helper
+    assert "scopeFromMapBounds" in helper
+    assert "scopeFromSegmentBounds" in helper
 
 
 def test_build_movement_fixes_ignores_cleared_issue_metadata(tmp_path):

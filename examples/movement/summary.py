@@ -65,8 +65,9 @@ QUALITY_KEYWORDS = (
 
 MAX_SERIES_POINTS = 1500
 MAX_STAT_SAMPLES = 2000
+DEFAULT_OVERVIEW_FIX_LIMIT = 25000
 DEFAULT_FIX_LIMIT = 1000000
-SUMMARY_CACHE_VERSION = 12
+SUMMARY_CACHE_VERSION = 14
 DEFAULT_BURST_GAP_MODE = "manual"
 DEFAULT_BURST_GAP_SECONDS = 3600.0
 DEFAULT_BURST_GAP_QUANTILE = 0.999
@@ -1089,11 +1090,13 @@ def build_movement_overview(
     normalized_burst_gap_mode = normalize_burst_gap_mode(burst_gap_mode)
     normalized_burst_gap_seconds = normalize_burst_gap_seconds(burst_gap_seconds)
     normalized_burst_gap_quantile = normalize_burst_gap_quantile(burst_gap_quantile)
+    overview_fix_limit = max(0, int(DEFAULT_OVERVIEW_FIX_LIMIT))
     path_str, mtime_ns, size = _cache_metadata(path)
     params = {
         "burst_gap_mode": normalized_burst_gap_mode,
         "burst_gap_seconds": normalized_burst_gap_seconds,
         "burst_gap_quantile": normalized_burst_gap_quantile,
+        "overview_fix_limit": overview_fix_limit,
     }
     cached = _load_cached_response(path, kind="overview", params=params, mtime_ns=mtime_ns, size=size)
     if cached is not None:
@@ -1105,6 +1108,7 @@ def build_movement_overview(
         normalized_burst_gap_mode,
         normalized_burst_gap_seconds,
         normalized_burst_gap_quantile,
+        overview_fix_limit,
     )
     _save_cached_response(path, kind="overview", params=params, mtime_ns=mtime_ns, size=size, summary=overview)
     return overview
@@ -1118,6 +1122,7 @@ def _build_movement_overview_cached(
     burst_gap_mode: str,
     burst_gap_seconds: float,
     burst_gap_quantile: float,
+    overview_fix_limit: int,
 ) -> dict:
     path = Path(path_str)
     with path.open("r", newline="", encoding="utf-8") as handle:
@@ -1236,7 +1241,7 @@ def _build_movement_overview_cached(
                     {"suspected": 0, "confirmed": 0},
                 )
                 individual_review_counts[review_status] += 1
-            if len(overview_fix_contexts) < DEFAULT_FIX_LIMIT:
+            if len(overview_fix_contexts) < overview_fix_limit:
                 overview_fix_contexts.append(
                     {
                         "row_index": row_index,
@@ -1253,7 +1258,6 @@ def _build_movement_overview_cached(
                     }
                 )
             elif not overview_truncated:
-                overview_fix_contexts.clear()
                 overview_truncated = True
 
     if total_rows == 0 or min_time_ms is None or max_time_ms is None:
@@ -1287,7 +1291,7 @@ def _build_movement_overview_cached(
             }
         )
 
-    overview_fixes = [] if overview_truncated else [
+    overview_fixes = [
         _build_fix_record(
             row_index=context["row_index"],
             fix_id=context["fix_id"],
@@ -1367,7 +1371,7 @@ def _build_movement_overview_cached(
         "auto_bursts": auto_bursts,
         "auto_bursts_truncated": bool(overview_truncated),
         "overview_truncated": bool(overview_truncated),
-        "overview_fix_limit": int(DEFAULT_FIX_LIMIT),
+        "overview_fix_limit": int(overview_fix_limit),
         **_burst_gap_metadata(burst_gap),
         "initial_view": {
             "longitude": float((min_lon + max_lon) / 2),

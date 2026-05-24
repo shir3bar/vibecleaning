@@ -1,3 +1,11 @@
+import {
+  buildOsmDeckLayers,
+  fetchOsmContext,
+  scopeFromMapBounds,
+  scopeFromPoint,
+  scopeFromSegmentBounds,
+} from "/static/osm_layer.js";
+
 const LOCAL_BLANK_STYLE = {
   version: 8,
   sources: {},
@@ -271,6 +279,9 @@ class MovementExampleApp {
     this.currentDataset = null;
     this.currentArtifactEntry = null;
     this.data = null;
+    this.osmContext = null;
+    this.osmContextError = "";
+    this.osmContextStatus = "idle";
     this.currentTimeMs = 0;
     this.loadRequestId = 0;
     this.studyLoadId = 0;
@@ -283,6 +294,9 @@ class MovementExampleApp {
       overview: null,
       detail: null,
       reportDetail: null,
+      osm: null,
+      candidateQuery: null,
+      queryLibrary: null,
     };
     this.map = null;
     this.mapLoaded = false;
@@ -300,6 +314,15 @@ class MovementExampleApp {
       histogramMode: "full",
       histogramMin: null,
       histogramMax: null,
+    };
+    this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
+    this.candidateQueryLibrary = {
+      status: "idle",
+      queries: [],
+      selectedKey: "",
+      parameterValues: {},
+      executionScope: "whole_study",
+      error: "",
     };
     this.thresholdInputPendingBlur = false;
     this.activeFixPopup = null;
@@ -326,6 +349,7 @@ class MovementExampleApp {
   async init() {
     this.renderShell();
     this.bindEvents();
+    this.renderCandidateQueryLibraryControls();
     this.showOverlay("Loading the movement review workspace...");
     this.setStatus("Loading movement review workspace...");
     try {
@@ -337,6 +361,7 @@ class MovementExampleApp {
       this.setStatus(`Map assets could not be loaded: ${error.message}`, true);
       this.showOverlay("Map assets could not be loaded. You can still switch studies and inspect summaries.");
     }
+    void this.loadCandidateQueryLibrary();
     await this.loadFamilies();
   }
 
@@ -695,6 +720,47 @@ class MovementExampleApp {
           color: #c9e7f6;
           font-size: 11px;
           white-space: nowrap;
+        }
+        .movement-candidate-query-control {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+          padding: 6px 8px;
+          border-radius: 12px;
+          border: 1px solid rgba(125, 211, 252, 0.12);
+          background: rgba(15, 23, 42, 0.38);
+        }
+        .movement-candidate-query-control select {
+          min-width: 220px;
+        }
+        .movement-candidate-query-meta {
+          flex: 1 1 280px;
+          min-width: min(100%, 280px);
+          max-width: 520px;
+          color: #9bb0c6;
+          font-size: 11px;
+          line-height: 1.35;
+        }
+        .movement-candidate-query-meta strong {
+          color: #dbeafe;
+          font-weight: 600;
+        }
+        .movement-candidate-query-params {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .movement-candidate-query-params.hidden {
+          display: none;
+        }
+        .movement-candidate-query-params label {
+          color: #b9cadb;
+        }
+        .movement-candidate-query-params input[type="checkbox"] {
+          min-width: auto;
+          width: auto;
         }
         .movement-toolbar button,
         .movement-modal button {
@@ -1653,6 +1719,21 @@ class MovementExampleApp {
           <button type="button" data-role="select-none">No individuals</button>
           <button type="button" data-role="select-suspicious">Select all suspicious</button>
           <button type="button" data-role="clear-fixes">Clear checked fixes</button>
+          <div class="movement-candidate-query-control" data-role="candidate-query-control">
+            <label>Candidate query <select data-role="candidate-query-select"></select></label>
+            <label>Scope
+              <select data-role="candidate-query-scope">
+                <option value="whole_study">Whole study</option>
+                <option value="current_individual">Current individual</option>
+                <option value="all_individuals_per_individual">All individuals separately</option>
+              </select>
+            </label>
+            <button type="button" data-role="run-candidate-query">Preview query</button>
+            <div class="movement-candidate-query-params hidden" data-role="candidate-query-params"></div>
+            <div class="movement-candidate-query-meta" data-role="candidate-query-meta">Loading saved queries...</div>
+          </div>
+          <button type="button" data-role="check-candidates">Check candidates</button>
+          <button type="button" data-role="clear-candidates">Clear candidates</button>
           <button type="button" data-role="reset-view">Reset view</button>
           <button type="button" class="movement-emphasis" data-role="mark-suspected">Mark suspected</button>
           <button type="button" class="movement-emphasis" data-role="mark-confirmed">Mark confirmed</button>
@@ -1883,6 +1964,13 @@ class MovementExampleApp {
       selectNone: this.mountEl.querySelector('[data-role="select-none"]'),
       selectSuspicious: this.mountEl.querySelector('[data-role="select-suspicious"]'),
       clearFixes: this.mountEl.querySelector('[data-role="clear-fixes"]'),
+      candidateQuerySelect: this.mountEl.querySelector('[data-role="candidate-query-select"]'),
+      candidateQueryScope: this.mountEl.querySelector('[data-role="candidate-query-scope"]'),
+      candidateQueryMeta: this.mountEl.querySelector('[data-role="candidate-query-meta"]'),
+      candidateQueryParams: this.mountEl.querySelector('[data-role="candidate-query-params"]'),
+      runCandidateQuery: this.mountEl.querySelector('[data-role="run-candidate-query"]'),
+      checkCandidates: this.mountEl.querySelector('[data-role="check-candidates"]'),
+      clearCandidates: this.mountEl.querySelector('[data-role="clear-candidates"]'),
       resetView: this.mountEl.querySelector('[data-role="reset-view"]'),
       markSuspected: this.mountEl.querySelector('[data-role="mark-suspected"]'),
       markConfirmed: this.mountEl.querySelector('[data-role="mark-confirmed"]'),
@@ -2125,6 +2213,15 @@ class MovementExampleApp {
       this.renderLayers();
       this.updateActionButtons();
     });
+    this.refs.candidateQuerySelect.addEventListener("change", () => this.selectCandidateQuery(this.refs.candidateQuerySelect.value));
+    this.refs.candidateQueryScope.addEventListener("change", () => this.selectCandidateQueryExecutionScope(this.refs.candidateQueryScope.value));
+    this.refs.candidateQueryParams.addEventListener("input", event => this.handleCandidateQueryParameterInput(event));
+    this.refs.candidateQueryParams.addEventListener("change", event => this.handleCandidateQueryParameterInput(event));
+    this.refs.runCandidateQuery.addEventListener("click", () => {
+      void this.runSelectedCandidateQuery();
+    });
+    this.refs.checkCandidates.addEventListener("click", () => this.checkCandidateQueryPreview());
+    this.refs.clearCandidates.addEventListener("click", () => this.clearCandidateQueryPreview({ announce: true }));
     this.refs.resetView.addEventListener("click", () => this.resetView());
     this.refs.markSuspected.addEventListener("click", () => this.openIssueModal("suspected"));
     this.refs.markConfirmed.addEventListener("click", () => this.openIssueModal("confirmed"));
@@ -2248,6 +2345,8 @@ class MovementExampleApp {
       this.cancelRequest("overview");
       this.cancelRequest("detail");
       this.cancelRequest("reportDetail");
+      this.cancelRequest("osm");
+      this.cancelRequest("candidateQuery");
       return;
     }
     if (level === "study") {
@@ -2256,6 +2355,8 @@ class MovementExampleApp {
       this.cancelRequest("overview");
       this.cancelRequest("detail");
       this.cancelRequest("reportDetail");
+      this.cancelRequest("osm");
+      this.cancelRequest("candidateQuery");
       return;
     }
     if (level === "dataset") {
@@ -2263,13 +2364,532 @@ class MovementExampleApp {
       this.cancelRequest("overview");
       this.cancelRequest("detail");
       this.cancelRequest("reportDetail");
+      this.cancelRequest("osm");
+      this.cancelRequest("candidateQuery");
       return;
     }
     if (level === "artifact") {
       this.cancelRequest("overview");
       this.cancelRequest("detail");
       this.cancelRequest("reportDetail");
+      this.cancelRequest("osm");
+      this.cancelRequest("candidateQuery");
     }
+  }
+
+  osmScopeFromPoint(fixOrLonLat, radiusM) {
+    return scopeFromPoint(fixOrLonLat, radiusM);
+  }
+
+  osmScopeFromMapBounds() {
+    return scopeFromMapBounds(this.map);
+  }
+
+  osmScopeFromSegmentBounds(fixes, paddingM) {
+    return scopeFromSegmentBounds(fixes, paddingM);
+  }
+
+  async queryOsmContext(query, options = {}) {
+    const controller = this.beginRequest("osm");
+    this.osmContextStatus = "loading";
+    this.osmContextError = "";
+    this.setStatus("Loading OSM context...");
+    this.updateActionButtons();
+    try {
+      const payload = await fetchOsmContext(query, {
+        ...options,
+        signal: controller.signal,
+      });
+      if (this.requestControllers.osm !== controller) {
+        return null;
+      }
+      this.osmContext = payload;
+      this.osmContextError = "";
+      this.osmContextStatus = "loaded";
+      this.setStatus(this.formatOsmContextStatus(payload));
+      this.renderLayers();
+      this.updateActionButtons();
+      return payload;
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return null;
+      }
+      if (this.requestControllers.osm === controller) {
+        this.osmContext = null;
+        this.osmContextError = error.message;
+        this.osmContextStatus = "error";
+        this.setStatus(`OSM context failed: ${error.message}`, true);
+        this.renderLayers();
+        this.updateActionButtons();
+      }
+      throw error;
+    }
+  }
+
+  clearOsmContext({ render = true, announce = false } = {}) {
+    this.cancelRequest("osm");
+    this.osmContext = null;
+    this.osmContextError = "";
+    this.osmContextStatus = "idle";
+    if (announce && this.refs) {
+      this.setStatus("OSM context cleared.");
+    }
+    if (render && this.refs) {
+      this.renderLayers();
+      this.updateActionButtons();
+    }
+  }
+
+  getOsmContextMetadata() {
+    return this.osmContext?.metadata || null;
+  }
+
+  getOsmDeckLayers() {
+    return buildOsmDeckLayers(this.osmContext, {
+      deckInstance: window.deck,
+      idPrefix: "movement-osm-context",
+    });
+  }
+
+  formatOsmContextStatus(payload) {
+    const metadata = payload?.metadata || {};
+    const featureCount = Number(metadata.feature_count ?? payload?.features?.length ?? 0) || 0;
+    const omittedCount = Number(metadata.omitted_feature_count || 0) || 0;
+    const scopeType = metadata.scope?.type || "scope";
+    const omittedText = omittedCount > 0 ? `; ${formatCount(omittedCount)} omitted` : "";
+    return `Loaded OSM context: ${formatCount(featureCount)} features from ${scopeType}${omittedText}.`;
+  }
+
+  makeEmptyCandidateQueryPreview() {
+    return {
+      analysisId: "",
+      matchKeys: new Set(),
+      candidates: [],
+      evidenceByFixKey: new Map(),
+      status: "idle",
+      warnings: [],
+      candidateCount: 0,
+      returnedCount: 0,
+    };
+  }
+
+  candidateQueryKey(query) {
+    return `${String(query?.query_id || "")}::${String(query?.version || "")}`;
+  }
+
+  getSelectedCandidateQuery() {
+    const key = this.candidateQueryLibrary.selectedKey;
+    return (this.candidateQueryLibrary.queries || []).find(query => this.candidateQueryKey(query) === key) || null;
+  }
+
+  defaultCandidateQueryExecutionScope(query) {
+    return query?.evaluator?.type === "fix_osm_proximity" ? "current_individual" : "whole_study";
+  }
+
+  candidateQueryParameterDescriptors(query) {
+    const parameters = query?.parameters && typeof query.parameters === "object" && !Array.isArray(query.parameters)
+      ? query.parameters
+      : {};
+    return Object.entries(parameters).map(([name, rawSpec]) => {
+      const isSpecObject = rawSpec && typeof rawSpec === "object" && !Array.isArray(rawSpec);
+      const spec = isSpecObject ? rawSpec : { default: rawSpec };
+      const rawDefault = Object.prototype.hasOwnProperty.call(spec, "default")
+        ? spec.default
+        : Object.prototype.hasOwnProperty.call(spec, "value")
+          ? spec.value
+          : "";
+      let type = String(spec.type || spec.kind || "").trim().toLowerCase();
+      if (!["number", "string", "boolean"].includes(type)) {
+        if (typeof rawDefault === "number") {
+          type = "number";
+        } else if (typeof rawDefault === "boolean") {
+          type = "boolean";
+        } else {
+          type = "string";
+        }
+      }
+      return {
+        name: String(name),
+        label: String(spec.label || name),
+        description: String(spec.description || ""),
+        type,
+        defaultValue: rawDefault,
+      };
+    }).filter(item => item.name);
+  }
+
+  defaultCandidateQueryParameterValues(query) {
+    const values = {};
+    for (const descriptor of this.candidateQueryParameterDescriptors(query)) {
+      if (descriptor.type === "boolean") {
+        values[descriptor.name] = Boolean(descriptor.defaultValue);
+      } else if (descriptor.defaultValue === null || descriptor.defaultValue === undefined) {
+        values[descriptor.name] = "";
+      } else {
+        values[descriptor.name] = String(descriptor.defaultValue);
+      }
+    }
+    return values;
+  }
+
+  async loadCandidateQueryLibrary() {
+    const controller = this.beginRequest("queryLibrary");
+    this.candidateQueryLibrary.status = "loading";
+    this.candidateQueryLibrary.error = "";
+    this.renderCandidateQueryLibraryControls();
+    try {
+      const payload = await this.fetchJSON("/api/query-library/queries?app=movement", { signal: controller.signal });
+      if (this.requestControllers.queryLibrary !== controller) {
+        return;
+      }
+      const queries = Array.isArray(payload.queries) ? payload.queries : [];
+      this.candidateQueryLibrary.status = "loaded";
+      this.candidateQueryLibrary.queries = queries;
+      this.candidateQueryLibrary.error = "";
+      const currentStillExists = queries.some(query => this.candidateQueryKey(query) === this.candidateQueryLibrary.selectedKey);
+      const selected = currentStillExists ? this.getSelectedCandidateQuery() : queries[0] || null;
+      this.candidateQueryLibrary.selectedKey = selected ? this.candidateQueryKey(selected) : "";
+      this.candidateQueryLibrary.parameterValues = selected ? this.defaultCandidateQueryParameterValues(selected) : {};
+      if (!currentStillExists) {
+        this.candidateQueryLibrary.executionScope = this.defaultCandidateQueryExecutionScope(selected);
+      }
+      this.renderCandidateQueryLibraryControls();
+      this.updateActionButtons();
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return;
+      }
+      this.candidateQueryLibrary.status = "error";
+      this.candidateQueryLibrary.error = error.message;
+      this.candidateQueryLibrary.queries = [];
+      this.candidateQueryLibrary.selectedKey = "";
+      this.candidateQueryLibrary.parameterValues = {};
+      this.renderCandidateQueryLibraryControls();
+      this.updateActionButtons();
+    } finally {
+      if (this.requestControllers.queryLibrary === controller) {
+        this.requestControllers.queryLibrary = null;
+      }
+    }
+  }
+
+  selectCandidateQuery(key) {
+    this.candidateQueryLibrary.selectedKey = String(key || "");
+    const query = this.getSelectedCandidateQuery();
+    this.candidateQueryLibrary.parameterValues = query ? this.defaultCandidateQueryParameterValues(query) : {};
+    this.candidateQueryLibrary.executionScope = this.defaultCandidateQueryExecutionScope(query);
+    this.renderCandidateQueryLibraryControls();
+    this.updateActionButtons();
+  }
+
+  selectCandidateQueryExecutionScope(value) {
+    const allowed = new Set(["whole_study", "current_individual", "all_individuals_per_individual"]);
+    const nextValue = String(value || "whole_study");
+    this.candidateQueryLibrary.executionScope = allowed.has(nextValue) ? nextValue : "whole_study";
+    this.renderCandidateQueryLibraryControls();
+    this.updateActionButtons();
+  }
+
+  handleCandidateQueryParameterInput(event) {
+    const input = event.target.closest?.("[data-param-name]");
+    if (!input) {
+      return;
+    }
+    const name = String(input.dataset.paramName || "");
+    if (!name) {
+      return;
+    }
+    this.candidateQueryLibrary.parameterValues = {
+      ...(this.candidateQueryLibrary.parameterValues || {}),
+      [name]: input.type === "checkbox" ? input.checked : input.value,
+    };
+  }
+
+  renderCandidateQueryLibraryControls() {
+    if (!this.refs?.candidateQuerySelect || !this.refs?.candidateQueryScope || !this.refs?.candidateQueryMeta || !this.refs?.candidateQueryParams) {
+      return;
+    }
+    const select = this.refs.candidateQuerySelect;
+    const scopeSelect = this.refs.candidateQueryScope;
+    const queries = this.candidateQueryLibrary.queries || [];
+    select.innerHTML = "";
+    scopeSelect.value = this.candidateQueryLibrary.executionScope || "whole_study";
+    if (this.candidateQueryLibrary.status === "loading") {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "Loading queries...";
+      select.appendChild(option);
+      select.disabled = true;
+      scopeSelect.disabled = true;
+      this.refs.candidateQueryMeta.textContent = "Loading saved movement queries...";
+      this.refs.candidateQueryParams.innerHTML = "";
+      this.refs.candidateQueryParams.classList.add("hidden");
+      return;
+    }
+    if (this.candidateQueryLibrary.status === "error") {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "Could not load queries";
+      select.appendChild(option);
+      select.disabled = true;
+      scopeSelect.disabled = true;
+      this.refs.candidateQueryMeta.textContent = `Could not load query library: ${this.candidateQueryLibrary.error}`;
+      this.refs.candidateQueryParams.innerHTML = "";
+      this.refs.candidateQueryParams.classList.add("hidden");
+      return;
+    }
+    if (!queries.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No saved movement queries";
+      select.appendChild(option);
+      select.disabled = true;
+      scopeSelect.disabled = true;
+      this.refs.candidateQueryMeta.textContent = "No saved movement candidate queries.";
+      this.refs.candidateQueryParams.innerHTML = "";
+      this.refs.candidateQueryParams.classList.add("hidden");
+      return;
+    }
+    for (const query of queries) {
+      const option = document.createElement("option");
+      option.value = this.candidateQueryKey(query);
+      option.textContent = `${query.name || query.query_id} v${query.version}`;
+      select.appendChild(option);
+    }
+    select.disabled = false;
+    scopeSelect.disabled = false;
+    if (!this.candidateQueryLibrary.selectedKey || !queries.some(query => this.candidateQueryKey(query) === this.candidateQueryLibrary.selectedKey)) {
+      this.candidateQueryLibrary.selectedKey = this.candidateQueryKey(queries[0]);
+      this.candidateQueryLibrary.parameterValues = this.defaultCandidateQueryParameterValues(queries[0]);
+    }
+    select.value = this.candidateQueryLibrary.selectedKey;
+    const selected = this.getSelectedCandidateQuery();
+    if (!selected) {
+      this.refs.candidateQueryMeta.textContent = "Select a candidate query.";
+      return;
+    }
+    const evaluatorType = selected.evaluator?.type || "unknown";
+    const requiredFields = Array.isArray(selected.required_fields) && selected.required_fields.length
+      ? selected.required_fields.join(", ")
+      : "none";
+    const scopeHint = evaluatorType === "fix_osm_proximity"
+      ? " | OSM scope: select one individual, or choose all individuals separately"
+      : "";
+    this.refs.candidateQueryMeta.innerHTML = `
+      <strong>${escapeHtml(selected.name || selected.query_id)}</strong>
+      ${escapeHtml(selected.description || "No description.")}
+      v${escapeHtml(String(selected.version || ""))}
+      | ${escapeHtml(selected.candidate_kind || "candidate")}
+      | evaluator ${escapeHtml(evaluatorType)}
+      | fields ${escapeHtml(requiredFields)}
+      ${escapeHtml(scopeHint)}
+    `;
+    const descriptors = this.candidateQueryParameterDescriptors(selected);
+    if (!descriptors.length) {
+      this.refs.candidateQueryParams.innerHTML = "";
+      this.refs.candidateQueryParams.classList.add("hidden");
+      return;
+    }
+    const values = this.candidateQueryLibrary.parameterValues || {};
+    this.refs.candidateQueryParams.innerHTML = descriptors.map(descriptor => {
+      const rawValue = values[descriptor.name] ?? descriptor.defaultValue ?? "";
+      const title = descriptor.description ? ` title="${escapeHtml(descriptor.description)}"` : "";
+      if (descriptor.type === "boolean") {
+        return `
+          <label${title}>${escapeHtml(descriptor.label)}
+            <input type="checkbox" data-param-name="${escapeHtml(descriptor.name)}" ${rawValue ? "checked" : ""}>
+          </label>
+        `;
+      }
+      const inputType = descriptor.type === "number" ? "number" : "text";
+      const step = descriptor.type === "number" ? ' step="any"' : "";
+      return `
+        <label${title}>${escapeHtml(descriptor.label)}
+          <input type="${inputType}"${step} data-param-name="${escapeHtml(descriptor.name)}" value="${escapeHtml(String(rawValue))}">
+        </label>
+      `;
+    }).join("");
+    this.refs.candidateQueryParams.classList.remove("hidden");
+  }
+
+  getCandidateQueryParameterValues(query) {
+    const values = {};
+    const currentValues = this.candidateQueryLibrary.parameterValues || {};
+    for (const descriptor of this.candidateQueryParameterDescriptors(query)) {
+      const rawValue = currentValues[descriptor.name] ?? descriptor.defaultValue ?? "";
+      if (descriptor.type === "boolean") {
+        values[descriptor.name] = Boolean(rawValue);
+      } else if (descriptor.type === "number") {
+        const numericValue = Number(rawValue);
+        values[descriptor.name] = Number.isFinite(numericValue) ? numericValue : rawValue;
+      } else {
+        values[descriptor.name] = String(rawValue);
+      }
+    }
+    return values;
+  }
+
+  getCandidateQueryCurrentIndividual() {
+    if (!this.data) {
+      return "";
+    }
+    const selectedIndividuals = this.getSelectedIndividuals();
+    return selectedIndividuals.length === 1 ? selectedIndividuals[0] : "";
+  }
+
+  getCandidateQueryExecutionScope() {
+    const scope = this.candidateQueryLibrary.executionScope || "whole_study";
+    if (scope === "current_individual") {
+      const individual = this.getCandidateQueryCurrentIndividual();
+      return individual ? { type: "current_individual", individual } : null;
+    }
+    if (scope === "all_individuals_per_individual") {
+      return { type: "all_individuals_per_individual" };
+    }
+    return { type: "whole_study" };
+  }
+
+  getCandidateQueryMatchKeys() {
+    if (!this.data || !(this.candidateQueryPreview?.matchKeys instanceof Set)) {
+      return new Set();
+    }
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    const visibleSetNames = this.getVisibleSetNames();
+    return new Set(
+      [...this.candidateQueryPreview.matchKeys].filter(fixKey => {
+        const fix = this.data.fixByKey.get(fixKey);
+        return Boolean(fix && visibleIndividuals.has(fix.individual) && visibleSetNames.has(fix.setName));
+      }),
+    );
+  }
+
+  clearCandidateQueryPreview({ render = true, announce = false } = {}) {
+    this.cancelRequest("candidateQuery");
+    this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
+    if (announce && this.refs) {
+      this.setStatus("Candidate preview cleared.");
+    }
+    if (render && this.refs) {
+      this.renderLayers();
+      this.updateActionButtons();
+    }
+  }
+
+  async runSelectedCandidateQuery() {
+    if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
+      return;
+    }
+    const selectedQuery = this.getSelectedCandidateQuery();
+    if (!selectedQuery) {
+      this.setStatus("No saved movement candidate query is selected.", true);
+      return;
+    }
+    const executionScope = this.getCandidateQueryExecutionScope();
+    if (!executionScope) {
+      this.setStatus("Select exactly one individual before running the current-individual candidate query scope.", true);
+      return;
+    }
+    const controller = this.beginRequest("candidateQuery");
+    this.candidateQueryPreview = {
+      ...this.makeEmptyCandidateQueryPreview(),
+      status: "loading",
+    };
+    this.setStatus(`Running candidate query ${selectedQuery.name || selectedQuery.query_id}...`);
+    this.renderLayers();
+    this.updateActionButtons();
+
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/run-candidate-query`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            user: this.getUser() || "reviewer",
+            preview_limit: 1000,
+            query_id: selectedQuery.query_id,
+            query_version: selectedQuery.version,
+            query_parameters: this.getCandidateQueryParameterValues(selectedQuery),
+            execution_scope: executionScope,
+          }),
+        },
+      );
+      if (this.requestControllers.candidateQuery !== controller) {
+        return;
+      }
+      const summary = result?.summary || {};
+      const candidates = Array.isArray(summary.candidates) ? summary.candidates : [];
+      const matchKeys = new Set();
+      const evidenceByFixKey = new Map();
+      for (const candidate of candidates) {
+        const fixKey = String(candidate?.fix_key || "");
+        if (!fixKey || !this.data.fixByKey.has(fixKey)) {
+          continue;
+        }
+        matchKeys.add(fixKey);
+        evidenceByFixKey.set(fixKey, candidate.evidence || {});
+      }
+      this.candidateQueryPreview = {
+        analysisId: String(result?.analysis_id || result?.analysis?.analysis_id || ""),
+        matchKeys,
+        candidates,
+        evidenceByFixKey,
+        status: String(summary.run_status || "success"),
+        warnings: Array.isArray(summary.warnings) ? summary.warnings : [],
+        candidateCount: Number(summary.candidate_count) || matchKeys.size,
+        returnedCount: Number(summary.returned_count) || candidates.length,
+      };
+      const visibleCount = this.getCandidateQueryMatchKeys().size;
+      const warningText = this.candidateQueryPreview.warnings.length
+        ? ` ${this.candidateQueryPreview.warnings[0]}`
+        : "";
+      if (this.candidateQueryPreview.status === "unresolved") {
+        this.setStatus(`Candidate query unresolved. ${warningText}`.trim(), true);
+      } else {
+        this.setStatus(`Candidate query found ${formatCount(this.candidateQueryPreview.candidateCount)} candidates; ${formatCount(visibleCount)} visible.${warningText}`.trim());
+      }
+      this.renderLayers();
+      this.updateActionButtons();
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return;
+      }
+      if (this.requestControllers.candidateQuery === controller) {
+        this.candidateQueryPreview = {
+          ...this.makeEmptyCandidateQueryPreview(),
+          status: "error",
+          warnings: [error.message],
+        };
+        this.setStatus(`Candidate query failed: ${error.message}`, true);
+        this.renderLayers();
+        this.updateActionButtons();
+      }
+    } finally {
+      if (this.requestControllers.candidateQuery === controller) {
+        this.requestControllers.candidateQuery = null;
+      }
+    }
+  }
+
+  checkCandidateQueryPreview() {
+    if (!this.data) {
+      return;
+    }
+    const matchKeys = this.getCandidateQueryMatchKeys();
+    if (!matchKeys.size) {
+      return;
+    }
+    const nextSelected = new Set(this.data.selectedFixKeys);
+    for (const fixKey of matchKeys) {
+      nextSelected.add(fixKey);
+    }
+    this.data.selectedFixKeys = nextSelected;
+    this.renderSelectedFixes();
+    this.renderThresholdPane();
+    this.renderLayers();
+    this.updateActionButtons();
   }
 
   handleVisibilityChange() {
@@ -2296,6 +2916,8 @@ class MovementExampleApp {
 
   clearLoadedStudyState() {
     this.clearThresholdState();
+    this.clearOsmContext({ render: false });
+    this.clearCandidateQueryPreview({ render: false });
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
     this.tableSelection = {
@@ -2529,7 +3151,7 @@ class MovementExampleApp {
       this.refs.slider.min = String(this.data.minTimeMs);
       this.refs.slider.max = String(this.data.maxTimeMs);
       this.refs.slider.value = String(this.currentTimeMs);
-      const initiallySelectedIndividuals = this.data.overviewTruncated ? [] : this.data.individuals;
+      const initiallySelectedIndividuals = initialMovementVisibleIndividuals(this.data);
       this.data.selectedIndividuals = new Set(initiallySelectedIndividuals);
       this.data.selectedFixKeys = new Set();
       this.populateColorByOptions();
@@ -2698,7 +3320,7 @@ class MovementExampleApp {
       this.refs.slider.min = String(this.data.minTimeMs);
       this.refs.slider.max = String(this.data.maxTimeMs);
       this.refs.slider.value = String(this.currentTimeMs);
-      const initiallySelectedIndividuals = this.data.overviewTruncated ? [] : this.data.individuals;
+      const initiallySelectedIndividuals = initialMovementVisibleIndividuals(this.data);
       this.data.selectedIndividuals = new Set(initiallySelectedIndividuals);
       this.data.selectedFixKeys = new Set(
         [...preservedFixKeys].filter(key => this.data.fixByKey.has(key)),
@@ -3092,22 +3714,6 @@ class MovementExampleApp {
     };
   }
 
-  extendRenderedTableRowsToInclude(fixKey) {
-    if (!fixKey || this.refs.tableMode.value !== "fixes") {
-      return;
-    }
-    const rows = this.getFilteredTableFixRows();
-    const index = rows.findIndex(fix => fix.fixKey === fixKey);
-    if (index < 0) {
-      return;
-    }
-    const requiredCount = index + 1;
-    if (requiredCount <= this.tableRenderState.rowLimit) {
-      return;
-    }
-    this.tableRenderState.rowLimit = Math.ceil(requiredCount / TABLE_ROW_INCREMENT) * TABLE_ROW_INCREMENT;
-  }
-
   handleTableWrapScroll() {
     if (!this.data || this.refs.tableMode.value !== "fixes") {
       return;
@@ -3310,29 +3916,6 @@ class MovementExampleApp {
     return [...(this.tableSelection.selectedFixKeys || new Set())]
       .map(fixKey => this.data?.fixByKey?.get(fixKey))
       .filter(fix => Boolean(fix) && visibleIndividuals.has(fix.individual) && visibleSetNames.has(fix.setName));
-  }
-
-  revealFixInTable(fixKey, { align = "center" } = {}) {
-    if (!fixKey || this.refs?.sideSheetTabs?.dataset.activeSheet !== "table") {
-      return;
-    }
-    if (this.refs.tableMode.value !== "fixes") {
-      this.refs.tableMode.value = "fixes";
-      this.renderTableSheet();
-    }
-    requestAnimationFrame(() => {
-      this.extendRenderedTableRowsToInclude(fixKey);
-      this.renderTableSheet();
-      let row = this.refs.tableWrap?.querySelector(`tr[data-fix-key="${cssEscape(fixKey)}"]`);
-      if (!row && this.refs.tableFilter.value) {
-        this.refs.tableFilter.value = "";
-        this.saveUiState();
-        this.extendRenderedTableRowsToInclude(fixKey);
-        this.renderTableSheet();
-        row = this.refs.tableWrap?.querySelector(`tr[data-fix-key="${cssEscape(fixKey)}"]`);
-      }
-      row?.scrollIntoView?.({ block: align, inline: "nearest" });
-    });
   }
 
   zoomToPath(path) {
@@ -3737,6 +4320,7 @@ class MovementExampleApp {
     this.map.on("load", () => {
       this.mapLoaded = true;
       this.renderLayers();
+      this.updateActionButtons();
     });
     this.map.on("error", (event) => {
       const message = event?.error?.message || "Map request failed";
@@ -3846,9 +4430,11 @@ class MovementExampleApp {
     const pointData = [];
     const thresholdPointData = [];
     const selectedThresholdPointData = [];
+    const candidatePointData = [];
+    const selectedCandidatePointData = [];
     const selectedPointData = [];
-    const tableSelectedPointData = [];
     const cursorData = [];
+    const showPoints = this.refs.showPoints.checked;
     const visibleSegments = this.getVisibleSegments();
     const visibleAutoBursts = this.getVisibleAutoBursts();
     const suppressedBaseTrackKeys = new Set(
@@ -3871,10 +4457,19 @@ class MovementExampleApp {
       }));
     const visibleTableSelection = this.getVisibleTableSelectionFixes();
     const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
-    const tableSelectionPath = this.getCurrentSegmentSelection()?.fixes
+    const tableSelectedPointData = visibleTableSelection.map(fix => ({
+      fixKey: fix.fixKey,
+      position: fix.position,
+      color: [87, 218, 174, 220],
+    }));
+    const segmentSelection = this.tableSelection.selectedFixKeys.size
+      ? this.getCurrentSegmentSelection()
+      : null;
+    const tableSelectionPath = segmentSelection?.fixes
       ?.filter(fix => visibleTableSelectionKeys.has(fix.fixKey))
       .map(fix => fix.position) || [];
-    const thresholdMatchKeys = this.getThresholdContext()?.matchKeys || new Set();
+    const thresholdMatchKeys = showPoints ? this.getActiveThresholdMatchKeys() : new Set();
+    const candidateMatchKeys = showPoints ? this.getCandidateQueryMatchKeys() : new Set();
 
     for (const individual of this.data.individuals) {
       if (!visibleIndividuals.has(individual)) {
@@ -3903,40 +4498,47 @@ class MovementExampleApp {
       }
     }
 
-    for (const fix of this.data.fixes) {
-      if (!visibleIndividuals.has(fix.individual) || !visibleSetNames.has(fix.setName)) {
-        continue;
-      }
-      const point = {
-        fixKey: fix.fixKey,
-        individual: fix.individual,
-        setName: fix.setName,
-        position: fix.position,
-        color: this.colorForFix(fix),
-      };
-      if (this.data.selectedFixKeys.has(fix.fixKey)) {
-        selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
-        if (thresholdMatchKeys.has(fix.fixKey)) {
-          selectedThresholdPointData.push({
-            fixKey: fix.fixKey,
-            position: fix.position,
-          });
+    if (showPoints) {
+      for (const fix of this.data.fixes) {
+        if (!visibleIndividuals.has(fix.individual) || !visibleSetNames.has(fix.setName)) {
+          continue;
         }
-      } else {
-        pointData.push(point);
-        if (thresholdMatchKeys.has(fix.fixKey)) {
-          thresholdPointData.push({
-            fixKey: fix.fixKey,
-            position: fix.position,
-          });
-        }
-      }
-      if (visibleTableSelectionKeys.has(fix.fixKey)) {
-        tableSelectedPointData.push({
+        const point = {
           fixKey: fix.fixKey,
+          individual: fix.individual,
+          setName: fix.setName,
           position: fix.position,
-          color: [87, 218, 174, 220],
-        });
+          color: this.colorForFix(fix),
+        };
+        if (this.data.selectedFixKeys.has(fix.fixKey)) {
+          selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
+          if (thresholdMatchKeys.has(fix.fixKey)) {
+            selectedThresholdPointData.push({
+              fixKey: fix.fixKey,
+              position: fix.position,
+            });
+          }
+          if (candidateMatchKeys.has(fix.fixKey)) {
+            selectedCandidatePointData.push({
+              fixKey: fix.fixKey,
+              position: fix.position,
+            });
+          }
+        } else {
+          pointData.push(point);
+          if (thresholdMatchKeys.has(fix.fixKey)) {
+            thresholdPointData.push({
+              fixKey: fix.fixKey,
+              position: fix.position,
+            });
+          }
+          if (candidateMatchKeys.has(fix.fixKey)) {
+            candidatePointData.push({
+              fixKey: fix.fixKey,
+              position: fix.position,
+            });
+          }
+        }
       }
     }
 
@@ -4026,7 +4628,7 @@ class MovementExampleApp {
       );
     }
 
-    if (this.refs.showPoints.checked) {
+    if (showPoints) {
       layers.push(
         new deck.ScatterplotLayer({
           id: "movement-points",
@@ -4066,6 +4668,36 @@ class MovementExampleApp {
           getRadius: 156,
           radiusMinPixels: 9,
           radiusMaxPixels: 18,
+          pickable: false,
+        }),
+      );
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-candidate-query-points",
+          data: candidatePointData,
+          getPosition: item => item.position,
+          getLineColor: [72, 222, 255, 255],
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 2.5,
+          getRadius: 132,
+          radiusMinPixels: 8,
+          radiusMaxPixels: 15,
+          pickable: false,
+        }),
+      );
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-selected-candidate-query-points",
+          data: selectedCandidatePointData,
+          getPosition: item => item.position,
+          getLineColor: [72, 222, 255, 255],
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 3,
+          getRadius: 182,
+          radiusMinPixels: 11,
+          radiusMaxPixels: 21,
           pickable: false,
         }),
       );
@@ -4123,6 +4755,9 @@ class MovementExampleApp {
         }),
       );
     }
+
+    layers.push(...this.getOsmDeckLayers());
+
     try {
       this.overlay.setProps({ layers });
     } catch (error) {
@@ -4233,10 +4868,11 @@ class MovementExampleApp {
     });
     this.renderThresholdPane();
     this.renderSelectedFixes();
-    this.renderTableSheet();
+    if (this.refs?.sideSheetTabs?.dataset.activeSheet === "table") {
+      this.renderTableSheet();
+    }
     this.renderLayers();
     this.updateActionButtons();
-    this.revealFixInTable(fixKey);
   }
 
   handleMapContextMenu(event) {
@@ -4664,6 +5300,29 @@ class MovementExampleApp {
       matchKeys,
       uncheckedMatchKeys,
     };
+  }
+
+  getActiveThresholdMatchKeys() {
+    if (!this.data) {
+      return new Set();
+    }
+    const field = this.getCurrentColorField();
+    if (!field || field.key === INDIVIDUAL_COLOR_FIELD_KEY || this.thresholdState.fieldKey !== field.key) {
+      return new Set();
+    }
+    if (field.kind === "numeric") {
+      if (!Number.isFinite(this.thresholdState.value)) {
+        return new Set();
+      }
+    } else {
+      const selectedLevels = Array.isArray(this.thresholdState.selectedLevels)
+        ? this.thresholdState.selectedLevels
+        : [];
+      if (!selectedLevels.length) {
+        return new Set();
+      }
+    }
+    return this.getThresholdContext()?.matchKeys || new Set();
   }
 
   renderThresholdPane() {
@@ -5260,9 +5919,10 @@ class MovementExampleApp {
         return;
       }
       this.data.detailState = "loaded";
-      this.data.detailIndividuals = Array.isArray(payload.detail_scope?.individuals)
-        ? payload.detail_scope.individuals.map(value => String(value))
-        : [...selectedIndividuals];
+      const payloadIndividuals = Array.isArray(payload.detail_scope?.individuals)
+        ? payload.detail_scope.individuals.map(value => String(value)).filter(Boolean)
+        : [];
+      this.data.detailIndividuals = payloadIndividuals.length ? payloadIndividuals : [...selectedIndividuals];
       this.data.detailLimit = payload.detail_scope?.limit ?? null;
       this.data.detailMatchingFixCount = Number(payload.matching_fix_count) || 0;
       this.data.detailReturnedFixCount = Number(payload.returned_fix_count) || 0;
@@ -5907,9 +6567,15 @@ class MovementExampleApp {
     const hasDetail = this.hasLoadedDetailSelection();
     const selectedCount = this.getSelectedFixes().length;
     const visibleSuspiciousCount = this.getSuspiciousFixes("", { scope: "visible" }).length;
+    const candidatePreviewLoading = this.candidateQueryPreview?.status === "loading";
+    const visibleCandidateCount = this.getCandidateQueryMatchKeys().size;
+    const selectedCandidateQuery = this.getSelectedCandidateQuery();
     for (const button of [
       this.refs.selectSuspicious,
       this.refs.clearFixes,
+      this.refs.runCandidateQuery,
+      this.refs.checkCandidates,
+      this.refs.clearCandidates,
       this.refs.markSuspected,
       this.refs.markConfirmed,
       this.refs.generateReport,
@@ -5923,8 +6589,13 @@ class MovementExampleApp {
     this.refs.removeConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
     this.refs.selectSuspicious.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || visibleSuspiciousCount === 0;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
+    this.refs.runCandidateQuery.disabled = !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
+    this.refs.checkCandidates.disabled = !hasData || candidatePreviewLoading || visibleCandidateCount === 0;
+    this.refs.clearCandidates.disabled = !hasData || candidatePreviewLoading || this.candidateQueryPreview?.status === "idle";
     this.updateUndoButton();
-    this.renderTableSheet();
+    if (this.refs?.sideSheetTabs?.dataset.activeSheet === "table") {
+      this.renderTableSheet();
+    }
   }
 
   updateUndoButton() {
@@ -6496,6 +7167,16 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
   };
   refreshMovementFixCollections(data);
   return data;
+}
+
+function initialMovementVisibleIndividuals(data) {
+  if (!data) {
+    return [];
+  }
+  if (data.overviewTruncated && !(data.overviewFixes || []).length) {
+    return [];
+  }
+  return data.individuals || [];
 }
 
 function parseMovementBurstGap(summary) {
