@@ -297,6 +297,7 @@ class MovementExampleApp {
       osm: null,
       candidateQuery: null,
       queryLibrary: null,
+      anomalyRanking: null,
     };
     this.map = null;
     this.mapLoaded = false;
@@ -316,6 +317,7 @@ class MovementExampleApp {
       histogramMax: null,
     };
     this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
+    this.anomalyRanking = this.makeEmptyAnomalyRanking();
     this.candidateQueryLibrary = {
       status: "idle",
       queries: [],
@@ -1292,7 +1294,7 @@ class MovementExampleApp {
           display: none;
         }
         .movement-side-sheet.individuals {
-          grid-template-rows: auto auto minmax(0, 0.95fr) auto minmax(0, 1.05fr);
+          grid-template-rows: auto auto minmax(0, 0.8fr) auto minmax(120px, 0.85fr) auto minmax(0, 0.65fr);
         }
         .movement-side-sheet.table {
           grid-template-rows: auto auto minmax(0, 1fr);
@@ -1305,9 +1307,25 @@ class MovementExampleApp {
           color: #9bb0c6;
         }
         .movement-individuals,
-        .movement-fixes {
+        .movement-fixes,
+        .movement-anomaly-ranking {
           overflow-y: auto;
           padding: 10px 12px;
+        }
+        .movement-anomaly-meta,
+        .movement-anomaly-warnings {
+          display: grid;
+          gap: 5px;
+          margin-bottom: 10px;
+          color: #95a8bb;
+          font-size: 11px;
+          line-height: 1.4;
+        }
+        .movement-anomaly-warning {
+          color: #f6cf86;
+        }
+        .movement-anomaly-ranking .movement-table tbody tr {
+          cursor: default;
         }
         .movement-side-search {
           display: grid;
@@ -1737,6 +1755,7 @@ class MovementExampleApp {
           <button type="button" data-role="reset-view">Reset view</button>
           <button type="button" class="movement-emphasis" data-role="mark-suspected">Mark suspected</button>
           <button type="button" class="movement-emphasis" data-role="mark-confirmed">Mark confirmed</button>
+          <button type="button" data-role="run-anomaly-ranking">Rank bursts</button>
           <button type="button" data-role="generate-report">Generate report</button>
           <button type="button" class="movement-danger" data-role="remove-confirmed">Remove confirmed</button>
           <button type="button" data-role="undo">Undo</button>
@@ -1778,6 +1797,8 @@ class MovementExampleApp {
                   </label>
                 </div>
                 <div class="movement-individuals" data-role="individuals"></div>
+                <div class="movement-side-head">Burst anomaly ranking</div>
+                <div class="movement-anomaly-ranking" data-role="anomaly-ranking"></div>
                 <div class="movement-side-head" data-role="fix-head">Checked fixes</div>
                 <div class="movement-fixes" data-role="selected-fixes"></div>
               </div>
@@ -1974,6 +1995,7 @@ class MovementExampleApp {
       resetView: this.mountEl.querySelector('[data-role="reset-view"]'),
       markSuspected: this.mountEl.querySelector('[data-role="mark-suspected"]'),
       markConfirmed: this.mountEl.querySelector('[data-role="mark-confirmed"]'),
+      runAnomalyRanking: this.mountEl.querySelector('[data-role="run-anomaly-ranking"]'),
       generateReport: this.mountEl.querySelector('[data-role="generate-report"]'),
       removeConfirmed: this.mountEl.querySelector('[data-role="remove-confirmed"]'),
       undo: this.mountEl.querySelector('[data-role="undo"]'),
@@ -1989,6 +2011,7 @@ class MovementExampleApp {
       individualHead: this.mountEl.querySelector('[data-role="individual-head"]'),
       fixHead: this.mountEl.querySelector('[data-role="fix-head"]'),
       selectedFixes: this.mountEl.querySelector('[data-role="selected-fixes"]'),
+      anomalyRanking: this.mountEl.querySelector('[data-role="anomaly-ranking"]'),
       tableMode: this.mountEl.querySelector('[data-role="table-mode"]'),
       tableFilter: this.mountEl.querySelector('[data-role="table-filter"]'),
       tableSort: this.mountEl.querySelector('[data-role="table-sort"]'),
@@ -2089,6 +2112,7 @@ class MovementExampleApp {
     this.refs.individualSearch.value = this.individualSearchQuery;
     this.applySidePaneWidth(this.sidePaneWidthPx, { save: false, resizeMap: false });
     this.setSideSheet(this.uiState.sideSheet || "individuals", { save: false });
+    this.renderAnomalyRanking();
     this.updateActionButtons();
   }
 
@@ -2225,6 +2249,9 @@ class MovementExampleApp {
     this.refs.resetView.addEventListener("click", () => this.resetView());
     this.refs.markSuspected.addEventListener("click", () => this.openIssueModal("suspected"));
     this.refs.markConfirmed.addEventListener("click", () => this.openIssueModal("confirmed"));
+    this.refs.runAnomalyRanking.addEventListener("click", () => {
+      void this.runBurstAnomalyRanking();
+    });
     this.refs.generateReport.addEventListener("click", () => this.openReportModal());
     this.refs.removeConfirmed.addEventListener("click", () => this.openRemoveModal());
     this.refs.undo.addEventListener("click", async () => {
@@ -2347,6 +2374,7 @@ class MovementExampleApp {
       this.cancelRequest("reportDetail");
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
+      this.cancelRequest("anomalyRanking");
       return;
     }
     if (level === "study") {
@@ -2357,6 +2385,7 @@ class MovementExampleApp {
       this.cancelRequest("reportDetail");
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
+      this.cancelRequest("anomalyRanking");
       return;
     }
     if (level === "dataset") {
@@ -2366,6 +2395,7 @@ class MovementExampleApp {
       this.cancelRequest("reportDetail");
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
+      this.cancelRequest("anomalyRanking");
       return;
     }
     if (level === "artifact") {
@@ -2374,6 +2404,7 @@ class MovementExampleApp {
       this.cancelRequest("reportDetail");
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
+      this.cancelRequest("anomalyRanking");
     }
   }
 
@@ -2775,6 +2806,168 @@ class MovementExampleApp {
     }
   }
 
+  makeEmptyAnomalyRanking() {
+    return {
+      analysisId: "",
+      status: "idle",
+      rankedIndividuals: [],
+      warnings: [],
+      burstGap: null,
+      modelFit: null,
+    };
+  }
+
+  clearAnomalyRanking({ render = true } = {}) {
+    this.cancelRequest("anomalyRanking");
+    this.anomalyRanking = this.makeEmptyAnomalyRanking();
+    if (render && this.refs) {
+      this.renderAnomalyRanking();
+      this.updateActionButtons();
+    }
+  }
+
+  async runBurstAnomalyRanking() {
+    if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
+      return;
+    }
+    const controller = this.beginRequest("anomalyRanking");
+    this.anomalyRanking = {
+      ...this.makeEmptyAnomalyRanking(),
+      status: "loading",
+    };
+    this.renderAnomalyRanking();
+    this.updateActionButtons();
+    this.setStatus("Running burst anomaly ranking analysis...");
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/run-burst-anomaly-ranking`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            burst_gap_mode: this.getBurstGapMode(),
+            burst_gap_seconds: this.getBurstGapSeconds(),
+            burst_gap_quantile: this.getBurstGapQuantile(),
+            user: this.getUser() || "reviewer",
+          }),
+        },
+      );
+      if (this.requestControllers.anomalyRanking !== controller) {
+        return;
+      }
+      const summary = result?.summary || {};
+      this.anomalyRanking = {
+        analysisId: String(result?.analysis_id || result?.analysis?.analysis_id || ""),
+        status: String(summary.run_status || "completed"),
+        rankedIndividuals: Array.isArray(summary.ranked_individuals) ? summary.ranked_individuals : [],
+        warnings: Array.isArray(summary.warnings) ? summary.warnings : [],
+        burstGap: summary.burst_gap || null,
+        modelFit: summary.model_fit || summary.scorer || null,
+      };
+      this.renderAnomalyRanking();
+      this.updateActionButtons();
+      const count = formatCount(this.anomalyRanking.rankedIndividuals.length);
+      if (this.anomalyRanking.status === "unresolved") {
+        this.setStatus("Burst anomaly ranking could not be resolved for this artifact. Review its warnings below.", true);
+      } else {
+        this.setStatus(`Created burst anomaly ranking analysis for ${count} individuals.`);
+      }
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return;
+      }
+      if (this.requestControllers.anomalyRanking === controller) {
+        this.anomalyRanking = {
+          ...this.makeEmptyAnomalyRanking(),
+          status: "error",
+          warnings: [error.message],
+        };
+        this.renderAnomalyRanking();
+        this.updateActionButtons();
+        this.setStatus(`Burst anomaly ranking failed: ${error.message}`, true);
+      }
+    } finally {
+      if (this.requestControllers.anomalyRanking === controller) {
+        this.requestControllers.anomalyRanking = null;
+        this.updateActionButtons();
+      }
+    }
+  }
+
+  renderAnomalyRanking() {
+    if (!this.refs?.anomalyRanking) {
+      return;
+    }
+    const result = this.anomalyRanking || this.makeEmptyAnomalyRanking();
+    if (result.status === "idle") {
+      this.refs.anomalyRanking.innerHTML = '<div class="movement-table-empty">Run burst ranking to prioritize individual review.</div>';
+      return;
+    }
+    if (result.status === "loading") {
+      this.refs.anomalyRanking.innerHTML = '<div class="movement-table-empty">Running burst anomaly ranking analysis...</div>';
+      return;
+    }
+    const burstGapLabel = result.burstGap
+      ? formatBurstGapMetadata(parseMovementBurstGap({ burst_gap: result.burstGap }))
+      : "";
+    const modelFit = result.modelFit || {};
+    const metadata = [
+      result.analysisId ? `Analysis: ${result.analysisId}` : "",
+      burstGapLabel ? `Burst gap: ${burstGapLabel}` : "",
+      modelFit.model ? `Model: ${modelFit.model}` : "",
+      Number.isFinite(Number(modelFit.scored_burst_count))
+        ? `Scored bursts: ${formatCount(modelFit.scored_burst_count)}`
+        : "",
+      Array.isArray(modelFit.fitted_features)
+        ? `Fitted features: ${formatCount(modelFit.fitted_features.length)}`
+        : "",
+    ].filter(Boolean);
+    const metadataHtml = metadata.length
+      ? `<div class="movement-anomaly-meta">${metadata.map(item => `<div>${escapeHtml(item)}</div>`).join("")}</div>`
+      : "";
+    const warningsHtml = result.warnings.length
+      ? `<div class="movement-anomaly-warnings">${result.warnings.map(warning => `<div class="movement-anomaly-warning">${escapeHtml(String(warning))}</div>`).join("")}</div>`
+      : "";
+    const rows = Array.isArray(result.rankedIndividuals) ? result.rankedIndividuals : [];
+    if (!rows.length) {
+      const message = result.status === "error"
+        ? "The ranking analysis failed."
+        : "No individuals were ranked.";
+      this.refs.anomalyRanking.innerHTML = `${metadataHtml}${warningsHtml}<div class="movement-table-empty">${escapeHtml(message)}</div>`;
+      return;
+    }
+    this.refs.anomalyRanking.innerHTML = `
+      ${metadataHtml}
+      ${warningsHtml}
+      <table class="movement-table">
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Individual</th>
+            <th>Top score</th>
+            <th>Top burst</th>
+            <th>Bursts</th>
+            <th>Scored</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(row => `
+            <tr>
+              <td class="movement-table-cell-mono">${escapeHtml(String(row.rank ?? ""))}</td>
+              <td>${escapeHtml(String(row.individual || ""))}</td>
+              <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(finiteOrNull(row.top_burst_score), ""))}</td>
+              <td class="movement-table-cell-mono">${escapeHtml(String(row.top_burst_id || ""))}</td>
+              <td class="movement-table-cell-mono">${escapeHtml(formatCount(row.burst_count))}</td>
+              <td class="movement-table-cell-mono">${escapeHtml(formatCount(row.scored_burst_count))}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
   async runSelectedCandidateQuery() {
     if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
       return;
@@ -2918,6 +3111,7 @@ class MovementExampleApp {
     this.clearThresholdState();
     this.clearOsmContext({ render: false });
     this.clearCandidateQueryPreview({ render: false });
+    this.clearAnomalyRanking({ render: false });
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
     this.tableSelection = {
@@ -2935,6 +3129,7 @@ class MovementExampleApp {
     this.lastReportLinks = [];
     this.refs.individuals.innerHTML = "";
     this.refs.selectedFixes.innerHTML = "";
+    this.renderAnomalyRanking();
     this.refs.individualHead.textContent = "Individuals and coverage";
     this.refs.fixHead.textContent = "Checked fixes";
     this.refs.slider.min = "0";
@@ -3272,6 +3467,7 @@ class MovementExampleApp {
 
   async loadArtifact(preservedFixKeys = new Set()) {
     this.cancelSelectionRequests("artifact");
+    this.clearAnomalyRanking();
     const familyName = this.currentFamily;
     const studyName = this.currentStudy;
     const datasetId = this.currentDatasetId;
@@ -6568,6 +6764,7 @@ class MovementExampleApp {
     const selectedCount = this.getSelectedFixes().length;
     const visibleSuspiciousCount = this.getSuspiciousFixes("", { scope: "visible" }).length;
     const candidatePreviewLoading = this.candidateQueryPreview?.status === "loading";
+    const anomalyRankingLoading = this.anomalyRanking?.status === "loading";
     const visibleCandidateCount = this.getCandidateQueryMatchKeys().size;
     const selectedCandidateQuery = this.getSelectedCandidateQuery();
     for (const button of [
@@ -6578,6 +6775,7 @@ class MovementExampleApp {
       this.refs.clearCandidates,
       this.refs.markSuspected,
       this.refs.markConfirmed,
+      this.refs.runAnomalyRanking,
       this.refs.generateReport,
       this.refs.removeConfirmed,
     ]) {
@@ -6590,6 +6788,7 @@ class MovementExampleApp {
     this.refs.selectSuspicious.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || visibleSuspiciousCount === 0;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
     this.refs.runCandidateQuery.disabled = !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
+    this.refs.runAnomalyRanking.disabled = !hasData || !this.currentArtifact || anomalyRankingLoading;
     this.refs.checkCandidates.disabled = !hasData || candidatePreviewLoading || visibleCandidateCount === 0;
     this.refs.clearCandidates.disabled = !hasData || candidatePreviewLoading || this.candidateQueryPreview?.status === "idle";
     this.updateUndoButton();

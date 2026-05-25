@@ -29,6 +29,8 @@ from examples.movement.report_analysis_template import (
     load_rows_with_context,
     normalize_report_records,
 )
+from examples.movement.bursts import build_auto_bursts
+from examples.movement.movement_features import STEP_FEATURE_FIELDS, compute_track_movement
 import examples.movement.summary as movement_summary
 from examples.movement.summary import build_movement_fixes, build_movement_overview, diagnose_track_topology
 
@@ -59,6 +61,134 @@ def write_movement_csv(path: Path) -> Path:
 def write_profile_csv(path: Path) -> Path:
     path.write_text(PROFILE_CSV_CONTENT, encoding="utf-8")
     return path
+
+
+def test_compute_track_movement_exposes_only_canonical_step_features():
+    records_by_group = {
+        ("alpha", "train"): [
+            {
+                "row_index": 2,
+                "fix_key": "late",
+                "individual": "alpha",
+                "time_ms": 3_600_000,
+                "lon": -70.1,
+                "lat": 40.1,
+            },
+            {
+                "row_index": 1,
+                "fix_key": "early",
+                "individual": "alpha",
+                "time_ms": 0,
+                "lon": -70.0,
+                "lat": 40.0,
+            },
+        ],
+    }
+
+    features, stats = compute_track_movement(records_by_group)
+
+    assert tuple(features["early"]) == STEP_FEATURE_FIELDS
+    assert features["early"] == {"step_length_m": None, "speed_mps": None, "time_delta_s": None}
+    assert features["late"]["time_delta_s"] == 3600.0
+    assert isclose(features["late"]["speed_mps"], features["late"]["step_length_m"] / 3600.0, rel_tol=1e-12)
+    assert not any("anomaly" in key.lower() for row in features.values() for key in row)
+    assert stats["alpha"]["seen_step"] == 1
+
+
+def test_build_auto_bursts_uses_strict_gap_threshold_and_preserves_mapping():
+    records = [
+        {
+            "row_index": 3,
+            "fix_key": "fix_2",
+            "individual": "alpha",
+            "set_name": "train",
+            "time_ms": 7_201_000,
+            "position": [-70.2, 40.2],
+        },
+        {
+            "row_index": 1,
+            "fix_key": "fix_0",
+            "individual": "alpha",
+            "set_name": "train",
+            "time_ms": 0,
+            "position": [-70.0, 40.0],
+        },
+        {
+            "row_index": 2,
+            "fix_key": "fix_1",
+            "individual": "alpha",
+            "set_name": "train",
+            "time_ms": 3_600_000,
+            "position": [-70.1, 40.1],
+        },
+    ]
+
+    bursts = build_auto_bursts(records, burst_gap_seconds=3600)
+
+    assert bursts[0] == {
+        "burst_id": "alpha:train:burst_000000",
+        "burst_idx": 0,
+        "individual": "alpha",
+        "set_name": "train",
+        "start_fix_key": "fix_0",
+        "end_fix_key": "fix_1",
+        "start_time_ms": 0,
+        "end_time_ms": 3_600_000,
+        "fix_count": 2,
+        "burst_gap_seconds": 3600.0,
+        "fix_keys": ["fix_0", "fix_1"],
+        "path": [[-70.0, 40.0], [-70.1, 40.1]],
+    }
+    assert bursts[1]["burst_id"] == "alpha:train:burst_000001"
+    assert bursts[1]["fix_keys"] == ["fix_2"]
+
+
+def test_build_auto_bursts_resets_index_for_each_track():
+    records = [
+        {
+            "row_index": 2,
+            "fix_key": "alpha_train_1",
+            "individual": "alpha",
+            "set_name": "train",
+            "time_ms": 7_200_000,
+            "position": [-70.1, 40.1],
+        },
+        {
+            "row_index": 1,
+            "fix_key": "alpha_train_0",
+            "individual": "alpha",
+            "set_name": "train",
+            "time_ms": 0,
+            "position": [-70.0, 40.0],
+        },
+        {
+            "row_index": 3,
+            "fix_key": "alpha_test_0",
+            "individual": "alpha",
+            "set_name": "test",
+            "time_ms": 0,
+            "position": [-70.2, 40.2],
+        },
+        {
+            "row_index": 4,
+            "fix_key": "beta_train_0",
+            "individual": "beta",
+            "set_name": "train",
+            "time_ms": 0,
+            "position": [-71.0, 41.0],
+        },
+    ]
+
+    bursts = build_auto_bursts(records, burst_gap_seconds=3600)
+
+    assert [(burst["burst_id"], burst["burst_idx"], burst["fix_keys"]) for burst in bursts] == [
+        ("alpha:test:burst_000000", 0, ["alpha_test_0"]),
+        ("alpha:train:burst_000000", 0, ["alpha_train_0"]),
+        ("alpha:train:burst_000001", 1, ["alpha_train_1"]),
+        ("beta:train:burst_000000", 0, ["beta_train_0"]),
+    ]
+
+
 def test_build_movement_fixes_filters_multiple_individuals(tmp_path):
     csv_path = write_movement_csv(tmp_path / "movement.csv")
 
@@ -186,6 +316,10 @@ fix_b,beta,2024-01-01T00:00:00Z,-71.0,41.0,train
         fixes[1]["attributes"]["speed_mps"],
         fixes[1]["attributes"]["step_length_m"] / 3600.0,
         rel_tol=1e-12,
+    )
+    assert all(
+        not any(key.endswith("anomaly_score") for key in fix.get("attributes", {}))
+        for fix in fixes
     )
 
 

@@ -1336,6 +1336,10 @@ CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("candidate_que
 CANDIDATE_QUERY_ANALYSIS_SCRIPT = CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
 compile(CANDIDATE_QUERY_ANALYSIS_SCRIPT, str(CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH), "exec")
 
+ANOMALY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("anomaly_analysis_template.py")
+BURST_ANOMALY_ANALYSIS_SCRIPT = ANOMALY_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+compile(BURST_ANOMALY_ANALYSIS_SCRIPT, str(ANOMALY_ANALYSIS_TEMPLATE_PATH), "exec")
+
 
 def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]:
     if value is None and allow_empty:
@@ -1900,6 +1904,40 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                     "query_parameters": query_parameters,
                     "execution_scope": execution_scope,
                     "preview_limit": preview_limit,
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
+                    "user": user,
+                },
+            }
+            return JSONResponse(create_analysis(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-burst-anomaly-ranking")
+    async def post_movement_run_burst_anomaly_ranking(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            user = body.get("user")
+            payload = {
+                "user": user,
+                "title": f"Rank automatic movement bursts for {logical_name}",
+                "kind": "python",
+                "script": BURST_ANOMALY_ANALYSIS_SCRIPT,
+                "dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": ["burst_anomaly_ranking.json"],
+                "parameters": {
+                    "app": "movement",
+                    "action": "run_burst_anomaly_ranking",
+                    "target_artifact": logical_name,
+                    "dataset_id": dataset_id,
+                    "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),
+                    "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
+                    "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
                     "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
