@@ -627,7 +627,7 @@ class MovementExampleApp {
   }
 
   setSideSheet(sheet, { save = true } = {}) {
-    const nextSheet = sheet === "table" ? "table" : "individuals";
+    const nextSheet = ["table", "ranking"].includes(sheet) ? sheet : "individuals";
     if (this.refs?.sideSheetTabs) {
       this.refs.sideSheetTabs.dataset.activeSheet = nextSheet;
     }
@@ -637,11 +637,17 @@ class MovementExampleApp {
     if (this.refs?.sideTabTable) {
       this.refs.sideTabTable.classList.toggle("is-active", nextSheet === "table");
     }
+    if (this.refs?.sideTabRanking) {
+      this.refs.sideTabRanking.classList.toggle("is-active", nextSheet === "ranking");
+    }
     if (this.refs?.sideSheetIndividuals) {
       this.refs.sideSheetIndividuals.classList.toggle("hidden", nextSheet !== "individuals");
     }
     if (this.refs?.sideSheetTable) {
       this.refs.sideSheetTable.classList.toggle("hidden", nextSheet !== "table");
+    }
+    if (this.refs?.sideSheetRanking) {
+      this.refs.sideSheetRanking.classList.toggle("hidden", nextSheet !== "ranking");
     }
     if (save && this.refs) {
       this.saveUiState();
@@ -1787,6 +1793,7 @@ class MovementExampleApp {
             <div class="movement-side-tabs" data-role="side-sheet-tabs">
               <button type="button" class="movement-side-tab is-active" data-role="side-tab-individuals">Individuals</button>
               <button type="button" class="movement-side-tab" data-role="side-tab-table">Table</button>
+              <button type="button" class="movement-side-tab" data-role="side-tab-ranking">Burst Ranking</button>
             </div>
             <div class="movement-side-content">
               <div class="movement-side-sheet individuals" data-role="side-sheet-individuals">
@@ -1797,8 +1804,6 @@ class MovementExampleApp {
                   </label>
                 </div>
                 <div class="movement-individuals" data-role="individuals"></div>
-                <div class="movement-side-head">Burst anomaly ranking</div>
-                <div class="movement-anomaly-ranking" data-role="anomaly-ranking"></div>
                 <div class="movement-side-head" data-role="fix-head">Checked fixes</div>
                 <div class="movement-fixes" data-role="selected-fixes"></div>
               </div>
@@ -1834,6 +1839,10 @@ class MovementExampleApp {
                 </div>
                 <div class="movement-table-meta" data-role="table-meta"></div>
                 <div class="movement-table-wrap" data-role="table-wrap"></div>
+              </div>
+              <div class="movement-side-sheet ranking hidden" data-role="side-sheet-ranking">
+                <div class="movement-side-head">Burst anomaly ranking</div>
+                <div class="movement-anomaly-ranking" data-role="anomaly-ranking"></div>
               </div>
             </div>
             <div class="movement-slider-row">
@@ -2003,8 +2012,10 @@ class MovementExampleApp {
       sideSheetTabs: this.mountEl.querySelector('[data-role="side-sheet-tabs"]'),
       sideTabIndividuals: this.mountEl.querySelector('[data-role="side-tab-individuals"]'),
       sideTabTable: this.mountEl.querySelector('[data-role="side-tab-table"]'),
+      sideTabRanking: this.mountEl.querySelector('[data-role="side-tab-ranking"]'),
       sideSheetIndividuals: this.mountEl.querySelector('[data-role="side-sheet-individuals"]'),
       sideSheetTable: this.mountEl.querySelector('[data-role="side-sheet-table"]'),
+      sideSheetRanking: this.mountEl.querySelector('[data-role="side-sheet-ranking"]'),
       sideResize: this.mountEl.querySelector('[data-role="side-resize"]'),
       individualSearch: this.mountEl.querySelector('[data-role="individual-search"]'),
       individuals: this.mountEl.querySelector('[data-role="individuals"]'),
@@ -2120,6 +2131,7 @@ class MovementExampleApp {
     window.addEventListener("resize", this.handleWindowResize);
     this.refs.sideTabIndividuals.addEventListener("click", () => this.setSideSheet("individuals"));
     this.refs.sideTabTable.addEventListener("click", () => this.setSideSheet("table"));
+    this.refs.sideTabRanking.addEventListener("click", () => this.setSideSheet("ranking"));
     this.refs.individualSearch.addEventListener("input", () => {
       this.individualSearchQuery = this.refs.individualSearch.value || "";
       this.renderIndividuals();
@@ -2244,7 +2256,9 @@ class MovementExampleApp {
     this.refs.runCandidateQuery.addEventListener("click", () => {
       void this.runSelectedCandidateQuery();
     });
-    this.refs.checkCandidates.addEventListener("click", () => this.checkCandidateQueryPreview());
+    this.refs.checkCandidates.addEventListener("click", () => {
+      void this.checkCandidateQueryPreview();
+    });
     this.refs.clearCandidates.addEventListener("click", () => this.clearCandidateQueryPreview({ announce: true }));
     this.refs.resetView.addEventListener("click", () => this.resetView());
     this.refs.markSuspected.addEventListener("click", () => this.openIssueModal("suspected"));
@@ -2514,6 +2528,10 @@ class MovementExampleApp {
   }
 
   defaultCandidateQueryExecutionScope(query) {
+    const requiredFields = Array.isArray(query?.required_fields) ? query.required_fields : [];
+    if (requiredFields.some(field => String(field || "").startsWith("osm:"))) {
+      return "current_individual";
+    }
     return query?.evaluator?.type === "fix_osm_proximity" ? "current_individual" : "whole_study";
   }
 
@@ -2794,6 +2812,13 @@ class MovementExampleApp {
     );
   }
 
+  getCandidateQueryReturnedMatchKeys() {
+    if (!(this.candidateQueryPreview?.matchKeys instanceof Set)) {
+      return new Set();
+    }
+    return new Set(this.candidateQueryPreview.matchKeys);
+  }
+
   clearCandidateQueryPreview({ render = true, announce = false } = {}) {
     this.cancelRequest("candidateQuery");
     this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
@@ -2866,6 +2891,7 @@ class MovementExampleApp {
         burstGap: summary.burst_gap || null,
         modelFit: summary.model_fit || summary.scorer || null,
       };
+      this.setSideSheet("ranking");
       this.renderAnomalyRanking();
       this.updateActionButtons();
       const count = formatCount(this.anomalyRanking.rankedIndividuals.length);
@@ -3018,7 +3044,7 @@ class MovementExampleApp {
       const evidenceByFixKey = new Map();
       for (const candidate of candidates) {
         const fixKey = String(candidate?.fix_key || "");
-        if (!fixKey || !this.data.fixByKey.has(fixKey)) {
+        if (!fixKey) {
           continue;
         }
         matchKeys.add(fixKey);
@@ -3035,13 +3061,17 @@ class MovementExampleApp {
         returnedCount: Number(summary.returned_count) || candidates.length,
       };
       const visibleCount = this.getCandidateQueryMatchKeys().size;
+      const returnedCount = this.getCandidateQueryReturnedMatchKeys().size;
       const warningText = this.candidateQueryPreview.warnings.length
         ? ` ${this.candidateQueryPreview.warnings[0]}`
         : "";
       if (this.candidateQueryPreview.status === "unresolved") {
         this.setStatus(`Candidate query unresolved. ${warningText}`.trim(), true);
       } else {
-        this.setStatus(`Candidate query found ${formatCount(this.candidateQueryPreview.candidateCount)} candidates; ${formatCount(visibleCount)} visible.${warningText}`.trim());
+        const visibilityText = visibleCount === returnedCount
+          ? `${formatCount(visibleCount)} visible`
+          : `${formatCount(visibleCount)} visible now; ${formatCount(returnedCount)} returned and available to check`;
+        this.setStatus(`Candidate query found ${formatCount(this.candidateQueryPreview.candidateCount)} candidates; ${visibilityText}.${warningText}`.trim());
       }
       this.renderLayers();
       this.updateActionButtons();
@@ -3066,23 +3096,37 @@ class MovementExampleApp {
     }
   }
 
-  checkCandidateQueryPreview() {
+  async checkCandidateQueryPreview() {
     if (!this.data) {
       return;
     }
-    const matchKeys = this.getCandidateQueryMatchKeys();
+    const matchKeys = this.getCandidateQueryReturnedMatchKeys();
     if (!matchKeys.size) {
       return;
     }
+    const candidateFixes = parseMovementFixes(this.candidateQueryPreview.candidates || []);
+    this.data.candidateFixes = candidateFixes;
+    refreshMovementFixCollections(this.data);
+    for (const fix of candidateFixes) {
+      if (fix.individual) {
+        this.data.selectedIndividuals.add(fix.individual);
+      }
+    }
     const nextSelected = new Set(this.data.selectedFixKeys);
     for (const fixKey of matchKeys) {
-      nextSelected.add(fixKey);
+      if (this.data.fixByKey.has(fixKey)) {
+        nextSelected.add(fixKey);
+      }
     }
     this.data.selectedFixKeys = nextSelected;
+    this.saveUiState();
+    this.setSideSheet("individuals");
+    this.renderIndividuals();
     this.renderSelectedFixes();
     this.renderThresholdPane();
     this.renderLayers();
     this.updateActionButtons();
+    await this.loadDetailForCurrentSelection({ preservedFixKeys: nextSelected });
   }
 
   handleVisibilityChange() {
@@ -6765,7 +6809,7 @@ class MovementExampleApp {
     const visibleSuspiciousCount = this.getSuspiciousFixes("", { scope: "visible" }).length;
     const candidatePreviewLoading = this.candidateQueryPreview?.status === "loading";
     const anomalyRankingLoading = this.anomalyRanking?.status === "loading";
-    const visibleCandidateCount = this.getCandidateQueryMatchKeys().size;
+    const returnedCandidateCount = this.getCandidateQueryReturnedMatchKeys().size;
     const selectedCandidateQuery = this.getSelectedCandidateQuery();
     for (const button of [
       this.refs.selectSuspicious,
@@ -6789,7 +6833,7 @@ class MovementExampleApp {
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
     this.refs.runCandidateQuery.disabled = !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
     this.refs.runAnomalyRanking.disabled = !hasData || !this.currentArtifact || anomalyRankingLoading;
-    this.refs.checkCandidates.disabled = !hasData || candidatePreviewLoading || visibleCandidateCount === 0;
+    this.refs.checkCandidates.disabled = !hasData || candidatePreviewLoading || returnedCandidateCount === 0;
     this.refs.clearCandidates.disabled = !hasData || candidatePreviewLoading || this.candidateQueryPreview?.status === "idle";
     this.updateUndoButton();
     if (this.refs?.sideSheetTabs?.dataset.activeSheet === "table") {
@@ -7334,6 +7378,7 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     overviewFixLimit: Number(summary.overview_fix_limit) || null,
     autoBurstsTruncated: Boolean(summary.auto_bursts_truncated),
     overviewHasAllFixes: !overviewTruncated,
+    candidateFixes: [],
     detailFixes: [],
     detailSegments: [],
     detailAutoBursts: [],
@@ -7372,7 +7417,7 @@ function initialMovementVisibleIndividuals(data) {
   if (!data) {
     return [];
   }
-  if (data.overviewTruncated && !(data.overviewFixes || []).length) {
+  if (data.overviewTruncated) {
     return [];
   }
   return data.individuals || [];
@@ -7585,7 +7630,7 @@ function refreshMovementFixCollections(data) {
     return;
   }
   const merged = new Map();
-  for (const fix of [...(data.overviewFixes || []), ...(data.detailFixes || [])]) {
+  for (const fix of [...(data.overviewFixes || []), ...(data.candidateFixes || []), ...(data.detailFixes || [])]) {
     merged.set(fix.fixKey, fix);
   }
   data.fixes = Array.from(merged.values())

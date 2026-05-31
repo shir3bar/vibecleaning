@@ -12,8 +12,10 @@ from app.execution import create_analysis, create_step, undo_to_parent
 from app.query_library import get_query
 from app.state import (
     ProjectStateError,
+    dataset_summary,
     get_dataset_artifact,
     graph_payload,
+    list_history,
     load_dataset,
     load_json,
     media_type_for_path,
@@ -52,6 +54,43 @@ def _build_initial_study_payload(study_dir: Path) -> dict:
         "dataset_id": dataset_id,
         "logical_name": logical_name,
     }
+
+
+def _reusable_osm_enrichment_response(
+    study_dir: Path,
+    *,
+    parent_dataset_id: str,
+    logical_name: str,
+    search_radius_m: float,
+) -> dict | None:
+    history = list_history(study_dir)
+    for step in reversed(history["steps"]):
+        parameters = dict(step.get("parameters") or {})
+        summary = dict(step.get("summary") or {})
+        if step.get("parent_dataset_id") != parent_dataset_id:
+            continue
+        if parameters.get("action") != "enrich_osm_context":
+            continue
+        if parameters.get("target_artifact") != logical_name:
+            continue
+        if parameters.get("search_radius_m") != search_radius_m:
+            continue
+        if summary.get("run_status") != "completed" or summary.get("source_type") != "local_extract":
+            continue
+        if "movement_osm_context.csv" not in step.get("output_artifacts", []):
+            continue
+        try:
+            output_dataset = load_dataset(study_dir, step["output_dataset_id"])
+            get_dataset_artifact(study_dir, output_dataset["dataset_id"], "movement_osm_context.csv")
+        except (KeyError, ProjectStateError):
+            continue
+        return {
+            "step": step,
+            "dataset": dataset_summary(output_dataset),
+            "history": history,
+            "reused": True,
+        }
+    return None
 
 
 SCRIPT_SHARED = textwrap.dedent(
@@ -1340,6 +1379,10 @@ ANOMALY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("anomaly_analysis_temp
 BURST_ANOMALY_ANALYSIS_SCRIPT = ANOMALY_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
 compile(BURST_ANOMALY_ANALYSIS_SCRIPT, str(ANOMALY_ANALYSIS_TEMPLATE_PATH), "exec")
 
+OSM_ENRICHMENT_TEMPLATE_PATH = Path(__file__).with_name("osm_enrichment_template.py")
+OSM_ENRICHMENT_SCRIPT = OSM_ENRICHMENT_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+compile(OSM_ENRICHMENT_SCRIPT, str(OSM_ENRICHMENT_TEMPLATE_PATH), "exec")
+
 
 def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]:
     if value is None and allow_empty:
@@ -1556,7 +1599,7 @@ def _validate_query_definition(value: object) -> dict:
     definition = value.get("definition")
     if not isinstance(evaluator, dict) or not isinstance(definition, dict):
         raise ValueError("Query definition must include evaluator and definition")
-    if evaluator.get("type") not in {"fix_numeric_comparison", "fix_osm_proximity"}:
+    if evaluator.get("type") not in {"fix_numeric_comparison", "fix_osm_proximity", "fix_string_comparison"}:
         raise ValueError("Unsupported candidate query evaluator")
     return dict(value)
 
@@ -1699,6 +1742,19 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             raise ValueError("Invalid burst_gap_quantile") from exc
         if not isfinite(value) or value <= 0.0 or value > 1.0:
             raise ValueError("Invalid burst_gap_quantile")
+        return value
+
+    def parse_osm_search_radius_m(raw_value: object) -> float:
+        if raw_value in (None, ""):
+            raise ValueError("search_radius_m is required")
+        if isinstance(raw_value, bool):
+            raise ValueError("Invalid search_radius_m")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid search_radius_m") from exc
+        if not isfinite(value) or value <= 0.0:
+            raise ValueError("Invalid search_radius_m")
         return value
 
     def parse_optional_individual(raw_value: object) -> str:
@@ -1943,6 +1999,52 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                 },
             }
             return JSONResponse(create_analysis(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/enrich-osm-context")
+    async def post_movement_enrich_osm_context(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            search_radius_m = parse_osm_search_radius_m(body.get("search_radius_m"))
+            confirmed_large_download = body.get("confirmed_large_download", False)
+            if not isinstance(confirmed_large_download, bool):
+                raise ValueError("Invalid confirmed_large_download")
+            user = body.get("user")
+            reusable = _reusable_osm_enrichment_response(
+                study_dir,
+                parent_dataset_id=dataset_id,
+                logical_name=logical_name,
+                search_radius_m=search_radius_m,
+            )
+            if reusable is not None:
+                return JSONResponse(reusable)
+            payload = {
+                "user": user,
+                "title": f"Add OSM road and railway context to {logical_name}",
+                "kind": "python",
+                "script": OSM_ENRICHMENT_SCRIPT,
+                "parameters": {
+                    "app": "movement",
+                    "action": "enrich_osm_context",
+                    "target_artifact": logical_name,
+                    "search_radius_m": search_radius_m,
+                    "confirmed_large_download": confirmed_large_download,
+                    "data_root": str(data_root.resolve()),
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
+                    "user": user,
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": ["movement_osm_context.csv"],
+                "set_as_head": True,
+            }
+            return JSONResponse(create_step(study_dir, payload))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 

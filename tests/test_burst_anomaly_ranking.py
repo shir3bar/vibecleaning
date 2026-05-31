@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 from app.state import load_project_state, project_paths
 from app.web import create_app
 from examples.movement.anomaly_ranking import rank_individuals, score_bursts
+from examples.movement.burst_features import build_burst_feature_rows
 from examples.movement.routes import (
     ANOMALY_ANALYSIS_TEMPLATE_PATH,
     BURST_ANOMALY_ANALYSIS_SCRIPT,
@@ -87,6 +88,7 @@ def test_score_bursts_adds_scores_only_to_burst_rows_and_prioritizes_outlier():
         "contamination": "auto",
         "random_state": 0,
     }
+    assert result["feature_set"] == "movement_only"
     assert result["preprocessing"]["scaling"] == "none"
     assert result["preprocessing"]["missing_value_strategy"] == (
         "median_imputation_per_fitted_feature"
@@ -153,6 +155,15 @@ def test_score_bursts_excludes_metadata_and_records_dropped_and_imputed_features
     assert "n_fixes" in result["excluded_metadata"]
     assert "fix_keys" in result["excluded_metadata"]
     assert "start_time_ms" not in result["requested_features"]
+    assert result["candidate_model_features"] == [
+        "all_null_feature",
+        "constant_feature",
+        "mean_speed_mps",
+        "missing_feature",
+        "mixed_feature",
+        "path_length_m",
+    ]
+    assert result["excluded_by_feature_set"] == {}
     assert "start_time_ms" not in result["fitted_features"]
     assert result["dropped_features"] == {
         "all_null_feature": "all_null",
@@ -186,6 +197,96 @@ def test_score_bursts_returns_unresolved_for_insufficient_rows_or_features():
     assert no_features["fitted_features"] == []
     assert all("anomaly_score" not in row for row in no_features["scored_bursts"])
     assert any("No usable" in warning for warning in no_features["warnings"])
+
+
+def test_score_bursts_excludes_precomputed_osm_burst_summaries_by_default_without_fetching():
+    fixes = []
+    bursts = []
+    for index, (road_distance_m, railway_distance_m) in enumerate(
+        [(5.0, 90.0), (20.0, 40.0), (250.0, 3.0)]
+    ):
+        start_ms = index * 100_000
+        first_key = f"fix_{index}_0"
+        second_key = f"fix_{index}_1"
+        fixes.extend(
+            [
+                {
+                    "fix_key": first_key,
+                    "individual": "alpha",
+                    "time_ms": start_ms,
+                    "lon": 0.0,
+                    "lat": 0.0,
+                    "attributes": {
+                        "osm:nearest_road_distance_m": road_distance_m,
+                        "osm:nearest_railway_distance_m": railway_distance_m,
+                    },
+                },
+                {
+                    "fix_key": second_key,
+                    "individual": "alpha",
+                    "time_ms": start_ms + 10_000,
+                    "lon": 0.001,
+                    "lat": 0.0,
+                    "attributes": {
+                        "step_length_m": 10.0 + index,
+                        "speed_mps": 1.0 + index,
+                        "time_delta_s": 10.0,
+                        "osm:nearest_road_distance_m": road_distance_m + 1.0,
+                        "osm:nearest_railway_distance_m": railway_distance_m + 1.0,
+                    },
+                },
+            ]
+        )
+        bursts.append(
+            {
+                "burst_id": f"alpha:train:burst_{index:06d}",
+                "burst_idx": index,
+                "individual": "alpha",
+                "set_name": "train",
+                "start_time_ms": start_ms,
+                "end_time_ms": start_ms + 10_000,
+                "fix_keys": [first_key, second_key],
+            }
+        )
+
+    result = score_bursts(
+        build_burst_feature_rows(fixes, bursts),
+        config={"n_estimators": 32},
+    )
+
+    assert result["run_status"] == "completed"
+    assert result["feature_set"] == "movement_only"
+    assert "osm:nearest_road_distance_m__mean" in result["requested_features"]
+    assert "osm:nearest_railway_distance_m__min" in result["requested_features"]
+    assert "osm:nearest_road_distance_m__mean" not in result["candidate_model_features"]
+    assert "osm:nearest_railway_distance_m__min" not in result["candidate_model_features"]
+    assert "osm:nearest_road_distance_m__mean" not in result["fitted_features"]
+    assert "osm:nearest_railway_distance_m__min" not in result["fitted_features"]
+    assert result["excluded_by_feature_set"]["osm:nearest_road_distance_m__mean"] == (
+        "context_feature_excluded_from_movement_only"
+    )
+    assert result["excluded_by_feature_set"]["osm:nearest_railway_distance_m__min"] == (
+        "context_feature_excluded_from_movement_only"
+    )
+    context_result = score_bursts(
+        build_burst_feature_rows(fixes, bursts),
+        config={"n_estimators": 32, "feature_set": "movement_plus_context"},
+    )
+    assert context_result["run_status"] == "completed"
+    assert context_result["feature_set"] == "movement_plus_context"
+    assert context_result["excluded_by_feature_set"] == {}
+    assert "osm:nearest_road_distance_m__mean" in context_result["candidate_model_features"]
+    assert "osm:nearest_railway_distance_m__min" in context_result["candidate_model_features"]
+    assert "osm:nearest_road_distance_m__mean" in context_result["fitted_features"]
+    assert "osm:nearest_railway_distance_m__min" in context_result["fitted_features"]
+    ranking_source = (REPO_ROOT / "examples" / "movement" / "anomaly_ranking.py").read_text(
+        encoding="utf-8"
+    )
+    analysis_source = (
+        REPO_ROOT / "examples" / "movement" / "anomaly_analysis_template.py"
+    ).read_text(encoding="utf-8")
+    assert "fetch_osm_features" not in ranking_source
+    assert "fetch_osm_features" not in analysis_source
 
 
 def test_rank_individuals_uses_highest_burst_score_globally_per_individual():
@@ -313,11 +414,32 @@ def test_burst_anomaly_analysis_uses_compilable_template_file():
 
 def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    individuals_sheet = source[
+        source.index('<div class="movement-side-sheet individuals"'):
+        source.index('<div class="movement-side-sheet table hidden"')
+    ]
+    ranking_sheet = source[
+        source.index('<div class="movement-side-sheet ranking hidden"'):
+        source.index('<div class="movement-slider-row">')
+    ]
+    handler = source[
+        source.index("async runBurstAnomalyRanking()"):
+        source.index("  renderAnomalyRanking() {")
+    ]
+    renderer = source[
+        source.index("  renderAnomalyRanking() {"):
+        source.index("async runSelectedCandidateQuery()")
+    ]
 
     assert 'data-role="run-anomaly-ranking"' in source
-    assert 'data-role="anomaly-ranking"' in source
+    assert 'data-role="side-tab-ranking">Burst Ranking' in source
+    assert 'data-role="side-sheet-ranking"' in source
+    assert 'data-role="anomaly-ranking"' not in individuals_sheet
+    assert 'data-role="anomaly-ranking"' in ranking_sheet
+    assert 'this.refs.sideTabRanking.addEventListener("click", () => this.setSideSheet("ranking"))' in source
     assert "runBurstAnomalyRanking()" in source
     assert "run-burst-anomaly-ranking" in source
+    assert 'this.setSideSheet("ranking")' in handler
     assert "ranked_individuals" in source
     assert "top_burst_score" in source
     assert "top_burst_id" in source
@@ -325,6 +447,8 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert "scored_burst_count" in source
     assert "formatBurstGapMetadata(parseMovementBurstGap" in source
     assert "summary.model_fit" in source
+    assert "data-action=" not in renderer
+    assert "Mark " not in renderer
 
 
 def test_burst_anomaly_route_creates_analysis_artifact_without_dataset_mutation(tmp_path):
@@ -360,15 +484,17 @@ def test_burst_anomaly_route_creates_analysis_artifact_without_dataset_mutation(
     assert summary["burst_gap"]["effective_seconds"] == 60.0
     assert summary["burst_gap"]["quantile"] == 0.75
     assert summary["model_fit"]["model"] == "IsolationForest"
+    assert summary["model_fit"]["feature_set"] == "movement_only"
     assert summary["model_fit"]["scored_burst_count"] == 4
     assert summary["model_fit"]["preprocessing"]["scaling"] == "none"
     assert "path_length_m" in summary["model_fit"]["fitted_features"]
     assert "gps:hdop__mean" in summary["model_fit"]["fitted_features"]
     assert "height-above-msl__mean" in summary["model_fit"]["fitted_features"]
-    assert len(summary["scored_bursts"]) == 4
-    assert all("anomaly_score" in burst for burst in summary["scored_bursts"])
+    assert summary["model_fit"]["excluded_by_feature_set"] == {}
+    assert "scored_bursts" not in summary
     assert summary["individual_ranking_summary"]["ranking_scope"] == "individual"
     assert len(summary["ranked_individuals"]) == 2
+    assert all("ranked_burst_refs" not in row for row in summary["ranked_individuals"])
     assert "scorer" not in summary
     assert "individual_ranking" not in summary
     assert "fixes" not in summary
@@ -380,7 +506,11 @@ def test_burst_anomaly_route_creates_analysis_artifact_without_dataset_mutation(
         / "burst_anomaly_ranking.json"
     )
     output = json.loads(output_path.read_text(encoding="utf-8"))
-    assert output == summary
+    assert len(output["scored_bursts"]) == 4
+    assert all("anomaly_score" in burst for burst in output["scored_bursts"])
+    assert all("ranked_burst_refs" in row for row in output["ranked_individuals"])
+    assert output["input_artifact"] == summary["input_artifact"]
+    assert output["model_fit"] == summary["model_fit"]
     assert not (
         project_paths(study_dir)["analyses"]
         / analysis["analysis_id"]

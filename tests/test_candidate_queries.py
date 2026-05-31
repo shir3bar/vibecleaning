@@ -30,6 +30,18 @@ fix_4,beta,2024-01-01T00:00:00Z,-70.0,41.0,train
 fix_5,beta,2024-01-01T01:00:00Z,-69.999,41.0,train
 """
 
+OSM_CONTEXT_CSV = """eventid,individual,timestamp,longitude,latitude,set,osm:nearest_road_distance_m,osm:nearest_road_class,osm:road_match_status,osm:nearest_railway_distance_m,osm:nearest_railway_class,osm:railway_match_status
+fix_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,10,track,matched,200,,not_found_within_radius
+fix_2,alpha,2024-01-01T01:00:00Z,-68.0,40.0,train,75,,not_found_within_radius,20,rail,matched
+fix_3,beta,2024-01-01T00:00:00Z,-69.0,41.0,train,,,context_not_planned,,,context_not_planned
+"""
+
+OSM_CONTEXT_ORDERING_CSV = """eventid,individual,timestamp,longitude,latitude,set,osm:nearest_road_distance_m,osm:nearest_road_class,osm:road_match_status
+far_first,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,40,service,matched
+near_second,alpha,2024-01-01T01:00:00Z,-70.0,40.001,train,5,motorway,matched
+middle_third,alpha,2024-01-01T02:00:00Z,-70.0,40.002,train,20,primary,matched
+"""
+
 
 def numeric_query_definition(field: str = "speed_mps", threshold: float = 120 / 3.6) -> dict:
     return {
@@ -133,7 +145,36 @@ def test_query_library_crud_and_immutable_versions(tmp_path):
     assert second["version"] == 2
     assert get_query(data_root, "fast_fixes", version=1)["name"] == "Fast fixes"
     assert get_query(data_root, "fast_fixes")["name"] == "Very fast fixes"
-    assert [query["version"] for query in list_queries(data_root, app="movement")] == [1, 2]
+    fast_versions = [
+        query["version"]
+        for query in list_queries(data_root, app="movement")
+        if query["query_id"] == "fast_fixes"
+    ]
+    assert fast_versions == [1, 2]
+
+
+def test_builtin_precomputed_osm_queries_available_without_persisted_library(tmp_path):
+    data_root = tmp_path / "data"
+
+    queries = list_queries(data_root, app="movement")
+    query_ids = {query["query_id"] for query in queries}
+
+    assert "precomputed_near_road_50m" in query_ids
+    assert "precomputed_near_railway_50m" in query_ids
+    assert "precomputed_road_context_not_matched" in query_ids
+    assert "precomputed_railway_context_not_matched" in query_ids
+
+    road_query = get_query(data_root, "precomputed_near_road_50m")
+    assert road_query["evaluator"] == {"type": "fix_numeric_comparison"}
+    assert road_query["definition"]["field"] == "osm:nearest_road_distance_m"
+
+    status_query = get_query(data_root, "precomputed_road_context_not_matched")
+    assert status_query["evaluator"] == {"type": "fix_string_comparison"}
+    assert status_query["definition"] == {
+        "field": "osm:road_match_status",
+        "op": "!=",
+        "value": "matched",
+    }
 
 
 def test_query_library_rejects_malformed_records(tmp_path):
@@ -194,7 +235,9 @@ def test_query_library_routes(tmp_path):
 
     listing = client.get("/api/query-library/queries", params={"app": "movement"})
     assert listing.status_code == 200
-    assert listing.json()["queries"][0]["query_id"] == "fast_fixes"
+    listed_ids = {query["query_id"] for query in listing.json()["queries"]}
+    assert "fast_fixes" in listed_ids
+    assert "precomputed_near_road_50m" in listed_ids
 
     fetched = client.get("/api/query-library/queries/fast_fixes")
     assert fetched.status_code == 200
@@ -257,8 +300,112 @@ def test_numeric_candidate_query_evaluator_uses_movement_fixes(tmp_path):
     assert evidence["unit"] == "m/s"
     assert evidence["display_unit"] == "km/h"
     assert evidence["threshold_display"] == "120 km/h"
-    assert result["evaluator_provenance"]["implementation_version"] == "movement-candidate-query-v2"
+    assert result["evaluator_provenance"]["implementation_version"] == "movement-candidate-query-v3"
     assert result["evaluator_provenance"]["source_digest"]
+
+
+def test_precomputed_osm_distance_queries_use_enriched_attributes_without_overpass(monkeypatch, tmp_path):
+    csv_path = tmp_path / "movement_osm_context.csv"
+    csv_path.write_text(OSM_CONTEXT_CSV, encoding="utf-8")
+
+    def fail_fetch(query):
+        raise AssertionError("Precomputed OSM distance queries must not fetch OSM")
+
+    def fail_build_movement_fixes(*args, **kwargs):
+        raise AssertionError("Precomputed OSM distance queries should scan existing CSV columns directly")
+
+    monkeypatch.setattr(candidate_queries, "fetch_osm_features", fail_fetch)
+    monkeypatch.setattr(candidate_queries, "build_movement_fixes", fail_build_movement_fixes)
+
+    road_result = run_candidate_query(
+        csv_path,
+        query_definition=get_query(tmp_path / "data", "precomputed_near_road_50m"),
+        dataset_id="dataset_test",
+        logical_name="movement_osm_context.csv",
+    )
+    railway_result = run_candidate_query(
+        csv_path,
+        query_definition=get_query(tmp_path / "data", "precomputed_near_railway_50m"),
+        dataset_id="dataset_test",
+        logical_name="movement_osm_context.csv",
+    )
+
+    assert road_result["run_status"] == "success"
+    assert road_result["candidate_count"] == 1
+    assert road_result["candidates"][0]["fix_key"] == "id:fix_1#row:1"
+    assert road_result["candidates"][0]["set"] == "train"
+    assert road_result["candidates"][0]["attributes"]["osm:nearest_road_distance_m"] == 10
+    road_evidence = road_result["candidates"][0]["evidence"]
+    assert road_evidence["field"] == "osm:nearest_road_distance_m"
+    assert road_evidence["value"] == 10
+    assert road_evidence["threshold"] == 50
+
+    assert railway_result["run_status"] == "success"
+    assert railway_result["candidate_count"] == 1
+    assert railway_result["candidates"][0]["fix_key"] == "id:fix_2#row:2"
+    railway_evidence = railway_result["candidates"][0]["evidence"]
+    assert railway_evidence["field"] == "osm:nearest_railway_distance_m"
+    assert railway_evidence["value"] == 20
+    assert railway_evidence["threshold"] == 50
+
+
+def test_precomputed_osm_distance_preview_returns_nearest_matches_first(monkeypatch, tmp_path):
+    csv_path = tmp_path / "movement_osm_context.csv"
+    csv_path.write_text(OSM_CONTEXT_ORDERING_CSV, encoding="utf-8")
+
+    def fail_build_movement_fixes(*args, **kwargs):
+        raise AssertionError("Precomputed OSM distance queries should scan existing CSV columns directly")
+
+    monkeypatch.setattr(candidate_queries, "build_movement_fixes", fail_build_movement_fixes)
+
+    result = run_candidate_query(
+        csv_path,
+        query_definition=get_query(tmp_path / "data", "precomputed_near_road_50m"),
+        dataset_id="dataset_test",
+        logical_name="movement_osm_context.csv",
+        preview_limit=1,
+        execution_scope={"type": "current_individual", "individual": "alpha"},
+    )
+
+    assert result["run_status"] == "success"
+    assert result["candidate_count"] == 3
+    assert result["returned_count"] == 1
+    assert result["candidates"][0]["fix_key"] == "id:near_second#row:2"
+    assert result["candidates"][0]["evidence"]["value"] == 5
+    assert "Candidate preview was limited to 1 returned candidates." in result["warnings"][0]
+
+
+def test_precomputed_osm_status_query_uses_string_evaluator_without_overpass(monkeypatch, tmp_path):
+    csv_path = tmp_path / "movement_osm_context.csv"
+    csv_path.write_text(OSM_CONTEXT_CSV, encoding="utf-8")
+
+    def fail_fetch(query):
+        raise AssertionError("Precomputed OSM status queries must not fetch OSM")
+
+    def fail_build_movement_fixes(*args, **kwargs):
+        raise AssertionError("Precomputed OSM status queries should scan existing CSV columns directly")
+
+    monkeypatch.setattr(candidate_queries, "fetch_osm_features", fail_fetch)
+    monkeypatch.setattr(candidate_queries, "build_movement_fixes", fail_build_movement_fixes)
+
+    result = run_candidate_query(
+        csv_path,
+        query_definition=get_query(tmp_path / "data", "precomputed_road_context_not_matched"),
+        dataset_id="dataset_test",
+        logical_name="movement_osm_context.csv",
+    )
+
+    assert result["run_status"] == "success"
+    assert result["candidate_count"] == 2
+    assert [candidate["fix_key"] for candidate in result["candidates"]] == [
+        "id:fix_2#row:2",
+        "id:fix_3#row:3",
+    ]
+    evidence = result["candidates"][0]["evidence"]
+    assert evidence["field"] == "osm:road_match_status"
+    assert evidence["op"] == "!="
+    assert evidence["expected_value"] == "matched"
+    assert evidence["value"] == "not_found_within_radius"
 
 
 @pytest.mark.parametrize(
@@ -779,7 +926,7 @@ def test_run_candidate_query_route_creates_analysis_artifact(tmp_path):
     assert summary["run_digest"]
     assert summary["execution_scope"]["resolved"]["type"] == "whole_study"
     assert summary["scope_results"][0]["scope_id"] == "whole_study"
-    assert summary["evaluator_provenance"]["implementation_version"] == "movement-candidate-query-v2"
+    assert summary["evaluator_provenance"]["implementation_version"] == "movement-candidate-query-v3"
     assert analysis["parameters"]["action"] == "run_candidate_query"
     assert analysis["parameters"]["execution_scope"] is None
     assert analysis["output_artifacts"] == ["candidate_query_results.json"]
@@ -902,6 +1049,7 @@ def test_frontend_candidate_preview_reuses_selected_fix_flow():
     assert "selectCandidateQueryExecutionScope(value)" in source
     assert "getCandidateQueryExecutionScope()" in source
     assert "defaultCandidateQueryExecutionScope(query)" in source
+    assert 'String(field || "").startsWith("osm:")' in source
     assert 'query?.evaluator?.type === "fix_osm_proximity" ? "current_individual" : "whole_study"' in source
     assert "OSM scope: select one individual, or choose all individuals separately" in source
     assert "return selectedIndividuals.length === 1 ? selectedIndividuals[0] : \"\";" in source
@@ -918,6 +1066,10 @@ def test_frontend_candidate_preview_reuses_selected_fix_flow():
     assert "run-candidate-query" in source
     assert "movement-candidate-query-points" in source
     assert "movement-selected-candidate-query-points" in source
+    assert "getCandidateQueryReturnedMatchKeys" in source
+    assert "parseMovementFixes(this.candidateQueryPreview.candidates || [])" in source
+    assert "this.data.candidateFixes = candidateFixes" in source
+    assert "void this.checkCandidateQueryPreview()" in source
     assert "previewMatchKeys" not in source
     assert "Preview speed" not in source
     assert "Speed greater than 120" not in source

@@ -209,4 +209,105 @@ def test_raw_numeric_source_fields_are_summarized_without_anomaly_fields():
     assert row["height-above-msl__sd"] == 2.0
     assert not any(key.startswith("gps:quality__") for key in row)
     assert not any(key.startswith("gps:valid__") for key in row)
+    assert not any(key.startswith("osm:") for key in row)
     assert not any("anomaly" in key.lower() for key in row)
+
+
+def test_precomputed_osm_distance_fields_are_summarized_within_each_burst_only():
+    fixes = [
+        _fix(
+            "fix_0",
+            0,
+            0.0,
+            attributes={
+                "osm:nearest_road_distance_m": 10.0,
+                "osm:nearest_railway_distance_m": 90.0,
+                "osm:nearest_road_class": "track",
+                "osm:road_match_status": "matched",
+            },
+        ),
+        _fix(
+            "fix_1",
+            10_000,
+            0.001,
+            attributes={
+                "step_length_m": 5.0,
+                "speed_mps": 0.5,
+                "time_delta_s": 10.0,
+                "osm:nearest_road_distance_m": 30.0,
+                "osm:nearest_railway_distance_m": 110.0,
+                "osm:nearest_road_class": "service",
+                "osm:road_match_status": "matched",
+            },
+        ),
+        _fix(
+            "fix_2",
+            100_000,
+            0.01,
+            attributes={
+                "osm:nearest_road_distance_m": 999.0,
+                "osm:nearest_railway_distance_m": 888.0,
+                "osm:nearest_road_class": "motorway",
+                "osm:road_match_status": "matched",
+            },
+        ),
+    ]
+    rows = build_burst_feature_rows(
+        fixes,
+        [
+            _burst("alpha:train:burst_000000", ["fix_0", "fix_1"], 0, 10_000),
+            _burst("alpha:train:burst_000001", ["fix_2"], 100_000, 100_000, burst_idx=1),
+        ],
+    )
+
+    first = rows[0]
+    assert first["osm:nearest_road_distance_m__min"] == 10.0
+    assert first["osm:nearest_road_distance_m__mean"] == 20.0
+    assert first["osm:nearest_road_distance_m__median"] == 20.0
+    assert first["osm:nearest_road_distance_m__max"] == 30.0
+    assert first["osm:nearest_road_distance_m__sd"] == 10.0
+    assert first["osm:nearest_railway_distance_m__min"] == 90.0
+    assert first["osm:nearest_railway_distance_m__mean"] == 100.0
+    assert first["osm:nearest_railway_distance_m__max"] == 110.0
+    assert not any("class__" in field or "match_status__" in field for field in first)
+    second = rows[1]
+    assert second["osm:nearest_road_distance_m__mean"] == 999.0
+    assert second["osm:nearest_railway_distance_m__mean"] == 888.0
+
+
+def test_absent_categorical_or_nonnumeric_osm_fields_do_not_create_summaries():
+    row = build_burst_feature_rows(
+        [
+            _fix(
+                "fix_0",
+                0,
+                0.0,
+                attributes={
+                    "osm:nearest_road_class": "track",
+                    "osm:road_match_status": "matched",
+                    "osm:nearest_road_distance_m": "unknown",
+                },
+            ),
+            _fix(
+                "fix_1",
+                10_000,
+                0.001,
+                attributes={
+                    "step_length_m": 1.0,
+                    "speed_mps": 0.1,
+                    "time_delta_s": 10.0,
+                    "osm:nearest_road_distance_m": "",
+                },
+            ),
+        ],
+        [_burst("alpha:train:burst_000000", ["fix_0", "fix_1"], 0, 10_000)],
+    )[0]
+
+    assert not any(field.startswith("osm:") for field in row)
+
+
+def test_burst_features_do_not_fetch_osm():
+    source = (REPO_ROOT / "examples" / "movement" / "burst_features.py").read_text(encoding="utf-8")
+
+    assert "fetch_osm_features" not in source
+    assert "app.osm" not in source

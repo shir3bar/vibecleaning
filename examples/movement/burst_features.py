@@ -47,21 +47,40 @@ def _numeric_summary(values: list[float]) -> dict[str, float | None]:
     }
 
 
+def _osm_distance_summary(values: list[float]) -> dict[str, float | None]:
+    if not values:
+        return {"min": None, **_numeric_summary(values)}
+    return {"min": float(min(values)), **_numeric_summary(values)}
+
+
 def _is_raw_numeric_source_field(field: object) -> bool:
     normalized = str(field).lower()
     return normalized.startswith(RAW_NUMERIC_PREFIXES)
 
 
-def _raw_numeric_source_fields(fixes: list[dict]) -> list[str]:
+def _is_osm_distance_source_field(field: object) -> bool:
+    normalized = str(field).lower()
+    return normalized.startswith("osm:") and normalized.endswith("_distance_m")
+
+
+def _numeric_source_fields(fixes: list[dict], field_matcher) -> list[str]:
     candidates: set[str] = set()
     for fix in fixes:
-        candidates.update(str(field) for field in fix if _is_raw_numeric_source_field(field))
+        candidates.update(str(field) for field in fix if field_matcher(field))
         attributes = fix.get("attributes")
         if isinstance(attributes, dict):
             candidates.update(
-                str(field) for field in attributes if _is_raw_numeric_source_field(field)
+                str(field) for field in attributes if field_matcher(field)
             )
     return sorted(field for field in candidates if _numeric_values(fixes, field))
+
+
+def _raw_numeric_source_fields(fixes: list[dict]) -> list[str]:
+    return _numeric_source_fields(fixes, _is_raw_numeric_source_field)
+
+
+def _osm_distance_source_fields(fixes: list[dict]) -> list[str]:
+    return _numeric_source_fields(fixes, _is_osm_distance_source_field)
 
 
 def _burst_sort_key(burst: dict) -> tuple[str, str, int, int, str]:
@@ -84,6 +103,7 @@ def build_burst_feature_rows(fixes: list[dict], bursts: list[dict]) -> list[dict
         fixes_by_key[fix_key] = fix
 
     raw_numeric_fields = _raw_numeric_source_fields(fixes)
+    osm_distance_fields = _osm_distance_source_fields(fixes)
     feature_rows = []
     for burst in sorted(bursts, key=_burst_sort_key):
         fix_keys = [str(fix_key) for fix_key in burst.get("fix_keys", [])]
@@ -143,6 +163,10 @@ def build_burst_feature_rows(fixes: list[dict], bursts: list[dict]) -> list[dict
 
         for field in raw_numeric_fields:
             summary = _numeric_summary(_numeric_values(burst_fixes, field))
+            for statistic, value in summary.items():
+                row[f"{field}__{statistic}"] = value
+        for field in osm_distance_fields:
+            summary = _osm_distance_summary(_numeric_values(burst_fixes, field))
             for statistic, value in summary.items():
                 row[f"{field}__{statistic}"] = value
         feature_rows.append(row)

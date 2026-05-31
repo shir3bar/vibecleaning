@@ -78,7 +78,7 @@ QUALITY_KEYWORDS = (
 MAX_SERIES_POINTS = 1500
 DEFAULT_OVERVIEW_FIX_LIMIT = 25000
 DEFAULT_FIX_LIMIT = 1000000
-SUMMARY_CACHE_VERSION = 14
+SUMMARY_CACHE_VERSION = 15
 
 
 def normalize_header(header: str | None) -> str:
@@ -351,9 +351,18 @@ def _candidate_field_kind(stats: dict) -> str | None:
     return None
 
 
+def _attribute_field_kind(fieldname: str, stats: dict) -> str | None:
+    kind = _candidate_field_kind(stats)
+    if kind is None and str(fieldname).lower().startswith("osm:") and stats["nonempty"] > 0:
+        return "categorical"
+    return kind
+
+
 def _should_include_quality_field(fieldname: str, stats: dict) -> bool:
     normalized = normalize_header(fieldname)
     if fieldname in ALL_REVIEW_COLUMNS:
+        return True
+    if str(fieldname).lower().startswith("osm:"):
         return True
     if any(keyword in normalized for keyword in QUALITY_KEYWORDS):
         return True
@@ -481,7 +490,7 @@ def _build_color_fields(fieldnames: list[str], columns: dict[str, str | None], f
         stats = field_stats[fieldname]
         if not _should_include_quality_field(fieldname, stats):
             continue
-        kind = _candidate_field_kind(stats)
+        kind = _attribute_field_kind(fieldname, stats)
         if not kind:
             continue
         color_fields.append(
@@ -943,7 +952,10 @@ def _build_movement_overview_cached(
         for fieldname in fieldnames
         if fieldname not in excluded_fields
         and fieldname not in REVIEW_COLUMNS
-        and any(keyword in normalize_header(fieldname) for keyword in QUALITY_KEYWORDS)
+        and (
+            str(fieldname).lower().startswith("osm:")
+            or any(keyword in normalize_header(fieldname) for keyword in QUALITY_KEYWORDS)
+        )
     ]
     overview_field_stats = {
         fieldname: {
@@ -1079,7 +1091,7 @@ def _build_movement_overview_cached(
                 }
             )
     for fieldname in overview_quality_fields:
-        kind = _candidate_field_kind(overview_field_stats[fieldname])
+        kind = _attribute_field_kind(fieldname, overview_field_stats[fieldname])
         if not kind:
             continue
         color_fields.append(

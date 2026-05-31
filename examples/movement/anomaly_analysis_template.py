@@ -55,7 +55,7 @@ def main():
         burst_gap_quantile=params.get("burst_gap_quantile"),
     )
     feature_rows = build_burst_feature_rows(movement["fixes"], movement["auto_bursts"])
-    scoring = score_bursts(feature_rows)
+    scoring = score_bursts(feature_rows, config={"feature_set": "movement_only"})
     individual_ranking = rank_individuals(scoring["scored_bursts"])
     warnings = [*scoring["warnings"], *individual_ranking["warnings"]]
 
@@ -86,9 +86,33 @@ def main():
     }
     output_path = Path(output["path"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    serialized = json.dumps(result, indent=2, sort_keys=True) + "\n"
-    output_path.write_text(serialized, encoding="utf-8")
-    summary_path.write_text(serialized, encoding="utf-8")
+    output_path.write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    response_summary = {
+        key: value
+        for key, value in result.items()
+        if key not in {"scored_bursts", "ranked_individuals"}
+    }
+    response_summary["ranked_individuals"] = [
+        {
+            key: row.get(key)
+            for key in (
+                "rank",
+                "individual",
+                "top_burst_score",
+                "top_burst_id",
+                "burst_count",
+                "scored_burst_count",
+            )
+        }
+        for row in result["ranked_individuals"]
+    ]
+    summary_path.write_text(
+        json.dumps(response_summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

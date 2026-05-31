@@ -1,4 +1,6 @@
 import hashlib
+import csv
+import heapq
 import json
 import math
 from datetime import datetime, timezone
@@ -8,12 +10,16 @@ from pathlib import Path
 
 from app.osm import EARTH_RADIUS_M, OSMFetchError, OSMValidationError, fetch_osm_features
 
-from .summary import build_movement_fixes
+from .osm_context import (
+    nearest_osm_feature as _nearest_osm_feature,
+    project_lon_lat as _project_lon_lat,
+)
+from .summary import _make_fix_key, build_movement_fixes, detect_columns, parse_time_ms, try_float
 
 
 SUPPORTED_OPS = {">", ">=", "<", "<=", "==", "!="}
-SUPPORTED_EVALUATORS = {"fix_numeric_comparison", "fix_osm_proximity"}
-EVALUATOR_IMPLEMENTATION_VERSION = "movement-candidate-query-v2"
+SUPPORTED_EVALUATORS = {"fix_numeric_comparison", "fix_osm_proximity", "fix_string_comparison"}
+EVALUATOR_IMPLEMENTATION_VERSION = "movement-candidate-query-v3"
 PROVENANCE_NOTE = (
     "Evaluator implementation version and source digest are recorded for provenance; "
     "exact rerun reproducibility across future code changes is out of scope for this analysis."
@@ -35,6 +41,18 @@ FIELD_DISPLAY_METADATA = {
         "field_label": "Time delta",
         "unit": "s",
         "display_unit": "s",
+        "display_scale": 1.0,
+    },
+    "osm:nearest_road_distance_m": {
+        "field_label": "Nearest road distance",
+        "unit": "m",
+        "display_unit": "m",
+        "display_scale": 1.0,
+    },
+    "osm:nearest_railway_distance_m": {
+        "field_label": "Nearest railway distance",
+        "unit": "m",
+        "display_unit": "m",
         "display_scale": 1.0,
     },
 }
@@ -97,6 +115,16 @@ def run_candidate_query(
     evaluator_type = str(evaluator.get("type") or "").strip()
     if evaluator_type == "fix_numeric_comparison":
         return run_fix_numeric_candidate_query(
+            artifact_path,
+            query_definition=snapshot,
+            parameters=parameters,
+            dataset_id=dataset_id,
+            logical_name=logical_name,
+            preview_limit=preview_limit,
+            execution_scope=execution_scope,
+        )
+    if evaluator_type == "fix_string_comparison":
+        return run_fix_string_candidate_query(
             artifact_path,
             query_definition=snapshot,
             parameters=parameters,
@@ -177,6 +205,20 @@ def run_fix_numeric_candidate_query(
             execution_scope=execution_scope,
             unresolved_fields=[field],
             warnings=[f"Numeric comparison value for {field} is missing or invalid."],
+        )
+    if field.startswith("osm:"):
+        return _run_raw_csv_attribute_candidate_query(
+            artifact_path,
+            query_definition=snapshot,
+            parameters=parameters,
+            dataset_id=dataset_id,
+            logical_name=logical_name,
+            preview_limit=preview_limit,
+            execution_scope=execution_scope,
+            field=field,
+            op=op,
+            expected_value=threshold,
+            value_kind="numeric",
         )
 
     preview_limit_value = _normalize_preview_limit(preview_limit)
@@ -259,6 +301,341 @@ def run_fix_numeric_candidate_query(
                 run_status="success",
                 candidate_count=matching_count,
                 returned_count=len(scope_candidates),
+                warnings=warnings,
+            )
+        )
+
+    return _scoped_result(
+        snapshot,
+        parameters,
+        dataset_id=dataset_id,
+        logical_name=logical_name,
+        query_digest_value=digest,
+        run_digest_value=evaluation_digest,
+        execution_scope=scope_context["execution_scope"],
+        resolved_fields=required_fields,
+        scope_results=scope_results,
+        candidates=candidates,
+    )
+
+
+def run_fix_string_candidate_query(
+    artifact_path: Path,
+    *,
+    query_definition: dict,
+    parameters: dict | None = None,
+    dataset_id: str = "",
+    logical_name: str = "",
+    preview_limit: int | None = None,
+    execution_scope: object = None,
+) -> dict:
+    parameters = dict(parameters or {})
+    snapshot = dict(query_definition or {})
+    digest = query_digest(snapshot)
+    evaluator = dict(snapshot.get("evaluator") or {})
+    evaluator_type = str(evaluator.get("type") or "").strip()
+    definition = dict(snapshot.get("definition") or {})
+    if evaluator_type != "fix_string_comparison":
+        raise CandidateQueryError("Unsupported candidate query evaluator")
+
+    field = str(definition.get("field") or evaluator.get("field") or "").strip()
+    op = str(definition.get("op") or evaluator.get("op") or "").strip()
+    if not field:
+        return _unresolved_result(
+            snapshot,
+            parameters,
+            dataset_id=dataset_id,
+            logical_name=logical_name,
+            execution_scope=execution_scope,
+            unresolved_fields=["field"],
+            warnings=["Candidate query is missing a string field."],
+        )
+    if op not in {"==", "!="}:
+        return _unresolved_result(
+            snapshot,
+            parameters,
+            dataset_id=dataset_id,
+            logical_name=logical_name,
+            execution_scope=execution_scope,
+            unresolved_fields=[field],
+            warnings=[f"Unsupported string comparison operator: {op or 'missing'}"],
+        )
+
+    raw_value = definition.get("value", evaluator.get("value"))
+    if raw_value is None:
+        raw_value = _parameter_value(definition.get("parameter", evaluator.get("parameter")), parameters)
+    elif isinstance(raw_value, str) and raw_value.startswith("$"):
+        raw_value = _parameter_value(raw_value[1:], parameters)
+    elif isinstance(raw_value, dict) and "parameter" in raw_value:
+        raw_value = _parameter_value(raw_value.get("parameter"), parameters)
+    expected_value = _string_value(raw_value)
+    if expected_value is None:
+        return _unresolved_result(
+            snapshot,
+            parameters,
+            dataset_id=dataset_id,
+            logical_name=logical_name,
+            execution_scope=execution_scope,
+            unresolved_fields=[field],
+            warnings=[f"String comparison value for {field} is missing."],
+        )
+    if field.startswith("osm:"):
+        return _run_raw_csv_attribute_candidate_query(
+            artifact_path,
+            query_definition=snapshot,
+            parameters=parameters,
+            dataset_id=dataset_id,
+            logical_name=logical_name,
+            preview_limit=preview_limit,
+            execution_scope=execution_scope,
+            field=field,
+            op=op,
+            expected_value=expected_value,
+            value_kind="string",
+        )
+
+    preview_limit_value = _normalize_preview_limit(preview_limit)
+    payload = build_movement_fixes(artifact_path, limit=None)
+    fixes = payload.get("fixes") if isinstance(payload.get("fixes"), list) else []
+    scope_context = _resolve_execution_groups(fixes, execution_scope)
+    required_fields = _required_fields(snapshot, field)
+    evaluation_digest = run_digest(
+        snapshot,
+        parameters,
+        evaluator_type=evaluator_type,
+        dataset_id=dataset_id,
+        logical_name=logical_name,
+        resolved_fields=required_fields,
+        execution_scope=scope_context["execution_scope"],
+    )
+    available_fields = _available_fields(fixes)
+    unresolved_fields = [item for item in required_fields if item not in available_fields]
+    if unresolved_fields:
+        return _unresolved_result(
+            snapshot,
+            parameters,
+            dataset_id=dataset_id,
+            logical_name=logical_name,
+            execution_scope=execution_scope,
+            scope_context=scope_context,
+            unresolved_fields=unresolved_fields,
+            warnings=[
+                f"Required field is not available in normalized movement fixes: {item}"
+                for item in unresolved_fields
+            ],
+        )
+
+    if scope_context["unresolved_scope_results"] and not scope_context["groups"]:
+        return _scoped_result(
+            snapshot,
+            parameters,
+            dataset_id=dataset_id,
+            logical_name=logical_name,
+            query_digest_value=digest,
+            run_digest_value=evaluation_digest,
+            execution_scope=scope_context["execution_scope"],
+            resolved_fields=required_fields,
+            scope_results=scope_context["unresolved_scope_results"],
+            candidates=[],
+        )
+
+    candidates = []
+    scope_results = list(scope_context["unresolved_scope_results"])
+    for group in scope_context["groups"]:
+        scope_candidates = []
+        matching_count = 0
+        for fix in group["fixes"]:
+            value = _fix_field_value(fix, field)
+            if value is None or not _compare_string(value, op, expected_value):
+                continue
+            matching_count += 1
+            if preview_limit_value is not None and len(candidates) >= preview_limit_value:
+                continue
+            candidate = _string_candidate_from_fix(
+                fix,
+                field=field,
+                op=op,
+                expected_value=expected_value,
+                value=value,
+                scope_id=group["scope_id"],
+                run_digest_value=evaluation_digest,
+                dataset_id=dataset_id,
+                logical_name=logical_name,
+            )
+            candidates.append(candidate)
+            scope_candidates.append(candidate)
+        warnings = []
+        if preview_limit_value is not None and matching_count > len(scope_candidates):
+            warnings.append(f"Candidate preview was limited to {preview_limit_value} returned candidates.")
+        scope_results.append(
+            _scope_result(
+                group,
+                run_status="success",
+                candidate_count=matching_count,
+                returned_count=len(scope_candidates),
+                warnings=warnings,
+            )
+        )
+
+    return _scoped_result(
+        snapshot,
+        parameters,
+        dataset_id=dataset_id,
+        logical_name=logical_name,
+        query_digest_value=digest,
+        run_digest_value=evaluation_digest,
+        execution_scope=scope_context["execution_scope"],
+        resolved_fields=required_fields,
+        scope_results=scope_results,
+        candidates=candidates,
+    )
+
+
+def _run_raw_csv_attribute_candidate_query(
+    artifact_path: Path,
+    *,
+    query_definition: dict,
+    parameters: dict,
+    dataset_id: str,
+    logical_name: str,
+    preview_limit: int | None,
+    execution_scope: object,
+    field: str,
+    op: str,
+    expected_value: object,
+    value_kind: str,
+) -> dict:
+    snapshot = dict(query_definition or {})
+    digest = query_digest(snapshot)
+    evaluator_type = str((snapshot.get("evaluator") or {}).get("type") or "").strip()
+    preview_limit_value = _normalize_preview_limit(preview_limit)
+    scope_context = _raw_csv_execution_scope_context(artifact_path, execution_scope)
+    required_fields = _required_fields(snapshot, field)
+    evaluation_digest = run_digest(
+        snapshot,
+        parameters,
+        evaluator_type=evaluator_type,
+        dataset_id=dataset_id,
+        logical_name=logical_name,
+        resolved_fields=required_fields,
+        execution_scope=scope_context["execution_scope"],
+    )
+
+    if scope_context["unresolved_scope_results"] and not scope_context["groups"]:
+        return _scoped_result(
+            snapshot,
+            parameters,
+            dataset_id=dataset_id,
+            logical_name=logical_name,
+            query_digest_value=digest,
+            run_digest_value=evaluation_digest,
+            execution_scope=scope_context["execution_scope"],
+            resolved_fields=required_fields,
+            scope_results=scope_context["unresolved_scope_results"],
+            candidates=[],
+        )
+
+    with artifact_path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        columns = detect_columns(fieldnames)
+        if field not in fieldnames:
+            return _unresolved_result(
+                snapshot,
+                parameters,
+                dataset_id=dataset_id,
+                logical_name=logical_name,
+                execution_scope=execution_scope,
+                scope_context=scope_context,
+                unresolved_fields=[field],
+                warnings=[f"Required field is not available in normalized movement fixes: {field}"],
+            )
+        missing_required = [
+            label
+            for label, column in {
+                "individual": columns.get("individual"),
+                "time": columns.get("time"),
+                "lon": columns.get("lon"),
+                "lat": columns.get("lat"),
+            }.items()
+            if not column
+        ]
+        if missing_required:
+            return _unresolved_result(
+                snapshot,
+                parameters,
+                dataset_id=dataset_id,
+                logical_name=logical_name,
+                execution_scope=execution_scope,
+                scope_context=scope_context,
+                unresolved_fields=missing_required,
+                warnings=[f"CSV is missing required column for candidate preview: {item}" for item in missing_required],
+            )
+
+        groups_by_scope_id = {group["scope_id"]: group for group in scope_context["groups"]}
+        scope_counts = {group["scope_id"]: 0 for group in scope_context["groups"]}
+        collector = _CandidatePreviewCollector(limit=preview_limit_value, op=op, value_kind=value_kind)
+        for row_index, raw in enumerate(reader, start=1):
+            row = _raw_csv_candidate_row(raw, columns, row_index)
+            if row is None:
+                continue
+            group = _raw_csv_group_for_row(row, scope_context, groups_by_scope_id)
+            if group is None:
+                continue
+            if value_kind == "numeric":
+                value = _finite_number(raw.get(field))
+                if value is None or not _compare(value, op, float(expected_value)):
+                    continue
+                candidate = _candidate_from_fix(
+                    row,
+                    field=field,
+                    op=op,
+                    threshold=float(expected_value),
+                    value=value,
+                    scope_id=group["scope_id"],
+                    run_digest_value=evaluation_digest,
+                    dataset_id=dataset_id,
+                    logical_name=logical_name,
+                )
+            else:
+                value = _string_value(raw.get(field))
+                if value is None or not _compare_string(value, op, str(expected_value)):
+                    continue
+                candidate = _string_candidate_from_fix(
+                    row,
+                    field=field,
+                    op=op,
+                    expected_value=str(expected_value),
+                    value=value,
+                    scope_id=group["scope_id"],
+                    run_digest_value=evaluation_digest,
+                    dataset_id=dataset_id,
+                    logical_name=logical_name,
+                )
+            scope_counts[group["scope_id"]] += 1
+            collector.add(candidate)
+
+    candidates = collector.candidates()
+    returned_by_scope = {}
+    for candidate in candidates:
+        scope_id = str(candidate.get("scope_id") or "")
+        returned_by_scope[scope_id] = returned_by_scope.get(scope_id, 0) + 1
+    scope_results = list(scope_context["unresolved_scope_results"])
+    for group in scope_context["groups"]:
+        matching_count = scope_counts.get(group["scope_id"], 0)
+        returned_count = returned_by_scope.get(group["scope_id"], 0)
+        warnings = []
+        if preview_limit_value is not None and matching_count > returned_count:
+            warnings.append(
+                f"Candidate preview was limited to {preview_limit_value} returned candidates. "
+                "Narrow the query scope or threshold for exhaustive review."
+            )
+        scope_results.append(
+            _scope_result(
+                group,
+                run_status="success",
+                candidate_count=matching_count,
+                returned_count=returned_count,
                 warnings=warnings,
             )
         )
@@ -811,6 +1188,113 @@ def _fixes_by_individual(fixes: list[dict]) -> dict[str, list[dict]]:
     return grouped
 
 
+def _raw_csv_execution_scope_context(artifact_path: Path, raw_scope: object) -> dict:
+    requested = _requested_execution_scope(raw_scope)
+    requested_type = str(requested.get("type") or "").strip()
+    scope_type = "individual" if requested_type == "current_individual" else requested_type
+    groups = []
+    unresolved_scope_results = []
+    individuals = _raw_csv_individuals(artifact_path)
+
+    if scope_type == "whole_study":
+        groups.append(
+            {
+                "scope_id": "whole_study",
+                "scope_type": "whole_study",
+                "individual": "",
+            }
+        )
+    elif scope_type == "individual":
+        individual = str(requested.get("individual") or "").strip()
+        scope_id = f"individual:{individual}" if individual else "individual:"
+        if not individual:
+            unresolved_scope_results.append(
+                _unresolved_scope_result(
+                    scope_id=scope_id,
+                    scope_type="individual",
+                    individual=individual,
+                    warnings=["Individual execution scope is missing an individual id."],
+                )
+            )
+        elif individual not in individuals:
+            unresolved_scope_results.append(
+                _unresolved_scope_result(
+                    scope_id=scope_id,
+                    scope_type="individual",
+                    individual=individual,
+                    warnings=[f"Unknown individual for execution scope: {individual}"],
+                )
+            )
+        else:
+            groups.append(
+                {
+                    "scope_id": scope_id,
+                    "scope_type": "individual",
+                    "individual": individual,
+                }
+            )
+    elif scope_type == "all_individuals_per_individual":
+        for individual in sorted(individuals):
+            groups.append(
+                {
+                    "scope_id": f"individual:{individual}",
+                    "scope_type": "individual",
+                    "individual": individual,
+                }
+            )
+    else:
+        unresolved_scope_results.append(
+            _unresolved_scope_result(
+                scope_id="unresolved",
+                scope_type="unresolved",
+                individual="",
+                warnings=[_invalid_execution_scope_warning(requested_type)],
+            )
+        )
+        scope_type = "unresolved"
+
+    resolved = {
+        "type": scope_type,
+        "scope_count": len(groups),
+        "scope_ids": [group["scope_id"] for group in groups],
+        "individuals": [group["individual"] for group in groups if group["individual"]],
+    }
+    if scope_type == "individual":
+        resolved["individual"] = str(requested.get("individual") or "").strip()
+    return {
+        "execution_scope": {
+            "requested": requested,
+            "resolved": resolved,
+        },
+        "groups": groups,
+        "unresolved_scope_results": unresolved_scope_results,
+    }
+
+
+def _raw_csv_individuals(artifact_path: Path) -> set[str]:
+    individuals = set()
+    with artifact_path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        columns = detect_columns(list(reader.fieldnames or []))
+        individual_column = columns.get("individual")
+        if not individual_column:
+            return individuals
+        for raw in reader:
+            individual = str(raw.get(individual_column, "")).strip()
+            if individual:
+                individuals.add(individual)
+    return individuals
+
+
+def _raw_csv_group_for_row(row: dict, scope_context: dict, groups_by_scope_id: dict[str, dict]) -> dict | None:
+    resolved_type = str(scope_context.get("execution_scope", {}).get("resolved", {}).get("type") or "")
+    if resolved_type == "whole_study":
+        return groups_by_scope_id.get("whole_study")
+    if resolved_type in {"individual", "all_individuals_per_individual"}:
+        return groups_by_scope_id.get(f"individual:{row.get('individual')}")
+    return None
+
+
 def _invalid_execution_scope_warning(scope_type: str) -> str:
     return (
         "Execution scope type is missing."
@@ -872,6 +1356,64 @@ def _finite_number(raw_value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if isfinite(value) else None
+
+
+def _string_value(raw_value: object) -> str | None:
+    if raw_value is None:
+        return None
+    return str(raw_value)
+
+
+def _fix_field_value(fix: dict, field: str) -> str | None:
+    attributes = fix.get("attributes") if isinstance(fix.get("attributes"), dict) else {}
+    if field in attributes:
+        return _string_value(attributes.get(field))
+    if field in fix:
+        return _string_value(fix.get(field))
+    return None
+
+
+def _raw_csv_candidate_row(raw: dict, columns: dict[str, str | None], row_index: int) -> dict | None:
+    individual_column = columns.get("individual")
+    time_column = columns.get("time")
+    lon_column = columns.get("lon")
+    lat_column = columns.get("lat")
+    if not individual_column or not time_column or not lon_column or not lat_column:
+        return None
+    individual = str(raw.get(individual_column, "")).strip()
+    time_ms = parse_time_ms(raw.get(time_column))
+    lon = try_float(raw.get(lon_column))
+    lat = try_float(raw.get(lat_column))
+    if not individual or time_ms is None or lon is None or lat is None:
+        return None
+    set_column = columns.get("set")
+    set_name = str(raw.get(set_column, "")).strip().lower() if set_column else "train"
+    if set_name != "test":
+        set_name = "train"
+    fix_id_column = columns.get("fix_id")
+    fix_id = str(raw.get(fix_id_column, "")).strip() if fix_id_column else ""
+    return {
+        "fix_key": _make_fix_key(row_index, fix_id, individual, time_ms),
+        "individual": individual,
+        "set": set_name,
+        "time_ms": int(time_ms),
+        "lon": float(lon),
+        "lat": float(lat),
+        "attributes": _raw_csv_osm_attributes(raw),
+    }
+
+
+def _raw_csv_osm_attributes(raw: dict) -> dict:
+    attributes = {}
+    for key, raw_value in raw.items():
+        if not str(key or "").startswith("osm:"):
+            continue
+        text = str(raw_value or "").strip()
+        if not text:
+            continue
+        numeric = _finite_number(text)
+        attributes[str(key)] = numeric if numeric is not None else text
+    return attributes
 
 
 def _resolve_osm_distance_m(definition: dict, evaluator: dict, parameters: dict) -> float | None:
@@ -1185,132 +1727,66 @@ def _payload_signature(payload: object) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
 
-def _nearest_osm_feature(lon: float, lat: float, features: list[dict]) -> dict | None:
-    nearest = None
-    for feature in features:
-        if not isinstance(feature, dict):
-            continue
-        distance_m = _distance_to_feature_m(lon, lat, feature.get("geometry"))
-        if distance_m is None:
-            continue
-        if nearest is None or distance_m < nearest["distance_m"]:
-            properties = feature.get("properties") if isinstance(feature.get("properties"), dict) else {}
-            nearest = {
-                "feature": feature,
-                "properties": properties,
-                "distance_m": distance_m,
-            }
-    return nearest
+class _CandidatePreviewCollector:
+    def __init__(self, *, limit: int | None, op: str, value_kind: str):
+        self.limit = limit
+        self.op = op
+        self.value_kind = value_kind
+        self._items = []
+        self._sequence = 0
 
+    def add(self, candidate: dict):
+        self._sequence += 1
+        if self.limit is None:
+            self._items.append(candidate)
+            return
+        if self.limit <= 0:
+            return
+        if self.value_kind != "numeric" or self.op not in {"<", "<=", ">", ">="}:
+            if len(self._items) < self.limit:
+                self._items.append(candidate)
+            return
+        priority = self._heap_priority(candidate, self._sequence)
+        item = (priority, self._sequence, candidate)
+        if len(self._items) < self.limit:
+            heapq.heappush(self._items, item)
+            return
+        if priority > self._items[0][0]:
+            heapq.heapreplace(self._items, item)
 
-def _distance_to_feature_m(lon: float, lat: float, geometry: object) -> float | None:
-    if not isinstance(geometry, dict):
-        return None
-    geometry_type = geometry.get("type")
-    coordinates = geometry.get("coordinates")
-    if geometry_type == "Point" and _valid_lon_lat_pair(coordinates):
-        return _haversine_m(lon, lat, coordinates[0], coordinates[1])
-    if geometry_type == "LineString" and isinstance(coordinates, list):
-        return _distance_to_line_m(lon, lat, coordinates)
-    if geometry_type == "Polygon" and isinstance(coordinates, list):
-        rings = [ring for ring in coordinates if isinstance(ring, list)]
-        if not rings:
-            return None
-        if _point_in_ring(lon, lat, rings[0]):
-            return 0.0
-        distances = [
-            _distance_to_line_m(lon, lat, ring)
-            for ring in rings
-            if len(ring) >= 2
-        ]
-        distances = [distance for distance in distances if distance is not None]
-        return min(distances) if distances else None
-    if geometry_type == "MultiLineString" and isinstance(coordinates, list):
-        distances = [_distance_to_line_m(lon, lat, line) for line in coordinates if isinstance(line, list)]
-        distances = [distance for distance in distances if distance is not None]
-        return min(distances) if distances else None
-    if geometry_type == "MultiPolygon" and isinstance(coordinates, list):
-        distances = []
-        for polygon in coordinates:
-            if not isinstance(polygon, list):
-                continue
-            distance = _distance_to_feature_m(lon, lat, {"type": "Polygon", "coordinates": polygon})
-            if distance is not None:
-                distances.append(distance)
-        return min(distances) if distances else None
-    return None
-
-
-def _distance_to_line_m(lon: float, lat: float, coordinates: list) -> float | None:
-    points = [point for point in coordinates if _valid_lon_lat_pair(point)]
-    if not points:
-        return None
-    if len(points) == 1:
-        return _haversine_m(lon, lat, points[0][0], points[0][1])
-    px, py = _project_lon_lat(lon, lat, lat)
-    min_distance = None
-    for start, end in zip(points, points[1:]):
-        ax, ay = _project_lon_lat(start[0], start[1], lat)
-        bx, by = _project_lon_lat(end[0], end[1], lat)
-        distance = _point_to_segment_distance(px, py, ax, ay, bx, by)
-        if min_distance is None or distance < min_distance:
-            min_distance = distance
-    return min_distance
-
-
-def _valid_lon_lat_pair(value: object) -> bool:
-    if not isinstance(value, (list, tuple)) or len(value) < 2:
-        return False
-    lon = _finite_number(value[0])
-    lat = _finite_number(value[1])
-    return lon is not None and lat is not None and -180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0
-
-
-def _project_lon_lat(lon: float, lat: float, reference_lat: float) -> tuple[float, float]:
-    return (
-        math.radians(lon) * EARTH_RADIUS_M * math.cos(math.radians(reference_lat)),
-        math.radians(lat) * EARTH_RADIUS_M,
-    )
-
-
-def _point_to_segment_distance(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
-    dx = bx - ax
-    dy = by - ay
-    if dx == 0.0 and dy == 0.0:
-        return math.hypot(px - ax, py - ay)
-    t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
-    t = max(0.0, min(1.0, t))
-    closest_x = ax + t * dx
-    closest_y = ay + t * dy
-    return math.hypot(px - closest_x, py - closest_y)
-
-
-def _point_in_ring(lon: float, lat: float, ring: list) -> bool:
-    points = [point for point in ring if _valid_lon_lat_pair(point)]
-    inside = False
-    if len(points) < 3:
-        return False
-    previous_lon, previous_lat = points[-1][0], points[-1][1]
-    for current_lon, current_lat in points:
-        intersects = ((current_lat > lat) != (previous_lat > lat)) and (
-            lon < (previous_lon - current_lon) * (lat - current_lat) / (previous_lat - current_lat) + current_lon
+    def candidates(self) -> list[dict]:
+        if self.value_kind != "numeric" or self.op not in {"<", "<=", ">", ">="}:
+            return list(self._items)
+        if self.limit is None:
+            return sorted(self._items, key=_candidate_output_sort_key(self.op, self.value_kind))
+        return sorted(
+            [item[2] for item in self._items],
+            key=_candidate_output_sort_key(self.op, self.value_kind),
         )
-        if intersects:
-            inside = not inside
-        previous_lon, previous_lat = current_lon, current_lat
-    return inside
+
+    def _heap_priority(self, candidate: dict, sequence: int) -> float:
+        value = _finite_number((candidate.get("evidence") or {}).get("value"))
+        if value is None:
+            value = math.inf if self.op in {"<", "<="} else -math.inf
+        if self.op in {"<", "<="}:
+            return -float(value)
+        return float(value)
 
 
-def _haversine_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    d_phi = math.radians(lat2 - lat1)
-    d_lambda = math.radians(lon2 - lon1)
-    a = (
-        math.sin(d_phi / 2.0) ** 2
-        + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2.0) ** 2
-    )
-    return 2.0 * EARTH_RADIUS_M * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+def _candidate_output_sort_key(op: str, value_kind: str):
+    def key(candidate: dict):
+        evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+        value = _finite_number(evidence.get("value"))
+        time_ms = _safe_int(candidate.get("time_ms"))
+        fix_key = str(candidate.get("fix_key") or "")
+        if value_kind == "numeric" and value is not None:
+            if op in {"<", "<="}:
+                return (value, time_ms, fix_key)
+            if op in {">", ">="}:
+                return (-value, time_ms, fix_key)
+        return (time_ms, fix_key)
+
+    return key
 
 
 def _normalize_preview_limit(raw_value: object) -> int | None:
@@ -1359,6 +1835,14 @@ def _compare(left: float, op: str, right: float) -> bool:
     return False
 
 
+def _compare_string(left: str, op: str, right: str) -> bool:
+    if op == "==":
+        return left == right
+    if op == "!=":
+        return left != right
+    return False
+
+
 def _candidate_from_fix(
     fix: dict,
     *,
@@ -1386,16 +1870,66 @@ def _candidate_from_fix(
         "kind": "fix",
         "fix_key": fix_key,
         "individual": fix.get("individual"),
+        "set": fix.get("set", "train"),
         "time_ms": time_ms,
         "time": _format_time(time_ms),
         "lon": fix.get("lon"),
         "lat": fix.get("lat"),
+        "attributes": dict(fix.get("attributes") or {}) if isinstance(fix.get("attributes"), dict) else {},
+        "review": dict(fix.get("review") or {}) if isinstance(fix.get("review"), dict) else {},
+        "segments": list(fix.get("segments") or []) if isinstance(fix.get("segments"), list) else [],
         "evidence": {
             "field": field,
             "op": op,
             "threshold": threshold,
             "value": value,
             **display_metadata,
+        },
+    }
+
+
+def _string_candidate_from_fix(
+    fix: dict,
+    *,
+    field: str,
+    op: str,
+    expected_value: str,
+    value: str,
+    scope_id: str,
+    run_digest_value: str,
+    dataset_id: str,
+    logical_name: str,
+) -> dict:
+    time_ms = fix.get("time_ms")
+    fix_key = fix.get("fix_key")
+    return {
+        "candidate_id": _candidate_id(
+            run_digest_value=run_digest_value,
+            dataset_id=dataset_id,
+            logical_name=logical_name,
+            scope_id=scope_id,
+            fix_key=fix_key,
+        ),
+        "scope_id": scope_id,
+        "kind": "fix",
+        "fix_key": fix_key,
+        "individual": fix.get("individual"),
+        "set": fix.get("set", "train"),
+        "time_ms": time_ms,
+        "time": _format_time(time_ms),
+        "lon": fix.get("lon"),
+        "lat": fix.get("lat"),
+        "attributes": dict(fix.get("attributes") or {}) if isinstance(fix.get("attributes"), dict) else {},
+        "review": dict(fix.get("review") or {}) if isinstance(fix.get("review"), dict) else {},
+        "segments": list(fix.get("segments") or []) if isinstance(fix.get("segments"), list) else [],
+        "evidence": {
+            "field": field,
+            "op": op,
+            "expected_value": expected_value,
+            "value": value,
+            "field_label": field,
+            "value_display": value,
+            "threshold_display": expected_value,
         },
     }
 
@@ -1430,10 +1964,14 @@ def _osm_candidate_from_fix(
         "kind": "fix",
         "fix_key": fix_key,
         "individual": fix.get("individual"),
+        "set": fix.get("set", "train"),
         "time_ms": time_ms,
         "time": _format_time(time_ms),
         "lon": fix.get("lon"),
         "lat": fix.get("lat"),
+        "attributes": dict(fix.get("attributes") or {}) if isinstance(fix.get("attributes"), dict) else {},
+        "review": dict(fix.get("review") or {}) if isinstance(fix.get("review"), dict) else {},
+        "segments": list(fix.get("segments") or []) if isinstance(fix.get("segments"), list) else [],
         "evidence": {
             "field": "osm_proximity",
             "distance_m": distance_m,

@@ -10,6 +10,14 @@ DEFAULT_MODEL_CONFIG = {
     "contamination": "auto",
     "random_state": 0,
 }
+DEFAULT_FEATURE_SET = "movement_only"
+FEATURE_SET_MOVEMENT_ONLY = "movement_only"
+FEATURE_SET_MOVEMENT_PLUS_CONTEXT = "movement_plus_context"
+SUPPORTED_FEATURE_SETS = {
+    FEATURE_SET_MOVEMENT_ONLY,
+    FEATURE_SET_MOVEMENT_PLUS_CONTEXT,
+}
+FEATURE_SET_EXCLUSION_CONTEXT = "context_feature_excluded_from_movement_only"
 MIN_BURST_ROWS = 2
 METADATA_COLUMNS = {
     "anomaly_score",
@@ -55,28 +63,58 @@ def _is_missing_numeric(value: object) -> bool:
 
 
 def _normalize_config(config: dict | None) -> dict:
+    allowed_keys = {*DEFAULT_MODEL_CONFIG, "feature_set"}
     if config is None:
-        return dict(DEFAULT_MODEL_CONFIG)
-    unsupported = sorted(set(config) - set(DEFAULT_MODEL_CONFIG))
+        return {
+            "model_config": dict(DEFAULT_MODEL_CONFIG),
+            "feature_set": DEFAULT_FEATURE_SET,
+        }
+    unsupported = sorted(set(config) - allowed_keys)
     if unsupported:
         raise ValueError(f"Unsupported anomaly ranking config values: {unsupported}")
-    normalized = {**DEFAULT_MODEL_CONFIG, **config}
+    feature_set = str(config.get("feature_set", DEFAULT_FEATURE_SET)).strip()
+    if feature_set not in SUPPORTED_FEATURE_SETS:
+        raise ValueError(f"Unsupported anomaly ranking feature_set: {feature_set}")
+    model_config = {
+        key: config.get(key, default_value)
+        for key, default_value in DEFAULT_MODEL_CONFIG.items()
+    }
+    normalized = {**DEFAULT_MODEL_CONFIG, **model_config}
     if int(normalized["n_estimators"]) <= 0:
         raise ValueError("n_estimators must be positive")
     normalized["n_estimators"] = int(normalized["n_estimators"])
-    return normalized
+    return {
+        "model_config": normalized,
+        "feature_set": feature_set,
+    }
 
 
-def _prepare_features(feature_rows: list[dict]) -> dict:
+def _excluded_by_feature_set(requested_features: list[str], feature_set: str) -> dict[str, str]:
+    if feature_set == FEATURE_SET_MOVEMENT_PLUS_CONTEXT:
+        return {}
+    if feature_set == FEATURE_SET_MOVEMENT_ONLY:
+        return {
+            field: FEATURE_SET_EXCLUSION_CONTEXT
+            for field in requested_features
+            if field.lower().startswith("osm:")
+        }
+    raise ValueError(f"Unsupported anomaly ranking feature_set: {feature_set}")
+
+
+def _prepare_features(feature_rows: list[dict], *, feature_set: str) -> dict:
     columns = sorted({str(field) for row in feature_rows for field in row})
     excluded_metadata = [field for field in columns if _is_metadata_column(field)]
     requested_features = [field for field in columns if field not in excluded_metadata]
+    excluded_by_feature_set = _excluded_by_feature_set(requested_features, feature_set)
+    candidate_model_features = [
+        field for field in requested_features if field not in excluded_by_feature_set
+    ]
     fitted_features = []
     dropped_features: dict[str, str] = {}
     feature_medians: dict[str, float] = {}
     imputed_value_counts: dict[str, int] = {}
 
-    for field in requested_features:
+    for field in candidate_model_features:
         values = [row.get(field) for row in feature_rows]
         if any(not _is_missing_numeric(value) and _numeric_value(value) is None for value in values):
             dropped_features[field] = "nonnumeric"
@@ -111,6 +149,8 @@ def _prepare_features(feature_rows: list[dict]) -> dict:
     return {
         "excluded_metadata": excluded_metadata,
         "requested_features": requested_features,
+        "candidate_model_features": candidate_model_features,
+        "excluded_by_feature_set": excluded_by_feature_set,
         "fitted_features": fitted_features,
         "dropped_features": dropped_features,
         "feature_medians": feature_medians,
@@ -121,9 +161,11 @@ def _prepare_features(feature_rows: list[dict]) -> dict:
 
 def score_bursts(feature_rows: list[dict], config: dict | None = None) -> dict:
     """Score burst feature rows without creating fix- or individual-level outputs."""
-    model_config = _normalize_config(config)
+    normalized_config = _normalize_config(config)
+    model_config = normalized_config["model_config"]
+    feature_set = normalized_config["feature_set"]
     burst_rows = [dict(row) for row in feature_rows]
-    prepared = _prepare_features(burst_rows)
+    prepared = _prepare_features(burst_rows, feature_set=feature_set)
     warnings = []
     if prepared["dropped_features"]:
         warnings.append(
@@ -140,15 +182,18 @@ def score_bursts(feature_rows: list[dict], config: dict | None = None) -> dict:
         "run_status": "unresolved",
         "model": "IsolationForest",
         "model_config": model_config,
+        "feature_set": feature_set,
         "preprocessing": {
             "scaling": "none",
             "missing_value_strategy": "median_imputation_per_fitted_feature",
             "nonfinite_value_handling": "treated_as_missing",
-            "feature_exclusions": ["metadata", "nonnumeric", "all_null", "constant"],
+            "feature_exclusions": ["metadata", "feature_set", "nonnumeric", "all_null", "constant"],
         },
         "input_burst_count": len(burst_rows),
         "scored_burst_count": 0,
         "requested_features": prepared["requested_features"],
+        "candidate_model_features": prepared["candidate_model_features"],
+        "excluded_by_feature_set": prepared["excluded_by_feature_set"],
         "fitted_features": prepared["fitted_features"],
         "dropped_features": prepared["dropped_features"],
         "excluded_metadata": prepared["excluded_metadata"],

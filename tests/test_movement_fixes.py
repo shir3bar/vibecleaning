@@ -512,6 +512,7 @@ def test_movement_frontend_uses_on_demand_individual_loading_for_truncated_overv
     assert "Select individuals to load fixes on demand." in source
     assert "initialMovementVisibleIndividuals(data)" in source
     assert "initialMovementVisibleIndividuals(this.data)" in source
+    assert "if (data.overviewTruncated) {" in source
     assert "getActiveThresholdMatchKeys()" in source
     assert "showPoints ? this.getActiveThresholdMatchKeys() : new Set()" in source
 
