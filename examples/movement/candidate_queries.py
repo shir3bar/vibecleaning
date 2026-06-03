@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.osm import EARTH_RADIUS_M, OSMFetchError, OSMValidationError, fetch_osm_features
 
+from .candidate_segments import build_candidate_segments, normalize_segment_grouping_config
 from .osm_context import (
     nearest_osm_feature as _nearest_osm_feature,
     project_lon_lat as _project_lon_lat,
@@ -575,6 +576,9 @@ def _run_raw_csv_attribute_candidate_query(
         groups_by_scope_id = {group["scope_id"]: group for group in scope_context["groups"]}
         scope_counts = {group["scope_id"]: 0 for group in scope_context["groups"]}
         collector = _CandidatePreviewCollector(limit=preview_limit_value, op=op, value_kind=value_kind)
+        track_fixes = []
+        matched_fix_keys = set()
+        evidence_by_fix_key = {}
         for row_index, raw in enumerate(reader, start=1):
             row = _raw_csv_candidate_row(raw, columns, row_index)
             if row is None:
@@ -582,6 +586,7 @@ def _run_raw_csv_attribute_candidate_query(
             group = _raw_csv_group_for_row(row, scope_context, groups_by_scope_id)
             if group is None:
                 continue
+            track_fixes.append(row)
             if value_kind == "numeric":
                 value = _finite_number(raw.get(field))
                 if value is None or not _compare(value, op, float(expected_value)):
@@ -613,6 +618,8 @@ def _run_raw_csv_attribute_candidate_query(
                     logical_name=logical_name,
                 )
             scope_counts[group["scope_id"]] += 1
+            matched_fix_keys.add(str(row.get("fix_key") or ""))
+            evidence_by_fix_key[str(row.get("fix_key") or "")] = dict(candidate.get("evidence") or {})
             collector.add(candidate)
 
     candidates = collector.candidates()
@@ -640,7 +647,7 @@ def _run_raw_csv_attribute_candidate_query(
             )
         )
 
-    return _scoped_result(
+    result = _scoped_result(
         snapshot,
         parameters,
         dataset_id=dataset_id,
@@ -651,6 +658,15 @@ def _run_raw_csv_attribute_candidate_query(
         resolved_fields=required_fields,
         scope_results=scope_results,
         candidates=candidates,
+    )
+    return _attach_segment_grouping(
+        result,
+        query_definition=snapshot,
+        query_digest_value=digest,
+        run_digest_value=evaluation_digest,
+        track_fixes=track_fixes,
+        matched_fix_keys=matched_fix_keys,
+        evidence_by_fix_key=evidence_by_fix_key,
     )
 
 
@@ -996,6 +1012,36 @@ def _scoped_result(
         "candidates": candidates,
         "warnings": warnings,
     }
+
+
+def _attach_segment_grouping(
+    result: dict,
+    *,
+    query_definition: dict,
+    query_digest_value: str,
+    run_digest_value: str,
+    track_fixes: list[dict],
+    matched_fix_keys: set[str],
+    evidence_by_fix_key: dict[str, dict],
+) -> dict:
+    config = normalize_segment_grouping_config((query_definition or {}).get("segment_grouping"))
+    if not config["enabled"]:
+        return result
+    segment_result = build_candidate_segments(
+        query_definition=query_definition,
+        query_digest_value=query_digest_value,
+        run_digest_value=run_digest_value,
+        track_fixes=track_fixes,
+        matched_fix_keys=matched_fix_keys,
+        evidence_by_fix_key=evidence_by_fix_key,
+        config=config,
+    )
+    result["segment_count"] = segment_result["segment_count"]
+    result["returned_segment_count"] = segment_result["returned_segment_count"]
+    result["candidate_segments"] = segment_result["candidate_segments"]
+    result["segment_grouping"] = segment_result["segment_grouping"]
+    result["warnings"] = _unique_strings([*result.get("warnings", []), *segment_result.get("warnings", [])])
+    return result
 
 
 def _aggregate_run_status(scope_results: list[dict]) -> str:
@@ -1397,6 +1443,7 @@ def _raw_csv_candidate_row(raw: dict, columns: dict[str, str | None], row_index:
         "individual": individual,
         "set": set_name,
         "time_ms": int(time_ms),
+        "row_index": int(row_index),
         "lon": float(lon),
         "lat": float(lat),
         "attributes": _raw_csv_osm_attributes(raw),

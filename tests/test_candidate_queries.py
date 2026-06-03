@@ -42,6 +42,20 @@ near_second,alpha,2024-01-01T01:00:00Z,-70.0,40.001,train,5,motorway,matched
 middle_third,alpha,2024-01-01T02:00:00Z,-70.0,40.002,train,20,primary,matched
 """
 
+OSM_CONTEXT_SEGMENTS_CSV = """eventid,individual,timestamp,longitude,latitude,set,osm:nearest_road_distance_m,osm:nearest_road_class,osm:road_match_status,osm:nearest_railway_distance_m,osm:nearest_railway_class,osm:railway_match_status
+alpha_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,10,service,matched,200,,not_found_within_radius
+alpha_2,alpha,2024-01-01T01:00:00Z,-70.0,40.001,train,12,service,matched,190,,not_found_within_radius
+alpha_3,alpha,2024-01-01T02:00:00Z,-70.0,40.002,train,75,,not_found_within_radius,180,,not_found_within_radius
+alpha_4,alpha,2024-01-01T03:00:00Z,-70.0,40.003,train,8,motorway,matched,170,,not_found_within_radius
+alpha_5,alpha,2024-01-01T04:00:00Z,-70.0,40.004,train,9,motorway,matched,160,,not_found_within_radius
+beta_1,beta,2024-01-01T00:00:00Z,-69.0,41.0,train,5,primary,matched,150,,not_found_within_radius
+"""
+
+OSM_CONTEXT_GAP_SEGMENTS_CSV = """eventid,individual,timestamp,longitude,latitude,set,osm:nearest_road_distance_m,osm:nearest_road_class,osm:road_match_status
+gap_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,10,service,matched
+gap_2,alpha,2024-01-01T04:00:00Z,-70.0,40.001,train,12,service,matched
+"""
+
 
 def numeric_query_definition(field: str = "speed_mps", threshold: float = 120 / 3.6) -> dict:
     return {
@@ -167,6 +181,13 @@ def test_builtin_precomputed_osm_queries_available_without_persisted_library(tmp
     road_query = get_query(data_root, "precomputed_near_road_50m")
     assert road_query["evaluator"] == {"type": "fix_numeric_comparison"}
     assert road_query["definition"]["field"] == "osm:nearest_road_distance_m"
+    assert road_query["segment_grouping"] == {
+        "enabled": True,
+        "min_fixes": 2,
+        "min_duration_s": 0,
+        "max_gap_s": None,
+        "preview_limit": 200,
+    }
 
     status_query = get_query(data_root, "precomputed_road_context_not_matched")
     assert status_query["evaluator"] == {"type": "fix_string_comparison"}
@@ -375,6 +396,110 @@ def test_precomputed_osm_distance_preview_returns_nearest_matches_first(monkeypa
     assert "Candidate preview was limited to 1 returned candidates." in result["warnings"][0]
 
 
+def test_precomputed_osm_distance_queries_return_temporal_segments(monkeypatch, tmp_path):
+    csv_path = tmp_path / "movement_osm_context.csv"
+    csv_path.write_text(OSM_CONTEXT_SEGMENTS_CSV, encoding="utf-8")
+
+    def fail_fetch(query):
+        raise AssertionError("Precomputed OSM segment queries must not fetch OSM")
+
+    def fail_build_movement_fixes(*args, **kwargs):
+        raise AssertionError("Precomputed OSM segment queries should scan existing CSV columns directly")
+
+    monkeypatch.setattr(candidate_queries, "fetch_osm_features", fail_fetch)
+    monkeypatch.setattr(candidate_queries, "build_movement_fixes", fail_build_movement_fixes)
+
+    result = run_candidate_query(
+        csv_path,
+        query_definition=get_query(tmp_path / "data", "precomputed_near_road_50m"),
+        dataset_id="dataset_test",
+        logical_name="movement_osm_context.csv",
+    )
+
+    assert result["run_status"] == "success"
+    assert result["candidate_count"] == 5
+    assert result["returned_count"] == 5
+    assert result["segment_count"] == 2
+    assert result["returned_segment_count"] == 2
+    assert result["segment_grouping"]["enabled"] is True
+    nearest = result["candidate_segments"][0]
+    assert nearest["kind"] == "segment"
+    assert nearest["segment_id"].startswith("cqs:")
+    assert nearest["source_query_id"] == "precomputed_near_road_50m"
+    assert nearest["individual"] == "alpha"
+    assert nearest["set_name"] == "train"
+    assert nearest["fix_keys"] == ["id:alpha_4#row:4", "id:alpha_5#row:5"]
+    assert nearest["start_fix_key"] == "id:alpha_4#row:4"
+    assert nearest["end_fix_key"] == "id:alpha_5#row:5"
+    assert nearest["representative_fix_key"] == "id:alpha_4#row:4"
+    assert nearest["duration_s"] == 3600
+    assert nearest["n_fixes"] == 2
+    assert nearest["evidence_field"] == "osm:nearest_road_distance_m"
+    assert nearest["op"] == "<="
+    assert nearest["threshold"] == 50
+    assert nearest["min_value"] == 8
+    assert nearest["median_value"] == 8.5
+    assert nearest["max_value"] == 9
+    assert "min osm:nearest_road_distance_m" in nearest["summary"]
+
+
+def test_precomputed_osm_segment_preview_limit_is_applied_by_segment(tmp_path):
+    csv_path = tmp_path / "movement_osm_context.csv"
+    csv_path.write_text(OSM_CONTEXT_SEGMENTS_CSV, encoding="utf-8")
+    query = get_query(tmp_path / "data", "precomputed_near_road_50m")
+    query["segment_grouping"] = {
+        "enabled": True,
+        "min_fixes": 2,
+        "min_duration_s": 0,
+        "max_gap_s": None,
+        "preview_limit": 1,
+    }
+
+    result = run_candidate_query(
+        csv_path,
+        query_definition=query,
+        dataset_id="dataset_test",
+        logical_name="movement_osm_context.csv",
+    )
+
+    assert result["candidate_count"] == 5
+    assert result["returned_count"] == 5
+    assert result["segment_count"] == 2
+    assert result["returned_segment_count"] == 1
+    assert result["candidate_segments"][0]["fix_keys"] == ["id:alpha_4#row:4", "id:alpha_5#row:5"]
+    assert any(
+        warning.startswith("Candidate segment preview was limited to 1 returned segments.")
+        for warning in result["warnings"]
+    )
+
+
+def test_precomputed_osm_segment_grouping_respects_max_gap(tmp_path):
+    csv_path = tmp_path / "movement_osm_context.csv"
+    csv_path.write_text(OSM_CONTEXT_GAP_SEGMENTS_CSV, encoding="utf-8")
+    query = get_query(tmp_path / "data", "precomputed_near_road_50m")
+    query["segment_grouping"] = {
+        "enabled": True,
+        "min_fixes": 1,
+        "min_duration_s": 0,
+        "max_gap_s": 60,
+        "preview_limit": 200,
+    }
+
+    result = run_candidate_query(
+        csv_path,
+        query_definition=query,
+        dataset_id="dataset_test",
+        logical_name="movement_osm_context.csv",
+    )
+
+    assert result["candidate_count"] == 2
+    assert result["segment_count"] == 2
+    assert [segment["fix_keys"] for segment in result["candidate_segments"]] == [
+        ["id:gap_1#row:1"],
+        ["id:gap_2#row:2"],
+    ]
+
+
 def test_precomputed_osm_status_query_uses_string_evaluator_without_overpass(monkeypatch, tmp_path):
     csv_path = tmp_path / "movement_osm_context.csv"
     csv_path.write_text(OSM_CONTEXT_CSV, encoding="utf-8")
@@ -406,6 +531,7 @@ def test_precomputed_osm_status_query_uses_string_evaluator_without_overpass(mon
     assert evidence["op"] == "!="
     assert evidence["expected_value"] == "matched"
     assert evidence["value"] == "not_found_within_radius"
+    assert "candidate_segments" not in result
 
 
 @pytest.mark.parametrize(
