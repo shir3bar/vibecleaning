@@ -391,6 +391,7 @@ class MovementExampleApp {
         burstGapMode: DEFAULT_BURST_GAP_MODE,
         burstGapSeconds: DEFAULT_BURST_GAP_SECONDS,
         burstGapQuantile: DEFAULT_BURST_GAP_QUANTILE,
+        anomalyFeatureSet: "movement_only",
         colorBy: "step_length_m",
         sideSheet: "individuals",
         tableMode: "fixes",
@@ -415,6 +416,7 @@ class MovementExampleApp {
       burstGapMode: this.getBurstGapMode(),
       burstGapSeconds: this.getBurstGapSeconds(),
       burstGapQuantile: this.getBurstGapQuantile(),
+      anomalyFeatureSet: this.getAnomalyFeatureSet(),
       colorBy: this.refs.colorBy.value,
       sideSheet: this.refs.sideSheetTabs?.dataset.activeSheet || "individuals",
       tableMode: this.refs.tableMode?.value || "fixes",
@@ -428,6 +430,46 @@ class MovementExampleApp {
 
   getUser() {
     return localStorage.getItem("vibecleaning_user_name") || "";
+  }
+
+  getAnomalyFeatureSet() {
+    if (!this.hasOsmContextFeatures()) {
+      return "movement_only";
+    }
+    const value = String(this.refs?.anomalyFeatureSet?.value || this.uiState.anomalyFeatureSet || "movement_only").trim();
+    return value === "movement_plus_context" ? "movement_plus_context" : "movement_only";
+  }
+
+  anomalyFeatureSetLabel(featureSet = this.getAnomalyFeatureSet()) {
+    return featureSet === "movement_plus_context" ? "movement + OSM context" : "movement only";
+  }
+
+  hasOsmContextFeatures() {
+    return Boolean(
+      this.data?.colorFields?.some(field => {
+        const key = String(field?.key || "").toLowerCase();
+        return key.startsWith("osm:") && key.endsWith("_distance_m");
+      }),
+    );
+  }
+
+  syncAnomalyFeatureSetOptions({ save = true } = {}) {
+    if (!this.refs?.anomalyFeatureSet) {
+      return;
+    }
+    const select = this.refs.anomalyFeatureSet;
+    const hasOsmContext = this.hasOsmContextFeatures();
+    const previousValue = select.value || this.uiState.anomalyFeatureSet || "movement_only";
+    select.innerHTML = `
+      <option value="movement_only">Movement only</option>
+      ${hasOsmContext ? '<option value="movement_plus_context">Movement + OSM context</option>' : ""}
+    `;
+    select.value = hasOsmContext && previousValue === "movement_plus_context"
+      ? "movement_plus_context"
+      : "movement_only";
+    if (save) {
+      this.saveUiState();
+    }
   }
 
   setUser(user) {
@@ -1330,6 +1372,64 @@ class MovementExampleApp {
         .movement-anomaly-warning {
           color: #f6cf86;
         }
+        .movement-anomaly-bursts {
+          display: grid;
+          gap: 6px;
+          margin: 8px 0 2px;
+        }
+        .movement-anomaly-burst {
+          display: grid;
+          gap: 5px;
+          padding: 7px 8px;
+          border-radius: 10px;
+          border: 1px solid rgba(125, 211, 252, 0.12);
+          background: rgba(15, 23, 42, 0.48);
+        }
+        .movement-anomaly-burst-main,
+        .movement-anomaly-burst-actions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .movement-anomaly-burst-actions button {
+          padding: 4px 7px;
+          border-radius: 8px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(255, 255, 255, 0.08);
+          color: #e5edf7;
+          cursor: pointer;
+          font-size: 11px;
+        }
+        .movement-anomaly-explanation {
+          display: grid;
+          gap: 5px;
+          color: #9bb0c6;
+          font-size: 11px;
+          line-height: 1.35;
+        }
+        .movement-anomaly-explanation-note {
+          color: #7f93a8;
+        }
+        .movement-anomaly-explanation-section {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+        .movement-anomaly-explanation-label {
+          color: #dbeafe;
+          font-weight: 600;
+        }
+        .movement-anomaly-explanation-chip {
+          display: inline-flex;
+          gap: 4px;
+          align-items: center;
+          padding: 2px 6px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.07);
+          color: #cbd5e1;
+        }
         .movement-anomaly-ranking .movement-table tbody tr {
           cursor: default;
         }
@@ -1761,6 +1861,11 @@ class MovementExampleApp {
           <button type="button" data-role="reset-view">Reset view</button>
           <button type="button" class="movement-emphasis" data-role="mark-suspected">Mark suspected</button>
           <button type="button" class="movement-emphasis" data-role="mark-confirmed">Mark confirmed</button>
+          <label data-role="anomaly-feature-set-control">Ranking features
+            <select data-role="anomaly-feature-set">
+              <option value="movement_only">Movement only</option>
+            </select>
+          </label>
           <button type="button" data-role="run-anomaly-ranking">Rank bursts</button>
           <button type="button" data-role="generate-report">Generate report</button>
           <button type="button" class="movement-danger" data-role="remove-confirmed">Remove confirmed</button>
@@ -2004,6 +2109,8 @@ class MovementExampleApp {
       resetView: this.mountEl.querySelector('[data-role="reset-view"]'),
       markSuspected: this.mountEl.querySelector('[data-role="mark-suspected"]'),
       markConfirmed: this.mountEl.querySelector('[data-role="mark-confirmed"]'),
+      anomalyFeatureSetControl: this.mountEl.querySelector('[data-role="anomaly-feature-set-control"]'),
+      anomalyFeatureSet: this.mountEl.querySelector('[data-role="anomaly-feature-set"]'),
       runAnomalyRanking: this.mountEl.querySelector('[data-role="run-anomaly-ranking"]'),
       generateReport: this.mountEl.querySelector('[data-role="generate-report"]'),
       removeConfirmed: this.mountEl.querySelector('[data-role="remove-confirmed"]'),
@@ -2113,6 +2220,10 @@ class MovementExampleApp {
         ? Number(this.uiState.burstGapQuantile)
         : DEFAULT_BURST_GAP_QUANTILE,
     );
+    this.refs.anomalyFeatureSet.value = this.uiState.anomalyFeatureSet === "movement_plus_context"
+      ? "movement_plus_context"
+      : "movement_only";
+    this.syncAnomalyFeatureSetOptions({ save: false });
     this.syncBurstGapControls();
     this.renderBurstCountIndicator();
     this.refs.tableMode.value = this.uiState.tableMode || "fixes";
@@ -2203,6 +2314,7 @@ class MovementExampleApp {
     this.refs.burstGapMode.addEventListener("change", () => this.handleBurstGapSettingsChange());
     this.refs.burstGapSeconds.addEventListener("change", () => this.handleBurstGapSettingsChange());
     this.refs.burstGapQuantile.addEventListener("change", () => this.handleBurstGapSettingsChange());
+    this.refs.anomalyFeatureSet.addEventListener("change", () => this.saveUiState());
     this.refs.fixPopup.addEventListener("click", event => {
       const closeButton = event.target.closest('[data-role="fix-popup-close"]');
       if (closeButton) {
@@ -2303,6 +2415,9 @@ class MovementExampleApp {
     this.refs.segmentConfirmed.addEventListener("click", () => this.openSegmentModal("confirmed"));
     this.refs.tableWrap.addEventListener("click", event => this.handleTableWrapClick(event));
     this.refs.tableWrap.addEventListener("scroll", () => this.handleTableWrapScroll());
+    this.refs.anomalyRanking.addEventListener("click", event => {
+      void this.handleAnomalyRankingClick(event);
+    });
 
     this.refs.issueClose.addEventListener("click", () => this.closeModal(this.refs.issueModal, this.refs.issueSubmit));
     this.refs.issueSubmit.addEventListener("click", async () => this.submitIssueAction());
@@ -2860,9 +2975,11 @@ class MovementExampleApp {
       ...this.makeEmptyAnomalyRanking(),
       status: "loading",
     };
+    const featureSet = this.getAnomalyFeatureSet();
+    const featureSetLabel = this.anomalyFeatureSetLabel(featureSet);
     this.renderAnomalyRanking();
     this.updateActionButtons();
-    this.setStatus("Running burst anomaly ranking analysis...");
+    this.setStatus(`Running burst anomaly ranking analysis (${featureSetLabel})...`);
     try {
       const result = await this.requestJSON(
         `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/run-burst-anomaly-ranking`,
@@ -2875,6 +2992,7 @@ class MovementExampleApp {
             burst_gap_mode: this.getBurstGapMode(),
             burst_gap_seconds: this.getBurstGapSeconds(),
             burst_gap_quantile: this.getBurstGapQuantile(),
+            feature_set: featureSet,
             user: this.getUser() || "reviewer",
           }),
         },
@@ -2898,7 +3016,8 @@ class MovementExampleApp {
       if (this.anomalyRanking.status === "unresolved") {
         this.setStatus("Burst anomaly ranking could not be resolved for this artifact. Review its warnings below.", true);
       } else {
-        this.setStatus(`Created burst anomaly ranking analysis for ${count} individuals.`);
+        const returnedFeatureSet = String(this.anomalyRanking.modelFit?.feature_set || featureSet);
+        this.setStatus(`Created ${this.anomalyFeatureSetLabel(returnedFeatureSet)} burst anomaly ranking analysis for ${count} individuals.`);
       }
     } catch (error) {
       if (this.isAbortError(error)) {
@@ -2919,6 +3038,224 @@ class MovementExampleApp {
         this.requestControllers.anomalyRanking = null;
         this.updateActionButtons();
       }
+    }
+  }
+
+  normalizeRankingBurstRefs(row) {
+    const refs = Array.isArray(row?.ranked_burst_refs) ? row.ranked_burst_refs : [];
+    return refs
+      .map(ref => ({
+        ...ref,
+        individual: String(ref?.individual || row?.individual || ""),
+        burst_id: String(ref?.burst_id || ""),
+        fix_keys: Array.isArray(ref?.fix_keys) ? ref.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
+      }))
+      .filter(ref => ref.burst_id);
+  }
+
+  normalizeAnomalyExplanationItems(items) {
+    return (Array.isArray(items) ? items : [])
+      .map(item => ({
+        feature: String(item?.feature || ""),
+        displayValue: String(item?.display_value ?? item?.displayValue ?? ""),
+        percentile: finiteOrNull(item?.percentile),
+        direction: String(item?.direction || ""),
+      }))
+      .filter(item => item.feature);
+  }
+
+  formatAnomalyExplanationPercentile(percentile) {
+    const value = finiteOrNull(percentile);
+    if (value === null) {
+      return "";
+    }
+    const formatted = Math.abs(value - Math.round(value)) < 0.05
+      ? String(Math.round(value))
+      : value.toFixed(1);
+    return `${formatted}th percentile`;
+  }
+
+  renderAnomalyExplanationItems(label, items, direction) {
+    const normalized = this.normalizeAnomalyExplanationItems(items)
+      .filter(item => item.direction === direction)
+      .slice(0, 3);
+    if (!normalized.length) {
+      return "";
+    }
+    return `
+      <div class="movement-anomaly-explanation-section">
+        <span class="movement-anomaly-explanation-label">${escapeHtml(label)}</span>
+        ${normalized.map(item => {
+          const valueLabel = item.displayValue || (item.direction === "missing" ? "NA" : "n/a");
+          const percentileLabel = this.formatAnomalyExplanationPercentile(item.percentile);
+          return `
+            <span class="movement-anomaly-explanation-chip" data-explanation-direction="${escapeHtml(item.direction)}">
+              <span>${escapeHtml(item.feature)}</span>
+              <span>=</span>
+              <span>${escapeHtml(valueLabel)}</span>
+              ${percentileLabel ? `<span>(${escapeHtml(percentileLabel)})</span>` : ""}
+            </span>
+          `;
+        }).join("")}
+      </div>
+    `;
+  }
+
+  renderAnomalyBurstExplanation(ref) {
+    const highHtml = this.renderAnomalyExplanationItems(
+      "High observed quantiles",
+      ref.top_high_quantile_features,
+      "high",
+    );
+    const lowHtml = this.renderAnomalyExplanationItems(
+      "Low observed quantiles",
+      ref.top_low_quantile_features,
+      "low",
+    );
+    const missingHtml = this.renderAnomalyExplanationItems(
+      "Missing fitted features",
+      ref.missing_features,
+      "missing",
+    );
+    if (!highHtml && !lowHtml && !missingHtml) {
+      return "";
+    }
+    return `
+      <div class="movement-anomaly-explanation" data-role="ranking-burst-explanation">
+        <div class="movement-anomaly-explanation-note">Observed feature-value quantiles, not SHAP/model attribution.</div>
+        ${highHtml}
+        ${lowHtml}
+        ${missingHtml}
+      </div>
+    `;
+  }
+
+  renderAnomalyBurstRefs(row) {
+    const refs = this.normalizeRankingBurstRefs(row);
+    if (!refs.length) {
+      return "";
+    }
+    return `
+      <div class="movement-anomaly-bursts" data-role="ranking-burst-refs">
+        ${refs.map(ref => {
+          const fixCount = finiteOrNull(ref.n_fixes ?? ref.fix_count) ?? ref.fix_keys.length;
+          const meta = [
+            ref.set_name ? `track ${ref.set_name}` : "",
+            Number.isFinite(Number(fixCount)) ? `${formatCount(fixCount)} fixes` : "",
+          ].filter(Boolean).join(" • ");
+          return `
+            <div class="movement-anomaly-burst" data-ranking-burst-id="${escapeHtml(ref.burst_id)}">
+              <div class="movement-anomaly-burst-main">
+                <span class="movement-table-cell-mono">${escapeHtml(ref.burst_id)}</span>
+                <span>score ${escapeHtml(formatMaybeNumber(finiteOrNull(ref.anomaly_score), ""))}</span>
+                ${meta ? `<span class="movement-subtle">${escapeHtml(meta)}</span>` : ""}
+              </div>
+              ${this.renderAnomalyBurstExplanation(ref)}
+              <div class="movement-anomaly-burst-actions">
+                <button type="button" data-action="zoom-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Zoom to burst</button>
+                <button type="button" data-action="check-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Check fixes</button>
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+  }
+
+  getRankingBurstRef(burstId) {
+    const target = String(burstId || "");
+    if (!target || !this.anomalyRanking) {
+      return null;
+    }
+    for (const row of this.anomalyRanking.rankedIndividuals || []) {
+      const ref = this.normalizeRankingBurstRefs(row).find(item => item.burst_id === target);
+      if (ref) {
+        return ref;
+      }
+    }
+    return null;
+  }
+
+  getRankingBurstPath(ref) {
+    if (!this.data || !ref) {
+      return [];
+    }
+    const pathFromFixKeys = (ref.fix_keys || [])
+      .map(fixKey => this.data.fixByKey.get(fixKey))
+      .filter(Boolean)
+      .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey))
+      .map(fix => fix.position)
+      .filter(position => Array.isArray(position) && position.length >= 2);
+    if (pathFromFixKeys.length) {
+      return pathFromFixKeys;
+    }
+    const burst = this.data.autoBurstById?.get(ref.burst_id || "");
+    return burst?.path?.length ? burst.path : [];
+  }
+
+  async inspectRankingBurst(burstId, { checkFixes = false } = {}) {
+    if (!this.data) {
+      return;
+    }
+    const ref = this.getRankingBurstRef(burstId);
+    if (!ref) {
+      this.setStatus("Could not find that ranked burst in the current ranking result.", true);
+      return;
+    }
+    const fixKeys = Array.isArray(ref.fix_keys) ? ref.fix_keys : [];
+    const preservedFixKeys = new Set(this.data.selectedFixKeys);
+    if (checkFixes) {
+      for (const fixKey of fixKeys) {
+        preservedFixKeys.add(fixKey);
+      }
+    }
+    if (ref.individual) {
+      this.data.selectedIndividuals.add(ref.individual);
+    }
+    const startTimeMs = finiteOrNull(ref.start_time_ms);
+    if (startTimeMs !== null) {
+      this.currentTimeMs = startTimeMs;
+      this.refs.slider.value = String(startTimeMs);
+      this.updateTimeLabel();
+    }
+    this.saveUiState();
+    this.renderIndividuals();
+    await this.loadDetailForCurrentSelection({ preservedFixKeys });
+
+    if (checkFixes) {
+      const nextSelected = new Set(this.data.selectedFixKeys);
+      for (const fixKey of fixKeys) {
+        if (this.data.fixByKey.has(fixKey)) {
+          nextSelected.add(fixKey);
+        }
+      }
+      this.data.selectedFixKeys = nextSelected;
+      this.renderSelectedFixes();
+      this.renderThresholdPane();
+      this.renderLayers();
+      this.updateActionButtons();
+    }
+
+    const path = this.getRankingBurstPath(ref);
+    if (path.length) {
+      this.zoomToPath(path);
+      const action = checkFixes ? "checked and zoomed to" : "zoomed to";
+      this.setStatus(`Selected ${ref.individual || "individual"} and ${action} burst ${ref.burst_id}.`);
+    } else {
+      this.setStatus(`Selected ${ref.individual || "individual"}, but burst ${ref.burst_id} fixes are not loaded for zooming.`, true);
+    }
+  }
+
+  async handleAnomalyRankingClick(event) {
+    const actionButton = event.target.closest("button[data-action]");
+    if (!actionButton) {
+      return;
+    }
+    const action = actionButton.dataset.action || "";
+    if (action === "zoom-ranking-burst") {
+      await this.inspectRankingBurst(actionButton.dataset.burstId || "", { checkFixes: false });
+    } else if (action === "check-ranking-burst") {
+      await this.inspectRankingBurst(actionButton.dataset.burstId || "", { checkFixes: true });
     }
   }
 
@@ -2943,15 +3280,25 @@ class MovementExampleApp {
       result.analysisId ? `Analysis: ${result.analysisId}` : "",
       burstGapLabel ? `Burst gap: ${burstGapLabel}` : "",
       modelFit.model ? `Model: ${modelFit.model}` : "",
+      modelFit.feature_set ? `Feature set: ${String(modelFit.feature_set).replaceAll("_", " ")}` : "",
       Number.isFinite(Number(modelFit.scored_burst_count))
         ? `Scored bursts: ${formatCount(modelFit.scored_burst_count)}`
         : "",
       Array.isArray(modelFit.fitted_features)
         ? `Fitted features: ${formatCount(modelFit.fitted_features.length)}`
         : "",
+      modelFit.excluded_by_feature_set && typeof modelFit.excluded_by_feature_set === "object"
+        ? `Feature-set exclusions: ${formatCount(Object.keys(modelFit.excluded_by_feature_set).length)}`
+        : "",
     ].filter(Boolean);
     const metadataHtml = metadata.length
       ? `<div class="movement-anomaly-meta">${metadata.map(item => `<div>${escapeHtml(item)}</div>`).join("")}</div>`
+      : "";
+    const fittedFeatureNames = Array.isArray(modelFit.fitted_features)
+      ? modelFit.fitted_features.slice(0, 12).map(item => String(item))
+      : [];
+    const fittedFeaturesHtml = fittedFeatureNames.length
+      ? `<div class="movement-anomaly-meta"><div>Fitted feature sample: ${escapeHtml(fittedFeatureNames.join(", "))}${modelFit.fitted_features.length > fittedFeatureNames.length ? "..." : ""}</div></div>`
       : "";
     const warningsHtml = result.warnings.length
       ? `<div class="movement-anomaly-warnings">${result.warnings.map(warning => `<div class="movement-anomaly-warning">${escapeHtml(String(warning))}</div>`).join("")}</div>`
@@ -2961,11 +3308,12 @@ class MovementExampleApp {
       const message = result.status === "error"
         ? "The ranking analysis failed."
         : "No individuals were ranked.";
-      this.refs.anomalyRanking.innerHTML = `${metadataHtml}${warningsHtml}<div class="movement-table-empty">${escapeHtml(message)}</div>`;
+      this.refs.anomalyRanking.innerHTML = `${metadataHtml}${fittedFeaturesHtml}${warningsHtml}<div class="movement-table-empty">${escapeHtml(message)}</div>`;
       return;
     }
     this.refs.anomalyRanking.innerHTML = `
       ${metadataHtml}
+      ${fittedFeaturesHtml}
       ${warningsHtml}
       <table class="movement-table">
         <thead>
@@ -2979,16 +3327,20 @@ class MovementExampleApp {
           </tr>
         </thead>
         <tbody>
-          ${rows.map(row => `
-            <tr>
-              <td class="movement-table-cell-mono">${escapeHtml(String(row.rank ?? ""))}</td>
-              <td>${escapeHtml(String(row.individual || ""))}</td>
-              <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(finiteOrNull(row.top_burst_score), ""))}</td>
-              <td class="movement-table-cell-mono">${escapeHtml(String(row.top_burst_id || ""))}</td>
-              <td class="movement-table-cell-mono">${escapeHtml(formatCount(row.burst_count))}</td>
-              <td class="movement-table-cell-mono">${escapeHtml(formatCount(row.scored_burst_count))}</td>
-            </tr>
-          `).join("")}
+          ${rows.map(row => {
+            const burstRefsHtml = this.renderAnomalyBurstRefs(row);
+            return `
+              <tr>
+                <td class="movement-table-cell-mono">${escapeHtml(String(row.rank ?? ""))}</td>
+                <td>${escapeHtml(String(row.individual || ""))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(finiteOrNull(row.top_burst_score), ""))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(String(row.top_burst_id || ""))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatCount(row.burst_count))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatCount(row.scored_burst_count))}</td>
+              </tr>
+              ${burstRefsHtml ? `<tr class="movement-anomaly-burst-row"><td colspan="6">${burstRefsHtml}</td></tr>` : ""}
+            `;
+          }).join("")}
         </tbody>
       </table>
     `;
@@ -3179,6 +3531,7 @@ class MovementExampleApp {
     this.refs.slider.min = "0";
     this.refs.slider.max = "0";
     this.refs.slider.value = "0";
+    this.syncAnomalyFeatureSetOptions({ save: false });
     this.updateTimeLabel();
     this.renderBurstCountIndicator();
     this.renderLayers();
@@ -3386,6 +3739,7 @@ class MovementExampleApp {
       ) || null;
       this.clearLoadedStudyState();
       this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
+      this.syncAnomalyFeatureSetOptions({ save: false });
       this.currentTimeMs = this.data.minTimeMs;
       this.refs.slider.min = String(this.data.minTimeMs);
       this.refs.slider.max = String(this.data.maxTimeMs);
@@ -3555,6 +3909,7 @@ class MovementExampleApp {
         return;
       }
       this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
+      this.syncAnomalyFeatureSetOptions({ save: false });
       this.renderBurstCountIndicator();
       this.currentTimeMs = this.data.minTimeMs;
       this.refs.slider.min = String(this.data.minTimeMs);
@@ -6825,6 +7180,9 @@ class MovementExampleApp {
     ]) {
       button.hidden = !hasData;
     }
+    if (this.refs.anomalyFeatureSetControl) {
+      this.refs.anomalyFeatureSetControl.hidden = !hasData;
+    }
     this.refs.markSuspected.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
     this.refs.markConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
     this.refs.generateReport.disabled = !hasData || !(this.data?.individuals || []).length;
@@ -6833,6 +7191,9 @@ class MovementExampleApp {
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
     this.refs.runCandidateQuery.disabled = !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
     this.refs.runAnomalyRanking.disabled = !hasData || !this.currentArtifact || anomalyRankingLoading;
+    if (this.refs.anomalyFeatureSet) {
+      this.refs.anomalyFeatureSet.disabled = !hasData || anomalyRankingLoading;
+    }
     this.refs.checkCandidates.disabled = !hasData || candidatePreviewLoading || returnedCandidateCount === 0;
     this.refs.clearCandidates.disabled = !hasData || candidatePreviewLoading || this.candidateQueryPreview?.status === "idle";
     this.updateUndoButton();

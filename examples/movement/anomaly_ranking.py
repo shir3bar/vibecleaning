@@ -19,6 +19,14 @@ SUPPORTED_FEATURE_SETS = {
 }
 FEATURE_SET_EXCLUSION_CONTEXT = "context_feature_excluded_from_movement_only"
 MIN_BURST_ROWS = 2
+EXPLANATION_METHOD = "observed_empirical_quantile_among_scored_bursts"
+EXPLANATION_VALUE_SOURCE = "observed_burst_feature_values"
+MISSING_VALUE_DISPLAY = "NA"
+MODEL_IMPUTATION_NOTE = (
+    "Median imputation is used only for Isolation Forest fitting/scoring, "
+    "not as an observed explanation value."
+)
+EXPLANATION_LIST_LIMIT = 3
 METADATA_COLUMNS = {
     "anomaly_score",
     "burst_gap_seconds",
@@ -159,6 +167,117 @@ def _prepare_features(feature_rows: list[dict], *, feature_set: str) -> dict:
     }
 
 
+def _display_numeric(value: float) -> str:
+    return format(float(value), ".6g")
+
+
+def _empirical_percentile(value: float, sorted_values: list[float]) -> float | None:
+    if not sorted_values:
+        return None
+    if len(sorted_values) == 1:
+        return 50.0
+    matching_indexes = [
+        index for index, candidate in enumerate(sorted_values) if candidate == value
+    ]
+    if not matching_indexes:
+        return None
+    average_rank = sum(matching_indexes) / len(matching_indexes)
+    return float((average_rank / (len(sorted_values) - 1)) * 100.0)
+
+
+def _feature_direction(value: float, feature_median: float) -> str:
+    if value > feature_median:
+        return "high"
+    if value < feature_median:
+        return "low"
+    return "typical"
+
+
+def _build_observed_quantile_explanations(
+    burst_rows: list[dict],
+    *,
+    fitted_features: list[str],
+    feature_medians: dict[str, float],
+) -> list[dict]:
+    observed_values_by_feature = {
+        field: sorted(
+            numeric
+            for row in burst_rows
+            if (numeric := _numeric_value(row.get(field))) is not None
+        )
+        for field in fitted_features
+    }
+
+    explained_rows = []
+    for row in burst_rows:
+        feature_quantiles = []
+        high_features = []
+        low_features = []
+        missing_features = []
+
+        for field in fitted_features:
+            feature_median = feature_medians[field]
+            observed_value = _numeric_value(row.get(field))
+            if observed_value is None:
+                item = {
+                    "feature": field,
+                    "value": None,
+                    "display_value": MISSING_VALUE_DISPLAY,
+                    "percentile": None,
+                    "median": feature_median,
+                    "direction": "missing",
+                    "imputed_for_model": True,
+                }
+                feature_quantiles.append(item)
+                missing_features.append(item)
+                continue
+
+            percentile = _empirical_percentile(
+                observed_value,
+                observed_values_by_feature[field],
+            )
+            item = {
+                "feature": field,
+                "value": observed_value,
+                "display_value": _display_numeric(observed_value),
+                "percentile": percentile,
+                "median": feature_median,
+                "direction": _feature_direction(observed_value, feature_median),
+                "imputed_for_model": False,
+            }
+            feature_quantiles.append(item)
+            if item["direction"] == "high":
+                high_features.append(item)
+            elif item["direction"] == "low":
+                low_features.append(item)
+
+        high_features.sort(
+            key=lambda item: (
+                -(item["percentile"] if item["percentile"] is not None else -1.0),
+                item["feature"],
+            )
+        )
+        low_features.sort(
+            key=lambda item: (
+                item["percentile"] if item["percentile"] is not None else 101.0,
+                item["feature"],
+            )
+        )
+        missing_features.sort(key=lambda item: item["feature"])
+
+        explained_rows.append(
+            {
+                **row,
+                "feature_quantiles": feature_quantiles,
+                "top_high_quantile_features": high_features[:EXPLANATION_LIST_LIMIT],
+                "top_low_quantile_features": low_features[:EXPLANATION_LIST_LIMIT],
+                "missing_features": missing_features,
+            }
+        )
+
+    return explained_rows
+
+
 def score_bursts(feature_rows: list[dict], config: dict | None = None) -> dict:
     """Score burst feature rows without creating fix- or individual-level outputs."""
     normalized_config = _normalize_config(config)
@@ -199,6 +318,10 @@ def score_bursts(feature_rows: list[dict], config: dict | None = None) -> dict:
         "excluded_metadata": prepared["excluded_metadata"],
         "feature_medians": prepared["feature_medians"],
         "imputed_value_counts": prepared["imputed_value_counts"],
+        "explanation_method": EXPLANATION_METHOD,
+        "explanation_value_source": EXPLANATION_VALUE_SOURCE,
+        "missing_value_display": MISSING_VALUE_DISPLAY,
+        "model_imputation_note": MODEL_IMPUTATION_NOTE,
         "warnings": warnings,
         "scored_bursts": burst_rows,
     }
@@ -210,10 +333,15 @@ def score_bursts(feature_rows: list[dict], config: dict | None = None) -> dict:
     anomaly_scores = -model.score_samples(prepared["matrix"])
     result["run_status"] = "completed"
     result["scored_burst_count"] = len(burst_rows)
-    result["scored_bursts"] = [
+    scored_rows = [
         {**row, "anomaly_score": float(score)}
         for row, score in zip(burst_rows, anomaly_scores)
     ]
+    result["scored_bursts"] = _build_observed_quantile_explanations(
+        scored_rows,
+        fitted_features=prepared["fitted_features"],
+        feature_medians=prepared["feature_medians"],
+    )
     return result
 
 
@@ -228,6 +356,9 @@ def _burst_reference(row: dict, anomaly_score: float) -> dict:
         "end_time_ms",
         "n_fixes",
         "fix_keys",
+        "top_high_quantile_features",
+        "top_low_quantile_features",
+        "missing_features",
     ):
         if field in row:
             reference[field] = list(row[field]) if field == "fix_keys" else row[field]

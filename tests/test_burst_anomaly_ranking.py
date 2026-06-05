@@ -33,6 +33,17 @@ fix_b_3,beta,2024-01-01T01:00:00Z,-71.0000,41.0,test,1,110
 fix_b_4,beta,2024-01-01T01:00:10Z,-70.9000,41.0,test,4,150
 """
 
+ANOMALY_ANALYSIS_OSM_CSV = """eventid,individual,timestamp,longitude,latitude,set,gps:hdop,height-above-msl,osm:nearest_road_distance_m,osm:nearest_road_class,osm:road_match_status,osm:nearest_railway_distance_m,osm:nearest_railway_class,osm:railway_match_status
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0000,40.0,train,1,100,5,service,matched,100,rail,matched
+fix_a_2,alpha,2024-01-01T00:00:10Z,-69.9999,40.0,train,2,101,6,service,matched,110,rail,matched
+fix_a_3,alpha,2024-01-01T01:00:00Z,-70.0000,40.0,train,1,100,50,primary,matched,80,rail,matched
+fix_a_4,alpha,2024-01-01T01:00:10Z,-69.9998,40.0,train,2,102,60,primary,matched,90,rail,matched
+fix_b_1,beta,2024-01-01T00:00:00Z,-71.0000,41.0,test,1,110,500,,not_found_within_radius,5,rail,matched
+fix_b_2,beta,2024-01-01T00:00:10Z,-70.9999,41.0,test,1,110,510,,not_found_within_radius,6,rail,matched
+fix_b_3,beta,2024-01-01T01:00:00Z,-71.0000,41.0,test,1,110,900,,not_found_within_radius,20,rail,matched
+fix_b_4,beta,2024-01-01T01:00:10Z,-70.9000,41.0,test,4,150,950,,not_found_within_radius,25,rail,matched
+"""
+
 
 def _feature_row(index: int, path_length_m: float, mean_speed_mps: float) -> dict:
     return {
@@ -67,6 +78,20 @@ def _create_anomaly_analysis_client(tmp_path: Path) -> tuple[TestClient, Path, s
     study_dir = data_root / "movement_clean" / "test_study"
     study_dir.mkdir(parents=True)
     (study_dir / "movement.csv").write_text(ANOMALY_ANALYSIS_CSV, encoding="utf-8")
+    app = create_app(
+        data_root=data_root,
+        static_root=REPO_ROOT / "examples" / "movement" / "static",
+    )
+    register_movement_routes(app, data_root=data_root)
+    dataset_id = load_project_state(study_dir)["current_dataset_id"]
+    return TestClient(app), study_dir, dataset_id
+
+
+def _create_context_anomaly_analysis_client(tmp_path: Path) -> tuple[TestClient, Path, str]:
+    data_root = tmp_path / "data"
+    study_dir = data_root / "movement_clean" / "test_study"
+    study_dir.mkdir(parents=True)
+    (study_dir / "movement_osm_context.csv").write_text(ANOMALY_ANALYSIS_OSM_CSV, encoding="utf-8")
     app = create_app(
         data_root=data_root,
         static_root=REPO_ROOT / "examples" / "movement" / "static",
@@ -180,6 +205,115 @@ def test_score_bursts_excludes_metadata_and_records_dropped_and_imputed_features
     assert result["scored_bursts"][1]["missing_feature"] is None
 
 
+def test_score_bursts_adds_observed_quantile_explanations_without_imputed_display_values():
+    rows = [
+        {
+            **_feature_row(0, 10.0, 1.0),
+            "observed_feature": 1.0,
+            "missing_feature": 1.0,
+        },
+        {
+            **_feature_row(1, 20.0, 2.0),
+            "observed_feature": 2.0,
+            "missing_feature": None,
+        },
+        {
+            **_feature_row(2, 30.0, 3.0),
+            "observed_feature": 3.0,
+            "missing_feature": 5.0,
+        },
+        {
+            **_feature_row(3, 40.0, 4.0),
+            "observed_feature": 4.0,
+            "missing_feature": 9.0,
+        },
+    ]
+
+    result = score_bursts(rows, config={"n_estimators": 32, "random_state": 5})
+
+    assert result["run_status"] == "completed"
+    assert result["explanation_method"] == "observed_empirical_quantile_among_scored_bursts"
+    assert result["explanation_value_source"] == "observed_burst_feature_values"
+    assert result["missing_value_display"] == "NA"
+    assert "Median imputation is used only" in result["model_imputation_note"]
+    assert "explanation_top_n" not in result
+    assert result["feature_medians"]["missing_feature"] == 5.0
+    assert result["imputed_value_counts"]["missing_feature"] == 1
+
+    scored_missing = result["scored_bursts"][1]
+    assert "anomaly_score" in scored_missing
+    assert set(item["feature"] for item in scored_missing["feature_quantiles"]) == set(
+        result["fitted_features"]
+    )
+    missing_item = next(
+        item
+        for item in scored_missing["feature_quantiles"]
+        if item["feature"] == "missing_feature"
+    )
+    assert missing_item == {
+        "feature": "missing_feature",
+        "value": None,
+        "display_value": "NA",
+        "percentile": None,
+        "median": 5.0,
+        "direction": "missing",
+        "imputed_for_model": True,
+    }
+    assert missing_item in scored_missing["missing_features"]
+    assert all(
+        item["feature"] != "missing_feature"
+        for item in scored_missing["top_high_quantile_features"]
+        + scored_missing["top_low_quantile_features"]
+    )
+
+    observed_item = next(
+        item
+        for item in result["scored_bursts"][3]["feature_quantiles"]
+        if item["feature"] == "observed_feature"
+    )
+    assert observed_item["value"] == 4.0
+    assert observed_item["display_value"] == "4"
+    assert observed_item["percentile"] == 100.0
+    assert observed_item["median"] == 2.5
+    assert observed_item["direction"] == "high"
+    assert observed_item["imputed_for_model"] is False
+    assert observed_item in result["scored_bursts"][3]["top_high_quantile_features"]
+
+
+def test_score_bursts_observed_quantile_explanations_use_only_observed_values():
+    rows = [
+        {**_feature_row(0, 1.0, 1.0), "sparse_feature": 1.0},
+        {**_feature_row(1, 2.0, 2.0), "sparse_feature": None},
+        {**_feature_row(2, 3.0, 3.0), "sparse_feature": 9.0},
+    ]
+
+    result = score_bursts(rows, config={"n_estimators": 16})
+
+    low_item = next(
+        item
+        for item in result["scored_bursts"][0]["feature_quantiles"]
+        if item["feature"] == "sparse_feature"
+    )
+    high_item = next(
+        item
+        for item in result["scored_bursts"][2]["feature_quantiles"]
+        if item["feature"] == "sparse_feature"
+    )
+    missing_item = next(
+        item
+        for item in result["scored_bursts"][1]["feature_quantiles"]
+        if item["feature"] == "sparse_feature"
+    )
+
+    assert low_item["percentile"] == 0.0
+    assert high_item["percentile"] == 100.0
+    assert missing_item["percentile"] is None
+    assert missing_item["display_value"] == "NA"
+    assert missing_item["value"] is None
+    assert missing_item["median"] == 5.0
+    assert missing_item["display_value"] != str(missing_item["median"])
+
+
 def test_score_bursts_returns_unresolved_for_insufficient_rows_or_features():
     one_row = score_bursts([_feature_row(0, 10.0, 1.0)])
     no_features = score_bursts(
@@ -279,6 +413,16 @@ def test_score_bursts_excludes_precomputed_osm_burst_summaries_by_default_withou
     assert "osm:nearest_railway_distance_m__min" in context_result["candidate_model_features"]
     assert "osm:nearest_road_distance_m__mean" in context_result["fitted_features"]
     assert "osm:nearest_railway_distance_m__min" in context_result["fitted_features"]
+    assert all(
+        not item["feature"].startswith("osm:")
+        for row in result["scored_bursts"]
+        for item in row["feature_quantiles"]
+    )
+    assert any(
+        item["feature"].startswith("osm:")
+        for row in context_result["scored_bursts"]
+        for item in row["feature_quantiles"]
+    )
     ranking_source = (REPO_ROOT / "examples" / "movement" / "anomaly_ranking.py").read_text(
         encoding="utf-8"
     )
@@ -430,8 +574,26 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
         source.index("  renderAnomalyRanking() {"):
         source.index("async runSelectedCandidateQuery()")
     ]
+    ranking_handler = source[
+        source.index("  async inspectRankingBurst("):
+        source.index("  renderAnomalyRanking() {")
+    ]
 
     assert 'data-role="run-anomaly-ranking"' in source
+    assert 'data-role="anomaly-feature-set"' in source
+    assert '<option value="movement_only">Movement only</option>' in source
+    assert "Movement + OSM context" in source
+    assert "hasOsmContextFeatures()" in source
+    assert "syncAnomalyFeatureSetOptions" in source
+    assert 'key.startsWith("osm:") && key.endsWith("_distance_m")' in source
+    assert "getAnomalyFeatureSet()" in source
+    assert 'feature_set: featureSet' in source
+    assert 'Feature set: ${String(modelFit.feature_set).replaceAll("_", " ")}' in source
+    assert "anomalyFeatureSetLabel" in source
+    assert "Running burst anomaly ranking analysis (${featureSetLabel})" in source
+    assert "Created ${this.anomalyFeatureSetLabel(returnedFeatureSet)} burst anomaly ranking analysis" in source
+    assert "modelFit.excluded_by_feature_set" in source
+    assert "Fitted feature sample:" in source
     assert 'data-role="side-tab-ranking">Burst Ranking' in source
     assert 'data-role="side-sheet-ranking"' in source
     assert 'data-role="anomaly-ranking"' not in individuals_sheet
@@ -441,13 +603,38 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert "run-burst-anomaly-ranking" in source
     assert 'this.setSideSheet("ranking")' in handler
     assert "ranked_individuals" in source
+    assert "ranked_burst_refs" in source
+    assert 'data-role="ranking-burst-refs"' in source
+    assert 'data-action="zoom-ranking-burst"' in source
+    assert 'data-action="check-ranking-burst"' in source
+    assert 'data-role="ranking-burst-explanation"' in source
+    assert "Observed feature-value quantiles, not SHAP/model attribution." in source
+    assert "High observed quantiles" in source
+    assert "Low observed quantiles" in source
+    assert "Missing fitted features" in source
+    assert "top_high_quantile_features" in source
+    assert "top_low_quantile_features" in source
+    assert "missing_features" in source
+    assert "displayValue" in source
+    assert "percentile" in source
+    assert 'valueLabel = item.displayValue || (item.direction === "missing" ? "NA" : "n/a")' in source
+    assert "handleAnomalyRankingClick" in source
+    assert "inspectRankingBurst" in source
+    assert "getRankingBurstPath" in source
+    assert "this.zoomToPath(path)" in ranking_handler
+    assert "ref.fix_keys" in ranking_handler
+    assert "this.data.selectedFixKeys" in ranking_handler
+    assert "openSegmentModal" not in ranking_handler
+    assert "openIssueModal" not in ranking_handler
+    assert "run-candidate-query" not in ranking_handler
+    assert "run-burst-anomaly-ranking" not in ranking_handler
+    assert "enrich-osm-context" not in ranking_handler
     assert "top_burst_score" in source
     assert "top_burst_id" in source
     assert "burst_count" in source
     assert "scored_burst_count" in source
     assert "formatBurstGapMetadata(parseMovementBurstGap" in source
     assert "summary.model_fit" in source
-    assert "data-action=" not in renderer
     assert "Mark " not in renderer
 
 
@@ -472,6 +659,8 @@ def test_burst_anomaly_route_creates_analysis_artifact_without_dataset_mutation(
     summary = payload["summary"]
     assert analysis["dataset_id"] == dataset_id
     assert analysis["parameters"]["action"] == "run_burst_anomaly_ranking"
+    assert analysis["parameters"]["feature_set"] == "movement_only"
+    assert "(movement only)" in analysis["title"]
     assert analysis["output_artifacts"] == ["burst_anomaly_ranking.json"]
     assert {artifact["logical_name"] for artifact in analysis["realized_output_artifacts"]} == {
         "burst_anomaly_ranking.json"
@@ -494,7 +683,26 @@ def test_burst_anomaly_route_creates_analysis_artifact_without_dataset_mutation(
     assert "scored_bursts" not in summary
     assert summary["individual_ranking_summary"]["ranking_scope"] == "individual"
     assert len(summary["ranked_individuals"]) == 2
-    assert all("ranked_burst_refs" not in row for row in summary["ranked_individuals"])
+    assert all("ranked_burst_refs" in row for row in summary["ranked_individuals"])
+    assert all(row["ranked_burst_refs"] for row in summary["ranked_individuals"])
+    for row in summary["ranked_individuals"]:
+        for ref in row["ranked_burst_refs"]:
+            assert ref["individual"] == row["individual"]
+            assert ref["burst_id"]
+            assert "anomaly_score" in ref
+            assert "fix_keys" in ref
+            assert "top_high_quantile_features" in ref
+            assert "top_low_quantile_features" in ref
+            assert "missing_features" in ref
+            assert "feature_quantiles" not in ref
+            assert all(
+                not item["feature"].startswith("osm:")
+                for item in (
+                    ref["top_high_quantile_features"]
+                    + ref["top_low_quantile_features"]
+                    + ref["missing_features"]
+                )
+            )
     assert "scorer" not in summary
     assert "individual_ranking" not in summary
     assert "fixes" not in summary
@@ -524,3 +732,59 @@ def test_burst_anomaly_route_creates_analysis_artifact_without_dataset_mutation(
     assert state["project"]["current_dataset_id"] == dataset_id
     assert state["counts"]["analyses"] == 1
     assert state["counts"]["steps"] == 0
+
+
+def test_burst_anomaly_route_accepts_movement_plus_context_feature_set(tmp_path):
+    client, study_dir, dataset_id = _create_context_anomaly_analysis_client(tmp_path)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/run-burst-anomaly-ranking",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement_osm_context.csv",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": 60,
+            "feature_set": "movement_plus_context",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    analysis = payload["analysis"]
+    summary = payload["summary"]
+    assert analysis["parameters"]["feature_set"] == "movement_plus_context"
+    assert "(movement + OSM context)" in analysis["title"]
+    assert summary["model_fit"]["feature_set"] == "movement_plus_context"
+    assert summary["model_fit"]["excluded_by_feature_set"] == {}
+    assert "osm:nearest_road_distance_m__mean" in summary["model_fit"]["candidate_model_features"]
+    assert "osm:nearest_railway_distance_m__min" in summary["model_fit"]["candidate_model_features"]
+    assert "osm:nearest_road_distance_m__mean" in summary["model_fit"]["fitted_features"]
+    assert "osm:nearest_railway_distance_m__min" in summary["model_fit"]["fitted_features"]
+
+    output_path = (
+        project_paths(study_dir)["analyses"]
+        / analysis["analysis_id"]
+        / "outputs"
+        / "burst_anomaly_ranking.json"
+    )
+    output = json.loads(output_path.read_text(encoding="utf-8"))
+    assert output["model_fit"]["feature_set"] == "movement_plus_context"
+    assert output["model_fit"]["fitted_features"] == summary["model_fit"]["fitted_features"]
+
+
+def test_burst_anomaly_route_rejects_unknown_feature_set(tmp_path):
+    client, _, dataset_id = _create_anomaly_analysis_client(tmp_path)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/run-burst-anomaly-ranking",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "feature_set": "context_only",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "Invalid feature_set"

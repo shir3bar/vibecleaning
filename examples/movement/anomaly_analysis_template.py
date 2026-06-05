@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 OUTPUT_ARTIFACT_NAME = "burst_anomaly_ranking.json"
+SUMMARY_BURST_REF_LIMIT = 3
 
 
 def add_repo_root(project_dir: Path):
@@ -55,7 +56,8 @@ def main():
         burst_gap_quantile=params.get("burst_gap_quantile"),
     )
     feature_rows = build_burst_feature_rows(movement["fixes"], movement["auto_bursts"])
-    scoring = score_bursts(feature_rows, config={"feature_set": "movement_only"})
+    feature_set = str(params.get("feature_set") or "movement_only").strip()
+    scoring = score_bursts(feature_rows, config={"feature_set": feature_set})
     individual_ranking = rank_individuals(scoring["scored_bursts"])
     warnings = [*scoring["warnings"], *individual_ranking["warnings"]]
 
@@ -97,15 +99,24 @@ def main():
     }
     response_summary["ranked_individuals"] = [
         {
-            key: row.get(key)
-            for key in (
-                "rank",
-                "individual",
-                "top_burst_score",
-                "top_burst_id",
-                "burst_count",
-                "scored_burst_count",
-            )
+            **{
+                key: row.get(key)
+                for key in (
+                    "rank",
+                    "individual",
+                    "top_burst_score",
+                    "top_burst_id",
+                    "burst_count",
+                    "scored_burst_count",
+                )
+            },
+            "ranked_burst_refs": [
+                {
+                    **ref,
+                    "individual": row.get("individual"),
+                }
+                for ref in (row.get("ranked_burst_refs") or [])[:SUMMARY_BURST_REF_LIMIT]
+            ],
         }
         for row in result["ranked_individuals"]
     ]

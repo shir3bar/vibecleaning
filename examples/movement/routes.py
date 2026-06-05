@@ -1744,6 +1744,12 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             raise ValueError("Invalid burst_gap_quantile")
         return value
 
+    def parse_anomaly_feature_set(raw_value: object) -> str:
+        value = str(raw_value or "movement_only").strip()
+        if value in {"movement_only", "movement_plus_context"}:
+            return value
+        raise ValueError("Invalid feature_set")
+
     def parse_osm_search_radius_m(raw_value: object) -> float:
         if raw_value in (None, ""):
             raise ValueError("search_radius_m is required")
@@ -1977,10 +1983,16 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             study_dir = get_study_dir(data_root, family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            feature_set = parse_anomaly_feature_set(body.get("feature_set"))
+            feature_set_label = (
+                "movement + OSM context"
+                if feature_set == "movement_plus_context"
+                else "movement only"
+            )
             user = body.get("user")
             payload = {
                 "user": user,
-                "title": f"Rank automatic movement bursts for {logical_name}",
+                "title": f"Rank automatic movement bursts ({feature_set_label}) for {logical_name}",
                 "kind": "python",
                 "script": BURST_ANOMALY_ANALYSIS_SCRIPT,
                 "dataset_id": dataset_id,
@@ -1994,6 +2006,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                     "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),
                     "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
                     "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
+                    "feature_set": feature_set,
                     "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
