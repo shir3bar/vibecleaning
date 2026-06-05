@@ -608,6 +608,11 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert 'data-action="zoom-ranking-burst"' in source
     assert 'data-action="check-ranking-burst"' in source
     assert 'data-role="ranking-burst-explanation"' in source
+    assert "renderAnomalyWhy(ref)" in source
+    assert "getCompactAnomalyWhyItems" in source
+    assert "anomalyFeatureLabel" in source
+    assert '<strong>Why:</strong>' in source
+    assert "<summary>Details</summary>" in source
     assert "Observed feature-value quantiles, not SHAP/model attribution." in source
     assert "High observed quantiles" in source
     assert "Low observed quantiles" in source
@@ -618,6 +623,11 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert "displayValue" in source
     assert "percentile" in source
     assert 'valueLabel = item.displayValue || (item.direction === "missing" ? "NA" : "n/a")' in source
+    assert "very high" in source
+    assert "very low" in source
+    assert "missing ${this.anomalyFeatureLabel(item.feature)}" in source
+    assert 'direction === "missing" ? 5 : 3' in source
+    assert "+${escapeHtml(formatCount(moreCount))} more" in source
     assert "handleAnomalyRankingClick" in source
     assert "inspectRankingBurst" in source
     assert "getRankingBurstPath" in source

@@ -1379,8 +1379,8 @@ class MovementExampleApp {
         }
         .movement-anomaly-burst {
           display: grid;
-          gap: 5px;
-          padding: 7px 8px;
+          gap: 7px;
+          padding: 8px 9px;
           border-radius: 10px;
           border: 1px solid rgba(125, 211, 252, 0.12);
           background: rgba(15, 23, 42, 0.48);
@@ -1403,10 +1403,29 @@ class MovementExampleApp {
         }
         .movement-anomaly-explanation {
           display: grid;
-          gap: 5px;
+          gap: 6px;
           color: #9bb0c6;
           font-size: 11px;
           line-height: 1.35;
+        }
+        .movement-anomaly-why {
+          color: #c9d8e8;
+          font-size: 11px;
+          line-height: 1.35;
+        }
+        .movement-anomaly-why strong {
+          color: #e5edf7;
+          font-weight: 600;
+        }
+        .movement-anomaly-explanation-details {
+          display: grid;
+          gap: 5px;
+        }
+        .movement-anomaly-explanation-details summary {
+          width: fit-content;
+          cursor: pointer;
+          color: #c9e7f6;
+          font-size: 11px;
         }
         .movement-anomaly-explanation-note {
           color: #7f93a8;
@@ -3064,6 +3083,87 @@ class MovementExampleApp {
       .filter(item => item.feature);
   }
 
+  anomalyFeatureLabel(feature) {
+    const key = String(feature || "");
+    const labels = {
+      duration_s: "duration",
+      path_length_m: "path length",
+      mean_step_length_m: "mean step length",
+      sd_step_length_m: "step length variability",
+      net_displacement_m: "net displacement",
+      straightness: "straightness",
+      mean_speed_mps: "mean speed",
+      median_speed_mps: "median speed",
+      max_speed_mps: "max speed",
+      sd_speed_mps: "speed variability",
+      max_time_gap_s: "max time gap",
+    };
+    if (labels[key]) {
+      return labels[key];
+    }
+    let cleaned = key;
+    if (cleaned.startsWith("osm:")) {
+      cleaned = cleaned.replace(/^osm:nearest_/, "").replace(/_distance_m/g, " distance");
+    }
+    cleaned = cleaned
+      .replace(/__(mean|median|min|max|sd)$/g, " $1")
+      .replace(/_mps/g, "")
+      .replace(/_m/g, "")
+      .replace(/_s/g, "")
+      .replace(/_/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return cleaned || key;
+  }
+
+  explanationExtremeness(item) {
+    const percentile = finiteOrNull(item?.percentile);
+    if (percentile === null) {
+      return -1;
+    }
+    if (item.direction === "high") {
+      return percentile;
+    }
+    if (item.direction === "low") {
+      return 100 - percentile;
+    }
+    return -1;
+  }
+
+  getCompactAnomalyWhyItems(ref) {
+    const high = this.normalizeAnomalyExplanationItems(ref.top_high_quantile_features)
+      .filter(item => item.direction === "high");
+    const low = this.normalizeAnomalyExplanationItems(ref.top_low_quantile_features)
+      .filter(item => item.direction === "low");
+    const extremeItems = [...high, ...low]
+      .sort((left, right) => (
+        this.explanationExtremeness(right) - this.explanationExtremeness(left)
+        || left.feature.localeCompare(right.feature)
+      ))
+      .slice(0, 3);
+    if (extremeItems.length) {
+      return extremeItems;
+    }
+    return this.normalizeAnomalyExplanationItems(ref.missing_features)
+      .filter(item => item.direction === "missing")
+      .slice(0, 3);
+  }
+
+  renderAnomalyWhy(ref) {
+    const items = this.getCompactAnomalyWhyItems(ref);
+    if (!items.length) {
+      return "";
+    }
+    const parts = items.map(item => {
+      if (item.direction === "missing") {
+        return `missing ${this.anomalyFeatureLabel(item.feature)}`;
+      }
+      const directionLabel = item.direction === "low" ? "very low" : "very high";
+      return `${directionLabel} ${this.anomalyFeatureLabel(item.feature)}`;
+    });
+    return `<div class="movement-anomaly-why"><strong>Why:</strong> ${escapeHtml(parts.join("; "))}</div>`;
+  }
+
   formatAnomalyExplanationPercentile(percentile) {
     const value = finiteOrNull(percentile);
     if (value === null) {
@@ -3078,10 +3178,13 @@ class MovementExampleApp {
   renderAnomalyExplanationItems(label, items, direction) {
     const normalized = this.normalizeAnomalyExplanationItems(items)
       .filter(item => item.direction === direction)
-      .slice(0, 3);
+      .slice(0, direction === "missing" ? 5 : 3);
     if (!normalized.length) {
       return "";
     }
+    const totalCount = this.normalizeAnomalyExplanationItems(items)
+      .filter(item => item.direction === direction).length;
+    const moreCount = Math.max(0, totalCount - normalized.length);
     return `
       <div class="movement-anomaly-explanation-section">
         <span class="movement-anomaly-explanation-label">${escapeHtml(label)}</span>
@@ -3097,6 +3200,7 @@ class MovementExampleApp {
             </span>
           `;
         }).join("")}
+        ${moreCount ? `<span class="movement-subtle">+${escapeHtml(formatCount(moreCount))} more</span>` : ""}
       </div>
     `;
   }
@@ -3121,12 +3225,15 @@ class MovementExampleApp {
       return "";
     }
     return `
-      <div class="movement-anomaly-explanation" data-role="ranking-burst-explanation">
-        <div class="movement-anomaly-explanation-note">Observed feature-value quantiles, not SHAP/model attribution.</div>
-        ${highHtml}
-        ${lowHtml}
-        ${missingHtml}
-      </div>
+      <details class="movement-anomaly-explanation-details" data-role="ranking-burst-explanation">
+        <summary>Details</summary>
+        <div class="movement-anomaly-explanation">
+          <div class="movement-anomaly-explanation-note">Observed feature-value quantiles, not SHAP/model attribution.</div>
+          ${highHtml}
+          ${lowHtml}
+          ${missingHtml}
+        </div>
+      </details>
     `;
   }
 
@@ -3150,6 +3257,7 @@ class MovementExampleApp {
                 <span>score ${escapeHtml(formatMaybeNumber(finiteOrNull(ref.anomaly_score), ""))}</span>
                 ${meta ? `<span class="movement-subtle">${escapeHtml(meta)}</span>` : ""}
               </div>
+              ${this.renderAnomalyWhy(ref)}
               ${this.renderAnomalyBurstExplanation(ref)}
               <div class="movement-anomaly-burst-actions">
                 <button type="button" data-action="zoom-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Zoom to burst</button>
