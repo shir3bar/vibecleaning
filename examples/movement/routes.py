@@ -1379,6 +1379,18 @@ ANOMALY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("anomaly_analysis_temp
 BURST_ANOMALY_ANALYSIS_SCRIPT = ANOMALY_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
 compile(BURST_ANOMALY_ANALYSIS_SCRIPT, str(ANOMALY_ANALYSIS_TEMPLATE_PATH), "exec")
 
+BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name(
+    "burst_feature_space_analysis_template.py"
+)
+BURST_FEATURE_SPACE_ANALYSIS_SCRIPT = (
+    BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+)
+compile(
+    BURST_FEATURE_SPACE_ANALYSIS_SCRIPT,
+    str(BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH),
+    "exec",
+)
+
 OSM_ENRICHMENT_TEMPLATE_PATH = Path(__file__).with_name("osm_enrichment_template.py")
 OSM_ENRICHMENT_SCRIPT = OSM_ENRICHMENT_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
 compile(OSM_ENRICHMENT_SCRIPT, str(OSM_ENRICHMENT_TEMPLATE_PATH), "exec")
@@ -2001,6 +2013,51 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                 "parameters": {
                     "app": "movement",
                     "action": "run_burst_anomaly_ranking",
+                    "target_artifact": logical_name,
+                    "dataset_id": dataset_id,
+                    "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),
+                    "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
+                    "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
+                    "feature_set": feature_set,
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
+                    "user": user,
+                },
+            }
+            return JSONResponse(create_analysis(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-burst-feature-space")
+    async def post_movement_run_burst_feature_space(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            feature_set = parse_anomaly_feature_set(body.get("feature_set"))
+            feature_set_label = (
+                "movement + OSM context"
+                if feature_set == "movement_plus_context"
+                else "movement only"
+            )
+            user = body.get("user")
+            payload = {
+                "user": user,
+                "title": f"Project automatic movement bursts ({feature_set_label}) for {logical_name}",
+                "kind": "python",
+                "script": BURST_FEATURE_SPACE_ANALYSIS_SCRIPT,
+                "dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": ["burst_feature_space.json"],
+                "parameters": {
+                    "app": "movement",
+                    "action": "run_burst_feature_space",
                     "target_artifact": logical_name,
                     "dataset_id": dataset_id,
                     "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),

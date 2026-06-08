@@ -298,6 +298,7 @@ class MovementExampleApp {
       candidateQuery: null,
       queryLibrary: null,
       anomalyRanking: null,
+      burstFeatureSpace: null,
     };
     this.map = null;
     this.mapLoaded = false;
@@ -318,6 +319,7 @@ class MovementExampleApp {
     };
     this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
+    this.burstFeatureSpace = this.makeEmptyBurstFeatureSpace();
     this.candidateQueryLibrary = {
       status: "idle",
       queries: [],
@@ -670,7 +672,7 @@ class MovementExampleApp {
   }
 
   setSideSheet(sheet, { save = true } = {}) {
-    const nextSheet = ["table", "ranking"].includes(sheet) ? sheet : "individuals";
+    const nextSheet = ["table", "ranking", "feature_space"].includes(sheet) ? sheet : "individuals";
     if (this.refs?.sideSheetTabs) {
       this.refs.sideSheetTabs.dataset.activeSheet = nextSheet;
     }
@@ -683,6 +685,9 @@ class MovementExampleApp {
     if (this.refs?.sideTabRanking) {
       this.refs.sideTabRanking.classList.toggle("is-active", nextSheet === "ranking");
     }
+    if (this.refs?.sideTabFeatureSpace) {
+      this.refs.sideTabFeatureSpace.classList.toggle("is-active", nextSheet === "feature_space");
+    }
     if (this.refs?.sideSheetIndividuals) {
       this.refs.sideSheetIndividuals.classList.toggle("hidden", nextSheet !== "individuals");
     }
@@ -692,11 +697,16 @@ class MovementExampleApp {
     if (this.refs?.sideSheetRanking) {
       this.refs.sideSheetRanking.classList.toggle("hidden", nextSheet !== "ranking");
     }
+    if (this.refs?.sideSheetFeatureSpace) {
+      this.refs.sideSheetFeatureSpace.classList.toggle("hidden", nextSheet !== "feature_space");
+    }
     if (save && this.refs) {
       this.saveUiState();
     }
     if (nextSheet === "table") {
       this.renderTableSheet();
+    } else if (nextSheet === "feature_space") {
+      this.renderBurstFeatureSpace();
     }
   }
 
@@ -1311,6 +1321,7 @@ class MovementExampleApp {
         }
         .movement-side-tabs {
           display: flex;
+          flex-wrap: wrap;
           gap: 8px;
           padding: 12px 14px 10px;
           border-bottom: 1px solid rgba(255, 255, 255, 0.05);
@@ -1347,6 +1358,9 @@ class MovementExampleApp {
         }
         .movement-side-sheet.table {
           grid-template-rows: auto auto minmax(0, 1fr);
+        }
+        .movement-side-sheet.feature-space {
+          grid-template-rows: auto minmax(0, 1fr);
         }
         .movement-side-head,
         .movement-slider-row {
@@ -1468,6 +1482,76 @@ class MovementExampleApp {
         }
         .movement-anomaly-ranking .movement-table tbody tr {
           cursor: default;
+        }
+        .movement-feature-space {
+          overflow-y: auto;
+          padding: 10px 12px;
+        }
+        .movement-feature-space-meta {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px 12px;
+          margin-bottom: 10px;
+          color: #95a8bb;
+          font-size: 11px;
+        }
+        .movement-feature-space-plot {
+          min-height: 280px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 12px;
+          background: rgba(7, 12, 22, 0.72);
+          overflow: hidden;
+        }
+        .movement-feature-space-plot svg {
+          display: block;
+          width: 100%;
+          min-height: 280px;
+        }
+        .movement-feature-space-axis {
+          stroke: rgba(148, 163, 184, 0.22);
+          stroke-width: 1;
+        }
+        .movement-feature-space-point {
+          fill: rgba(125, 211, 252, 0.62);
+          stroke: rgba(15, 23, 42, 0.75);
+          stroke-width: 1;
+          cursor: pointer;
+        }
+        .movement-feature-space-point.is-neighbor {
+          fill: rgba(250, 204, 21, 0.9);
+          stroke: rgba(254, 240, 138, 0.95);
+          stroke-width: 1.5;
+        }
+        .movement-feature-space-point.is-selected {
+          fill: rgba(216, 180, 254, 1);
+          stroke: rgba(255, 255, 255, 0.98);
+          stroke-width: 2.5;
+        }
+        .movement-feature-space-selection {
+          display: grid;
+          gap: 8px;
+          margin-top: 10px;
+          padding: 10px;
+          border-radius: 10px;
+          background: rgba(255, 255, 255, 0.04);
+          color: #cbd5e1;
+          font-size: 11px;
+        }
+        .movement-feature-space-selection-main,
+        .movement-feature-space-neighbors {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 6px 10px;
+        }
+        .movement-feature-space-neighbors button {
+          padding: 4px 7px;
+          border-radius: 8px;
+          border: 1px solid rgba(250, 204, 21, 0.22);
+          background: rgba(250, 204, 21, 0.08);
+          color: #fde68a;
+          cursor: pointer;
+          font-size: 11px;
         }
         .movement-side-search {
           display: grid;
@@ -1903,6 +1987,7 @@ class MovementExampleApp {
             </select>
           </label>
           <button type="button" data-role="run-anomaly-ranking">Rank bursts</button>
+          <button type="button" data-role="run-burst-feature-space">Feature space</button>
           <button type="button" data-role="generate-report">Generate report</button>
           <button type="button" class="movement-danger" data-role="remove-confirmed">Remove confirmed</button>
           <button type="button" data-role="undo">Undo</button>
@@ -1935,6 +2020,7 @@ class MovementExampleApp {
               <button type="button" class="movement-side-tab is-active" data-role="side-tab-individuals">Individuals</button>
               <button type="button" class="movement-side-tab" data-role="side-tab-table">Table</button>
               <button type="button" class="movement-side-tab" data-role="side-tab-ranking">Burst Ranking</button>
+              <button type="button" class="movement-side-tab" data-role="side-tab-feature-space">Burst feature space</button>
             </div>
             <div class="movement-side-content">
               <div class="movement-side-sheet individuals" data-role="side-sheet-individuals">
@@ -1984,6 +2070,10 @@ class MovementExampleApp {
               <div class="movement-side-sheet ranking hidden" data-role="side-sheet-ranking">
                 <div class="movement-side-head">Burst anomaly ranking</div>
                 <div class="movement-anomaly-ranking" data-role="anomaly-ranking"></div>
+              </div>
+              <div class="movement-side-sheet feature-space hidden" data-role="side-sheet-feature-space">
+                <div class="movement-side-head">Burst feature space</div>
+                <div class="movement-feature-space" data-role="burst-feature-space"></div>
               </div>
             </div>
             <div class="movement-slider-row">
@@ -2148,6 +2238,7 @@ class MovementExampleApp {
       anomalyFeatureSetControl: this.mountEl.querySelector('[data-role="anomaly-feature-set-control"]'),
       anomalyFeatureSet: this.mountEl.querySelector('[data-role="anomaly-feature-set"]'),
       runAnomalyRanking: this.mountEl.querySelector('[data-role="run-anomaly-ranking"]'),
+      runBurstFeatureSpace: this.mountEl.querySelector('[data-role="run-burst-feature-space"]'),
       generateReport: this.mountEl.querySelector('[data-role="generate-report"]'),
       removeConfirmed: this.mountEl.querySelector('[data-role="remove-confirmed"]'),
       undo: this.mountEl.querySelector('[data-role="undo"]'),
@@ -2156,9 +2247,11 @@ class MovementExampleApp {
       sideTabIndividuals: this.mountEl.querySelector('[data-role="side-tab-individuals"]'),
       sideTabTable: this.mountEl.querySelector('[data-role="side-tab-table"]'),
       sideTabRanking: this.mountEl.querySelector('[data-role="side-tab-ranking"]'),
+      sideTabFeatureSpace: this.mountEl.querySelector('[data-role="side-tab-feature-space"]'),
       sideSheetIndividuals: this.mountEl.querySelector('[data-role="side-sheet-individuals"]'),
       sideSheetTable: this.mountEl.querySelector('[data-role="side-sheet-table"]'),
       sideSheetRanking: this.mountEl.querySelector('[data-role="side-sheet-ranking"]'),
+      sideSheetFeatureSpace: this.mountEl.querySelector('[data-role="side-sheet-feature-space"]'),
       sideResize: this.mountEl.querySelector('[data-role="side-resize"]'),
       individualSearch: this.mountEl.querySelector('[data-role="individual-search"]'),
       individuals: this.mountEl.querySelector('[data-role="individuals"]'),
@@ -2166,6 +2259,7 @@ class MovementExampleApp {
       fixHead: this.mountEl.querySelector('[data-role="fix-head"]'),
       selectedFixes: this.mountEl.querySelector('[data-role="selected-fixes"]'),
       anomalyRanking: this.mountEl.querySelector('[data-role="anomaly-ranking"]'),
+      burstFeatureSpace: this.mountEl.querySelector('[data-role="burst-feature-space"]'),
       tableMode: this.mountEl.querySelector('[data-role="table-mode"]'),
       tableFilter: this.mountEl.querySelector('[data-role="table-filter"]'),
       tableSort: this.mountEl.querySelector('[data-role="table-sort"]'),
@@ -2271,6 +2365,7 @@ class MovementExampleApp {
     this.applySidePaneWidth(this.sidePaneWidthPx, { save: false, resizeMap: false });
     this.setSideSheet(this.uiState.sideSheet || "individuals", { save: false });
     this.renderAnomalyRanking();
+    this.renderBurstFeatureSpace();
     this.updateActionButtons();
   }
 
@@ -2279,6 +2374,7 @@ class MovementExampleApp {
     this.refs.sideTabIndividuals.addEventListener("click", () => this.setSideSheet("individuals"));
     this.refs.sideTabTable.addEventListener("click", () => this.setSideSheet("table"));
     this.refs.sideTabRanking.addEventListener("click", () => this.setSideSheet("ranking"));
+    this.refs.sideTabFeatureSpace.addEventListener("click", () => this.setSideSheet("feature_space"));
     this.refs.individualSearch.addEventListener("input", () => {
       this.individualSearchQuery = this.refs.individualSearch.value || "";
       this.renderIndividuals();
@@ -2414,6 +2510,9 @@ class MovementExampleApp {
     this.refs.runAnomalyRanking.addEventListener("click", () => {
       void this.runBurstAnomalyRanking();
     });
+    this.refs.runBurstFeatureSpace.addEventListener("click", () => {
+      void this.runBurstFeatureSpace();
+    });
     this.refs.generateReport.addEventListener("click", () => this.openReportModal());
     this.refs.removeConfirmed.addEventListener("click", () => this.openRemoveModal());
     this.refs.undo.addEventListener("click", async () => {
@@ -2453,6 +2552,9 @@ class MovementExampleApp {
     this.refs.tableWrap.addEventListener("scroll", () => this.handleTableWrapScroll());
     this.refs.anomalyRanking.addEventListener("click", event => {
       void this.handleAnomalyRankingClick(event);
+    });
+    this.refs.burstFeatureSpace.addEventListener("click", event => {
+      void this.handleBurstFeatureSpaceClick(event);
     });
 
     this.refs.issueClose.addEventListener("click", () => this.closeModal(this.refs.issueModal, this.refs.issueSubmit));
@@ -2540,6 +2642,7 @@ class MovementExampleApp {
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
+      this.cancelRequest("burstFeatureSpace");
       return;
     }
     if (level === "study") {
@@ -2551,6 +2654,7 @@ class MovementExampleApp {
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
+      this.cancelRequest("burstFeatureSpace");
       return;
     }
     if (level === "dataset") {
@@ -2561,6 +2665,7 @@ class MovementExampleApp {
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
+      this.cancelRequest("burstFeatureSpace");
       return;
     }
     if (level === "artifact") {
@@ -2570,6 +2675,7 @@ class MovementExampleApp {
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
+      this.cancelRequest("burstFeatureSpace");
     }
   }
 
@@ -3004,6 +3110,29 @@ class MovementExampleApp {
     }
   }
 
+  makeEmptyBurstFeatureSpace() {
+    return {
+      analysisId: "",
+      status: "idle",
+      featureSet: "movement_only",
+      points: [],
+      selectedBurstId: "",
+      warnings: [],
+      burstGap: null,
+      featureMatrix: null,
+      pca: null,
+    };
+  }
+
+  clearBurstFeatureSpace({ render = true } = {}) {
+    this.cancelRequest("burstFeatureSpace");
+    this.burstFeatureSpace = this.makeEmptyBurstFeatureSpace();
+    if (render && this.refs) {
+      this.renderBurstFeatureSpace();
+      this.updateActionButtons();
+    }
+  }
+
   async runBurstAnomalyRanking() {
     if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
       return;
@@ -3076,6 +3205,301 @@ class MovementExampleApp {
         this.requestControllers.anomalyRanking = null;
         this.updateActionButtons();
       }
+    }
+  }
+
+  async runBurstFeatureSpace() {
+    if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
+      return;
+    }
+    const controller = this.beginRequest("burstFeatureSpace");
+    const featureSet = this.getAnomalyFeatureSet();
+    const featureSetLabel = this.anomalyFeatureSetLabel(featureSet);
+    this.burstFeatureSpace = {
+      ...this.makeEmptyBurstFeatureSpace(),
+      status: "loading",
+      featureSet,
+    };
+    this.renderBurstFeatureSpace();
+    this.updateActionButtons();
+    this.setStatus(`Building burst feature space (${featureSetLabel})...`);
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/run-burst-feature-space`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            burst_gap_mode: this.getBurstGapMode(),
+            burst_gap_seconds: this.getBurstGapSeconds(),
+            burst_gap_quantile: this.getBurstGapQuantile(),
+            feature_set: featureSet,
+            user: this.getUser() || "reviewer",
+          }),
+        },
+      );
+      if (this.requestControllers.burstFeatureSpace !== controller) {
+        return;
+      }
+      const analysisId = String(result?.analysis_id || result?.analysis?.analysis_id || "");
+      if (!analysisId) {
+        throw new Error("Feature-space analysis did not return an analysis id.");
+      }
+      const artifact = await this.fetchJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis/${encodeURIComponent(analysisId)}/artifact/burst_feature_space.json`,
+        { signal: controller.signal },
+      );
+      if (this.requestControllers.burstFeatureSpace !== controller) {
+        return;
+      }
+      const points = Array.isArray(artifact?.points) ? artifact.points : [];
+      const focusedBurstId = String(this.focusedRankingBurst?.burstId || "");
+      this.burstFeatureSpace = {
+        analysisId,
+        status: String(artifact?.run_status || "completed"),
+        featureSet: String(artifact?.feature_set || featureSet),
+        points,
+        selectedBurstId: points.some(point => String(point?.burst_id || "") === focusedBurstId)
+          ? focusedBurstId
+          : "",
+        warnings: Array.isArray(artifact?.warnings) ? artifact.warnings : [],
+        burstGap: artifact?.burst_gap || null,
+        featureMatrix: artifact?.feature_matrix || null,
+        pca: artifact?.pca || null,
+      };
+      this.setSideSheet("feature_space");
+      this.renderBurstFeatureSpace();
+      this.updateActionButtons();
+      if (this.burstFeatureSpace.status === "unresolved") {
+        this.setStatus("Burst feature space could not be resolved for this artifact. Review its warnings below.", true);
+      } else {
+        this.setStatus(`Created ${featureSetLabel} burst feature space for ${formatCount(points.length)} bursts.`);
+      }
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return;
+      }
+      if (this.requestControllers.burstFeatureSpace === controller) {
+        this.burstFeatureSpace = {
+          ...this.makeEmptyBurstFeatureSpace(),
+          status: "error",
+          featureSet,
+          warnings: [error.message],
+        };
+        this.renderBurstFeatureSpace();
+        this.updateActionButtons();
+        this.setStatus(`Burst feature space failed: ${error.message}`, true);
+      }
+    } finally {
+      if (this.requestControllers.burstFeatureSpace === controller) {
+        this.requestControllers.burstFeatureSpace = null;
+        this.updateActionButtons();
+      }
+    }
+  }
+
+  getBurstFeatureSpacePoint(burstId) {
+    const target = String(burstId || "");
+    if (!target) {
+      return null;
+    }
+    return (this.burstFeatureSpace?.points || []).find(
+      point => String(point?.burst_id || "") === target,
+    ) || null;
+  }
+
+  selectBurstFeatureSpacePoint(burstId, { render = true } = {}) {
+    const point = this.getBurstFeatureSpacePoint(burstId);
+    if (!point || !this.burstFeatureSpace) {
+      return null;
+    }
+    this.burstFeatureSpace.selectedBurstId = String(point.burst_id || "");
+    if (render) {
+      this.renderBurstFeatureSpace();
+    }
+    return point;
+  }
+
+  getBurstFeatureSpaceNeighbors(point) {
+    return (Array.isArray(point?.nearest_neighbors) ? point.nearest_neighbors : [])
+      .map(item => ({
+        burstId: String(item?.burst_id || ""),
+        distance: finiteOrNull(item?.distance),
+        rank: finiteOrNull(item?.rank),
+      }))
+      .filter(item => item.burstId);
+  }
+
+  renderBurstFeatureSpaceSelection(point) {
+    if (!point) {
+      return "";
+    }
+    const neighbors = this.getBurstFeatureSpaceNeighbors(point);
+    const main = [
+      String(point.burst_id || ""),
+      point.individual ? `individual ${point.individual}` : "",
+      point.set_name ? `track ${point.set_name}` : "",
+      Number.isFinite(Number(point.n_fixes)) ? `${formatCount(point.n_fixes)} fixes` : "",
+    ].filter(Boolean);
+    return `
+      <div class="movement-feature-space-selection" data-role="feature-space-selection">
+        <div class="movement-feature-space-selection-main">
+          ${main.map((item, index) => (
+            index === 0
+              ? `<strong class="movement-table-cell-mono">${escapeHtml(item)}</strong>`
+              : `<span>${escapeHtml(item)}</span>`
+          )).join("")}
+        </div>
+        ${neighbors.length ? `
+          <div class="movement-feature-space-neighbors" data-role="feature-space-neighbors">
+            <span>Nearest</span>
+            ${neighbors.map(neighbor => {
+              const neighborPoint = this.getBurstFeatureSpacePoint(neighbor.burstId);
+              const label = neighborPoint?.burst_id || neighbor.burstId;
+              const distance = neighbor.distance === null ? "" : ` · ${formatMaybeNumber(neighbor.distance, "")}`;
+              return `<button type="button" data-action="focus-feature-space-neighbor" data-burst-id="${escapeHtml(neighbor.burstId)}">${escapeHtml(label)}${escapeHtml(distance)}</button>`;
+            }).join("")}
+          </div>
+        ` : ""}
+      </div>
+    `;
+  }
+
+  renderBurstFeatureSpacePlot(points, selectedPoint) {
+    const plottedPoints = points
+      .map(point => ({
+        point,
+        x: finiteOrNull(point?.pc1),
+        y: finiteOrNull(point?.pc2),
+      }))
+      .filter(item => item.x !== null && item.y !== null);
+    if (!plottedPoints.length) {
+      return '<div class="movement-table-empty">No projected burst points are available.</div>';
+    }
+    const width = 640;
+    const height = 420;
+    const padding = 30;
+    const xs = plottedPoints.map(item => item.x);
+    const ys = plottedPoints.map(item => item.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const spanX = maxX - minX || 1;
+    const spanY = maxY - minY || 1;
+    const scaleX = value => padding + ((value - minX) / spanX) * (width - (2 * padding));
+    const scaleY = value => height - padding - ((value - minY) / spanY) * (height - (2 * padding));
+    const selectedId = String(selectedPoint?.burst_id || "");
+    const neighborIds = new Set(this.getBurstFeatureSpaceNeighbors(selectedPoint).map(item => item.burstId));
+    const zeroX = minX <= 0 && maxX >= 0 ? scaleX(0) : null;
+    const zeroY = minY <= 0 && maxY >= 0 ? scaleY(0) : null;
+    return `
+      <div class="movement-feature-space-plot">
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="PCA projection of burst feature rows">
+          ${zeroX === null ? "" : `<line class="movement-feature-space-axis" x1="${zeroX}" x2="${zeroX}" y1="${padding}" y2="${height - padding}"></line>`}
+          ${zeroY === null ? "" : `<line class="movement-feature-space-axis" x1="${padding}" x2="${width - padding}" y1="${zeroY}" y2="${zeroY}"></line>`}
+          ${plottedPoints.map(item => {
+            const burstId = String(item.point?.burst_id || "");
+            const isSelected = burstId === selectedId;
+            const isNeighbor = neighborIds.has(burstId);
+            const classNames = [
+              "movement-feature-space-point",
+              isNeighbor ? "is-neighbor" : "",
+              isSelected ? "is-selected" : "",
+            ].filter(Boolean).join(" ");
+            const radius = isSelected ? 7 : isNeighbor ? 5 : 3;
+            return `
+              <circle
+                class="${classNames}"
+                data-action="focus-feature-space-burst"
+                data-burst-id="${escapeHtml(burstId)}"
+                cx="${scaleX(item.x)}"
+                cy="${scaleY(item.y)}"
+                r="${radius}"
+              ><title>${escapeHtml(burstId)}</title></circle>
+            `;
+          }).join("")}
+        </svg>
+      </div>
+    `;
+  }
+
+  renderBurstFeatureSpace() {
+    if (!this.refs?.burstFeatureSpace) {
+      return;
+    }
+    const result = this.burstFeatureSpace || this.makeEmptyBurstFeatureSpace();
+    if (result.status === "idle") {
+      this.refs.burstFeatureSpace.innerHTML = '<div class="movement-table-empty">Run feature space to project automatic bursts.</div>';
+      return;
+    }
+    if (result.status === "loading") {
+      this.refs.burstFeatureSpace.innerHTML = '<div class="movement-table-empty">Building burst feature space...</div>';
+      return;
+    }
+    const points = Array.isArray(result.points) ? result.points : [];
+    const explainedVariance = Array.isArray(result.pca?.explained_variance_ratio)
+      ? result.pca.explained_variance_ratio
+      : [];
+    const fittedFeatures = Array.isArray(result.featureMatrix?.fitted_features)
+      ? result.featureMatrix.fitted_features
+      : [];
+    const metadata = [
+      result.featureSet ? `Feature set: ${String(result.featureSet).replaceAll("_", " ")}` : "",
+      Number.isFinite(Number(explainedVariance[0])) ? `PC1: ${(Number(explainedVariance[0]) * 100).toFixed(1)}%` : "",
+      Number.isFinite(Number(explainedVariance[1])) ? `PC2: ${(Number(explainedVariance[1]) * 100).toFixed(1)}%` : "",
+      `Features: ${formatCount(fittedFeatures.length)}`,
+      `Bursts: ${formatCount(points.length)}`,
+    ].filter(Boolean);
+    const warningsHtml = result.warnings.length
+      ? `<div class="movement-anomaly-warnings">${result.warnings.map(warning => `<div class="movement-anomaly-warning">${escapeHtml(String(warning))}</div>`).join("")}</div>`
+      : "";
+    const selectedPoint = this.getBurstFeatureSpacePoint(result.selectedBurstId);
+    this.refs.burstFeatureSpace.innerHTML = `
+      <div class="movement-feature-space-meta">${metadata.map(item => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+      ${warningsHtml}
+      ${points.length ? this.renderBurstFeatureSpacePlot(points, selectedPoint) : '<div class="movement-table-empty">No burst feature-space points were produced.</div>'}
+      ${this.renderBurstFeatureSpaceSelection(selectedPoint)}
+    `;
+  }
+
+  async inspectBurstFeatureSpacePoint(burstId) {
+    const point = this.selectBurstFeatureSpacePoint(burstId);
+    if (!point) {
+      this.setStatus("Could not find that burst in the current feature-space result.", true);
+      return;
+    }
+    await this.inspectBurstRef(point, {
+      checkFixes: false,
+      isolateIndividual: true,
+    });
+  }
+
+  async inspectBurstFeatureSpaceNeighbor(burstId) {
+    const point = this.getBurstFeatureSpacePoint(burstId);
+    if (!point) {
+      this.setStatus("Could not find that neighbor burst in the current feature-space result.", true);
+      return;
+    }
+    await this.inspectBurstRef(point, {
+      checkFixes: false,
+      isolateIndividual: true,
+      preserveFeatureSpaceSelection: true,
+    });
+  }
+
+  async handleBurstFeatureSpaceClick(event) {
+    const target = event.target.closest("[data-action]");
+    if (!target) {
+      return;
+    }
+    const action = target.dataset.action || "";
+    if (action === "focus-feature-space-burst") {
+      await this.inspectBurstFeatureSpacePoint(target.dataset.burstId || "");
+    } else if (action === "focus-feature-space-neighbor") {
+      await this.inspectBurstFeatureSpaceNeighbor(target.dataset.burstId || "");
     }
   }
 
@@ -3361,6 +3785,10 @@ class MovementExampleApp {
       setName: String(ref.set_name || ref.setName || ""),
       fixKeys: Array.isArray(ref.fix_keys) ? ref.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
     };
+    if (this.getBurstFeatureSpacePoint(this.focusedRankingBurst.burstId)) {
+      this.burstFeatureSpace.selectedBurstId = this.focusedRankingBurst.burstId;
+      this.renderBurstFeatureSpace();
+    }
   }
 
   clearFocusedRankingBurstIfHidden() {
@@ -3411,6 +3839,13 @@ class MovementExampleApp {
       this.setStatus("Could not find that ranked burst in the current ranking result.", true);
       return;
     }
+    await this.inspectBurstRef(ref, { checkFixes });
+  }
+
+  async inspectBurstRef(ref, { checkFixes = false, isolateIndividual = false, preserveFeatureSpaceSelection = false } = {}) {
+    if (!this.data || !ref?.burst_id) {
+      return;
+    }
     const fixKeys = Array.isArray(ref.fix_keys) ? ref.fix_keys : [];
     const preservedFixKeys = new Set(this.data.selectedFixKeys);
     if (checkFixes) {
@@ -3418,7 +3853,9 @@ class MovementExampleApp {
         preservedFixKeys.add(fixKey);
       }
     }
-    if (ref.individual) {
+    if (ref.individual && isolateIndividual) {
+      this.data.selectedIndividuals = new Set([ref.individual]);
+    } else if (ref.individual) {
       this.data.selectedIndividuals.add(ref.individual);
     }
     const startTimeMs = finiteOrNull(ref.start_time_ms);
@@ -3431,7 +3868,14 @@ class MovementExampleApp {
     this.renderIndividuals();
     await this.loadDetailForCurrentSelection({ preservedFixKeys });
 
+    const preservedFeatureSpaceBurstId = preserveFeatureSpaceSelection
+      ? String(this.burstFeatureSpace?.selectedBurstId || "")
+      : "";
     this.setFocusedRankingBurst(ref);
+    if (preserveFeatureSpaceSelection && preservedFeatureSpaceBurstId) {
+      this.burstFeatureSpace.selectedBurstId = preservedFeatureSpaceBurstId;
+      this.renderBurstFeatureSpace();
+    }
     if (checkFixes) {
       const nextSelected = new Set(this.data.selectedFixKeys);
       for (const fixKey of fixKeys) {
@@ -3718,6 +4162,7 @@ class MovementExampleApp {
     this.clearOsmContext({ render: false });
     this.clearCandidateQueryPreview({ render: false });
     this.clearAnomalyRanking({ render: false });
+    this.clearBurstFeatureSpace({ render: false });
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
     this.tableSelection = {
@@ -3736,6 +4181,7 @@ class MovementExampleApp {
     this.refs.individuals.innerHTML = "";
     this.refs.selectedFixes.innerHTML = "";
     this.renderAnomalyRanking();
+    this.renderBurstFeatureSpace();
     this.refs.individualHead.textContent = "Individuals and coverage";
     this.refs.fixHead.textContent = "Checked fixes";
     this.refs.slider.min = "0";
@@ -4076,6 +4522,7 @@ class MovementExampleApp {
   async loadArtifact(preservedFixKeys = new Set()) {
     this.cancelSelectionRequests("artifact");
     this.clearAnomalyRanking();
+    this.clearBurstFeatureSpace();
     const familyName = this.currentFamily;
     const studyName = this.currentStudy;
     const datasetId = this.currentDatasetId;
@@ -5400,7 +5847,7 @@ class MovementExampleApp {
             : item.color,
           getWidth: 5,
           widthMinPixels: 3,
-          pickable: false,
+          pickable: Boolean(this.burstFeatureSpace?.points?.length),
         }),
       );
     }
@@ -5423,7 +5870,7 @@ class MovementExampleApp {
           getRadius: 124,
           radiusMinPixels: 6,
           radiusMaxPixels: 15,
-          pickable: false,
+          pickable: Boolean(this.burstFeatureSpace?.points?.length),
         }),
       );
     }
@@ -5751,8 +6198,64 @@ class MovementExampleApp {
     this.updateActionButtons();
   }
 
+  getMapPickedFeatureSpaceBurst(event) {
+    if (
+      !this.overlay
+      || !this.data
+      || this.refs?.sideSheetTabs?.dataset.activeSheet !== "feature_space"
+      || !(this.burstFeatureSpace?.points || []).length
+    ) {
+      return null;
+    }
+    const point = event?.point;
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+      return null;
+    }
+    const pickedObjects = this.overlay.pickMultipleObjects({
+      x: Number(point.x),
+      y: Number(point.y),
+      radius: 8,
+      depth: 20,
+    }) || [];
+    for (const picked of pickedObjects) {
+      const burstId = String(picked?.object?.burst?.burstId || "");
+      if (burstId && this.getBurstFeatureSpacePoint(burstId)) {
+        return this.data.autoBurstById?.get(burstId) || picked.object.burst;
+      }
+    }
+    return null;
+  }
+
+  selectMapBurstInFeatureSpace(burst) {
+    if (!burst?.burstId) {
+      return false;
+    }
+    const point = this.selectBurstFeatureSpacePoint(burst.burstId, { render: false });
+    if (!point) {
+      return false;
+    }
+    this.setFocusedRankingBurst({
+      burst_id: burst.burstId,
+      individual: burst.individual,
+      set_name: burst.setName,
+      start_time_ms: burst.startTimeMs,
+      end_time_ms: burst.endTimeMs,
+      n_fixes: burst.fixCount,
+      fix_keys: burst.fixKeys,
+    });
+    this.setSideSheet("feature_space");
+    this.renderBurstFeatureSpace();
+    this.renderLayers();
+    this.setStatus(`Selected burst ${burst.burstId} in feature space.`);
+    return true;
+  }
+
   handleMapClick(event) {
     if (!this.overlay || !this.data) {
+      return;
+    }
+    const pickedBurst = this.getMapPickedFeatureSpaceBurst(event);
+    if (pickedBurst && this.selectMapBurstInFeatureSpace(pickedBurst)) {
       return;
     }
     const point = event?.point;
@@ -7479,6 +7982,7 @@ class MovementExampleApp {
     const visibleSuspiciousCount = this.getSuspiciousFixes("", { scope: "visible" }).length;
     const candidatePreviewLoading = this.candidateQueryPreview?.status === "loading";
     const anomalyRankingLoading = this.anomalyRanking?.status === "loading";
+    const burstFeatureSpaceLoading = this.burstFeatureSpace?.status === "loading";
     const returnedCandidateCount = this.getCandidateQueryReturnedMatchKeys().size;
     const selectedCandidateQuery = this.getSelectedCandidateQuery();
     for (const button of [
@@ -7490,6 +7994,7 @@ class MovementExampleApp {
       this.refs.markSuspected,
       this.refs.markConfirmed,
       this.refs.runAnomalyRanking,
+      this.refs.runBurstFeatureSpace,
       this.refs.generateReport,
       this.refs.removeConfirmed,
     ]) {
@@ -7505,9 +8010,10 @@ class MovementExampleApp {
     this.refs.selectSuspicious.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || visibleSuspiciousCount === 0;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
     this.refs.runCandidateQuery.disabled = !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
-    this.refs.runAnomalyRanking.disabled = !hasData || !this.currentArtifact || anomalyRankingLoading;
+    this.refs.runAnomalyRanking.disabled = !hasData || !this.currentArtifact || anomalyRankingLoading || burstFeatureSpaceLoading;
+    this.refs.runBurstFeatureSpace.disabled = !hasData || !this.currentArtifact || burstFeatureSpaceLoading || anomalyRankingLoading;
     if (this.refs.anomalyFeatureSet) {
-      this.refs.anomalyFeatureSet.disabled = !hasData || anomalyRankingLoading;
+      this.refs.anomalyFeatureSet.disabled = !hasData || anomalyRankingLoading || burstFeatureSpaceLoading;
     }
     this.refs.checkCandidates.disabled = !hasData || candidatePreviewLoading || returnedCandidateCount === 0;
     this.refs.clearCandidates.disabled = !hasData || candidatePreviewLoading || this.candidateQueryPreview?.status === "idle";

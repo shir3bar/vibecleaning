@@ -11,6 +11,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.state import load_project_state, project_paths
 from app.web import create_app
+from examples.movement.burst_feature_matrix import prepare_burst_feature_matrix
 from examples.movement.anomaly_ranking import rank_individuals, score_bursts
 from examples.movement.burst_features import build_burst_feature_rows
 from examples.movement.routes import (
@@ -145,6 +146,120 @@ def test_score_bursts_is_deterministic_with_fixed_random_state():
     assert [row["anomaly_score"] for row in first["scored_bursts"]] == [
         row["anomaly_score"] for row in second["scored_bursts"]
     ]
+
+
+def test_prepare_burst_feature_matrix_filters_imputes_and_standardizes_deterministically():
+    rows = [
+        {
+            **_feature_row(0, 1.0, 10.0),
+            "constant_feature": 8.0,
+            "all_null_feature": None,
+            "mixed_feature": 1.0,
+            "missing_feature": 1.0,
+            "osm:nearest_road_distance_m__mean": 5.0,
+        },
+        {
+            **_feature_row(1, 2.0, 20.0),
+            "constant_feature": 8.0,
+            "all_null_feature": None,
+            "mixed_feature": "not numeric",
+            "missing_feature": None,
+            "osm:nearest_road_distance_m__mean": 10.0,
+        },
+        {
+            **_feature_row(2, 3.0, 30.0),
+            "constant_feature": 8.0,
+            "all_null_feature": None,
+            "mixed_feature": 3.0,
+            "missing_feature": 5.0,
+            "osm:nearest_road_distance_m__mean": 15.0,
+        },
+    ]
+
+    prepared = prepare_burst_feature_matrix(rows)
+
+    assert prepared["excluded_metadata"] == [
+        "burst_id",
+        "end_time_ms",
+        "fix_keys",
+        "individual",
+        "n_fixes",
+        "set_name",
+        "start_time_ms",
+    ]
+    assert prepared["candidate_model_features"] == [
+        "all_null_feature",
+        "constant_feature",
+        "mean_speed_mps",
+        "missing_feature",
+        "mixed_feature",
+        "path_length_m",
+    ]
+    assert prepared["excluded_by_feature_set"] == {
+        "osm:nearest_road_distance_m__mean": "context_feature_excluded_from_movement_only",
+    }
+    assert prepared["dropped_features"] == {
+        "all_null_feature": "all_null",
+        "constant_feature": "constant",
+        "mixed_feature": "nonnumeric",
+    }
+    assert prepared["fitted_features"] == [
+        "mean_speed_mps",
+        "missing_feature",
+        "path_length_m",
+    ]
+    assert prepared["feature_medians"] == {
+        "mean_speed_mps": 20.0,
+        "missing_feature": 3.0,
+        "path_length_m": 2.0,
+    }
+    assert prepared["imputed_value_counts"] == {
+        "mean_speed_mps": 0,
+        "missing_feature": 1,
+        "path_length_m": 0,
+    }
+    assert prepared["matrix"] == [
+        [10.0, 1.0, 1.0],
+        [20.0, 3.0, 2.0],
+        [30.0, 5.0, 3.0],
+    ]
+    assert prepared["scaling"] == "none"
+    assert prepared["imputed_matrix"] == prepared["matrix"]
+    assert prepared["feature_means"] == {}
+    assert prepared["feature_scales"] == {}
+
+    standardized = prepare_burst_feature_matrix(rows, standardize=True)
+    assert standardized["scaling"] == "standardize"
+    assert standardized["imputed_matrix"] == prepared["matrix"]
+    assert standardized["feature_means"] == {
+        "mean_speed_mps": 20.0,
+        "missing_feature": 3.0,
+        "path_length_m": 2.0,
+    }
+    assert standardized["feature_scales"] == pytest.approx(
+        {
+            "mean_speed_mps": 8.16496580927726,
+            "missing_feature": 1.632993161855452,
+            "path_length_m": 0.816496580927726,
+        }
+    )
+    for actual, expected in zip(
+        standardized["matrix"],
+        [
+            [-1.224744871391589, -1.224744871391589, -1.224744871391589],
+            [0.0, 0.0, 0.0],
+            [1.224744871391589, 1.224744871391589, 1.224744871391589],
+        ],
+    ):
+        assert actual == pytest.approx(expected)
+
+    with_context = prepare_burst_feature_matrix(
+        rows,
+        feature_set="movement_plus_context",
+    )
+    assert with_context["excluded_by_feature_set"] == {}
+    assert "osm:nearest_road_distance_m__mean" in with_context["candidate_model_features"]
+    assert "osm:nearest_road_distance_m__mean" in with_context["fitted_features"]
 
 
 def test_score_bursts_excludes_metadata_and_records_dropped_and_imputed_features():
