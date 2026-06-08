@@ -329,6 +329,7 @@ class MovementExampleApp {
     this.thresholdInputPendingBlur = false;
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
+    this.focusedRankingBurst = null;
     this.tableSelection = {
       anchorFixKey: "",
       focusFixKey: "",
@@ -1385,12 +1386,28 @@ class MovementExampleApp {
           border: 1px solid rgba(125, 211, 252, 0.12);
           background: rgba(15, 23, 42, 0.48);
         }
+        .movement-anomaly-burst.is-ranking-burst {
+          border-color: rgba(250, 204, 21, 0.35);
+          background: rgba(250, 204, 21, 0.08);
+        }
         .movement-anomaly-burst-main,
         .movement-anomaly-burst-actions {
           display: flex;
           align-items: center;
           gap: 8px;
           flex-wrap: wrap;
+        }
+        .movement-anomaly-burst-rank-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 16px;
+          height: 16px;
+          border-radius: 999px;
+          background: rgba(250, 204, 21, 0.18);
+          color: #fde68a;
+          font-size: 11px;
+          line-height: 1;
         }
         .movement-anomaly-burst-actions button {
           padding: 4px 7px;
@@ -2979,8 +2996,10 @@ class MovementExampleApp {
   clearAnomalyRanking({ render = true } = {}) {
     this.cancelRequest("anomalyRanking");
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
+    this.focusedRankingBurst = null;
     if (render && this.refs) {
       this.renderAnomalyRanking();
+      this.renderLayers();
       this.updateActionButtons();
     }
   }
@@ -3130,35 +3149,63 @@ class MovementExampleApp {
     return -1;
   }
 
+  isCompactWhyItem(item) {
+    const percentile = finiteOrNull(item?.percentile);
+    if (percentile === null) {
+      return false;
+    }
+    if (item.direction === "high") {
+      return percentile >= 80;
+    }
+    if (item.direction === "low") {
+      return percentile <= 20;
+    }
+    return false;
+  }
+
+  whyDirectionLabel(item) {
+    const percentile = finiteOrNull(item?.percentile);
+    if (item.direction === "high") {
+      return percentile >= 95 ? "very high" : "high";
+    }
+    if (item.direction === "low") {
+      return percentile <= 5 ? "very low" : "low";
+    }
+    return "";
+  }
+
+  hasAnomalyExplanationData(ref) {
+    return Boolean(
+      this.normalizeAnomalyExplanationItems(ref.top_high_quantile_features).length
+      || this.normalizeAnomalyExplanationItems(ref.top_low_quantile_features).length
+      || this.normalizeAnomalyExplanationItems(ref.missing_features).length
+    );
+  }
+
   getCompactAnomalyWhyItems(ref) {
     const high = this.normalizeAnomalyExplanationItems(ref.top_high_quantile_features)
       .filter(item => item.direction === "high");
     const low = this.normalizeAnomalyExplanationItems(ref.top_low_quantile_features)
       .filter(item => item.direction === "low");
-    const extremeItems = [...high, ...low]
+    return [...high, ...low]
+      .filter(item => this.isCompactWhyItem(item))
       .sort((left, right) => (
         this.explanationExtremeness(right) - this.explanationExtremeness(left)
         || left.feature.localeCompare(right.feature)
       ))
-      .slice(0, 3);
-    if (extremeItems.length) {
-      return extremeItems;
-    }
-    return this.normalizeAnomalyExplanationItems(ref.missing_features)
-      .filter(item => item.direction === "missing")
       .slice(0, 3);
   }
 
   renderAnomalyWhy(ref) {
     const items = this.getCompactAnomalyWhyItems(ref);
     if (!items.length) {
+      if (this.hasAnomalyExplanationData(ref)) {
+        return `<div class="movement-anomaly-why"><strong>Why:</strong> mixed feature pattern</div>`;
+      }
       return "";
     }
     const parts = items.map(item => {
-      if (item.direction === "missing") {
-        return `missing ${this.anomalyFeatureLabel(item.feature)}`;
-      }
-      const directionLabel = item.direction === "low" ? "very low" : "very high";
+      const directionLabel = this.whyDirectionLabel(item);
       return `${directionLabel} ${this.anomalyFeatureLabel(item.feature)}`;
     });
     return `<div class="movement-anomaly-why"><strong>Why:</strong> ${escapeHtml(parts.join("; "))}</div>`;
@@ -3244,15 +3291,17 @@ class MovementExampleApp {
     }
     return `
       <div class="movement-anomaly-bursts" data-role="ranking-burst-refs">
-        ${refs.map(ref => {
+        ${refs.map((ref, refIndex) => {
+          const isTopRankingBurst = refIndex === 0;
           const fixCount = finiteOrNull(ref.n_fixes ?? ref.fix_count) ?? ref.fix_keys.length;
           const meta = [
             ref.set_name ? `track ${ref.set_name}` : "",
             Number.isFinite(Number(fixCount)) ? `${formatCount(fixCount)} fixes` : "",
           ].filter(Boolean).join(" • ");
           return `
-            <div class="movement-anomaly-burst" data-ranking-burst-id="${escapeHtml(ref.burst_id)}">
+            <div class="movement-anomaly-burst${isTopRankingBurst ? " is-ranking-burst" : ""}" data-ranking-burst-id="${escapeHtml(ref.burst_id)}">
               <div class="movement-anomaly-burst-main">
+                ${isTopRankingBurst ? `<span class="movement-anomaly-burst-rank-badge" aria-label="ranking burst">★</span>` : ""}
                 <span class="movement-table-cell-mono">${escapeHtml(ref.burst_id)}</span>
                 <span>score ${escapeHtml(formatMaybeNumber(finiteOrNull(ref.anomaly_score), ""))}</span>
                 ${meta ? `<span class="movement-subtle">${escapeHtml(meta)}</span>` : ""}
@@ -3301,6 +3350,58 @@ class MovementExampleApp {
     return burst?.path?.length ? burst.path : [];
   }
 
+  setFocusedRankingBurst(ref) {
+    if (!ref?.burst_id) {
+      this.focusedRankingBurst = null;
+      return;
+    }
+    this.focusedRankingBurst = {
+      burstId: String(ref.burst_id || ""),
+      individual: String(ref.individual || ""),
+      setName: String(ref.set_name || ref.setName || ""),
+      fixKeys: Array.isArray(ref.fix_keys) ? ref.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
+    };
+  }
+
+  clearFocusedRankingBurstIfHidden() {
+    if (
+      this.focusedRankingBurst?.individual
+      && this.data?.selectedIndividuals instanceof Set
+      && !this.data.selectedIndividuals.has(this.focusedRankingBurst.individual)
+    ) {
+      this.focusedRankingBurst = null;
+    }
+  }
+
+  getFocusedRankingBurstFixes() {
+    this.clearFocusedRankingBurstIfHidden();
+    if (!this.data || !this.focusedRankingBurst?.fixKeys?.length) {
+      return [];
+    }
+    const focusedFixes = this.focusedRankingBurst.fixKeys
+      .map(fixKey => this.data.fixByKey.get(fixKey))
+      .filter(Boolean)
+      .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
+    if (!focusedFixes.length) {
+      return [];
+    }
+    const visibleSetNames = this.getVisibleSetNames();
+    return focusedFixes.filter(fix => (
+      this.data.selectedIndividuals.has(fix.individual)
+      && visibleSetNames.has(fix.setName)
+    ));
+  }
+
+  mutedRankingContextColor(color, alpha = 42) {
+    const source = Array.isArray(color) ? color : [124, 136, 153, 255];
+    const red = Number(source[0]) || 0;
+    const green = Number(source[1]) || 0;
+    const blue = Number(source[2]) || 0;
+    const gray = Math.round((red * 0.2126) + (green * 0.7152) + (blue * 0.0722));
+    const mutedChannel = channel => Math.round((gray * 0.82) + (channel * 0.18));
+    return [mutedChannel(red), mutedChannel(green), mutedChannel(blue), alpha];
+  }
+
   async inspectRankingBurst(burstId, { checkFixes = false } = {}) {
     if (!this.data) {
       return;
@@ -3330,6 +3431,7 @@ class MovementExampleApp {
     this.renderIndividuals();
     await this.loadDetailForCurrentSelection({ preservedFixKeys });
 
+    this.setFocusedRankingBurst(ref);
     if (checkFixes) {
       const nextSelected = new Set(this.data.selectedFixKeys);
       for (const fixKey of fixKeys) {
@@ -3340,9 +3442,9 @@ class MovementExampleApp {
       this.data.selectedFixKeys = nextSelected;
       this.renderSelectedFixes();
       this.renderThresholdPane();
-      this.renderLayers();
       this.updateActionButtons();
     }
+    this.renderLayers();
 
     const path = this.getRankingBurstPath(ref);
     if (path.length) {
@@ -5173,6 +5275,34 @@ class MovementExampleApp {
       .map(fix => fix.position) || [];
     const thresholdMatchKeys = showPoints ? this.getActiveThresholdMatchKeys() : new Set();
     const candidateMatchKeys = showPoints ? this.getCandidateQueryMatchKeys() : new Set();
+    const focusedRankingBurstFixes = this.getFocusedRankingBurstFixes();
+    const focusedRankingBurstPath = focusedRankingBurstFixes
+      .map(fix => fix.position)
+      .filter(position => Array.isArray(position) && position.length >= 2);
+    const focusedRankingBurstPoints = focusedRankingBurstFixes.map(fix => ({
+      fixKey: fix.fixKey,
+      position: fix.position,
+    }));
+    const hasFocusedRankingBurst = focusedRankingBurstFixes.length > 0;
+    const focusedRankingBurstMarkers = [];
+    if (focusedRankingBurstFixes.length) {
+      const startFix = focusedRankingBurstFixes[0];
+      const endFix = focusedRankingBurstFixes[focusedRankingBurstFixes.length - 1];
+      focusedRankingBurstMarkers.push({
+        markerRole: "start",
+        fixKey: startFix.fixKey,
+        position: startFix.position,
+        fillColor: [34, 211, 238, 245],
+      });
+      if (endFix.fixKey !== startFix.fixKey) {
+        focusedRankingBurstMarkers.push({
+          markerRole: "end",
+          fixKey: endFix.fixKey,
+          position: endFix.position,
+          fillColor: [244, 114, 182, 245],
+        });
+      }
+    }
 
     for (const individual of this.data.individuals) {
       if (!visibleIndividuals.has(individual)) {
@@ -5250,7 +5380,9 @@ class MovementExampleApp {
         id: "movement-paths",
         data: pathData,
         getPath: item => item.path,
-        getColor: item => item.color,
+        getColor: item => hasFocusedRankingBurst
+          ? this.mutedRankingContextColor(item.color, 34)
+          : item.color,
         getWidth: 2.5,
         widthMinPixels: 2,
         pickable: false,
@@ -5263,7 +5395,9 @@ class MovementExampleApp {
           id: "movement-auto-bursts",
           data: visibleAutoBurstPaths,
           getPath: item => item.path,
-          getColor: item => item.color,
+          getColor: item => hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.color, 36)
+            : item.color,
           getWidth: 5,
           widthMinPixels: 3,
           pickable: false,
@@ -5277,8 +5411,12 @@ class MovementExampleApp {
           id: "movement-auto-burst-points",
           data: visibleAutoBurstPoints,
           getPosition: item => item.position,
-          getFillColor: item => item.fillColor,
-          getLineColor: item => item.color,
+          getFillColor: item => hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.fillColor, 18)
+            : item.fillColor,
+          getLineColor: item => hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.color, 42)
+            : item.color,
           filled: true,
           stroked: true,
           lineWidthMinPixels: 2,
@@ -5337,7 +5475,9 @@ class MovementExampleApp {
           id: "movement-points",
           data: pointData,
           getPosition: item => item.position,
-          getFillColor: item => item.color,
+          getFillColor: item => hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.color, 42)
+            : item.color,
           getRadius: 80,
           radiusMinPixels: 4,
           radiusMaxPixels: 10,
@@ -5409,8 +5549,12 @@ class MovementExampleApp {
           id: "movement-selected-points",
           data: selectedPointData,
           getPosition: item => item.position,
-          getFillColor: item => item.color,
-          getLineColor: [255, 255, 255, 255],
+          getFillColor: item => hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.color, 54)
+            : item.color,
+          getLineColor: hasFocusedRankingBurst
+            ? [255, 255, 255, 100]
+            : [255, 255, 255, 255],
           stroked: true,
           lineWidthMinPixels: 1.5,
           getRadius: 130,
@@ -5435,6 +5579,69 @@ class MovementExampleApp {
           getRadius: 190,
           radiusMinPixels: 10,
           radiusMaxPixels: 22,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (focusedRankingBurstPath.length >= 2) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-focused-ranking-burst-path-outline",
+          data: [{ path: focusedRankingBurstPath }],
+          getPath: item => item.path,
+          getColor: [15, 23, 42, 235],
+          getWidth: 10,
+          widthMinPixels: 5,
+          pickable: false,
+        }),
+      );
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-focused-ranking-burst-path",
+          data: [{ path: focusedRankingBurstPath }],
+          getPath: item => item.path,
+          getColor: [216, 180, 254, 245],
+          getWidth: 6,
+          widthMinPixels: 3,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (focusedRankingBurstPoints.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-focused-ranking-burst-points",
+          data: focusedRankingBurstPoints,
+          getPosition: item => item.position,
+          getFillColor: [168, 85, 247, 220],
+          getLineColor: [15, 23, 42, 245],
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 2,
+          getRadius: 146,
+          radiusMinPixels: 7,
+          radiusMaxPixels: 16,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (focusedRankingBurstMarkers.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-focused-ranking-burst-markers",
+          data: focusedRankingBurstMarkers,
+          getPosition: item => item.position,
+          getFillColor: item => item.fillColor,
+          getLineColor: [255, 255, 255, 245],
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 2.5,
+          getRadius: 220,
+          radiusMinPixels: 12,
+          radiusMaxPixels: 24,
           pickable: false,
         }),
       );

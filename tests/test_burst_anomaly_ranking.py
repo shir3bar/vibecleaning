@@ -610,8 +610,42 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert 'data-role="ranking-burst-explanation"' in source
     assert "renderAnomalyWhy(ref)" in source
     assert "getCompactAnomalyWhyItems" in source
+    assert "isCompactWhyItem" in source
+    assert "whyDirectionLabel" in source
+    assert "hasAnomalyExplanationData" in source
     assert "anomalyFeatureLabel" in source
     assert '<strong>Why:</strong>' in source
+    assert "mixed feature pattern" in source
+    assert "percentile >= 80" in source
+    assert "percentile >= 95 ? \"very high\" : \"high\"" in source
+    assert "percentile <= 20" in source
+    assert "percentile <= 5 ? \"very low\" : \"low\"" in source
+    assert ".filter(item => this.isCompactWhyItem(item))" in source
+    assert "movement-anomaly-burst-rank-badge" in source
+    assert "is-ranking-burst" in source
+    assert "★" in source
+    assert "focusedRankingBurst" in source
+    assert "setFocusedRankingBurst(ref)" in source
+    assert "this.setFocusedRankingBurst(ref)" in ranking_handler
+    assert "getFocusedRankingBurstFixes" in source
+    assert "clearFocusedRankingBurstIfHidden" in source
+    assert 'id: "movement-focused-ranking-burst-path-outline"' in source
+    assert 'id: "movement-focused-ranking-burst-path"' in source
+    assert 'id: "movement-focused-ranking-burst-points"' in source
+    assert 'id: "movement-focused-ranking-burst-markers"' in source
+    assert 'markerRole: "start"' in source
+    assert 'markerRole: "end"' in source
+    assert "focusedRankingBurstPath" in source
+    assert "focusedRankingBurstPoints" in source
+    assert "focusedRankingBurstMarkers" in source
+    assert "hasFocusedRankingBurst = focusedRankingBurstFixes.length > 0" in source
+    assert "mutedRankingContextColor" in source
+    assert "this.mutedRankingContextColor(item.color, 34)" in source
+    assert "this.mutedRankingContextColor(item.color, 36)" in source
+    assert "this.mutedRankingContextColor(item.color, 42)" in source
+    assert "getColor: [216, 180, 254, 245]" in source
+    assert "focus-ranking-burst" not in source
+    assert "Focus burst" not in source
     assert "<summary>Details</summary>" in source
     assert "Observed feature-value quantiles, not SHAP/model attribution." in source
     assert "High observed quantiles" in source
@@ -625,7 +659,6 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert 'valueLabel = item.displayValue || (item.direction === "missing" ? "NA" : "n/a")' in source
     assert "very high" in source
     assert "very low" in source
-    assert "missing ${this.anomalyFeatureLabel(item.feature)}" in source
     assert 'direction === "missing" ? 5 : 3' in source
     assert "+${escapeHtml(formatCount(moreCount))} more" in source
     assert "handleAnomalyRankingClick" in source
@@ -645,6 +678,7 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert "scored_burst_count" in source
     assert "formatBurstGapMetadata(parseMovementBurstGap" in source
     assert "summary.model_fit" in source
+    assert "Individuals are ranked by their highest-scoring burst" not in source
     assert "Mark " not in renderer
 
 
