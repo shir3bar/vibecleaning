@@ -5756,14 +5756,12 @@ class MovementExampleApp {
         continue;
       }
       for (const setName of visibleSetNames) {
-        if (suppressedBaseTrackKeys.has(movementTrackKey(individual, setName))) {
-          continue;
-        }
+        const suppressBaseTrack = suppressedBaseTrackKeys.has(movementTrackKey(individual, setName));
         const series = this.buildVisibleTrackSeries(individual, setName);
         if (!series) {
           continue;
         }
-        if (series.positions.length >= 2) {
+        if (!suppressBaseTrack && series.positions.length >= 2) {
           pathData.push({
             individual,
             setName,

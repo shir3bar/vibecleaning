@@ -494,6 +494,10 @@ def test_movement_frontend_includes_auto_burst_controls():
 
 def test_movement_frontend_uses_canonical_track_paths_with_burst_suppression():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    renderer = source[
+        source.index("  renderLayers() {"):
+        source.index("  buildVisibleTrackSeries(")
+    ]
 
     assert "buildVisibleTrackSeries(individual, setName)" in source
     assert "getExactVisibleTrackFixes(individual, setName)" in source
@@ -501,6 +505,12 @@ def test_movement_frontend_uses_canonical_track_paths_with_burst_suppression():
     assert 'source: "sampled-overview"' in source
     assert "suppressedBaseTrackKeys" in source
     assert "movementTrackKey(burst.individual, burst.setName)" in source
+    assert "const suppressBaseTrack = suppressedBaseTrackKeys.has" in renderer
+    assert "if (!suppressBaseTrack && series.positions.length >= 2)" in renderer
+    assert renderer.index("const cursorPosition = interpolateSeriesPosition") > renderer.index(
+        "if (!suppressBaseTrack && series.positions.length >= 2)"
+    )
+    assert "if (suppressBaseTrack) {\n          continue;" not in renderer
 
 
 def test_movement_frontend_uses_on_demand_individual_loading_for_truncated_overviews():
