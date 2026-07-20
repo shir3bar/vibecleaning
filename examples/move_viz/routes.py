@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import tempfile
 from urllib.parse import quote
@@ -245,6 +246,7 @@ def register_move_viz_routes(
     session_root: Path | None = None,
     max_upload_bytes: int | None = None,
     max_rows: int | None = None,
+    sample_database: Path | None = None,
 ) -> None:
     owned_session_root = None
     if session_root is None:
@@ -256,6 +258,7 @@ def register_move_viz_routes(
     app.state.move_viz_temporary_directory = owned_session_root
     upload_limit = max_upload_bytes or int(os.environ.get("MOVE_VIZ_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES))
     row_limit = max_rows or int(os.environ.get("MOVE_VIZ_MAX_ROWS", DEFAULT_MAX_ROWS))
+    resolved_sample_database = sample_database.resolve() if sample_database else None
 
     def session_path(session_id: str) -> Path:
         if not re.fullmatch(r"[a-f0-9]{32}", session_id):
@@ -264,6 +267,30 @@ def register_move_viz_routes(
         if not path.exists():
             raise ValueError("Unknown SQLite session")
         return path
+
+    def session_payload(destination: Path, session_id: str, filename: str, fingerprint: str) -> dict:
+        tables = inspect_sqlite(destination)
+        compatible = [table for table in tables if table["compatible"]]
+        return {
+            "session_id": session_id,
+            "filename": filename,
+            "size": destination.stat().st_size,
+            "fingerprint": fingerprint,
+            "tables": tables,
+            "default_table": compatible[0]["name"] if compatible else "",
+        }
+
+    @app.get("/api/apps/move-viz/health")
+    async def move_viz_health():
+        return JSONResponse(
+            {
+                "status": "ok",
+                "protocol": 2,
+                "max_upload_bytes": upload_limit,
+                "max_rows": row_limit,
+                "sample_available": bool(resolved_sample_database and resolved_sample_database.is_file()),
+            }
+        )
 
     @app.post("/api/apps/move-viz/sessions")
     async def create_session(request: Request, filename: str = "movement.sqlite"):
@@ -284,24 +311,43 @@ def register_move_viz_routes(
                 header = handle.read(len(SQLITE_HEADER))
             if size < len(SQLITE_HEADER) or header != SQLITE_HEADER:
                 raise sqlite3.DatabaseError("The selected file is not a SQLite database")
-            tables = await run_in_threadpool(inspect_sqlite, destination)
+            payload = await run_in_threadpool(
+                session_payload,
+                destination,
+                session_id,
+                safe_filename,
+                digest.hexdigest(),
+            )
         except OverflowError:
             destination.unlink(missing_ok=True)
             return _json_error(f"SQLite file exceeds the {upload_limit}-byte upload limit", 413)
         except (OSError, sqlite3.DatabaseError) as exc:
             destination.unlink(missing_ok=True)
             return _json_error(str(exc), 400)
-        compatible = [table for table in tables if table["compatible"]]
-        return JSONResponse(
-            {
-                "session_id": session_id,
-                "filename": safe_filename,
-                "size": size,
-                "fingerprint": digest.hexdigest(),
-                "tables": tables,
-                "default_table": compatible[0]["name"] if compatible else "",
-            }
-        )
+        return JSONResponse(payload)
+
+    @app.post("/api/apps/move-viz/sessions/example")
+    async def create_example_session():
+        if not resolved_sample_database or not resolved_sample_database.is_file():
+            return _json_error("The bundled SQLite example is not available", 404)
+        session_id = uuid.uuid4().hex
+        destination = session_root / f"{session_id}.sqlite"
+        try:
+            await run_in_threadpool(shutil.copyfile, resolved_sample_database, destination)
+            fingerprint = await run_in_threadpool(
+                lambda: hashlib.sha256(destination.read_bytes()).hexdigest()
+            )
+            payload = await run_in_threadpool(
+                session_payload,
+                destination,
+                session_id,
+                resolved_sample_database.name,
+                fingerprint,
+            )
+            return JSONResponse(payload)
+        except (OSError, sqlite3.DatabaseError) as exc:
+            destination.unlink(missing_ok=True)
+            return _json_error(str(exc), 400)
 
     @app.post("/api/apps/move-viz/sessions/{session_id}/load")
     async def load_session_table(session_id: str, request: Request):

@@ -37,9 +37,19 @@ def create_test_database(path: Path) -> None:
         connection.execute("INSERT INTO notes VALUES ('not movement data')")
 
 
-def create_client(tmp_path: Path, *, max_rows: int = 100_000) -> TestClient:
+def create_client(
+    tmp_path: Path,
+    *,
+    max_rows: int = 100_000,
+    sample_database: Path | None = None,
+) -> TestClient:
     app = create_app(data_root=tmp_path / "data", static_root=MOVE_VIZ_STATIC_ROOT)
-    register_move_viz_routes(app, session_root=tmp_path / "sessions", max_rows=max_rows)
+    register_move_viz_routes(
+        app,
+        session_root=tmp_path / "sessions",
+        max_rows=max_rows,
+        sample_database=sample_database,
+    )
     return TestClient(app)
 
 
@@ -125,6 +135,22 @@ def test_move_viz_applies_row_limit_and_rejects_non_sqlite_files(tmp_path):
     assert "not a SQLite database" in rejected.json()["error"]
 
 
+def test_move_viz_health_and_bundled_example_bypass_browser_upload(tmp_path):
+    database = tmp_path / "movement.sqlite"
+    create_test_database(database)
+    client = create_client(tmp_path, sample_database=database)
+
+    health = client.get("/api/apps/move-viz/health")
+    opened = client.post("/api/apps/move-viz/sessions/example")
+
+    assert health.status_code == 200
+    assert health.json()["protocol"] == 2
+    assert health.json()["sample_available"] is True
+    assert opened.status_code == 200
+    assert opened.json()["filename"] == "movement.sqlite"
+    assert opened.json()["default_table"] == "movement"
+
+
 def test_move_viz_frontend_is_direct_and_lightweight(tmp_path):
     client = create_client(tmp_path)
 
@@ -137,9 +163,13 @@ def test_move_viz_frontend_is_direct_and_lightweight(tmp_path):
     assert "Browse SQLite" in source.text
     assert 'type="file"' in source.text
     assert "XMLHttpRequest" in source.text
+    assert "Checking move_viz server · protocol ${MOVE_VIZ_PROTOCOL}…" in source.text
+    assert "Reading selected file… 0%" in source.text
+    assert "Uploading database… 0%" in source.text
     assert "Uploading database… ${percent}%" in source.text
     assert "Inspecting SQLite tables…" in source.text
     assert "The SQLite upload timed out after two minutes." in source.text
+    assert "/api/apps/move-viz/sessions/example" in source.text
     assert "/api/apps/move-viz/sessions" in source.text
     assert "Color by" in source.text
     assert "Export flags CSV" in source.text

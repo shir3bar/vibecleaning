@@ -1,5 +1,8 @@
 const PALETTE = ["#60a5fa", "#2dd4bf", "#fde047", "#fb923c", "#f472b6", "#a78bfa", "#34d399", "#f87171"];
+const MOVE_VIZ_PROTOCOL = 2;
 const SQLITE_UPLOAD_TIMEOUT_MS = 120_000;
+const SQLITE_READ_TIMEOUT_MS = 30_000;
+const SERVER_CHECK_TIMEOUT_MS = 5_000;
 const BASEMAPS = {
   Positron: rasterStyle("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", ["a", "b", "c", "d"], 20, "#e9edf2", "© OpenStreetMap contributors © CARTO"),
   "Dark Matter": rasterStyle("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", ["a", "b", "c", "d"], 20, "#08111b", "© OpenStreetMap contributors © CARTO"),
@@ -82,7 +85,8 @@ class MoveVizApp {
         <header class="topbar">
           <div class="brand"><strong>move_viz</strong><span>SQLite movement viewer</span></div>
           <label class="file-button">Browse SQLite<input type="file" accept=".sqlite,.sqlite3,.db,application/vnd.sqlite3" data-role="file"></label>
-          <div class="file-meta" data-role="file-meta">No database selected</div>
+          <button type="button" data-role="example">Load bundled example</button>
+          <div class="file-meta" data-role="file-meta">No database selected · client protocol ${MOVE_VIZ_PROTOCOL}</div>
         </header>
         <div class="toolbar hidden" data-role="toolbar">
           <label data-role="table-wrap">Table <select data-role="table"></select></label>
@@ -132,6 +136,7 @@ class MoveVizApp {
 
   bindEvents() {
     this.refs.file.addEventListener("change", () => this.openSelectedFile());
+    this.refs.example.addEventListener("click", () => this.openBundledExample());
     this.refs.table.addEventListener("change", () => this.loadTable(this.refs.table.value));
     this.refs.basemap.addEventListener("change", () => this.changeBasemap());
     this.refs.color.addEventListener("change", () => { this.colorBy = this.refs.color.value; this.renderData(); });
@@ -170,7 +175,58 @@ class MoveVizApp {
     this.refs.status.classList.toggle("error", error);
   }
 
-  uploadSqliteFile(file) {
+  async checkServer() {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), SERVER_CHECK_TIMEOUT_MS);
+    try {
+      const response = await fetch(`/api/apps/move-viz/health?protocol=${MOVE_VIZ_PROTOCOL}`, {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error("The move_viz server is older than this page. Stop it, restart it, and refresh the browser.");
+      }
+      const payload = await response.json();
+      if (payload.protocol !== MOVE_VIZ_PROTOCOL) {
+        throw new Error(`Client/server protocol mismatch (${MOVE_VIZ_PROTOCOL}/${payload.protocol ?? "unknown"}). Restart the server and refresh the page.`);
+      }
+      this.refs.example.hidden = !payload.sample_available;
+      return payload;
+    } catch (error) {
+      if (error.name === "AbortError") {
+        throw new Error("The move_viz server did not answer its health check within five seconds.");
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  async readSqliteFile(file) {
+    this.setStatus("Reading selected file… 0%");
+    let timeout;
+    try {
+      const bytes = await Promise.race([
+        file.arrayBuffer(),
+        new Promise((_, reject) => {
+          timeout = window.setTimeout(
+            () => reject(new Error("The browser could not read the selected file within 30 seconds.")),
+            SQLITE_READ_TIMEOUT_MS,
+          );
+        }),
+      ]);
+      const header = new TextDecoder("ascii").decode(bytes.slice(0, 16));
+      if (header !== "SQLite format 3\u0000") {
+        throw new Error("The selected file is not a SQLite database.");
+      }
+      this.setStatus("Reading selected file… 100%");
+      return bytes;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  uploadSqliteFile(file, bytes) {
     this.uploadRequest?.abort();
     return new Promise((resolve, reject) => {
       const request = new XMLHttpRequest();
@@ -179,6 +235,7 @@ class MoveVizApp {
       request.setRequestHeader("Content-Type", "application/octet-stream");
       request.responseType = "json";
       request.timeout = SQLITE_UPLOAD_TIMEOUT_MS;
+      this.setStatus("Uploading database… 0%");
       request.upload.addEventListener("progress", event => {
         if (!event.lengthComputable) {
           this.setStatus("Uploading database…");
@@ -206,8 +263,16 @@ class MoveVizApp {
         reject(new Error("The SQLite upload timed out after two minutes."));
       });
       request.addEventListener("abort", () => reject(new Error("The previous SQLite upload was cancelled.")));
-      request.send(file);
+      request.send(bytes);
     });
+  }
+
+  async activateSession(payload) {
+    this.session = payload;
+    this.refs.fileMeta.textContent = `${payload.filename} · ${(payload.size / 1024 / 1024).toFixed(2)} MB`;
+    this.populateTables();
+    if (!payload.default_table) throw new Error("No table with recognizable longitude and latitude columns was found");
+    await this.loadTable(payload.default_table);
   }
 
   async openSelectedFile() {
@@ -216,15 +281,29 @@ class MoveVizApp {
     if (this.session?.session_id) {
       void fetch(`/api/apps/move-viz/sessions/${this.session.session_id}`, { method: "DELETE" });
     }
-    this.setStatus("Opening database…");
     this.refs.toolbar.classList.remove("hidden");
     this.refs.fileMeta.textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB`;
     try {
-      const payload = await this.uploadSqliteFile(file);
-      this.session = payload;
-      this.populateTables();
-      if (!payload.default_table) throw new Error("No table with recognizable longitude and latitude columns was found");
-      await this.loadTable(payload.default_table);
+      this.setStatus(`Checking move_viz server · protocol ${MOVE_VIZ_PROTOCOL}…`);
+      await this.checkServer();
+      const bytes = await this.readSqliteFile(file);
+      const payload = await this.uploadSqliteFile(file, bytes);
+      await this.activateSession(payload);
+    } catch (error) {
+      this.setStatus(error.message, true);
+    }
+  }
+
+  async openBundledExample() {
+    this.refs.toolbar.classList.remove("hidden");
+    try {
+      this.setStatus(`Checking move_viz server · protocol ${MOVE_VIZ_PROTOCOL}…`);
+      await this.checkServer();
+      this.setStatus("Opening bundled SQLite example…");
+      const response = await fetch("/api/apps/move-viz/sessions/example", { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Could not open the bundled SQLite example");
+      await this.activateSession(payload);
     } catch (error) {
       this.setStatus(error.message, true);
     }

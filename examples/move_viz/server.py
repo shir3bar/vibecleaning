@@ -24,7 +24,10 @@ app.mount(
     StaticFiles(directory=MOVEMENT_STATIC_ROOT),
     name="move-viz-movement-assets",
 )
-register_move_viz_routes(app)
+register_move_viz_routes(
+    app,
+    sample_database=ROOT / "examples" / "move_viz" / "sample_data" / "synthetic_demo_cp2.sqlite",
+)
 
 
 if __name__ == "__main__":

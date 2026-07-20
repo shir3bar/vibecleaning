@@ -34,6 +34,11 @@ ready-to-use example is included at:
 examples/move_viz/sample_data/synthetic_demo_cp2.sqlite
 ```
 
+You can also click **Load bundled example** to open the same database directly
+from the running server without a browser file upload. The header displays
+`client protocol 2`; if it does not, restart the server and hard-refresh the
+page.
+
 The example contains the 4,800 rows from
 `data/movement_raw/synthetic_demo_cp2/synthetic_demo_cp2.csv`. Regenerate it
 with:
