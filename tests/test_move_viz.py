@@ -136,6 +136,10 @@ def test_move_viz_frontend_is_direct_and_lightweight(tmp_path):
     assert source.status_code == 200
     assert "Browse SQLite" in source.text
     assert 'type="file"' in source.text
+    assert "XMLHttpRequest" in source.text
+    assert "Uploading database… ${percent}%" in source.text
+    assert "Inspecting SQLite tables…" in source.text
+    assert "The SQLite upload timed out after two minutes." in source.text
     assert "/api/apps/move-viz/sessions" in source.text
     assert "Color by" in source.text
     assert "Export flags CSV" in source.text

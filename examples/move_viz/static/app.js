@@ -1,4 +1,5 @@
 const PALETTE = ["#60a5fa", "#2dd4bf", "#fde047", "#fb923c", "#f472b6", "#a78bfa", "#34d399", "#f87171"];
+const SQLITE_UPLOAD_TIMEOUT_MS = 120_000;
 const BASEMAPS = {
   Positron: rasterStyle("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", ["a", "b", "c", "d"], 20, "#e9edf2", "© OpenStreetMap contributors © CARTO"),
   "Dark Matter": rasterStyle("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", ["a", "b", "c", "d"], 20, "#08111b", "© OpenStreetMap contributors © CARTO"),
@@ -70,6 +71,7 @@ class MoveVizApp {
     this.selectedFixes = new Set();
     this.flags = new Map();
     this.colorBy = "";
+    this.uploadRequest = null;
     this.renderShell();
     this.bindEvents();
   }
@@ -168,6 +170,46 @@ class MoveVizApp {
     this.refs.status.classList.toggle("error", error);
   }
 
+  uploadSqliteFile(file) {
+    this.uploadRequest?.abort();
+    return new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      this.uploadRequest = request;
+      request.open("POST", `/api/apps/move-viz/sessions?filename=${encodeURIComponent(file.name)}`);
+      request.setRequestHeader("Content-Type", "application/octet-stream");
+      request.responseType = "json";
+      request.timeout = SQLITE_UPLOAD_TIMEOUT_MS;
+      request.upload.addEventListener("progress", event => {
+        if (!event.lengthComputable) {
+          this.setStatus("Uploading database…");
+          return;
+        }
+        const percent = Math.min(100, Math.round((event.loaded / event.total) * 100));
+        this.setStatus(`Uploading database… ${percent}%`);
+      });
+      request.upload.addEventListener("load", () => this.setStatus("Inspecting SQLite tables…"));
+      request.addEventListener("load", () => {
+        this.uploadRequest = null;
+        const payload = request.response || {};
+        if (request.status >= 200 && request.status < 300) {
+          resolve(payload);
+          return;
+        }
+        reject(new Error(payload.error || `Could not open SQLite file (HTTP ${request.status})`));
+      });
+      request.addEventListener("error", () => {
+        this.uploadRequest = null;
+        reject(new Error("The SQLite upload failed. Check that the move_viz server is still running."));
+      });
+      request.addEventListener("timeout", () => {
+        this.uploadRequest = null;
+        reject(new Error("The SQLite upload timed out after two minutes."));
+      });
+      request.addEventListener("abort", () => reject(new Error("The previous SQLite upload was cancelled.")));
+      request.send(file);
+    });
+  }
+
   async openSelectedFile() {
     const file = this.refs.file.files?.[0];
     if (!file) return;
@@ -178,13 +220,7 @@ class MoveVizApp {
     this.refs.toolbar.classList.remove("hidden");
     this.refs.fileMeta.textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB`;
     try {
-      const response = await fetch(`/api/apps/move-viz/sessions?filename=${encodeURIComponent(file.name)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: file,
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Could not open SQLite file");
+      const payload = await this.uploadSqliteFile(file);
       this.session = payload;
       this.populateTables();
       if (!payload.default_table) throw new Error("No table with recognizable longitude and latitude columns was found");
