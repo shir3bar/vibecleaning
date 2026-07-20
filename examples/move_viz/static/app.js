@@ -1,5 +1,5 @@
 const PALETTE = ["#60a5fa", "#2dd4bf", "#fde047", "#fb923c", "#f472b6", "#a78bfa", "#34d399", "#f87171"];
-const MOVE_VIZ_PROTOCOL = 2;
+const MOVE_VIZ_PROTOCOL = 3;
 const SQLITE_UPLOAD_TIMEOUT_MS = 120_000;
 const SQLITE_READ_TIMEOUT_MS = 30_000;
 const SERVER_CHECK_TIMEOUT_MS = 5_000;
@@ -27,11 +27,6 @@ function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, character => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
   })[character]);
-}
-
-function csvCell(value) {
-  const text = String(value ?? "");
-  return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
 function truthy(value) {
@@ -82,6 +77,7 @@ class MoveVizApp {
     this.flags = new Map();
     this.colorBy = "";
     this.uploadRequest = null;
+    this.reviewBusy = false;
     this.renderShell();
     this.bindEvents();
   }
@@ -129,13 +125,19 @@ class MoveVizApp {
                   <option value="individual">Entire individual</option>
                 </select>
               </label>
+              <input type="text" placeholder="Reviewer name" data-role="user">
               <input type="text" placeholder="Optional review note" data-role="comment">
               <div class="review-actions">
                 <button type="button" class="flag" data-role="flag" disabled>Flag selected</button>
                 <button type="button" data-role="unflag" disabled>Unflag selected</button>
                 <button type="button" data-role="clear-selection" disabled>Clear selection</button>
                 <button type="button" data-role="export" disabled>Export flags CSV</button>
+                <button type="button" data-role="undo" disabled>Undo step</button>
               </div>
+              <details class="review-history">
+                <summary data-role="history-summary">Data graph · initial dataset</summary>
+                <div class="history-list" data-role="history"></div>
+              </details>
             </div>
             <div class="selection-detail" data-role="detail">Click map points to select fixes for review.</div>
           </aside>
@@ -149,6 +151,7 @@ class MoveVizApp {
       this.refs.basemap.add(new Option(name, name));
     }
     this.refs.basemap.value = "Positron";
+    this.refs.user.value = localStorage.getItem("vibecleaning_user_name") || "";
   }
 
   bindEvents() {
@@ -169,10 +172,18 @@ class MoveVizApp {
       this.selectionMode = this.refs.selectionMode.value;
       this.clearFixSelection();
     });
-    this.refs.flag.addEventListener("click", () => this.flagSelection());
-    this.refs.unflag.addEventListener("click", () => this.unflagSelection());
+    this.refs.user.addEventListener("change", () => {
+      localStorage.setItem("vibecleaning_user_name", this.refs.user.value.trim());
+    });
+    this.refs.flag.addEventListener("click", () => void this.flagSelection());
+    this.refs.unflag.addEventListener("click", () => void this.unflagSelection());
     this.refs.clearSelection.addEventListener("click", () => this.clearFixSelection());
-    this.refs.export.addEventListener("click", () => this.exportFlags());
+    this.refs.export.addEventListener("click", () => void this.exportFlags());
+    this.refs.undo.addEventListener("click", () => void this.undoReview());
+    this.refs.history.addEventListener("click", event => {
+      const button = event.target.closest("[data-dataset-id]");
+      if (button) void this.navigateToDataset(button.dataset.datasetId);
+    });
   }
 
   async initializeMap() {
@@ -359,7 +370,7 @@ class MoveVizApp {
       this.selectedFixes.clear();
       this.segmentAnchorKey = "";
       this.refs.selectionMode.disabled = false;
-      this.restoreFlags();
+      this.applyReviewState(payload);
       this.populateColorFields();
       this.renderIndividuals();
       await this.initializeMap();
@@ -574,10 +585,10 @@ class MoveVizApp {
   renderSelectionDetail() {
     const selected = this.data.rows.filter(row => this.selectedFixes.has(row.key));
     const segmentPending = this.selectionMode === "segment" && Boolean(this.segmentAnchorKey);
-    this.refs.flag.disabled = !selected.length || segmentPending;
-    this.refs.unflag.disabled = !selected.some(row => this.flags.has(row.key));
-    this.refs.clearSelection.disabled = !selected.length;
-    this.refs.export.disabled = !this.flags.size;
+    this.refs.flag.disabled = this.reviewBusy || !selected.length || segmentPending;
+    this.refs.unflag.disabled = this.reviewBusy || !selected.some(row => this.flags.has(row.key));
+    this.refs.clearSelection.disabled = this.reviewBusy || !selected.length;
+    this.refs.export.disabled = this.reviewBusy || !this.flags.size;
     if (!selected.length) {
       const instruction = this.selectionMode === "individual"
         ? "Click any fix to select its entire individual."
@@ -602,55 +613,171 @@ class MoveVizApp {
     this.refs.detail.innerHTML = `<dl>${entries.map(([name, value]) => `<dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd>`).join("")}</dl>`;
   }
 
-  flagStorageKey() {
-    return `vibecleaning_move_viz_flags:${this.session.fingerprint}:${this.data.table}`;
+  applyReviewState(payload) {
+    if (!this.session) return;
+    this.session.project_name = payload.project_name || this.session.project_name;
+    this.session.dataset_id = payload.dataset_id || this.session.dataset_id;
+    this.session.graph = payload.graph || this.session.graph;
+    this.session.analyses = payload.analyses || this.session.analyses || [];
+    this.flags = new Map(Object.entries(payload.flags || {}));
+    this.renderHistory();
   }
 
-  restoreFlags() {
-    try {
-      const values = JSON.parse(localStorage.getItem(this.flagStorageKey()) || "{}");
-      this.flags = new Map(Object.entries(values));
-    } catch {
-      this.flags = new Map();
-    }
-  }
-
-  saveFlags() {
-    localStorage.setItem(this.flagStorageKey(), JSON.stringify(Object.fromEntries(this.flags)));
-  }
-
-  flagSelection() {
-    const comment = this.refs.comment.value.trim();
-    for (const key of this.selectedFixes) {
-      this.flags.set(key, { comment, marked_at: new Date().toISOString(), scope: this.selectionMode });
-    }
-    this.saveFlags();
-    this.renderData();
-  }
-
-  unflagSelection() {
-    for (const key of this.selectedFixes) this.flags.delete(key);
-    this.saveFlags();
-    this.renderData();
-  }
-
-  exportFlags() {
-    if (!this.flags.size) return;
-    const rows = this.data.rows.filter(row => this.flags.has(row.key));
-    const header = ["source_file", "table", "row_key", "event_id", "individual", "timestamp", "longitude", "latitude", "selection_scope", "manually-marked-outlier", "outlier_comments"];
-    const body = rows.map(row => {
-      const flag = this.flags.get(row.key);
-      const already = [];
-      if (truthy(row.values["manually-marked-outlier"])) already.push("Already flagged in source: manually-marked-outlier=true");
-      if (truthy(row.values["algorithm-marked-outlier"])) already.push("Already flagged in source: algorithm-marked-outlier=true");
-      return [this.session.filename, this.data.table, row.key, row.values[this.data.mapping.event_id] ?? "", row.individual, row.timestamp ?? "", row.longitude, row.latitude, flag.scope || "fix", "true", [flag.comment, ...already].filter(Boolean).join("; ")];
+  renderHistory() {
+    const graph = this.session?.graph;
+    if (!graph) return;
+    const currentId = graph.current_dataset_id;
+    const stepsByOutput = new Map((graph.steps || []).map(step => [step.output_dataset_id, step]));
+    const analyses = this.session.analyses || [];
+    const datasets = [...(graph.datasets || [])].sort((left, right) => {
+      if (left.dataset_id === graph.root_dataset_id) return -1;
+      if (right.dataset_id === graph.root_dataset_id) return 1;
+      return String(left.created_at || "").localeCompare(String(right.created_at || ""));
     });
-    const csv = [header, ...body].map(row => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-    link.download = `${this.session.filename.replace(/\.(sqlite3?|db)$/i, "") || "movement"}_flags.csv`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    this.refs.historySummary.textContent = `Data graph · ${datasets.length.toLocaleString()} dataset${datasets.length === 1 ? "" : "s"} · ${analyses.length.toLocaleString()} analysis${analyses.length === 1 ? "" : "es"}`;
+    const datasetItems = datasets.map(dataset => {
+      const step = stepsByOutput.get(dataset.dataset_id);
+      const label = step?.title || (dataset.dataset_id === graph.root_dataset_id ? "Initial SQLite import" : dataset.note || "Dataset");
+      const current = dataset.dataset_id === currentId;
+      return `<button type="button" data-dataset-id="${escapeHtml(dataset.dataset_id)}" ${current ? "disabled" : ""}><strong>${escapeHtml(label)}</strong><span>${escapeHtml(dataset.created_at || "")}${current ? " · current" : ""}</span></button>`;
+    }).join("");
+    const analysisItems = analyses.map(analysis => `<div class="history-analysis"><strong>${escapeHtml(analysis.title || "Analysis")}</strong><span>${escapeHtml(analysis.created_at || "")} · ${escapeHtml(analysis.analysis_id || "")}</span></div>`).join("");
+    this.refs.history.innerHTML = datasetItems + analysisItems;
+    const currentDataset = datasets.find(dataset => dataset.dataset_id === currentId);
+    this.refs.undo.disabled = this.reviewBusy || !currentDataset?.parent_dataset_id;
+  }
+
+  setReviewBusy(busy) {
+    this.reviewBusy = busy;
+    this.renderSelectionDetail();
+    this.renderHistory();
+  }
+
+  reviewUser() {
+    const user = this.refs.user.value.trim();
+    if (!user) {
+      this.refs.user.focus();
+      throw new Error("Enter a reviewer name before changing the review graph.");
+    }
+    localStorage.setItem("vibecleaning_user_name", user);
+    return user;
+  }
+
+  async saveReviewOperation(operation) {
+    if (!this.selectedFixes.size || !this.session || !this.data) return;
+    try {
+      const user = this.reviewUser();
+      this.setReviewBusy(true);
+      this.setStatus(`${operation === "flag" ? "Flagging" : "Unflagging"} ${this.selectedFixes.size.toLocaleString()} fixes in a new graph step…`);
+      const response = await fetch(`/api/apps/move-viz/sessions/${this.session.session_id}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          operation,
+          dataset_id: this.session.dataset_id,
+          table: this.data.table,
+          row_keys: [...this.selectedFixes],
+          scope: this.selectionMode,
+          comment: this.refs.comment.value.trim(),
+          user,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Could not save the review graph step");
+      this.applyReviewState(payload);
+      this.renderData();
+      const stepId = payload.step_result?.step?.step_id || "saved step";
+      this.setStatus(`Review graph updated · ${stepId}`);
+    } catch (error) {
+      this.setStatus(error.message, true);
+    } finally {
+      this.setReviewBusy(false);
+    }
+  }
+
+  async flagSelection() {
+    await this.saveReviewOperation("flag");
+  }
+
+  async unflagSelection() {
+    await this.saveReviewOperation("unflag");
+  }
+
+  async undoReview() {
+    if (!this.session || !this.data) return;
+    try {
+      this.setReviewBusy(true);
+      this.setStatus("Moving to the parent dataset…");
+      const response = await fetch(`/api/apps/move-viz/sessions/${this.session.session_id}/undo`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ table: this.data.table }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Could not undo the current review step");
+      this.applyReviewState(payload);
+      this.renderData();
+      this.setStatus("Moved to the parent dataset.");
+    } catch (error) {
+      this.setStatus(error.message, true);
+    } finally {
+      this.setReviewBusy(false);
+    }
+  }
+
+  async navigateToDataset(datasetId) {
+    if (!this.session || !this.data || !datasetId) return;
+    try {
+      this.setReviewBusy(true);
+      this.setStatus("Loading review history stage…");
+      const response = await fetch(`/api/apps/move-viz/sessions/${this.session.session_id}/head`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ table: this.data.table, dataset_id: datasetId }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Could not load that history stage");
+      this.applyReviewState(payload);
+      this.renderData();
+      this.setStatus("Review history stage loaded.");
+    } catch (error) {
+      this.setStatus(error.message, true);
+    } finally {
+      this.setReviewBusy(false);
+    }
+  }
+
+  async exportFlags() {
+    if (!this.flags.size || !this.session || !this.data) return;
+    try {
+      const user = this.reviewUser();
+      this.setReviewBusy(true);
+      this.setStatus("Creating a reproducible flag-export analysis…");
+      const response = await fetch(`/api/apps/move-viz/sessions/${this.session.session_id}/export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dataset_id: this.session.dataset_id,
+          table: this.data.table,
+          user,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Could not export the current graph stage");
+      this.applyReviewState(payload);
+      const link = document.createElement("a");
+      link.href = payload.download_url;
+      link.download = payload.download_name || "move_viz_flags.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      const analysisId = payload.analysis_result?.analysis?.analysis_id || "saved analysis";
+      this.setStatus(`Flag export recorded · ${analysisId}`);
+    } catch (error) {
+      this.setStatus(error.message, true);
+    } finally {
+      this.setReviewBusy(false);
+    }
   }
 }
 

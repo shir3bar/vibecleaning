@@ -1,3 +1,5 @@
+import csv
+import io
 from pathlib import Path
 import re
 import sqlite3
@@ -15,6 +17,7 @@ SAMPLE_DATABASE = REPO_ROOT / "examples" / "move_viz" / "sample_data" / "synthet
 
 from app.web import create_app
 from examples.move_viz.routes import register_move_viz_routes
+from app.state import get_dataset_artifact, load_dataset
 
 
 def create_test_database(path: Path) -> None:
@@ -74,6 +77,15 @@ def test_move_viz_upload_detects_movement_table_and_columns(tmp_path):
     assert opened["filename"] == "movement.sqlite"
     assert len(opened["fingerprint"]) == 64
     assert opened["default_table"] == "movement"
+    assert opened["project_name"].startswith("move_viz_")
+    assert opened["dataset_id"] == opened["graph"]["root_dataset_id"]
+    assert opened["graph"]["current_dataset_id"] == opened["dataset_id"]
+    assert opened["flags"] == {}
+    project_dir = tmp_path / "data" / opened["project_name"]
+    assert (project_dir / "source.sqlite").read_bytes() == database.read_bytes()
+    root_dataset = load_dataset(project_dir, opened["dataset_id"])
+    assert [item["logical_name"] for item in root_dataset["artifacts"]] == ["source.sqlite"]
+    assert root_dataset["artifacts"][0]["storage_type"] == "raw"
     movement = next(table for table in opened["tables"] if table["name"] == "movement")
     notes = next(table for table in opened["tables"] if table["name"] == "notes")
     assert movement["compatible"] is True
@@ -145,11 +157,127 @@ def test_move_viz_health_and_bundled_example_bypass_browser_upload(tmp_path):
     opened = client.post("/api/apps/move-viz/sessions/example")
 
     assert health.status_code == 200
-    assert health.json()["protocol"] == 2
+    assert health.json()["protocol"] == 3
     assert health.json()["sample_available"] is True
     assert opened.status_code == 200
     assert opened.json()["filename"] == "movement.sqlite"
     assert opened.json()["default_table"] == "movement"
+
+
+def test_move_viz_flags_are_graph_steps_and_history_is_loadable(tmp_path):
+    database = tmp_path / "movement.sqlite"
+    create_test_database(database)
+    original = database.read_bytes()
+    client = create_client(tmp_path)
+    opened = upload_database(client, database)
+    session_id = opened["session_id"]
+    root_dataset_id = opened["dataset_id"]
+
+    flagged = client.post(
+        f"/api/apps/move-viz/sessions/{session_id}/review",
+        json={
+            "operation": "flag",
+            "dataset_id": root_dataset_id,
+            "table": "movement",
+            "row_keys": ["event:fix-1#row:1", "event:fix-2#row:2"],
+            "scope": "segment",
+            "comment": "Review this segment",
+            "user": "reviewer",
+        },
+    )
+
+    assert flagged.status_code == 200
+    flagged_payload = flagged.json()
+    flagged_dataset_id = flagged_payload["dataset_id"]
+    assert flagged_dataset_id != root_dataset_id
+    assert len(flagged_payload["graph"]["datasets"]) == 2
+    assert len(flagged_payload["graph"]["steps"]) == 1
+    assert set(flagged_payload["flags"]) == {"event:fix-1#row:1", "event:fix-2#row:2"}
+    assert flagged_payload["flags"]["event:fix-1#row:1"]["scope"] == "segment"
+    assert flagged_payload["flags"]["event:fix-1#row:1"]["comment"] == "Review this segment"
+    assert flagged_payload["flags"]["event:fix-1#row:1"]["step_id"].startswith("step_")
+    step = flagged_payload["step_result"]["step"]
+    assert step["user"] == "reviewer"
+    assert step["parameters"]["app"] == "move_viz"
+    assert step["parameters"]["action"] == "flag"
+    assert step["parameters"]["scope"] == "segment"
+
+    project_dir = tmp_path / "data" / opened["project_name"]
+    dataset = load_dataset(project_dir, flagged_dataset_id)
+    artifacts = {item["logical_name"]: item for item in dataset["artifacts"]}
+    assert artifacts["source.sqlite"]["storage_type"] == "raw"
+    assert artifacts["move_viz_review_annotations.json"]["storage_type"] == "output"
+    for record_path in (step["script_path"], step["spec_path"], step["summary_path"]):
+        assert (project_dir / record_path).is_file()
+    _, graph_source = get_dataset_artifact(project_dir, flagged_dataset_id, "source.sqlite")
+    assert graph_source.read_bytes() == original
+    assert database.read_bytes() == original
+
+    exported = client.post(
+        f"/api/apps/move-viz/sessions/{session_id}/export",
+        json={
+            "dataset_id": flagged_dataset_id,
+            "table": "movement",
+            "user": "reviewer",
+        },
+    )
+    assert exported.status_code == 200
+    export_payload = exported.json()
+    analysis = export_payload["analysis_result"]["analysis"]
+    assert analysis["user"] == "reviewer"
+    assert analysis["parameters"]["action"] == "export_flags_csv"
+    assert export_payload["download_name"] == "movement_flags.csv"
+    assert len(export_payload["graph"]["datasets"]) == 2
+    assert len(export_payload["analyses"]) == 1
+    for record_path in (analysis["script_path"], analysis["spec_path"], analysis["summary_path"]):
+        assert (project_dir / record_path).is_file()
+    download = client.get(export_payload["download_url"])
+    assert download.status_code == 200
+    exported_rows = list(csv.DictReader(io.StringIO(download.text)))
+    assert len(exported_rows) == 2
+    by_event = {row["event_id"]: row for row in exported_rows}
+    assert by_event["fix-1"]["selection_scope"] == "segment"
+    assert by_event["fix-1"]["manually-marked-outlier"] == "true"
+    assert by_event["fix-1"]["flag_step_id"] == step["step_id"]
+    assert "Review this segment" in by_event["fix-1"]["outlier_comments"]
+    assert "Already flagged in source: manually-marked-outlier=true" in by_event["fix-1"]["outlier_comments"]
+    assert "Already flagged in source: algorithm-marked-outlier=true" in by_event["fix-2"]["outlier_comments"]
+
+    reopened = upload_database(client, database)
+    assert reopened["project_name"] == opened["project_name"]
+    assert reopened["dataset_id"] == flagged_dataset_id
+    assert set(reopened["flags"]) == {"event:fix-1#row:1", "event:fix-2#row:2"}
+
+    unflagged = client.post(
+        f"/api/apps/move-viz/sessions/{reopened['session_id']}/review",
+        json={
+            "operation": "unflag",
+            "dataset_id": reopened["dataset_id"],
+            "table": "movement",
+            "row_keys": ["event:fix-1#row:1"],
+            "scope": "fix",
+            "user": "reviewer",
+        },
+    )
+    assert unflagged.status_code == 200
+    assert set(unflagged.json()["flags"]) == {"event:fix-2#row:2"}
+    assert len(unflagged.json()["graph"]["steps"]) == 2
+
+    undone = client.post(
+        f"/api/apps/move-viz/sessions/{reopened['session_id']}/undo",
+        json={"table": "movement"},
+    )
+    assert undone.status_code == 200
+    assert undone.json()["dataset_id"] == flagged_dataset_id
+    assert set(undone.json()["flags"]) == {"event:fix-1#row:1", "event:fix-2#row:2"}
+
+    initial = client.post(
+        f"/api/apps/move-viz/sessions/{reopened['session_id']}/head",
+        json={"table": "movement", "dataset_id": root_dataset_id},
+    )
+    assert initial.status_code == 200
+    assert initial.json()["dataset_id"] == root_dataset_id
+    assert initial.json()["flags"] == {}
 
 
 def test_move_viz_frontend_is_direct_and_lightweight(tmp_path):
@@ -174,10 +302,17 @@ def test_move_viz_frontend_is_direct_and_lightweight(tmp_path):
     assert "/api/apps/move-viz/sessions" in source.text
     assert "Color by" in source.text
     assert "Export flags CSV" in source.text
-    assert "Already flagged in source: manually-marked-outlier=true" in source.text
-    assert "Already flagged in source: algorithm-marked-outlier=true" in source.text
     assert "anomaly ranking" not in source.text.lower()
     assert "/api/projects" not in source.text
+    assert "new graph step" in source.text
+    assert "/review" in source.text
+    assert "/undo" in source.text
+    assert "/head" in source.text
+    assert "/export" in source.text
+    assert "flagStorageKey" not in source.text
+    assert "saveFlags" not in source.text
+    assert "Reviewer name" in source.text
+    assert "Data graph · initial dataset" in source.text
 
 
 def test_move_viz_frontend_references_every_declared_role_consistently():
@@ -223,7 +358,6 @@ def test_move_viz_supports_borderless_fixes_and_compact_scope_selection():
     assert 'sourceFlagged ? "#fbbf24" : "rgba(0,0,0,0)"' in source
     assert '"circle-stroke-width": ["get", "borderWidth"]' in source
     assert 'scope: this.selectionMode' in source
-    assert '"selection_scope"' in source
 
 
 def test_committed_sample_database_matches_raw_demo_shape():

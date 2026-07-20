@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import closing
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -16,11 +17,29 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from app.execution import create_analysis, create_step, set_current_head, undo_to_parent
+from app.state import (
+    ProjectStateError,
+    get_dataset_artifact,
+    graph_payload,
+    load_dataset,
+    load_json,
+    project_state_payload,
+)
+
 
 SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 DEFAULT_MAX_ROWS = 100_000
 NUMERIC_DECLARATIONS = ("INT", "REAL", "FLOA", "DOUB", "NUM", "DEC")
+MOVE_VIZ_PROTOCOL = 3
+SOURCE_ARTIFACT = "source.sqlite"
+REVIEW_ARTIFACT = "move_viz_review_annotations.json"
+REVIEW_STEP_SCRIPT = Path(__file__).with_name("review_step.py").read_text(encoding="utf-8")
+compile(REVIEW_STEP_SCRIPT, str(Path(__file__).with_name("review_step.py")), "exec")
+EXPORT_FLAGS_SCRIPT = Path(__file__).with_name("export_flags_analysis.py").read_text(encoding="utf-8")
+compile(EXPORT_FLAGS_SCRIPT, str(Path(__file__).with_name("export_flags_analysis.py")), "exec")
+EXPORT_FLAGS_ARTIFACT = "move_viz_flags.csv"
 
 COLUMN_ALIASES = {
     "longitude": ("location-long", "longitude", "lon", "lng", "long", "x"),
@@ -41,6 +60,14 @@ COLUMN_ALIASES = {
 
 def _json_error(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status_code)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _quoted_identifier(value: str) -> str:
@@ -248,6 +275,8 @@ def register_move_viz_routes(
     max_rows: int | None = None,
     sample_database: Path | None = None,
 ) -> None:
+    data_root = Path(app.state.data_root).resolve()
+    data_root.mkdir(parents=True, exist_ok=True)
     owned_session_root = None
     if session_root is None:
         owned_session_root = tempfile.TemporaryDirectory(prefix="vibecleaning-move-viz-")
@@ -260,6 +289,29 @@ def register_move_viz_routes(
     row_limit = max_rows or int(os.environ.get("MOVE_VIZ_MAX_ROWS", DEFAULT_MAX_ROWS))
     resolved_sample_database = sample_database.resolve() if sample_database else None
 
+    def project_dir_for_name(project_name: str) -> Path:
+        if not re.fullmatch(r"move_viz_[a-f0-9]{16}", project_name):
+            raise ValueError("Unknown move_viz graph")
+        project_dir = (data_root / project_name).resolve()
+        if data_root not in project_dir.parents:
+            raise ValueError("Unknown move_viz graph")
+        if not project_dir.is_dir():
+            raise ValueError("Unknown move_viz graph")
+        return project_dir
+
+    def ensure_graph_project(source_path: Path, fingerprint: str) -> tuple[str, Path]:
+        project_name = f"move_viz_{fingerprint[:16]}"
+        project_dir = data_root / project_name
+        project_dir.mkdir(parents=True, exist_ok=True)
+        graph_source = project_dir / SOURCE_ARTIFACT
+        if graph_source.exists():
+            if _file_sha256(graph_source) != fingerprint:
+                raise ValueError("The existing move_viz graph has a different source fingerprint")
+        else:
+            shutil.copyfile(source_path, graph_source)
+        project_state_payload(project_dir)
+        return project_name, project_dir
+
     def session_path(session_id: str) -> Path:
         if not re.fullmatch(r"[a-f0-9]{32}", session_id):
             raise ValueError("Unknown SQLite session")
@@ -268,24 +320,81 @@ def register_move_viz_routes(
             raise ValueError("Unknown SQLite session")
         return path
 
+    def session_record(session_id: str) -> dict:
+        session_path(session_id)
+        record_path = session_root / f"{session_id}.json"
+        if not record_path.is_file():
+            raise ValueError("Unknown SQLite session")
+        try:
+            record = load_json(record_path)
+        except ProjectStateError as exc:
+            raise ValueError("Unknown SQLite session") from exc
+        project_dir_for_name(str(record.get("project_name") or ""))
+        return record
+
+    def flags_for_dataset(project_dir: Path, dataset_id: str, table_name: str) -> dict:
+        dataset = load_dataset(project_dir, dataset_id)
+        if not any(item.get("logical_name") == REVIEW_ARTIFACT for item in dataset.get("artifacts", [])):
+            return {}
+        _, artifact_path = get_dataset_artifact(project_dir, dataset_id, REVIEW_ARTIFACT)
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("move_viz review annotations are invalid") from exc
+        tables = payload.get("tables") if isinstance(payload, dict) else None
+        table = tables.get(table_name) if isinstance(tables, dict) else None
+        flags = table.get("flags") if isinstance(table, dict) else None
+        return {
+            str(key): dict(value)
+            for key, value in (flags.items() if isinstance(flags, dict) else [])
+            if isinstance(value, dict)
+        }
+
+    def review_state(project_dir: Path, table_name: str) -> dict:
+        state = project_state_payload(project_dir)
+        dataset_id = str(state["project"]["current_dataset_id"])
+        return {
+            "project_name": project_dir.name,
+            "dataset_id": dataset_id,
+            "graph": graph_payload(project_dir),
+            "flags": flags_for_dataset(project_dir, dataset_id, table_name),
+            "analyses": state["history"]["analyses"],
+        }
+
     def session_payload(destination: Path, session_id: str, filename: str, fingerprint: str) -> dict:
         tables = inspect_sqlite(destination)
         compatible = [table for table in tables if table["compatible"]]
-        return {
+        default_table = compatible[0]["name"] if compatible else ""
+        project_name, project_dir = ensure_graph_project(destination, fingerprint)
+        current_review = review_state(project_dir, default_table)
+        record = {
+            "session_id": session_id,
+            "filename": filename,
+            "fingerprint": fingerprint,
+            "project_name": project_name,
+            "default_table": default_table,
+        }
+        (session_root / f"{session_id}.json").write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        payload = {
             "session_id": session_id,
             "filename": filename,
             "size": destination.stat().st_size,
             "fingerprint": fingerprint,
             "tables": tables,
-            "default_table": compatible[0]["name"] if compatible else "",
+            "default_table": default_table,
         }
+        payload.update(current_review)
+        return payload
 
     @app.get("/api/apps/move-viz/health")
     async def move_viz_health():
         return JSONResponse(
             {
                 "status": "ok",
-                "protocol": 2,
+                "protocol": MOVE_VIZ_PROTOCOL,
                 "max_upload_bytes": upload_limit,
                 "max_rows": row_limit,
                 "sample_available": bool(resolved_sample_database and resolved_sample_database.is_file()),
@@ -321,7 +430,7 @@ def register_move_viz_routes(
         except OverflowError:
             destination.unlink(missing_ok=True)
             return _json_error(f"SQLite file exceeds the {upload_limit}-byte upload limit", 413)
-        except (OSError, sqlite3.DatabaseError) as exc:
+        except (OSError, sqlite3.DatabaseError, ValueError, ProjectStateError) as exc:
             destination.unlink(missing_ok=True)
             return _json_error(str(exc), 400)
         return JSONResponse(payload)
@@ -334,9 +443,7 @@ def register_move_viz_routes(
         destination = session_root / f"{session_id}.sqlite"
         try:
             await run_in_threadpool(shutil.copyfile, resolved_sample_database, destination)
-            fingerprint = await run_in_threadpool(
-                lambda: hashlib.sha256(destination.read_bytes()).hexdigest()
-            )
+            fingerprint = await run_in_threadpool(_file_sha256, destination)
             payload = await run_in_threadpool(
                 session_payload,
                 destination,
@@ -345,7 +452,7 @@ def register_move_viz_routes(
                 fingerprint,
             )
             return JSONResponse(payload)
-        except (OSError, sqlite3.DatabaseError) as exc:
+        except (OSError, sqlite3.DatabaseError, ValueError, ProjectStateError) as exc:
             destination.unlink(missing_ok=True)
             return _json_error(str(exc), 400)
 
@@ -353,6 +460,7 @@ def register_move_viz_routes(
     async def load_session_table(session_id: str, request: Request):
         try:
             path = session_path(session_id)
+            record = session_record(session_id)
         except ValueError as exc:
             return _json_error(str(exc), 404)
         try:
@@ -363,8 +471,196 @@ def register_move_viz_routes(
             return _json_error("Invalid JSON body", 400)
         try:
             result = await run_in_threadpool(load_movement_table, path, payload, max_rows=row_limit)
+            project_dir = project_dir_for_name(str(record["project_name"]))
+            result.update(await run_in_threadpool(review_state, project_dir, str(result["table"])))
             return JSONResponse(result)
         except (ValueError, sqlite3.DatabaseError) as exc:
+            return _json_error(str(exc), 400)
+
+    @app.post("/api/apps/move-viz/sessions/{session_id}/review")
+    async def review_session_rows(session_id: str, request: Request):
+        try:
+            path = session_path(session_id)
+            record = session_record(session_id)
+            project_dir = project_dir_for_name(str(record["project_name"]))
+        except ValueError as exc:
+            return _json_error(str(exc), 404)
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_error("Invalid JSON body", 400)
+        if not isinstance(body, dict):
+            return _json_error("Invalid JSON body", 400)
+        try:
+            operation = str(body.get("operation") or "").strip().lower()
+            if operation not in {"flag", "unflag"}:
+                raise ValueError("Invalid review operation")
+            table_name = str(body.get("table") or "").strip()
+            movement = await run_in_threadpool(
+                load_movement_table,
+                path,
+                {"table": table_name},
+                max_rows=row_limit,
+            )
+            available_keys = {str(row["key"]) for row in movement["rows"]}
+            raw_keys = body.get("row_keys")
+            if not isinstance(raw_keys, list):
+                raise ValueError("Select at least one fix")
+            row_keys = sorted({str(item).strip() for item in raw_keys if str(item).strip()})
+            if not row_keys or len(row_keys) > row_limit:
+                raise ValueError("Select at least one fix")
+            if set(row_keys) - available_keys:
+                raise ValueError("Some selected fixes are not present in the loaded SQLite table")
+            scope = str(body.get("scope") or "fix").strip().lower()
+            if scope not in {"fix", "segment", "individual"}:
+                raise ValueError("Invalid review scope")
+            comment = str(body.get("comment") or "").strip()
+            if len(comment) > 1200:
+                raise ValueError("Review note is too long")
+            user = body.get("user")
+            state = project_state_payload(project_dir)
+            dataset_id = str(state["project"]["current_dataset_id"])
+            requested_dataset_id = str(body.get("dataset_id") or "").strip()
+            if requested_dataset_id and requested_dataset_id != dataset_id:
+                return _json_error("The review graph changed; reload the current stage", 409)
+            dataset = load_dataset(project_dir, dataset_id)
+            get_dataset_artifact(project_dir, dataset_id, SOURCE_ARTIFACT)
+            input_artifacts = [SOURCE_ARTIFACT]
+            if any(item.get("logical_name") == REVIEW_ARTIFACT for item in dataset.get("artifacts", [])):
+                input_artifacts.append(REVIEW_ARTIFACT)
+            step_payload = {
+                "user": user,
+                "title": f"{operation.title()} {len(row_keys)} fixes ({scope}) in {table_name}",
+                "kind": "python",
+                "script": REVIEW_STEP_SCRIPT,
+                "parameters": {
+                    "app": "move_viz",
+                    "action": operation,
+                    "operation": operation,
+                    "table": table_name,
+                    "row_keys": row_keys,
+                    "scope": scope,
+                    "comment": comment,
+                    "source_filename": str(record.get("filename") or ""),
+                    "source_fingerprint": str(record.get("fingerprint") or ""),
+                    "user": user,
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": input_artifacts,
+                "output_artifacts": [REVIEW_ARTIFACT],
+                "set_as_head": True,
+            }
+            step_result = await run_in_threadpool(create_step, project_dir, step_payload)
+            result = {"step_result": step_result}
+            result.update(await run_in_threadpool(review_state, project_dir, table_name))
+            return JSONResponse(result)
+        except (ValueError, ProjectStateError) as exc:
+            return _json_error(str(exc), 400)
+
+    @app.post("/api/apps/move-viz/sessions/{session_id}/undo")
+    async def undo_session_review(session_id: str, request: Request):
+        try:
+            record = session_record(session_id)
+            project_dir = project_dir_for_name(str(record["project_name"]))
+        except ValueError as exc:
+            return _json_error(str(exc), 404)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        table_name = str(body.get("table") or record.get("default_table") or "") if isinstance(body, dict) else ""
+        try:
+            undo_result = await run_in_threadpool(undo_to_parent, project_dir)
+            result = {"undo": undo_result}
+            result.update(await run_in_threadpool(review_state, project_dir, table_name))
+            return JSONResponse(result)
+        except ProjectStateError as exc:
+            return _json_error(str(exc), 400)
+
+    @app.post("/api/apps/move-viz/sessions/{session_id}/export")
+    async def export_session_flags(session_id: str, request: Request):
+        try:
+            path = session_path(session_id)
+            record = session_record(session_id)
+            project_dir = project_dir_for_name(str(record["project_name"]))
+        except ValueError as exc:
+            return _json_error(str(exc), 404)
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_error("Invalid JSON body", 400)
+        if not isinstance(body, dict):
+            return _json_error("Invalid JSON body", 400)
+        try:
+            table_name = str(body.get("table") or "").strip()
+            movement = await run_in_threadpool(
+                load_movement_table,
+                path,
+                {"table": table_name},
+                max_rows=row_limit,
+            )
+            state = project_state_payload(project_dir)
+            dataset_id = str(state["project"]["current_dataset_id"])
+            requested_dataset_id = str(body.get("dataset_id") or "").strip()
+            if requested_dataset_id and requested_dataset_id != dataset_id:
+                return _json_error("The review graph changed; reload the current stage", 409)
+            dataset = load_dataset(project_dir, dataset_id)
+            if not any(item.get("logical_name") == REVIEW_ARTIFACT for item in dataset.get("artifacts", [])):
+                raise ValueError("The current dataset has no flagged fixes to export")
+            if not flags_for_dataset(project_dir, dataset_id, table_name):
+                raise ValueError("The current dataset has no flagged fixes to export")
+            user = body.get("user")
+            analysis_payload = {
+                "user": user,
+                "title": f"Export move_viz flags from {table_name}",
+                "kind": "python",
+                "script": EXPORT_FLAGS_SCRIPT,
+                "dataset_id": dataset_id,
+                "input_artifacts": [SOURCE_ARTIFACT, REVIEW_ARTIFACT],
+                "output_artifacts": [EXPORT_FLAGS_ARTIFACT],
+                "parameters": {
+                    "app": "move_viz",
+                    "action": "export_flags_csv",
+                    "table": table_name,
+                    "mapping": movement["mapping"],
+                    "source_filename": str(record.get("filename") or ""),
+                    "source_fingerprint": str(record.get("fingerprint") or ""),
+                    "user": user,
+                },
+            }
+            analysis_result = await run_in_threadpool(create_analysis, project_dir, analysis_payload)
+            analysis_id = str(analysis_result["analysis"]["analysis_id"])
+            result = {
+                "analysis_result": analysis_result,
+                "download_url": f"/api/project/{project_dir.name}/analysis/{analysis_id}/artifact/{EXPORT_FLAGS_ARTIFACT}",
+                "download_name": f"{Path(str(record.get('filename') or 'movement')).stem}_flags.csv",
+            }
+            result.update(await run_in_threadpool(review_state, project_dir, table_name))
+            return JSONResponse(result)
+        except (ValueError, ProjectStateError) as exc:
+            return _json_error(str(exc), 400)
+
+    @app.post("/api/apps/move-viz/sessions/{session_id}/head")
+    async def set_session_head(session_id: str, request: Request):
+        try:
+            record = session_record(session_id)
+            project_dir = project_dir_for_name(str(record["project_name"]))
+        except ValueError as exc:
+            return _json_error(str(exc), 404)
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_error("Invalid JSON body", 400)
+        if not isinstance(body, dict):
+            return _json_error("Invalid JSON body", 400)
+        table_name = str(body.get("table") or record.get("default_table") or "")
+        dataset_id = str(body.get("dataset_id") or "").strip()
+        try:
+            head = await run_in_threadpool(set_current_head, project_dir, dataset_id)
+            result = {"head": head}
+            result.update(await run_in_threadpool(review_state, project_dir, table_name))
+            return JSONResponse(result)
+        except ProjectStateError as exc:
             return _json_error(str(exc), 400)
 
     @app.delete("/api/apps/move-viz/sessions/{session_id}")
@@ -374,4 +670,5 @@ def register_move_viz_routes(
         except ValueError as exc:
             return _json_error(str(exc), 404)
         path.unlink(missing_ok=True)
+        (session_root / f"{session_id}.json").unlink(missing_ok=True)
         return JSONResponse({"deleted": True})

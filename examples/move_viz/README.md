@@ -12,12 +12,24 @@ It provides:
 - OSM, satellite, topographic, light, and dark basemaps
 - individual filtering and track/point visibility controls
 - explicit manual flagging of fixes, two-click track segments, or entire
-  individuals, persisted in browser storage by database fingerprint
-- export of manually flagged fixes as CSV
+  individuals as reproducible Vibecleaning graph steps
+- a compact history control for loading earlier datasets or undoing the current
+  step
+- export of manually flagged fixes as CSV, recorded as a graph analysis
 
-The uploaded database is copied into a temporary server session and opened
-read-only. `move_viz` never writes to the selected SQLite source. It has no
-anomaly detection, OSM feature queries, reports, or project selector.
+The uploaded database is fingerprinted and imported as the immutable
+`source.sqlite` artifact of an internal `data/move_viz_<fingerprint>/` project.
+Flag and unflag operations create new datasets whose versioned
+`move_viz_review_annotations.json` sidecar records the affected rows, scope,
+reviewer, comment, timestamp, and step ID. The SQLite artifact is reused by
+reference and is never modified. Reopening the same database resumes its graph
+without presenting a project selector.
+
+CSV export runs against the selected dataset and is saved as a graph analysis,
+including its user, script, specification, summary, and output artifact. Export
+does not create a new dataset because it does not change the reviewed data.
+
+`move_viz` has no anomaly detection, OSM feature queries, or report workflow.
 
 ## Run
 
@@ -36,7 +48,7 @@ examples/move_viz/sample_data/synthetic_demo_cp2.sqlite
 
 You can also click **Load bundled example** to open the same database directly
 from the running server without a browser file upload. The header displays
-`client protocol 2`; if it does not, restart the server and hard-refresh the
+`client protocol 3`; if it does not, restart the server and hard-refresh the
 page.
 
 The example contains the 4,800 rows from
