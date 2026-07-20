@@ -72,6 +72,7 @@ class MoveVizApp {
     this.root = root;
     this.map = null;
     this.mapReady = false;
+    this.styleChangeId = 0;
     this.session = null;
     this.data = null;
     this.selectedIndividuals = new Set();
@@ -145,7 +146,9 @@ class MoveVizApp {
     this.refs.file.addEventListener("change", () => this.openSelectedFile());
     this.refs.example.addEventListener("click", () => this.openBundledExample());
     this.refs.table.addEventListener("change", () => this.loadTable(this.refs.table.value));
-    this.refs.basemap.addEventListener("change", () => this.changeBasemap());
+    this.refs.basemap.addEventListener("change", () => {
+      void this.changeBasemap().catch(error => this.setStatus(`Could not switch basemap: ${error.message}`, true));
+    });
     this.refs.color.addEventListener("change", () => { this.colorBy = this.refs.color.value; this.renderData(); });
     this.refs.tracks.addEventListener("change", () => this.renderData());
     this.refs.points.addEventListener("change", () => this.renderData());
@@ -482,11 +485,19 @@ class MoveVizApp {
 
   async changeBasemap() {
     if (!this.map) return;
+    const changeId = ++this.styleChangeId;
     this.mapReady = false;
-    this.map.setStyle(BASEMAPS[this.refs.basemap.value]);
-    await new Promise(resolve => this.map.once("style.load", resolve));
+    const styleLoaded = new Promise(resolve => this.map.once("style.load", resolve));
+    const style = JSON.parse(JSON.stringify(BASEMAPS[this.refs.basemap.value]));
+    this.map.setStyle(style, { diff: false });
+    await styleLoaded;
+    if (changeId !== this.styleChangeId) return;
     this.mapReady = true;
     this.renderData();
+    if (this.data && (!this.map.getSource("move-viz-tracks") || !this.map.getSource("move-viz-points"))) {
+      throw new Error("movement overlays could not be restored");
+    }
+    this.map.triggerRepaint();
   }
 
   fitData() {

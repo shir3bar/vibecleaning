@@ -196,6 +196,20 @@ def test_move_viz_frontend_references_every_declared_role_consistently():
     assert "roleReferenceKey(element.dataset.role)" in source
 
 
+def test_move_viz_rebuilds_overlays_after_atomic_basemap_change():
+    source = (MOVE_VIZ_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+    listener_position = source.index('this.map.once("style.load", resolve)')
+    set_style_position = source.index('this.map.setStyle(style, { diff: false })')
+    render_position = source.index("this.renderData();", set_style_position)
+
+    assert listener_position < set_style_position < render_position
+    assert "const changeId = ++this.styleChangeId" in source
+    assert "if (changeId !== this.styleChangeId) return" in source
+    assert 'this.map.getSource("move-viz-tracks")' in source
+    assert 'this.map.getSource("move-viz-points")' in source
+
+
 def test_committed_sample_database_matches_raw_demo_shape():
     assert SAMPLE_DATABASE.exists()
     assert SAMPLE_DATABASE.read_bytes().startswith(b"SQLite format 3\x00")
