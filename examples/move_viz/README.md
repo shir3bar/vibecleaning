@@ -11,8 +11,8 @@ It provides:
 - all compatible SQLite columns as numeric or categorical color-by options
 - OSM, satellite, topographic, light, and dark basemaps
 - individual filtering and track/point visibility controls
-- explicit manual fix flagging, persisted in browser storage by database
-  fingerprint
+- explicit manual flagging of fixes, two-click track segments, or entire
+  individuals, persisted in browser storage by database fingerprint
 - export of manually flagged fixes as CSV
 
 The uploaded database is copied into a temporary server session and opened

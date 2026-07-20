@@ -210,6 +210,22 @@ def test_move_viz_rebuilds_overlays_after_atomic_basemap_change():
     assert 'this.map.getSource("move-viz-points")' in source
 
 
+def test_move_viz_supports_borderless_fixes_and_compact_scope_selection():
+    source = (MOVE_VIZ_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert '<option value="fix">Single fixes</option>' in source
+    assert '<option value="segment">Track segment (2 clicks)</option>' in source
+    assert '<option value="individual">Entire individual</option>' in source
+    assert "selectSegmentEndpoint(row)" in source
+    assert "candidate.individual === row.individual" in source
+    assert "track.slice(start, end + 1)" in source
+    assert 'borderColor: selected ? "#7dd3fc"' in source
+    assert 'sourceFlagged ? "#fbbf24" : "rgba(0,0,0,0)"' in source
+    assert '"circle-stroke-width": ["get", "borderWidth"]' in source
+    assert 'scope: this.selectionMode' in source
+    assert '"selection_scope"' in source
+
+
 def test_committed_sample_database_matches_raw_demo_shape():
     assert SAMPLE_DATABASE.exists()
     assert SAMPLE_DATABASE.read_bytes().startswith(b"SQLite format 3\x00")

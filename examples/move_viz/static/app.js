@@ -77,6 +77,8 @@ class MoveVizApp {
     this.data = null;
     this.selectedIndividuals = new Set();
     this.selectedFixes = new Set();
+    this.selectionMode = "fix";
+    this.segmentAnchorKey = "";
     this.flags = new Map();
     this.colorBy = "";
     this.uploadRequest = null;
@@ -120,6 +122,13 @@ class MoveVizApp {
             </div>
             <div class="individual-list" data-role="individuals"><div class="status">No movement data loaded.</div></div>
             <div class="review-controls">
+              <label class="review-mode">Select
+                <select data-role="selection-mode" disabled>
+                  <option value="fix">Single fixes</option>
+                  <option value="segment">Track segment (2 clicks)</option>
+                  <option value="individual">Entire individual</option>
+                </select>
+              </label>
               <input type="text" placeholder="Optional review note" data-role="comment">
               <div class="review-actions">
                 <button type="button" class="flag" data-role="flag" disabled>Flag selected</button>
@@ -156,9 +165,13 @@ class MoveVizApp {
     this.refs.search.addEventListener("input", () => this.renderIndividuals());
     this.refs.all.addEventListener("click", () => this.selectAllIndividuals());
     this.refs.none.addEventListener("click", () => this.selectNoIndividuals());
+    this.refs.selectionMode.addEventListener("change", () => {
+      this.selectionMode = this.refs.selectionMode.value;
+      this.clearFixSelection();
+    });
     this.refs.flag.addEventListener("click", () => this.flagSelection());
     this.refs.unflag.addEventListener("click", () => this.unflagSelection());
-    this.refs.clearSelection.addEventListener("click", () => { this.selectedFixes.clear(); this.renderData(); });
+    this.refs.clearSelection.addEventListener("click", () => this.clearFixSelection());
     this.refs.export.addEventListener("click", () => this.exportFlags());
   }
 
@@ -344,6 +357,8 @@ class MoveVizApp {
       this.data = payload;
       this.selectedIndividuals = new Set(payload.rows.map(row => row.individual));
       this.selectedFixes.clear();
+      this.segmentAnchorKey = "";
+      this.refs.selectionMode.disabled = false;
       this.restoreFlags();
       this.populateColorFields();
       this.renderIndividuals();
@@ -432,14 +447,18 @@ class MoveVizApp {
     const pointFeatures = rows.map(row => {
       const sourceManual = truthy(row.values["manually-marked-outlier"]);
       const sourceAlgorithm = truthy(row.values["algorithm-marked-outlier"]);
+      const selected = this.selectedFixes.has(row.key);
+      const flagged = this.flags.has(row.key);
+      const sourceFlagged = sourceManual || sourceAlgorithm;
       return {
         type: "Feature",
         geometry: { type: "Point", coordinates: [row.longitude, row.latitude] },
         properties: {
           key: row.key,
           displayColor: colors.color(row),
-          borderColor: this.selectedFixes.has(row.key) ? "#7dd3fc" : this.flags.has(row.key) ? "#fb7185" : (sourceManual || sourceAlgorithm) ? "#fbbf24" : "#e2e8f0",
-          selected: this.selectedFixes.has(row.key) ? 1 : 0,
+          borderColor: selected ? "#7dd3fc" : flagged ? "#fb7185" : sourceFlagged ? "#fbbf24" : "rgba(0,0,0,0)",
+          borderWidth: selected ? 3 : flagged ? 2.5 : sourceFlagged ? 2 : 0,
+          selected: selected ? 1 : 0,
         },
       };
     });
@@ -462,7 +481,7 @@ class MoveVizApp {
         "circle-radius": ["case", ["==", ["get", "selected"], 1], 7, 4],
         "circle-opacity": 0.88,
         "circle-stroke-color": ["get", "borderColor"],
-        "circle-stroke-width": ["case", ["==", ["get", "selected"], 1], 3, 1.4],
+        "circle-stroke-width": ["get", "borderWidth"],
       },
       layout: { visibility: this.refs.points.checked ? "visible" : "none" },
     });
@@ -511,23 +530,70 @@ class MoveVizApp {
   handleMapClick(event) {
     const key = event.features?.[0]?.properties?.key;
     if (!key) return;
-    if (this.selectedFixes.has(key)) this.selectedFixes.delete(key);
-    else this.selectedFixes.add(key);
+    const row = this.data?.rows.find(candidate => candidate.key === key);
+    if (!row) return;
+    if (this.selectionMode === "individual") {
+      const individualKeys = this.data.rows
+        .filter(candidate => candidate.individual === row.individual)
+        .map(candidate => candidate.key);
+      const remove = individualKeys.every(candidateKey => this.selectedFixes.has(candidateKey));
+      this.selectedFixes = new Set(remove ? [] : individualKeys);
+      this.segmentAnchorKey = "";
+    } else if (this.selectionMode === "segment") {
+      this.selectSegmentEndpoint(row);
+    } else {
+      this.segmentAnchorKey = "";
+      if (this.selectedFixes.has(key)) this.selectedFixes.delete(key);
+      else this.selectedFixes.add(key);
+    }
+    this.renderData();
+  }
+
+  selectSegmentEndpoint(row) {
+    const anchor = this.data.rows.find(candidate => candidate.key === this.segmentAnchorKey);
+    if (!anchor || anchor.individual !== row.individual) {
+      this.segmentAnchorKey = row.key;
+      this.selectedFixes = new Set([row.key]);
+      return;
+    }
+    const track = this.data.rows.filter(candidate => candidate.individual === row.individual);
+    const anchorIndex = track.findIndex(candidate => candidate.key === anchor.key);
+    const endpointIndex = track.findIndex(candidate => candidate.key === row.key);
+    const start = Math.min(anchorIndex, endpointIndex);
+    const end = Math.max(anchorIndex, endpointIndex);
+    this.selectedFixes = new Set(track.slice(start, end + 1).map(candidate => candidate.key));
+    this.segmentAnchorKey = "";
+  }
+
+  clearFixSelection() {
+    this.selectedFixes.clear();
+    this.segmentAnchorKey = "";
     this.renderData();
   }
 
   renderSelectionDetail() {
     const selected = this.data.rows.filter(row => this.selectedFixes.has(row.key));
-    this.refs.flag.disabled = !selected.length;
+    const segmentPending = this.selectionMode === "segment" && Boolean(this.segmentAnchorKey);
+    this.refs.flag.disabled = !selected.length || segmentPending;
     this.refs.unflag.disabled = !selected.some(row => this.flags.has(row.key));
     this.refs.clearSelection.disabled = !selected.length;
     this.refs.export.disabled = !this.flags.size;
     if (!selected.length) {
-      this.refs.detail.textContent = `${this.flags.size.toLocaleString()} manually flagged fixes. Click map points to select fixes for review.`;
+      const instruction = this.selectionMode === "individual"
+        ? "Click any fix to select its entire individual."
+        : this.selectionMode === "segment"
+          ? "Click two fixes from the same individual to select the intervening track segment."
+          : "Click map points to select fixes for review.";
+      this.refs.detail.textContent = `${this.flags.size.toLocaleString()} manually flagged fixes. ${instruction}`;
+      return;
+    }
+    if (segmentPending) {
+      this.refs.detail.textContent = `Segment start selected for ${selected[0].individual}. Click a second fix from that individual.`;
       return;
     }
     const row = selected[0];
     const entries = [
+      ["Scope", this.selectionMode === "individual" ? "Entire individual" : this.selectionMode === "segment" ? "Track segment" : "Fix selection"],
       ["Selected", selected.length.toLocaleString()], ["Individual", row.individual], ["Timestamp", row.timestamp ?? ""],
       ["Longitude", row.longitude], ["Latitude", row.latitude], ["Row key", row.key],
     ];
@@ -555,7 +621,9 @@ class MoveVizApp {
 
   flagSelection() {
     const comment = this.refs.comment.value.trim();
-    for (const key of this.selectedFixes) this.flags.set(key, { comment, marked_at: new Date().toISOString() });
+    for (const key of this.selectedFixes) {
+      this.flags.set(key, { comment, marked_at: new Date().toISOString(), scope: this.selectionMode });
+    }
     this.saveFlags();
     this.renderData();
   }
@@ -569,13 +637,13 @@ class MoveVizApp {
   exportFlags() {
     if (!this.flags.size) return;
     const rows = this.data.rows.filter(row => this.flags.has(row.key));
-    const header = ["source_file", "table", "row_key", "event_id", "individual", "timestamp", "longitude", "latitude", "manually-marked-outlier", "outlier_comments"];
+    const header = ["source_file", "table", "row_key", "event_id", "individual", "timestamp", "longitude", "latitude", "selection_scope", "manually-marked-outlier", "outlier_comments"];
     const body = rows.map(row => {
       const flag = this.flags.get(row.key);
       const already = [];
       if (truthy(row.values["manually-marked-outlier"])) already.push("Already flagged in source: manually-marked-outlier=true");
       if (truthy(row.values["algorithm-marked-outlier"])) already.push("Already flagged in source: algorithm-marked-outlier=true");
-      return [this.session.filename, this.data.table, row.key, row.values[this.data.mapping.event_id] ?? "", row.individual, row.timestamp ?? "", row.longitude, row.latitude, "true", [flag.comment, ...already].filter(Boolean).join("; ")];
+      return [this.session.filename, this.data.table, row.key, row.values[this.data.mapping.event_id] ?? "", row.individual, row.timestamp ?? "", row.longitude, row.latitude, flag.scope || "fix", "true", [flag.comment, ...already].filter(Boolean).join("; ")];
     });
     const csv = [header, ...body].map(row => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
     const link = document.createElement("a");
