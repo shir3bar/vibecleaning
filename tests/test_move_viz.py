@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import sqlite3
 import sys
 
@@ -177,6 +178,22 @@ def test_move_viz_frontend_is_direct_and_lightweight(tmp_path):
     assert "Already flagged in source: algorithm-marked-outlier=true" in source.text
     assert "anomaly ranking" not in source.text.lower()
     assert "/api/projects" not in source.text
+
+
+def test_move_viz_frontend_references_every_declared_role_consistently():
+    source = (MOVE_VIZ_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    declared_roles = set(re.findall(r'data-role="([a-z0-9-]+)"', source))
+    reference_keys = set(re.findall(r"this\.refs\.([A-Za-z][A-Za-z0-9]*)", source))
+    declared_keys = {
+        re.sub(r"-([a-z])", lambda match: match.group(1).upper(), role)
+        for role in declared_roles
+    }
+
+    assert "fileMeta" in declared_keys
+    assert "tableWrap" in declared_keys
+    assert "clearSelection" in declared_keys
+    assert reference_keys <= declared_keys
+    assert "roleReferenceKey(element.dataset.role)" in source
 
 
 def test_committed_sample_database_matches_raw_demo_shape():

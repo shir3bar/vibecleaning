@@ -38,6 +38,10 @@ function truthy(value) {
   return ["true", "1", "yes", "y"].includes(String(value ?? "").trim().toLowerCase());
 }
 
+function roleReferenceKey(role) {
+  return role.replace(/-([a-z])/g, (_, character) => character.toUpperCase());
+}
+
 function colorAt(ratio) {
   const stops = [[59, 130, 246], [45, 212, 191], [253, 224, 71], [249, 115, 22], [239, 68, 68]];
   const scaled = Math.max(0, Math.min(1, ratio)) * (stops.length - 1);
@@ -127,7 +131,10 @@ class MoveVizApp {
           </aside>
         </main>
       </div>`;
-    this.refs = Object.fromEntries([...this.root.querySelectorAll("[data-role]")].map(element => [element.dataset.role, element]));
+    this.refs = Object.fromEntries(
+      [...this.root.querySelectorAll("[data-role]")]
+        .map(element => [roleReferenceKey(element.dataset.role), element]),
+    );
     for (const name of Object.keys(BASEMAPS)) {
       this.refs.basemap.add(new Option(name, name));
     }
