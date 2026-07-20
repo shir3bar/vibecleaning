@@ -1,0 +1,1 @@
+"""Lightweight SQLite movement visualizer."""

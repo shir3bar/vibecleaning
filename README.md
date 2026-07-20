@@ -26,6 +26,7 @@ static/               default starter app frontend
 examples/trajectory/   richer reference app
 examples/movement/     full movement development playground
 examples/slim_movement/ user-facing movement review app
+examples/move_viz/      lightweight SQLite movement viewer
 data/<project>/        project inputs plus .vibecleaning state
 docs/                  minimal contracts for agents
 ```
@@ -40,6 +41,12 @@ Slim movement review:
 
 ```bash
 python examples/slim_movement/server.py
+```
+
+SQLite movement viewer:
+
+```bash
+python examples/move_viz/server.py
 ```
 
 Contracts:
