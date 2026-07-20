@@ -36,3 +36,13 @@ Backend wiring:
 - Frontends should call the generic `/api/...` routes directly when possible.
 - If the UI needs a domain-specific summary or named action, add an app-owned route in the starter app or example app.
 - App-owned routes should translate persistent work into `create_analysis(...)` or `create_step(...)`, not modify lineage files directly.
+
+OpenStreetMap (OSM) development:
+- All OSM-related work should use the shared OSM interaction layer.
+- The OSM layer is generic infrastructure for spatial context, not a cleaning-rule engine.
+- OSM context is ephemeral by default and must not touch review, flagging, or lineage state unless explicitly requested.
+- Future features should define selectors and spatial scope, call queryOsmContext or the backend route, and render temporary overlays through existing map patterns.
+- Broad exists queries must remain constrained and should use explicit element_types.
+- Use scope_signature/query_signature to detect stale overlays when relevant.
+- OSM results may omit unsupported relations or partial geometries; callers should surface metadata when useful.
+- Do not hard-code biological conclusions from OSM matches.

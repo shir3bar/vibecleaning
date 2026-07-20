@@ -1,5 +1,7 @@
+import json
 import textwrap
 import uuid
+from math import isfinite
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -7,10 +9,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.execution import create_analysis, create_step, undo_to_parent
+from app.query_library import get_query
 from app.state import (
     ProjectStateError,
+    dataset_summary,
     get_dataset_artifact,
     graph_payload,
+    list_history,
     load_dataset,
     load_json,
     media_type_for_path,
@@ -20,7 +25,15 @@ from app.state import (
 from app.web import get_project_dir, json_error, parse_json_body, validate_path_part
 
 from .catalog import get_study_dir, list_families, list_studies
-from .summary import DEFAULT_FIX_LIMIT, build_movement_fixes, build_movement_overview, build_movement_summary
+from .summary import (
+    DEFAULT_BURST_GAP_MODE,
+    DEFAULT_BURST_GAP_QUANTILE,
+    DEFAULT_BURST_GAP_SECONDS,
+    DEFAULT_FIX_LIMIT,
+    build_movement_fixes,
+    build_movement_overview,
+    build_movement_summary,
+)
 
 
 def _build_initial_study_payload(study_dir: Path) -> dict:
@@ -41,6 +54,43 @@ def _build_initial_study_payload(study_dir: Path) -> dict:
         "dataset_id": dataset_id,
         "logical_name": logical_name,
     }
+
+
+def _reusable_osm_enrichment_response(
+    study_dir: Path,
+    *,
+    parent_dataset_id: str,
+    logical_name: str,
+    search_radius_m: float,
+) -> dict | None:
+    history = list_history(study_dir)
+    for step in reversed(history["steps"]):
+        parameters = dict(step.get("parameters") or {})
+        summary = dict(step.get("summary") or {})
+        if step.get("parent_dataset_id") != parent_dataset_id:
+            continue
+        if parameters.get("action") != "enrich_osm_context":
+            continue
+        if parameters.get("target_artifact") != logical_name:
+            continue
+        if parameters.get("search_radius_m") != search_radius_m:
+            continue
+        if summary.get("run_status") != "completed" or summary.get("source_type") != "local_extract":
+            continue
+        if "movement_osm_context.csv" not in step.get("output_artifacts", []):
+            continue
+        try:
+            output_dataset = load_dataset(study_dir, step["output_dataset_id"])
+            get_dataset_artifact(study_dir, output_dataset["dataset_id"], "movement_osm_context.csv")
+        except (KeyError, ProjectStateError):
+            continue
+        return {
+            "step": step,
+            "dataset": dataset_summary(output_dataset),
+            "history": history,
+            "reused": True,
+        }
+    return None
 
 
 SCRIPT_SHARED = textwrap.dedent(
@@ -66,6 +116,19 @@ SCRIPT_SHARED = textwrap.dedent(
         "vc_review_user",
         "vc_reviewed_at",
     ]
+
+    SEGMENT_REVIEW_COLUMNS = [
+        "vc_segment_status",
+        "vc_segment_id",
+        "vc_segment_type",
+        "vc_segment_note",
+        "vc_segment_owner_question",
+        "vc_segment_review_user",
+        "vc_segment_reviewed_at",
+        "vc_segment_refs",
+    ]
+
+    ALL_REVIEW_COLUMNS = REVIEW_COLUMNS + SEGMENT_REVIEW_COLUMNS
 
     QUALITY_KEYWORDS = (
         "gps",
@@ -143,7 +206,7 @@ SCRIPT_SHARED = textwrap.dedent(
             ]),
             "set": find_column(normalized, ["set", "split", "partition"]),
         }
-        for name in REVIEW_COLUMNS:
+        for name in ALL_REVIEW_COLUMNS:
             columns[name] = normalized.get(normalize_header(name))
         return columns
 
@@ -220,6 +283,27 @@ SCRIPT_SHARED = textwrap.dedent(
         return cleaned
 
 
+    def clean_segment_payload(item, fallback_status=""):
+        status = normalize_review_status(item.get("status")) or normalize_review_status(fallback_status)
+        if not status:
+            return {}
+        segment = {
+            "status": status,
+            "segment_id": str(item.get("segment_id", "")).strip(),
+            "issue_type": str(item.get("issue_type", "")).strip(),
+            "start_fix_key": str(item.get("start_fix_key", "")).strip(),
+            "end_fix_key": str(item.get("end_fix_key", "")).strip(),
+            "issue_note": str(item.get("issue_note", "")).strip(),
+            "owner_question": str(item.get("owner_question", "")).strip(),
+            "review_user": str(item.get("review_user", "")).strip(),
+            "reviewed_at": str(item.get("reviewed_at", "")).strip(),
+        }
+        cleaned = {key: value for key, value in segment.items() if value}
+        if not cleaned.get("segment_id"):
+            return {}
+        return cleaned
+
+
     def parse_issue_refs(raw):
         row_status = normalize_review_status(raw.get("vc_outlier_status"))
         raw_refs = str(raw.get("vc_issue_refs", "")).strip()
@@ -256,15 +340,40 @@ SCRIPT_SHARED = textwrap.dedent(
         return ""
 
 
+    def parse_segment_refs(raw):
+        row_status = normalize_review_status(raw.get("vc_segment_status"))
+        raw_refs = str(raw.get("vc_segment_refs", "")).strip()
+        if raw_refs:
+            try:
+                parsed = json.loads(raw_refs)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                segments = [clean_segment_payload(item, row_status) for item in parsed if isinstance(item, dict)]
+                segments = [item for item in segments if item]
+                if segments:
+                    return segments
+        legacy = clean_segment_payload({
+            "status": raw.get("vc_segment_status"),
+            "segment_id": raw.get("vc_segment_id"),
+            "issue_type": raw.get("vc_segment_type"),
+            "issue_note": raw.get("vc_segment_note"),
+            "owner_question": raw.get("vc_segment_owner_question"),
+            "review_user": raw.get("vc_segment_review_user"),
+            "reviewed_at": raw.get("vc_segment_reviewed_at"),
+        }, row_status)
+        return [legacy] if legacy else []
+
+
     def extract_quality_fields(fieldnames, columns):
         excluded = {
             value
             for key, value in columns.items()
-            if value and key not in REVIEW_COLUMNS
+            if value and key not in ALL_REVIEW_COLUMNS
         }
         result = []
         for name in fieldnames:
-            if name in excluded or name in REVIEW_COLUMNS:
+            if name in excluded or name in ALL_REVIEW_COLUMNS:
                 continue
             normalized = normalize_header(name)
             if any(keyword in normalized for keyword in QUALITY_KEYWORDS):
@@ -335,6 +444,7 @@ SCRIPT_SHARED = textwrap.dedent(
             for name in REVIEW_COLUMNS:
                 review[name] = str(raw.get(name, "")).strip()
             review["issues"] = parse_issue_refs(raw)
+            segments = parse_segment_refs(raw)
             valid_records.append(
                 {
                     "row_index": row_index,
@@ -347,6 +457,7 @@ SCRIPT_SHARED = textwrap.dedent(
                     "time_text": str(raw.get(columns["time"], "")).strip(),
                     "raw": dict(raw),
                     "review": review,
+                    "segments": segments,
                     "step_length_m": step_length_m,
                     "speed_mps": speed_mps,
                     "time_delta_s": time_delta_s,
@@ -390,6 +501,47 @@ SCRIPT_SHARED = textwrap.dedent(
 
     def html_escape(value):
         return html.escape(str(value or ""), quote=True)
+
+
+    def validate_segment_range(valid_records, start_fix_key, end_fix_key, selected_fix_keys):
+        if not start_fix_key or not end_fix_key:
+            raise SystemExit("A start and end fix are required")
+        by_fix_key = {record["fix_key"]: record for record in valid_records}
+        start_record = by_fix_key.get(start_fix_key)
+        end_record = by_fix_key.get(end_fix_key)
+        if start_record is None or end_record is None:
+            raise SystemExit("Selected segment endpoints were not found in the current dataset")
+        if (
+            start_record["individual"] != end_record["individual"]
+            or start_record["set_name"] != end_record["set_name"]
+        ):
+            raise SystemExit("Segment endpoints must belong to the same track")
+
+        track_records = [
+            record
+            for record in valid_records
+            if record["individual"] == start_record["individual"] and record["set_name"] == start_record["set_name"]
+        ]
+        track_records.sort(key=lambda record: (record["time_ms"], record["row_index"], record["fix_key"]))
+        index_by_fix_key = {record["fix_key"]: index for index, record in enumerate(track_records)}
+        if start_fix_key not in index_by_fix_key or end_fix_key not in index_by_fix_key:
+            raise SystemExit("Segment endpoints could not be resolved in track order")
+        start_index = min(index_by_fix_key[start_fix_key], index_by_fix_key[end_fix_key])
+        end_index = max(index_by_fix_key[start_fix_key], index_by_fix_key[end_fix_key])
+        range_records = track_records[start_index:end_index + 1]
+        range_fix_keys = [record["fix_key"] for record in range_records]
+        selected_set = set(selected_fix_keys or [])
+        if selected_set and set(range_fix_keys) != selected_set:
+            raise SystemExit("Selected fixes must form one contiguous range on a single track")
+        overlapping_segment_ids = sorted({
+            str(segment.get("segment_id", "")).strip()
+            for record in range_records
+            for segment in record.get("segments", [])
+            if str(segment.get("segment_id", "")).strip()
+        })
+        if overlapping_segment_ids:
+            raise SystemExit("This track range already belongs to a flagged segment")
+        return range_records
     """
 ).strip() + "\n"
 
@@ -495,6 +647,118 @@ def main():
             "matched_fix_keys": sorted(matched),
             "missing_fix_keys": sorted(selected_set - matched),
             "annotated_fix_count": len(matched),
+            "reviewed_at": reviewed_at,
+            "review_user": user,
+        })
+
+
+if __name__ == "__main__":
+    main()
+    """
+).strip() + "\n"
+
+
+ANNOTATE_SEGMENT_SCRIPT = SCRIPT_SHARED + textwrap.dedent(
+    """
+
+def main():
+        spec_path = Path(os.environ["VIBECLEANING_SPEC_PATH"])
+        summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
+        spec = json.loads(spec_path.read_text())
+        params = dict(spec["step"].get("parameters") or {})
+        target_artifact = str(params.get("target_artifact") or "").strip()
+        selected_fix_keys = sorted({str(item).strip() for item in params.get("selected_fix_keys", []) if str(item).strip()})
+        start_fix_key = str(params.get("start_fix_key") or "").strip()
+        end_fix_key = str(params.get("end_fix_key") or "").strip()
+        status = str(params.get("status") or "").strip().lower()
+        segment_id = str(params.get("segment_id") or "").strip()
+        issue_type = str(params.get("issue_type") or "").strip()
+        issue_note = str(params.get("issue_note") or "").strip()
+        owner_question = str(params.get("owner_question") or "").strip()
+        user = str(params.get("user") or "").strip()
+        if status not in {"suspected", "confirmed"}:
+            raise SystemExit("Invalid segment status")
+        if not target_artifact:
+            raise SystemExit("Missing target artifact")
+        if not segment_id:
+            raise SystemExit("Missing segment id")
+        if not issue_type:
+            raise SystemExit("Missing segment issue type")
+
+        source = None
+        for artifact in spec.get("input_artifacts", []):
+            if artifact.get("logical_name") == target_artifact:
+                source = artifact
+                break
+        output = None
+        for artifact in spec.get("output_artifacts", []):
+            if artifact.get("logical_name") == target_artifact:
+                output = artifact
+                break
+        if source is None or output is None:
+            raise SystemExit("Missing input or output artifact")
+
+        fieldnames, _, rows, valid_records = load_rows_with_context(source["path"])
+        range_records = validate_segment_range(valid_records, start_fix_key, end_fix_key, selected_fix_keys)
+        context_by_row = {record["row_index"]: record for record in valid_records}
+        range_row_indexes = {record["row_index"] for record in range_records}
+        output_fieldnames = list(fieldnames)
+        for name in SEGMENT_REVIEW_COLUMNS:
+            if name not in output_fieldnames:
+                output_fieldnames.append(name)
+
+        reviewed_at = now_iso()
+        new_segment = clean_segment_payload({
+            "status": status,
+            "segment_id": segment_id,
+            "issue_type": issue_type,
+            "start_fix_key": range_records[0]["fix_key"],
+            "end_fix_key": range_records[-1]["fix_key"],
+            "issue_note": issue_note,
+            "owner_question": owner_question,
+            "review_user": user,
+            "reviewed_at": reviewed_at,
+        })
+
+        output_path = Path(output["path"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", newline="", encoding="utf-8") as output_handle:
+            writer = csv.DictWriter(output_handle, fieldnames=output_fieldnames)
+            writer.writeheader()
+            for row_index, raw in enumerate(rows, start=1):
+                row = dict(raw)
+                context = context_by_row.get(row_index)
+                if context and row_index in range_row_indexes:
+                    segments = parse_segment_refs(raw)
+                    segments.append(new_segment)
+                    row["vc_segment_status"] = status
+                    row["vc_segment_id"] = segment_id
+                    row["vc_segment_type"] = issue_type
+                    row["vc_segment_note"] = issue_note
+                    row["vc_segment_owner_question"] = owner_question
+                    row["vc_segment_review_user"] = user
+                    row["vc_segment_reviewed_at"] = reviewed_at
+                    row["vc_segment_refs"] = json.dumps(segments, sort_keys=True)
+                writer.writerow({name: row.get(name, "") for name in output_fieldnames})
+
+        write_json(summary_path, {
+            "app": "movement",
+            "action": "annotate_segment",
+            "target_artifact": target_artifact,
+            "segment_id": segment_id,
+            "status": status,
+            "issue_type": issue_type,
+            "issue_note": issue_note,
+            "owner_question": owner_question,
+            "start_fix_key": range_records[0]["fix_key"],
+            "end_fix_key": range_records[-1]["fix_key"],
+            "selected_fix_keys": selected_fix_keys,
+            "segment_fix_keys": [record["fix_key"] for record in range_records],
+            "segment_fix_count": len(range_records),
+            "individual": range_records[0]["individual"],
+            "set_name": range_records[0]["set_name"],
+            "start_time_text": range_records[0]["time_text"],
+            "end_time_text": range_records[-1]["time_text"],
             "reviewed_at": reviewed_at,
             "review_user": user,
         })
@@ -1107,6 +1371,30 @@ REPORT_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("report_analysis_templa
 GENERATE_REPORT_SCRIPT = REPORT_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
 compile(GENERATE_REPORT_SCRIPT, str(REPORT_ANALYSIS_TEMPLATE_PATH), "exec")
 
+CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("candidate_query_analysis_template.py")
+CANDIDATE_QUERY_ANALYSIS_SCRIPT = CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+compile(CANDIDATE_QUERY_ANALYSIS_SCRIPT, str(CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH), "exec")
+
+ANOMALY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("anomaly_analysis_template.py")
+BURST_ANOMALY_ANALYSIS_SCRIPT = ANOMALY_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+compile(BURST_ANOMALY_ANALYSIS_SCRIPT, str(ANOMALY_ANALYSIS_TEMPLATE_PATH), "exec")
+
+BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name(
+    "burst_feature_space_analysis_template.py"
+)
+BURST_FEATURE_SPACE_ANALYSIS_SCRIPT = (
+    BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+)
+compile(
+    BURST_FEATURE_SPACE_ANALYSIS_SCRIPT,
+    str(BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH),
+    "exec",
+)
+
+OSM_ENRICHMENT_TEMPLATE_PATH = Path(__file__).with_name("osm_enrichment_template.py")
+OSM_ENRICHMENT_SCRIPT = OSM_ENRICHMENT_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+compile(OSM_ENRICHMENT_SCRIPT, str(OSM_ENRICHMENT_TEMPLATE_PATH), "exec")
+
 
 def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]:
     if value is None and allow_empty:
@@ -1125,6 +1413,10 @@ def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]
     if not unique and not allow_empty:
         raise ValueError("Select at least one fix")
     return unique
+
+
+def _validate_fix_key(value: object, *, label: str) -> str:
+    return _validate_required_text(value, label=label, max_length=240)
 
 
 def _validate_issue_ids(value: object) -> list[str]:
@@ -1312,6 +1604,26 @@ def _validate_report_fixes(value: object) -> list[dict]:
     return cleaned
 
 
+def _validate_query_definition(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("Query definition is required")
+    evaluator = value.get("evaluator")
+    definition = value.get("definition")
+    if not isinstance(evaluator, dict) or not isinstance(definition, dict):
+        raise ValueError("Query definition must include evaluator and definition")
+    if evaluator.get("type") not in {"fix_numeric_comparison", "fix_osm_proximity", "fix_string_comparison"}:
+        raise ValueError("Unsupported candidate query evaluator")
+    return dict(value)
+
+
+def _validate_query_parameters(value: object) -> dict:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("Invalid query parameters")
+    return dict(value)
+
+
 def _validate_report_type(value: object) -> str:
     if value is None:
         return "issue_first"
@@ -1414,6 +1726,55 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             raise ValueError("Invalid limit")
         return value
 
+    def parse_burst_gap_seconds(raw_value: object) -> float:
+        if raw_value in (None, ""):
+            return DEFAULT_BURST_GAP_SECONDS
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid burst_gap_seconds") from exc
+        if not isfinite(value) or value <= 0:
+            raise ValueError("Invalid burst_gap_seconds")
+        return value
+
+    def parse_burst_gap_mode(raw_value: object) -> str:
+        if raw_value in (None, ""):
+            return DEFAULT_BURST_GAP_MODE
+        value = str(raw_value).strip().lower()
+        if value not in {"manual", "quantile"}:
+            raise ValueError("Invalid burst_gap_mode")
+        return value
+
+    def parse_burst_gap_quantile(raw_value: object) -> float:
+        if raw_value in (None, ""):
+            return DEFAULT_BURST_GAP_QUANTILE
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid burst_gap_quantile") from exc
+        if not isfinite(value) or value <= 0.0 or value > 1.0:
+            raise ValueError("Invalid burst_gap_quantile")
+        return value
+
+    def parse_anomaly_feature_set(raw_value: object) -> str:
+        value = str(raw_value or "movement_only").strip()
+        if value in {"movement_only", "movement_plus_context"}:
+            return value
+        raise ValueError("Invalid feature_set")
+
+    def parse_osm_search_radius_m(raw_value: object) -> float:
+        if raw_value in (None, ""):
+            raise ValueError("search_radius_m is required")
+        if isinstance(raw_value, bool):
+            raise ValueError("Invalid search_radius_m")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid search_radius_m") from exc
+        if not isfinite(value) or value <= 0.0:
+            raise ValueError("Invalid search_radius_m")
+        return value
+
     def parse_optional_individual(raw_value: object) -> str:
         if raw_value in (None, ""):
             return ""
@@ -1479,11 +1840,27 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             return json_error(str(exc), 404)
 
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}/overview")
-    async def get_movement_study_overview(family_name: str, study_name: str, dataset_id: str, logical_name: str):
+    async def get_movement_study_overview(
+        family_name: str,
+        study_name: str,
+        dataset_id: str,
+        logical_name: str,
+        burst_gap_mode: str | None = None,
+        burst_gap_seconds: float | None = None,
+        burst_gap_quantile: float | None = None,
+    ):
         try:
             study_dir = get_study_dir(data_root, family_name, study_name)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
-            return JSONResponse(await run_in_threadpool(build_movement_overview, artifact_path))
+            return JSONResponse(
+                await run_in_threadpool(
+                    build_movement_overview,
+                    artifact_path,
+                    burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
+                    burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
+                    burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
+                )
+            )
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
@@ -1499,6 +1876,9 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         end_ms: int | None = None,
         review_status: str = "",
         limit: int | None = None,
+        burst_gap_mode: str | None = None,
+        burst_gap_seconds: float | None = None,
+        burst_gap_quantile: float | None = None,
     ):
         try:
             study_dir = get_study_dir(data_root, family_name, study_name)
@@ -1516,6 +1896,9 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                 end_ms=parse_optional_int(end_ms, label="end_ms"),
                 review_status=str(review_status or "").strip().lower(),
                 limit=parse_optional_limit(limit) if limit not in (None, "") else DEFAULT_FIX_LIMIT,
+                burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
+                burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
+                burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
             )
             return JSONResponse(payload)
         except (ValueError, ProjectStateError) as exc:
@@ -1549,6 +1932,191 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
         return FileResponse(artifact_path, media_type=media_type_for_path(artifact_path))
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-candidate-query")
+    async def post_movement_run_candidate_query(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            user = body.get("user")
+            query_parameters = _validate_query_parameters(body.get("query_parameters", body.get("parameters")))
+            execution_scope = body.get("execution_scope")
+            preview_limit = parse_optional_limit(body.get("preview_limit"))
+
+            query_id = str(body.get("query_id") or "").strip()
+            if query_id:
+                query_version = parse_optional_int(body.get("query_version", body.get("version")), label="query_version")
+                query_definition = _validate_query_definition(get_query(data_root, query_id, version=query_version))
+            else:
+                query_definition = _validate_query_definition(body.get("query_definition"))
+
+            query_label = (
+                str(query_definition.get("name") or "").strip()
+                or str(query_definition.get("query_id") or "").strip()
+                or "inline candidate query"
+            )
+            payload = {
+                "user": user,
+                "title": f"Run candidate query {query_label} on {logical_name}",
+                "kind": "python",
+                "script": CANDIDATE_QUERY_ANALYSIS_SCRIPT,
+                "dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": ["candidate_query_results.json"],
+                "parameters": {
+                    "app": "movement",
+                    "action": "run_candidate_query",
+                    "target_artifact": logical_name,
+                    "dataset_id": dataset_id,
+                    "query_id": query_definition.get("query_id", ""),
+                    "query_version": query_definition.get("version"),
+                    "query_definition": query_definition,
+                    "query_parameters": query_parameters,
+                    "execution_scope": execution_scope,
+                    "preview_limit": preview_limit,
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
+                    "user": user,
+                },
+            }
+            return JSONResponse(create_analysis(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-burst-anomaly-ranking")
+    async def post_movement_run_burst_anomaly_ranking(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            feature_set = parse_anomaly_feature_set(body.get("feature_set"))
+            feature_set_label = (
+                "movement + OSM context"
+                if feature_set == "movement_plus_context"
+                else "movement only"
+            )
+            user = body.get("user")
+            payload = {
+                "user": user,
+                "title": f"Rank automatic movement bursts ({feature_set_label}) for {logical_name}",
+                "kind": "python",
+                "script": BURST_ANOMALY_ANALYSIS_SCRIPT,
+                "dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": ["burst_anomaly_ranking.json"],
+                "parameters": {
+                    "app": "movement",
+                    "action": "run_burst_anomaly_ranking",
+                    "target_artifact": logical_name,
+                    "dataset_id": dataset_id,
+                    "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),
+                    "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
+                    "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
+                    "feature_set": feature_set,
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
+                    "user": user,
+                },
+            }
+            return JSONResponse(create_analysis(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-burst-feature-space")
+    async def post_movement_run_burst_feature_space(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            feature_set = parse_anomaly_feature_set(body.get("feature_set"))
+            feature_set_label = (
+                "movement + OSM context"
+                if feature_set == "movement_plus_context"
+                else "movement only"
+            )
+            user = body.get("user")
+            payload = {
+                "user": user,
+                "title": f"Project automatic movement bursts ({feature_set_label}) for {logical_name}",
+                "kind": "python",
+                "script": BURST_FEATURE_SPACE_ANALYSIS_SCRIPT,
+                "dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": ["burst_feature_space.json"],
+                "parameters": {
+                    "app": "movement",
+                    "action": "run_burst_feature_space",
+                    "target_artifact": logical_name,
+                    "dataset_id": dataset_id,
+                    "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),
+                    "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
+                    "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
+                    "feature_set": feature_set,
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
+                    "user": user,
+                },
+            }
+            return JSONResponse(create_analysis(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/enrich-osm-context")
+    async def post_movement_enrich_osm_context(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            search_radius_m = parse_osm_search_radius_m(body.get("search_radius_m"))
+            confirmed_large_download = body.get("confirmed_large_download", False)
+            if not isinstance(confirmed_large_download, bool):
+                raise ValueError("Invalid confirmed_large_download")
+            user = body.get("user")
+            reusable = _reusable_osm_enrichment_response(
+                study_dir,
+                parent_dataset_id=dataset_id,
+                logical_name=logical_name,
+                search_radius_m=search_radius_m,
+            )
+            if reusable is not None:
+                return JSONResponse(reusable)
+            payload = {
+                "user": user,
+                "title": f"Add OSM road and railway context to {logical_name}",
+                "kind": "python",
+                "script": OSM_ENRICHMENT_SCRIPT,
+                "parameters": {
+                    "app": "movement",
+                    "action": "enrich_osm_context",
+                    "target_artifact": logical_name,
+                    "search_radius_m": search_radius_m,
+                    "confirmed_large_download": confirmed_large_download,
+                    "data_root": str(data_root.resolve()),
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
+                    "user": user,
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": ["movement_osm_context.csv"],
+                "set_as_head": True,
+            }
+            return JSONResponse(create_step(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
 
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/undo")
     async def post_movement_study_undo(family_name: str, study_name: str):
@@ -1592,6 +2160,53 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                     "issue_type": issue_type,
                     "issue_field": issue_field,
                     "issue_threshold": issue_threshold,
+                    "issue_note": issue_note,
+                    "owner_question": owner_question,
+                    "user": user,
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": [logical_name],
+                "set_as_head": True,
+            }
+            return JSONResponse(create_step(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/annotate-segment")
+    async def post_movement_annotate_segment(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            selected_fix_keys = _validate_fix_keys(body.get("selected_fix_keys"))
+            start_fix_key = _validate_fix_key(body.get("start_fix_key"), label="Start fix key")
+            end_fix_key = _validate_fix_key(body.get("end_fix_key"), label="End fix key")
+            status = _validate_status(body.get("status"))
+            issue_type = _validate_required_text(body.get("issue_type"), label="Issue type", max_length=120)
+            issue_note = _validate_required_text(body.get("issue_note"), label="Issue note", max_length=1200)
+            owner_question = _validate_required_text(body.get("owner_question"), label="Owner question", max_length=600)
+            user = body.get("user")
+            segment_id = f"segment_{uuid.uuid4().hex[:12]}"
+
+            payload = {
+                "user": user,
+                "title": f"Mark segment in {logical_name} as {status}",
+                "kind": "python",
+                "script": ANNOTATE_SEGMENT_SCRIPT,
+                "parameters": {
+                    "app": "movement",
+                    "action": "annotate_segment",
+                    "target_artifact": logical_name,
+                    "selected_fix_keys": selected_fix_keys,
+                    "start_fix_key": start_fix_key,
+                    "end_fix_key": end_fix_key,
+                    "status": status,
+                    "segment_id": segment_id,
+                    "issue_type": issue_type,
                     "issue_note": issue_note,
                     "owner_question": owner_question,
                     "user": user,
@@ -1760,6 +2375,53 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                     "issue_type": issue_type,
                     "issue_field": issue_field,
                     "issue_threshold": issue_threshold,
+                    "issue_note": issue_note,
+                    "owner_question": owner_question,
+                    "user": user,
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": [logical_name],
+                "set_as_head": True,
+            }
+            return JSONResponse(create_step(project_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/project/{project_name}/apps/movement/actions/annotate-segment")
+    async def post_annotate_segment(project_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            project_dir = get_project_dir(data_root, project_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            selected_fix_keys = _validate_fix_keys(body.get("selected_fix_keys"))
+            start_fix_key = _validate_fix_key(body.get("start_fix_key"), label="Start fix key")
+            end_fix_key = _validate_fix_key(body.get("end_fix_key"), label="End fix key")
+            status = _validate_status(body.get("status"))
+            issue_type = _validate_required_text(body.get("issue_type"), label="Issue type", max_length=120)
+            issue_note = _validate_required_text(body.get("issue_note"), label="Issue note", max_length=1200)
+            owner_question = _validate_required_text(body.get("owner_question"), label="Owner question", max_length=600)
+            user = body.get("user")
+            segment_id = f"segment_{uuid.uuid4().hex[:12]}"
+
+            payload = {
+                "user": user,
+                "title": f"Mark segment in {logical_name} as {status}",
+                "kind": "python",
+                "script": ANNOTATE_SEGMENT_SCRIPT,
+                "parameters": {
+                    "app": "movement",
+                    "action": "annotate_segment",
+                    "target_artifact": logical_name,
+                    "selected_fix_keys": selected_fix_keys,
+                    "start_fix_key": start_fix_key,
+                    "end_fix_key": end_fix_key,
+                    "status": status,
+                    "segment_id": segment_id,
+                    "issue_type": issue_type,
                     "issue_note": issue_note,
                     "owner_question": owner_question,
                     "user": user,

@@ -1,3 +1,11 @@
+import {
+  buildOsmDeckLayers,
+  fetchOsmContext,
+  scopeFromMapBounds,
+  scopeFromPoint,
+  scopeFromSegmentBounds,
+} from "/static/osm_layer.js";
+
 const LOCAL_BLANK_STYLE = {
   version: 8,
   sources: {},
@@ -12,21 +20,189 @@ const LOCAL_BLANK_STYLE = {
   ],
 };
 
-const BASEMAP_STYLES = {
-  Blank: LOCAL_BLANK_STYLE,
-  Positron: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-  Voyager: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
-  "Dark Matter": "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+const OSM_STREETS_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors';
+const OSM_STREETS_ATTRIBUTION_TEXT = "© OpenStreetMap contributors";
+const CARTO_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>';
+const CARTO_ATTRIBUTION_TEXT = "© OpenStreetMap contributors © CARTO";
+const ESRI_WORLD_IMAGERY_ATTRIBUTION = 'Imagery &copy; <a href="https://www.esri.com/" target="_blank" rel="noreferrer">Esri</a>, Maxar, Earthstar Geographics, and the GIS User Community';
+const ESRI_WORLD_IMAGERY_ATTRIBUTION_TEXT = "Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community";
+const OPENTOPO_ATTRIBUTION = 'Map data: &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors, map style: &copy; <a href="https://opentopomap.org" target="_blank" rel="noreferrer">OpenTopoMap</a>';
+const OPENTOPO_ATTRIBUTION_TEXT = "Map data © OpenStreetMap contributors, style © OpenTopoMap";
+
+function buildRasterStyle({ backgroundColor = "#08111b", sources = {}, layerIds = [] } = {}) {
+  return {
+    version: 8,
+    sources,
+    layers: [
+      {
+        id: "background",
+        type: "background",
+        paint: {
+          "background-color": backgroundColor,
+        },
+      },
+      ...layerIds.map(layerId => ({
+        id: `${layerId}-raster`,
+        type: "raster",
+        source: layerId,
+        minzoom: 0,
+        maxzoom: 22,
+      })),
+    ],
+  };
+}
+
+const OSM_STREETS_STYLE = buildRasterStyle({
+  backgroundColor: "#f6f4ef",
+  sources: {
+    "osm-streets": {
+      type: "raster",
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: OSM_STREETS_ATTRIBUTION,
+    },
+  },
+  layerIds: ["osm-streets"],
+});
+
+const SATELLITE_STYLE = buildRasterStyle({
+  backgroundColor: "#09111a",
+  sources: {
+    "esri-world-imagery": {
+      type: "raster",
+      tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    },
+  },
+  layerIds: ["esri-world-imagery"],
+});
+
+const SATELLITE_LABELS_STYLE = buildRasterStyle({
+  backgroundColor: "#09111a",
+  sources: {
+    "esri-world-imagery": {
+      type: "raster",
+      tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    },
+    "esri-world-transportation": {
+      type: "raster",
+      tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}"],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    },
+    "esri-world-boundaries": {
+      type: "raster",
+      tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    },
+  },
+  layerIds: ["esri-world-imagery", "esri-world-transportation", "esri-world-boundaries"],
+});
+
+const TOPOGRAPHIC_STYLE = buildRasterStyle({
+  backgroundColor: "#dde4d1",
+  sources: {
+    "open-topo": {
+      type: "raster",
+      tiles: ["https://tile.opentopomap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      maxzoom: 17,
+      attribution: OPENTOPO_ATTRIBUTION,
+    },
+  },
+  layerIds: ["open-topo"],
+});
+
+const BASEMAP_PRESETS = {
+  Blank: {
+    name: "Blank",
+    style: LOCAL_BLANK_STYLE,
+    snapshotStyle: LOCAL_BLANK_STYLE,
+    attributionHtml: "",
+    attributionText: "",
+  },
+  Positron: {
+    name: "Positron",
+    style: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+    snapshotStyle: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+    attributionHtml: CARTO_ATTRIBUTION,
+    attributionText: CARTO_ATTRIBUTION_TEXT,
+  },
+  "OSM Streets": {
+    name: "OSM Streets",
+    style: OSM_STREETS_STYLE,
+    snapshotStyle: OSM_STREETS_STYLE,
+    attributionHtml: OSM_STREETS_ATTRIBUTION,
+    attributionText: OSM_STREETS_ATTRIBUTION_TEXT,
+  },
+  Satellite: {
+    name: "Satellite",
+    style: SATELLITE_STYLE,
+    snapshotStyle: SATELLITE_STYLE,
+    attributionHtml: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    attributionText: ESRI_WORLD_IMAGERY_ATTRIBUTION_TEXT,
+  },
+  "Satellite + labels": {
+    name: "Satellite + labels",
+    style: SATELLITE_LABELS_STYLE,
+    snapshotStyle: SATELLITE_LABELS_STYLE,
+    attributionHtml: ESRI_WORLD_IMAGERY_ATTRIBUTION,
+    attributionText: ESRI_WORLD_IMAGERY_ATTRIBUTION_TEXT,
+  },
+  Topographic: {
+    name: "Topographic",
+    style: TOPOGRAPHIC_STYLE,
+    snapshotStyle: TOPOGRAPHIC_STYLE,
+    attributionHtml: OPENTOPO_ATTRIBUTION,
+    attributionText: OPENTOPO_ATTRIBUTION_TEXT,
+  },
 };
 
 const PATH_ALPHA = 110;
 const POINT_ALPHA = 215;
-const STORAGE_VERSION = 3;
+const STORAGE_VERSION = 5;
+const DEFAULT_BURST_GAP_MODE = "quantile";
+const DEFAULT_BURST_GAP_SECONDS = 3600;
+const DEFAULT_BURST_GAP_QUANTILE = 0.999;
+const DEFAULT_SIDE_PANE_WIDTH_PX = 420;
+const MIN_SIDE_PANE_WIDTH_PX = 300;
+const MAX_SIDE_PANE_WIDTH_RATIO = 0.55;
+const SIDE_PANE_HANDLE_WIDTH_PX = 12;
 const MAX_SELECTED_FIXES_SHOWN = 150;
 const DEFAULT_FAMILY = "movement_clean";
 const NUMERIC_COLOR_MIN_QUANTILE = 0.01;
 const NUMERIC_COLOR_MAX_QUANTILE = 0.99;
 const REPORT_SNAPSHOT_IDLE_TIMEOUT_MS = 12000;
+const TABLE_INITIAL_ROW_LIMIT = 250;
+const TABLE_ROW_INCREMENT = 250;
+const FIX_POPUP_DEFAULT_FIELDS = [
+  "set",
+  "fix_key",
+  "review.status",
+  "review.issue_type",
+  "step_length_m",
+  "speed_mps",
+  "time_delta_s",
+];
+const FIX_POPUP_OFFSET_PX = 14;
+const FIX_POPUP_EDGE_PADDING_PX = 12;
+const INDIVIDUAL_COLOR_FIELD_KEY = "individual";
+const INDIVIDUAL_LEGEND_MAX_ITEMS = 24;
+const INDIVIDUAL_COLOR_FIELD = Object.freeze({
+  key: INDIVIDUAL_COLOR_FIELD_KEY,
+  label: "Individual ID",
+  kind: "categorical",
+  source: "identity",
+});
 
 let assetPromise = null;
 
@@ -89,6 +265,7 @@ class MovementExampleApp {
   constructor({ mountEl }) {
     this.mountEl = mountEl;
     this.uiState = this.loadUiState();
+    this.individualSearchQuery = "";
     this.families = [];
     this.studies = [];
     this.graph = null;
@@ -102,6 +279,9 @@ class MovementExampleApp {
     this.currentDataset = null;
     this.currentArtifactEntry = null;
     this.data = null;
+    this.osmContext = null;
+    this.osmContextError = "";
+    this.osmContextStatus = "idle";
     this.currentTimeMs = 0;
     this.loadRequestId = 0;
     this.studyLoadId = 0;
@@ -114,6 +294,11 @@ class MovementExampleApp {
       overview: null,
       detail: null,
       reportDetail: null,
+      osm: null,
+      candidateQuery: null,
+      queryLibrary: null,
+      anomalyRanking: null,
+      burstFeatureSpace: null,
     };
     this.map = null;
     this.mapLoaded = false;
@@ -132,12 +317,44 @@ class MovementExampleApp {
       histogramMin: null,
       histogramMax: null,
     };
+    this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
+    this.anomalyRanking = this.makeEmptyAnomalyRanking();
+    this.burstFeatureSpace = this.makeEmptyBurstFeatureSpace();
+    this.candidateQueryLibrary = {
+      status: "idle",
+      queries: [],
+      selectedKey: "",
+      parameterValues: {},
+      executionScope: "whole_study",
+      error: "",
+    };
     this.thresholdInputPendingBlur = false;
+    this.activeFixPopup = null;
+    this.pendingIssueContext = null;
+    this.focusedRankingBurst = null;
+    this.tableSelection = {
+      anchorFixKey: "",
+      focusFixKey: "",
+      selectedFixKeys: new Set(),
+    };
+    this.tableRenderState = {
+      signature: "",
+      rowLimit: TABLE_INITIAL_ROW_LIMIT,
+    };
+    this.sidePaneWidthPx = finiteOrNull(this.uiState.sidePaneWidthPx) || DEFAULT_SIDE_PANE_WIDTH_PX;
+    this.sidePaneResize = {
+      active: false,
+      pointerId: null,
+    };
+    this.handleWindowResize = () => this.handleLayoutResize();
+    this.handleSidePanePointerMove = event => this.onSidePanePointerMove(event);
+    this.handleSidePanePointerUp = event => this.onSidePanePointerUp(event);
   }
 
   async init() {
     this.renderShell();
     this.bindEvents();
+    this.renderCandidateQueryLibraryControls();
     this.showOverlay("Loading the movement review workspace...");
     this.setStatus("Loading movement review workspace...");
     try {
@@ -149,6 +366,7 @@ class MovementExampleApp {
       this.setStatus(`Map assets could not be loaded: ${error.message}`, true);
       this.showOverlay("Map assets could not be loaded. You can still switch studies and inspect summaries.");
     }
+    void this.loadCandidateQueryLibrary();
     await this.loadFamilies();
   }
 
@@ -168,11 +386,22 @@ class MovementExampleApp {
         version: STORAGE_VERSION,
         family: familyPresetFromLocation() || DEFAULT_FAMILY,
         study: "",
-        basemap: "Blank",
+        basemap: "Positron",
         showTrain: true,
         showTest: true,
         showPoints: true,
+        showBursts: true,
+        burstGapMode: DEFAULT_BURST_GAP_MODE,
+        burstGapSeconds: DEFAULT_BURST_GAP_SECONDS,
+        burstGapQuantile: DEFAULT_BURST_GAP_QUANTILE,
+        anomalyFeatureSet: "movement_only",
         colorBy: "step_length_m",
+        sideSheet: "individuals",
+        tableMode: "fixes",
+        tableSort: "track_time",
+        tableDescending: false,
+        tableFilter: "",
+        sidePaneWidthPx: DEFAULT_SIDE_PANE_WIDTH_PX,
       };
     }
   }
@@ -186,7 +415,18 @@ class MovementExampleApp {
       showTrain: this.refs.showTrain.checked,
       showTest: this.refs.showTest.checked,
       showPoints: this.refs.showPoints.checked,
+      showBursts: this.refs.showBursts.checked,
+      burstGapMode: this.getBurstGapMode(),
+      burstGapSeconds: this.getBurstGapSeconds(),
+      burstGapQuantile: this.getBurstGapQuantile(),
+      anomalyFeatureSet: this.getAnomalyFeatureSet(),
       colorBy: this.refs.colorBy.value,
+      sideSheet: this.refs.sideSheetTabs?.dataset.activeSheet || "individuals",
+      tableMode: this.refs.tableMode?.value || "fixes",
+      tableSort: this.refs.tableSort?.value || "track_time",
+      tableDescending: this.refs.tableSortDirection?.dataset.direction === "desc",
+      tableFilter: this.refs.tableFilter?.value || "",
+      sidePaneWidthPx: this.sidePaneWidthPx,
     };
     localStorage.setItem("vibecleaning_movement_example_state", JSON.stringify(this.uiState));
   }
@@ -195,8 +435,279 @@ class MovementExampleApp {
     return localStorage.getItem("vibecleaning_user_name") || "";
   }
 
+  getAnomalyFeatureSet() {
+    if (!this.hasOsmContextFeatures()) {
+      return "movement_only";
+    }
+    const value = String(this.refs?.anomalyFeatureSet?.value || this.uiState.anomalyFeatureSet || "movement_only").trim();
+    return value === "movement_plus_context" ? "movement_plus_context" : "movement_only";
+  }
+
+  anomalyFeatureSetLabel(featureSet = this.getAnomalyFeatureSet()) {
+    return featureSet === "movement_plus_context" ? "movement + OSM context" : "movement only";
+  }
+
+  hasOsmContextFeatures() {
+    return Boolean(
+      this.data?.colorFields?.some(field => {
+        const key = String(field?.key || "").toLowerCase();
+        return key.startsWith("osm:") && key.endsWith("_distance_m");
+      }),
+    );
+  }
+
+  syncAnomalyFeatureSetOptions({ save = true } = {}) {
+    if (!this.refs?.anomalyFeatureSet) {
+      return;
+    }
+    const select = this.refs.anomalyFeatureSet;
+    const hasOsmContext = this.hasOsmContextFeatures();
+    const previousValue = select.value || this.uiState.anomalyFeatureSet || "movement_only";
+    select.innerHTML = `
+      <option value="movement_only">Movement only</option>
+      ${hasOsmContext ? '<option value="movement_plus_context">Movement + OSM context</option>' : ""}
+    `;
+    select.value = hasOsmContext && previousValue === "movement_plus_context"
+      ? "movement_plus_context"
+      : "movement_only";
+    if (save) {
+      this.saveUiState();
+    }
+  }
+
   setUser(user) {
     localStorage.setItem("vibecleaning_user_name", user);
+  }
+
+  getBurstGapSeconds() {
+    const value = Number(this.refs?.burstGapSeconds?.value ?? this.uiState.burstGapSeconds);
+    return Number.isFinite(value) && value > 0 ? value : DEFAULT_BURST_GAP_SECONDS;
+  }
+
+  getBurstGapMode() {
+    const value = String(this.refs?.burstGapMode?.value ?? this.uiState.burstGapMode ?? DEFAULT_BURST_GAP_MODE).trim().toLowerCase();
+    return value === "manual" || value === "quantile" ? value : DEFAULT_BURST_GAP_MODE;
+  }
+
+  getBurstGapQuantile() {
+    const value = Number(this.refs?.burstGapQuantile?.value ?? this.uiState.burstGapQuantile);
+    return Number.isFinite(value) && value > 0 && value <= 1 ? value : DEFAULT_BURST_GAP_QUANTILE;
+  }
+
+  syncBurstGapControls() {
+    if (!this.refs?.burstGapMode || !this.refs?.burstGapQuantile || !this.refs?.burstGapSecondsLabel) {
+      return;
+    }
+    const mode = this.getBurstGapMode();
+    this.refs.burstGapMode.value = mode;
+    this.refs.burstGapSecondsLabel.textContent = mode === "quantile" ? "Fallback (s)" : "Burst gap (s)";
+    this.refs.burstGapQuantile.hidden = mode !== "quantile";
+    this.refs.burstGapQuantile.disabled = mode !== "quantile";
+  }
+
+  handleBurstGapSettingsChange() {
+    this.refs.burstGapSeconds.value = String(this.getBurstGapSeconds());
+    this.refs.burstGapQuantile.value = String(this.getBurstGapQuantile());
+    this.syncBurstGapControls();
+    this.saveUiState();
+    if (this.currentArtifact) {
+      void this.loadArtifact(new Set(this.data?.selectedFixKeys || []));
+    }
+  }
+
+  burstGapLabel() {
+    return formatBurstGapMetadata(this.data?.burstGap);
+  }
+
+  renderBurstCountIndicator(message = "") {
+    if (!this.refs?.burstCount) {
+      return;
+    }
+    if (message) {
+      this.refs.burstCount.textContent = message;
+      return;
+    }
+    if (!this.data) {
+      this.refs.burstCount.textContent = "No bursts loaded";
+      return;
+    }
+
+    const total = this.data.autoBursts.length;
+    const visible = this.getVisibleAutoBursts({ requireOverlay: false }).length;
+    const noun = total === 1 ? "burst" : "bursts";
+    const scope = this.data.overviewHasAllFixes ? "generated" : "loaded";
+    let text = `${formatCount(total)} ${noun} ${scope}`;
+    if (visible !== total) {
+      text += `, ${formatCount(visible)} visible`;
+    }
+    const gapLabel = this.burstGapLabel();
+    if (gapLabel) {
+      text += ` at ${gapLabel}`;
+    }
+    if (this.data.detailState === "loading") {
+      text += " (loading)";
+    } else if (this.data.autoBurstsTruncated && total === 0) {
+      text = "Select individuals to count bursts";
+    }
+    this.refs.burstCount.textContent = text;
+  }
+
+  normalizeIndividualSearchQuery(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  getFilteredIndividuals() {
+    if (!this.data) {
+      return [];
+    }
+    const query = this.normalizeIndividualSearchQuery(this.individualSearchQuery);
+    if (!query) {
+      return [...this.data.individuals];
+    }
+    return this.data.individuals.filter(individual => individual.toLowerCase().includes(query));
+  }
+
+  isStackedSideLayout() {
+    return window.matchMedia?.("(max-width: 1080px)")?.matches === true;
+  }
+
+  getSidePaneWidthBounds() {
+    const mainWidth = Math.max(0, this.refs?.main?.clientWidth || 0);
+    if (!mainWidth) {
+      return {
+        min: MIN_SIDE_PANE_WIDTH_PX,
+        max: Math.max(MIN_SIDE_PANE_WIDTH_PX, DEFAULT_SIDE_PANE_WIDTH_PX),
+      };
+    }
+    const maxByRatio = Math.floor(mainWidth * MAX_SIDE_PANE_WIDTH_RATIO);
+    const max = Math.max(MIN_SIDE_PANE_WIDTH_PX, maxByRatio - SIDE_PANE_HANDLE_WIDTH_PX);
+    return {
+      min: MIN_SIDE_PANE_WIDTH_PX,
+      max,
+    };
+  }
+
+  clampSidePaneWidth(width) {
+    const numericWidth = Number(width);
+    const fallback = this.sidePaneWidthPx || DEFAULT_SIDE_PANE_WIDTH_PX;
+    const requested = Number.isFinite(numericWidth) ? numericWidth : fallback;
+    const bounds = this.getSidePaneWidthBounds();
+    return Math.round(Math.min(bounds.max, Math.max(bounds.min, requested)));
+  }
+
+  applySidePaneWidth(width, { save = true, resizeMap = true } = {}) {
+    const nextWidth = this.clampSidePaneWidth(width);
+    this.sidePaneWidthPx = nextWidth;
+    if (this.refs?.main) {
+      if (this.isStackedSideLayout()) {
+        this.refs.main.style.removeProperty("--movement-side-width");
+      } else {
+        this.refs.main.style.setProperty("--movement-side-width", `${nextWidth}px`);
+      }
+    }
+    if (this.refs?.sideResize) {
+      this.refs.sideResize.setAttribute("aria-valuenow", String(nextWidth));
+    }
+    if (save && this.refs) {
+      this.saveUiState();
+    }
+    if (resizeMap && this.map) {
+      window.requestAnimationFrame(() => {
+        if (!this.map) {
+          return;
+        }
+        try {
+          this.map.resize();
+        } catch {}
+        this.renderLayers();
+      });
+    }
+  }
+
+  handleLayoutResize() {
+    this.applySidePaneWidth(this.sidePaneWidthPx, { save: false });
+  }
+
+  beginSidePaneResize(event) {
+    if (this.isStackedSideLayout()) {
+      return;
+    }
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    this.sidePaneResize.active = true;
+    this.sidePaneResize.pointerId = event.pointerId;
+    this.refs.main?.classList.add("is-resizing");
+    this.refs.sideResize?.setPointerCapture?.(event.pointerId);
+    window.addEventListener("pointermove", this.handleSidePanePointerMove);
+    window.addEventListener("pointerup", this.handleSidePanePointerUp);
+    window.addEventListener("pointercancel", this.handleSidePanePointerUp);
+  }
+
+  onSidePanePointerMove(event) {
+    if (!this.sidePaneResize.active || event.pointerId !== this.sidePaneResize.pointerId || !this.refs?.main) {
+      return;
+    }
+    const rect = this.refs.main.getBoundingClientRect();
+    if (!rect.width) {
+      return;
+    }
+    const nextWidth = rect.right - event.clientX;
+    this.applySidePaneWidth(nextWidth, { save: false });
+  }
+
+  onSidePanePointerUp(event) {
+    if (!this.sidePaneResize.active || event.pointerId !== this.sidePaneResize.pointerId) {
+      return;
+    }
+    this.sidePaneResize.active = false;
+    this.sidePaneResize.pointerId = null;
+    this.refs.main?.classList.remove("is-resizing");
+    this.refs.sideResize?.releasePointerCapture?.(event.pointerId);
+    window.removeEventListener("pointermove", this.handleSidePanePointerMove);
+    window.removeEventListener("pointerup", this.handleSidePanePointerUp);
+    window.removeEventListener("pointercancel", this.handleSidePanePointerUp);
+    this.applySidePaneWidth(this.sidePaneWidthPx, { save: true });
+  }
+
+  setSideSheet(sheet, { save = true } = {}) {
+    const nextSheet = ["table", "ranking", "feature_space"].includes(sheet) ? sheet : "individuals";
+    if (this.refs?.sideSheetTabs) {
+      this.refs.sideSheetTabs.dataset.activeSheet = nextSheet;
+    }
+    if (this.refs?.sideTabIndividuals) {
+      this.refs.sideTabIndividuals.classList.toggle("is-active", nextSheet === "individuals");
+    }
+    if (this.refs?.sideTabTable) {
+      this.refs.sideTabTable.classList.toggle("is-active", nextSheet === "table");
+    }
+    if (this.refs?.sideTabRanking) {
+      this.refs.sideTabRanking.classList.toggle("is-active", nextSheet === "ranking");
+    }
+    if (this.refs?.sideTabFeatureSpace) {
+      this.refs.sideTabFeatureSpace.classList.toggle("is-active", nextSheet === "feature_space");
+    }
+    if (this.refs?.sideSheetIndividuals) {
+      this.refs.sideSheetIndividuals.classList.toggle("hidden", nextSheet !== "individuals");
+    }
+    if (this.refs?.sideSheetTable) {
+      this.refs.sideSheetTable.classList.toggle("hidden", nextSheet !== "table");
+    }
+    if (this.refs?.sideSheetRanking) {
+      this.refs.sideSheetRanking.classList.toggle("hidden", nextSheet !== "ranking");
+    }
+    if (this.refs?.sideSheetFeatureSpace) {
+      this.refs.sideSheetFeatureSpace.classList.toggle("hidden", nextSheet !== "feature_space");
+    }
+    if (save && this.refs) {
+      this.saveUiState();
+    }
+    if (nextSheet === "table") {
+      this.renderTableSheet();
+    } else if (nextSheet === "feature_space") {
+      this.renderBurstFeatureSpace();
+    }
   }
 
   renderShell() {
@@ -232,12 +743,14 @@ class MovementExampleApp {
           color: #9bb0c6;
         }
         .movement-toolbar select,
+        .movement-toolbar input,
         .movement-toolbar button,
         .movement-modal input,
         .movement-modal textarea {
           font: inherit;
         }
         .movement-toolbar select,
+        .movement-toolbar input,
         .movement-modal input,
         .movement-modal textarea {
           min-width: 150px;
@@ -246,6 +759,69 @@ class MovementExampleApp {
           border: 1px solid rgba(255, 255, 255, 0.08);
           background: rgba(15, 23, 42, 0.92);
           color: #e5edf7;
+        }
+        .movement-toolbar input[type="number"] {
+          min-width: 88px;
+          width: 96px;
+        }
+        .movement-burst-gap-control {
+          gap: 8px;
+        }
+        .movement-burst-gap-control input[data-role="burst-gap-quantile"] {
+          width: 82px;
+        }
+        .movement-burst-count {
+          display: inline-flex;
+          align-items: center;
+          min-height: 28px;
+          padding: 4px 8px;
+          border-radius: 999px;
+          border: 1px solid rgba(125, 211, 252, 0.22);
+          background: rgba(125, 211, 252, 0.08);
+          color: #c9e7f6;
+          font-size: 11px;
+          white-space: nowrap;
+        }
+        .movement-candidate-query-control {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+          padding: 6px 8px;
+          border-radius: 12px;
+          border: 1px solid rgba(125, 211, 252, 0.12);
+          background: rgba(15, 23, 42, 0.38);
+        }
+        .movement-candidate-query-control select {
+          min-width: 220px;
+        }
+        .movement-candidate-query-meta {
+          flex: 1 1 280px;
+          min-width: min(100%, 280px);
+          max-width: 520px;
+          color: #9bb0c6;
+          font-size: 11px;
+          line-height: 1.35;
+        }
+        .movement-candidate-query-meta strong {
+          color: #dbeafe;
+          font-weight: 600;
+        }
+        .movement-candidate-query-params {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .movement-candidate-query-params.hidden {
+          display: none;
+        }
+        .movement-candidate-query-params label {
+          color: #b9cadb;
+        }
+        .movement-candidate-query-params input[type="checkbox"] {
+          min-width: auto;
+          width: auto;
         }
         .movement-toolbar button,
         .movement-modal button {
@@ -284,9 +860,10 @@ class MovementExampleApp {
           color: #ffb3c2;
         }
         .movement-main {
+          --movement-side-width: 420px;
           display: grid;
-          grid-template-columns: minmax(0, 1.25fr) minmax(360px, 0.85fr);
-          gap: 12px;
+          grid-template-columns: minmax(0, 1fr) ${SIDE_PANE_HANDLE_WIDTH_PX}px minmax(${MIN_SIDE_PANE_WIDTH_PX}px, var(--movement-side-width));
+          gap: 0;
           min-height: 0;
           padding: 0 16px 14px;
         }
@@ -298,13 +875,62 @@ class MovementExampleApp {
           border: 1px solid rgba(255, 255, 255, 0.07);
           background: rgba(255, 255, 255, 0.03);
         }
+        .movement-main.is-resizing,
+        .movement-main.is-resizing * {
+          cursor: col-resize !important;
+          user-select: none;
+        }
         .movement-map-wrap {
           position: relative;
           background: #08111b;
         }
+        .movement-side-resize {
+          position: relative;
+          display: flex;
+          align-items: stretch;
+          justify-content: center;
+          width: 100%;
+          min-height: 0;
+          cursor: col-resize;
+          touch-action: none;
+        }
+        .movement-side-resize::before {
+          content: "";
+          width: 4px;
+          margin: 8px 0;
+          border-radius: 999px;
+          background: linear-gradient(180deg, rgba(87, 218, 174, 0.2), rgba(125, 211, 252, 0.48), rgba(87, 218, 174, 0.2));
+          box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04);
+        }
+        .movement-side-resize:hover::before,
+        .movement-main.is-resizing .movement-side-resize::before {
+          background: linear-gradient(180deg, rgba(87, 218, 174, 0.38), rgba(125, 211, 252, 0.8), rgba(87, 218, 174, 0.38));
+        }
         .movement-map {
           width: 100%;
           height: 100%;
+        }
+        .movement-map-attribution {
+          position: absolute;
+          left: 16px;
+          top: 16px;
+          z-index: 4;
+          max-width: min(300px, calc(100% - 88px));
+          padding: 6px 9px;
+          border-radius: 10px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(7, 11, 22, 0.82);
+          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+          color: #b8c8d8;
+          font-size: 11px;
+          line-height: 1.35;
+        }
+        .movement-map-attribution.hidden {
+          display: none;
+        }
+        .movement-map-attribution a {
+          color: #d6ecff;
+          text-decoration: underline;
         }
         .movement-legend {
           position: absolute;
@@ -343,6 +969,71 @@ class MovementExampleApp {
         }
         .movement-threshold.hidden {
           display: none;
+        }
+        .movement-fix-popup {
+          position: absolute;
+          z-index: 5;
+          width: min(320px, calc(100% - 24px));
+          display: grid;
+          gap: 10px;
+          padding: 12px 13px;
+          border-radius: 14px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          background: rgba(7, 11, 22, 0.94);
+          box-shadow: 0 20px 46px rgba(0, 0, 0, 0.36);
+          color: #e8eef7;
+          pointer-events: auto;
+        }
+        .movement-fix-popup.hidden {
+          display: none;
+        }
+        .movement-fix-popup-head {
+          display: flex;
+          align-items: start;
+          justify-content: space-between;
+          gap: 10px;
+        }
+        .movement-fix-popup-title {
+          font-size: 12px;
+          font-weight: 600;
+          color: #eef4fb;
+        }
+        .movement-fix-popup-subtitle {
+          font-size: 11px;
+          color: #8fa5bc;
+        }
+        .movement-fix-popup-close {
+          flex: 0 0 auto;
+          width: 24px;
+          height: 24px;
+          padding: 0;
+          border: none;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.08);
+          color: #e8eef7;
+          cursor: pointer;
+          font: inherit;
+          font-size: 14px;
+          line-height: 1;
+        }
+        .movement-fix-popup-fields {
+          display: grid;
+          gap: 7px;
+        }
+        .movement-fix-popup-row {
+          display: grid;
+          grid-template-columns: minmax(78px, auto) minmax(0, 1fr);
+          gap: 8px;
+          align-items: start;
+          font-size: 11px;
+        }
+        .movement-fix-popup-label {
+          color: #8fa5bc;
+          white-space: nowrap;
+        }
+        .movement-fix-popup-value {
+          color: #eef4fb;
+          overflow-wrap: anywhere;
         }
         .movement-threshold-head {
           display: grid;
@@ -626,7 +1317,50 @@ class MovementExampleApp {
         }
         .movement-side {
           display: grid;
-          grid-template-rows: auto minmax(0, 0.95fr) auto minmax(0, 1.05fr) auto;
+          grid-template-rows: auto minmax(0, 1fr) auto;
+        }
+        .movement-side-tabs {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          padding: 12px 14px 10px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .movement-side-tab {
+          padding: 7px 12px;
+          border-radius: 999px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(255, 255, 255, 0.04);
+          color: #d5e1ee;
+          cursor: pointer;
+          font: inherit;
+          font-size: 12px;
+        }
+        .movement-side-tab.is-active {
+          background: rgba(67, 206, 162, 0.22);
+          border-color: rgba(67, 206, 162, 0.34);
+          color: #d8fff3;
+        }
+        .movement-side-content {
+          min-height: 0;
+          overflow: hidden;
+        }
+        .movement-side-sheet {
+          display: grid;
+          min-height: 100%;
+          height: 100%;
+        }
+        .movement-side-sheet.hidden {
+          display: none;
+        }
+        .movement-side-sheet.individuals {
+          grid-template-rows: auto auto minmax(0, 0.8fr) auto minmax(120px, 0.85fr) auto minmax(0, 0.65fr);
+        }
+        .movement-side-sheet.table {
+          grid-template-rows: auto auto minmax(0, 1fr);
+        }
+        .movement-side-sheet.feature-space {
+          grid-template-rows: auto minmax(0, 1fr);
         }
         .movement-side-head,
         .movement-slider-row {
@@ -636,9 +1370,353 @@ class MovementExampleApp {
           color: #9bb0c6;
         }
         .movement-individuals,
-        .movement-fixes {
+        .movement-fixes,
+        .movement-anomaly-ranking {
           overflow-y: auto;
           padding: 10px 12px;
+        }
+        .movement-anomaly-meta,
+        .movement-anomaly-warnings {
+          display: grid;
+          gap: 5px;
+          margin-bottom: 10px;
+          color: #95a8bb;
+          font-size: 11px;
+          line-height: 1.4;
+        }
+        .movement-anomaly-warning {
+          color: #f6cf86;
+        }
+        .movement-anomaly-bursts {
+          display: grid;
+          gap: 6px;
+          margin: 8px 0 2px;
+        }
+        .movement-anomaly-burst {
+          display: grid;
+          gap: 7px;
+          padding: 8px 9px;
+          border-radius: 10px;
+          border: 1px solid rgba(125, 211, 252, 0.12);
+          background: rgba(15, 23, 42, 0.48);
+        }
+        .movement-anomaly-burst.is-ranking-burst {
+          border-color: rgba(250, 204, 21, 0.35);
+          background: rgba(250, 204, 21, 0.08);
+        }
+        .movement-anomaly-burst-main,
+        .movement-anomaly-burst-actions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .movement-anomaly-burst-rank-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 16px;
+          height: 16px;
+          border-radius: 999px;
+          background: rgba(250, 204, 21, 0.18);
+          color: #fde68a;
+          font-size: 11px;
+          line-height: 1;
+        }
+        .movement-anomaly-burst-actions button {
+          padding: 4px 7px;
+          border-radius: 8px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(255, 255, 255, 0.08);
+          color: #e5edf7;
+          cursor: pointer;
+          font-size: 11px;
+        }
+        .movement-anomaly-explanation {
+          display: grid;
+          gap: 6px;
+          color: #9bb0c6;
+          font-size: 11px;
+          line-height: 1.35;
+        }
+        .movement-anomaly-why {
+          color: #c9d8e8;
+          font-size: 11px;
+          line-height: 1.35;
+        }
+        .movement-anomaly-why strong {
+          color: #e5edf7;
+          font-weight: 600;
+        }
+        .movement-anomaly-explanation-details {
+          display: grid;
+          gap: 5px;
+        }
+        .movement-anomaly-explanation-details summary {
+          width: fit-content;
+          cursor: pointer;
+          color: #c9e7f6;
+          font-size: 11px;
+        }
+        .movement-anomaly-explanation-note {
+          color: #7f93a8;
+        }
+        .movement-anomaly-explanation-section {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+        .movement-anomaly-explanation-label {
+          color: #dbeafe;
+          font-weight: 600;
+        }
+        .movement-anomaly-explanation-chip {
+          display: inline-flex;
+          gap: 4px;
+          align-items: center;
+          padding: 2px 6px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.07);
+          color: #cbd5e1;
+        }
+        .movement-anomaly-ranking .movement-table tbody tr {
+          cursor: default;
+        }
+        .movement-feature-space {
+          overflow-y: auto;
+          padding: 10px 12px;
+        }
+        .movement-feature-space-meta {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px 12px;
+          margin-bottom: 10px;
+          color: #95a8bb;
+          font-size: 11px;
+        }
+        .movement-feature-space-plot {
+          min-height: 280px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 12px;
+          background: rgba(7, 12, 22, 0.72);
+          overflow: hidden;
+        }
+        .movement-feature-space-plot svg {
+          display: block;
+          width: 100%;
+          min-height: 280px;
+        }
+        .movement-feature-space-axis {
+          stroke: rgba(148, 163, 184, 0.22);
+          stroke-width: 1;
+        }
+        .movement-feature-space-point {
+          fill: rgba(125, 211, 252, 0.62);
+          stroke: rgba(15, 23, 42, 0.75);
+          stroke-width: 1;
+          cursor: pointer;
+        }
+        .movement-feature-space-point.is-neighbor {
+          fill: rgba(250, 204, 21, 0.9);
+          stroke: rgba(254, 240, 138, 0.95);
+          stroke-width: 1.5;
+        }
+        .movement-feature-space-point.is-selected {
+          fill: rgba(216, 180, 254, 1);
+          stroke: rgba(255, 255, 255, 0.98);
+          stroke-width: 2.5;
+        }
+        .movement-feature-space-selection {
+          display: grid;
+          gap: 8px;
+          margin-top: 10px;
+          padding: 10px;
+          border-radius: 10px;
+          background: rgba(255, 255, 255, 0.04);
+          color: #cbd5e1;
+          font-size: 11px;
+        }
+        .movement-feature-space-selection-main,
+        .movement-feature-space-neighbors {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 6px 10px;
+        }
+        .movement-feature-space-neighbors button {
+          padding: 4px 7px;
+          border-radius: 8px;
+          border: 1px solid rgba(250, 204, 21, 0.22);
+          background: rgba(250, 204, 21, 0.08);
+          color: #fde68a;
+          cursor: pointer;
+          font-size: 11px;
+        }
+        .movement-side-search {
+          display: grid;
+          gap: 8px;
+          padding: 12px 14px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+          background: rgba(255, 255, 255, 0.02);
+        }
+        .movement-side-search label {
+          display: grid;
+          gap: 6px;
+          font-size: 12px;
+          color: #9bb0c6;
+        }
+        .movement-side-search input {
+          width: 100%;
+          min-width: 0;
+          padding: 7px 9px;
+          border-radius: 10px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(15, 23, 42, 0.92);
+          color: #e5edf7;
+          font: inherit;
+        }
+        .movement-table-toolbar {
+          display: grid;
+          gap: 10px;
+          padding: 12px 14px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+          background: rgba(255, 255, 255, 0.02);
+        }
+        .movement-table-toolbar-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          align-items: center;
+        }
+        .movement-table-toolbar label {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 12px;
+          color: #9bb0c6;
+        }
+        .movement-table-toolbar input,
+        .movement-table-toolbar select,
+        .movement-table-toolbar button {
+          font: inherit;
+        }
+        .movement-table-toolbar input,
+        .movement-table-toolbar select {
+          min-width: 0;
+          padding: 7px 9px;
+          border-radius: 10px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(15, 23, 42, 0.92);
+          color: #e5edf7;
+        }
+        .movement-table-toolbar button {
+          padding: 7px 10px;
+          border: none;
+          border-radius: 10px;
+          background: rgba(255, 255, 255, 0.08);
+          color: #e5edf7;
+          cursor: pointer;
+        }
+        .movement-table-toolbar button:disabled {
+          cursor: not-allowed;
+          opacity: 0.45;
+        }
+        .movement-table-toolbar button.movement-emphasis {
+          background: rgba(67, 206, 162, 0.22);
+          color: #d8fff3;
+        }
+        .movement-table-meta {
+          padding: 10px 14px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+          font-size: 11px;
+          color: #95a8bb;
+          line-height: 1.45;
+        }
+        .movement-table-wrap {
+          min-height: 0;
+          overflow: auto;
+        }
+        .movement-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 11px;
+        }
+        .movement-table thead th {
+          position: sticky;
+          top: 0;
+          z-index: 1;
+          padding: 10px 8px;
+          text-align: left;
+          font-weight: 600;
+          color: #dce8f5;
+          background: rgba(11, 18, 30, 0.98);
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .movement-table tbody td {
+          padding: 9px 8px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+          color: #c9d7e4;
+          vertical-align: top;
+        }
+        .movement-table tbody tr {
+          cursor: pointer;
+        }
+        .movement-table tbody tr:hover {
+          background: rgba(255, 255, 255, 0.03);
+        }
+        .movement-table tbody tr.is-anchor {
+          background: rgba(96, 165, 250, 0.14);
+        }
+        .movement-table tbody tr.is-selected-range {
+          background: rgba(67, 206, 162, 0.12);
+        }
+        .movement-table tbody tr.is-checked-fix {
+          box-shadow: inset 3px 0 0 rgba(255, 236, 148, 0.95);
+        }
+        .movement-table tbody tr.is-segment-row {
+          background: rgba(255, 255, 255, 0.015);
+        }
+        .movement-table tbody tr.is-auto-burst-row {
+          background: rgba(125, 211, 252, 0.035);
+        }
+        .movement-burst-swatch {
+          display: inline-block;
+          width: 14px;
+          height: 14px;
+          border-radius: 999px;
+          border: 1px solid rgba(255, 255, 255, 0.58);
+          box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.06);
+          vertical-align: -2px;
+        }
+        .movement-table-cell-mono {
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-variant-numeric: tabular-nums;
+        }
+        .movement-table-cell-actions {
+          white-space: nowrap;
+        }
+        .movement-table-cell-actions button {
+          padding: 5px 8px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 8px;
+          background: rgba(255, 255, 255, 0.04);
+          color: #e8eef7;
+          cursor: pointer;
+          font: inherit;
+          font-size: 11px;
+        }
+        .movement-table-empty {
+          padding: 18px 14px;
+          color: #8ea1b7;
+          font-size: 12px;
+          line-height: 1.5;
+        }
+        .movement-table-more-row td.movement-table-more-cell {
+          padding: 12px 8px;
+          text-align: center;
+          color: #8ea1b7;
+          font-style: italic;
         }
         .movement-card {
           display: grid;
@@ -834,8 +1912,11 @@ class MovementExampleApp {
             grid-template-columns: 1fr;
             grid-template-rows: minmax(320px, 1fr) minmax(320px, 1fr);
           }
+          .movement-side-resize {
+            display: none;
+          }
           .movement-side {
-            grid-template-rows: auto minmax(220px, 0.7fr) auto minmax(220px, 0.9fr) auto;
+            grid-template-rows: auto minmax(320px, 1fr) auto;
           }
         }
         @media (max-width: 560px) {
@@ -850,6 +1931,9 @@ class MovementExampleApp {
           .movement-threshold-range-input {
             width: 100%;
           }
+          .movement-table-toolbar-row {
+            align-items: stretch;
+          }
         }
       </style>
       <div class="movement-root">
@@ -863,13 +1947,47 @@ class MovementExampleApp {
           <label class="movement-toggle"><input type="checkbox" data-role="show-train"> Train</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-test"> Test</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-points"> Points</label>
+          <label class="movement-toggle"><input type="checkbox" data-role="show-bursts"> Bursts</label>
+          <label>Burst gap
+            <select data-role="burst-gap-mode">
+              <option value="quantile">Quantile</option>
+              <option value="manual">Manual seconds</option>
+            </select>
+          </label>
+          <label class="movement-burst-gap-control"><span data-role="burst-gap-seconds-label">Fallback (s)</span>
+            <input type="number" min="1" step="300" data-role="burst-gap-seconds">
+            <input type="number" min="0.001" max="1" step="0.001" data-role="burst-gap-quantile" aria-label="Burst gap quantile">
+            <span class="movement-burst-count" data-role="burst-count">No bursts loaded</span>
+          </label>
           <button type="button" data-role="select-all">All individuals</button>
           <button type="button" data-role="select-none">No individuals</button>
           <button type="button" data-role="select-suspicious">Select all suspicious</button>
           <button type="button" data-role="clear-fixes">Clear checked fixes</button>
+          <div class="movement-candidate-query-control" data-role="candidate-query-control">
+            <label>Candidate query <select data-role="candidate-query-select"></select></label>
+            <label>Scope
+              <select data-role="candidate-query-scope">
+                <option value="whole_study">Whole study</option>
+                <option value="current_individual">Current individual</option>
+                <option value="all_individuals_per_individual">All individuals separately</option>
+              </select>
+            </label>
+            <button type="button" data-role="run-candidate-query">Preview query</button>
+            <div class="movement-candidate-query-params hidden" data-role="candidate-query-params"></div>
+            <div class="movement-candidate-query-meta" data-role="candidate-query-meta">Loading saved queries...</div>
+          </div>
+          <button type="button" data-role="check-candidates">Check candidates</button>
+          <button type="button" data-role="clear-candidates">Clear candidates</button>
           <button type="button" data-role="reset-view">Reset view</button>
           <button type="button" class="movement-emphasis" data-role="mark-suspected">Mark suspected</button>
           <button type="button" class="movement-emphasis" data-role="mark-confirmed">Mark confirmed</button>
+          <label data-role="anomaly-feature-set-control">Ranking features
+            <select data-role="anomaly-feature-set">
+              <option value="movement_only">Movement only</option>
+            </select>
+          </label>
+          <button type="button" data-role="run-anomaly-ranking">Rank bursts</button>
+          <button type="button" data-role="run-burst-feature-space">Feature space</button>
           <button type="button" data-role="generate-report">Generate report</button>
           <button type="button" class="movement-danger" data-role="remove-confirmed">Remove confirmed</button>
           <button type="button" data-role="undo">Undo</button>
@@ -878,8 +1996,10 @@ class MovementExampleApp {
         <div class="movement-main">
           <div class="movement-map-wrap">
             <div class="movement-map" data-role="map"></div>
+            <div class="movement-map-attribution hidden" data-role="map-attribution"></div>
             <div class="movement-legend hidden" data-role="legend"></div>
             <div class="movement-threshold hidden" data-role="threshold-pane"></div>
+            <div class="movement-fix-popup hidden" data-role="fix-popup"></div>
             <div class="movement-overlay" data-role="overlay">
               <div class="movement-overlay-card">
                 <h3>Movement Outlier Review</h3>
@@ -887,11 +2007,75 @@ class MovementExampleApp {
               </div>
             </div>
           </div>
+          <div
+            class="movement-side-resize"
+            data-role="side-resize"
+            role="separator"
+            aria-label="Resize side pane"
+            aria-orientation="vertical"
+            aria-valuemin="${MIN_SIDE_PANE_WIDTH_PX}"
+          ></div>
           <div class="movement-side">
-            <div class="movement-side-head" data-role="individual-head">Individuals and coverage</div>
-            <div class="movement-individuals" data-role="individuals"></div>
-            <div class="movement-side-head" data-role="fix-head">Checked fixes</div>
-            <div class="movement-fixes" data-role="selected-fixes"></div>
+            <div class="movement-side-tabs" data-role="side-sheet-tabs">
+              <button type="button" class="movement-side-tab is-active" data-role="side-tab-individuals">Individuals</button>
+              <button type="button" class="movement-side-tab" data-role="side-tab-table">Table</button>
+              <button type="button" class="movement-side-tab" data-role="side-tab-ranking">Burst Ranking</button>
+              <button type="button" class="movement-side-tab" data-role="side-tab-feature-space">Burst feature space</button>
+            </div>
+            <div class="movement-side-content">
+              <div class="movement-side-sheet individuals" data-role="side-sheet-individuals">
+                <div class="movement-side-head" data-role="individual-head">Individuals and coverage</div>
+                <div class="movement-side-search">
+                  <label>Search by individual ID
+                    <input type="search" data-role="individual-search" placeholder="Find an individual ID">
+                  </label>
+                </div>
+                <div class="movement-individuals" data-role="individuals"></div>
+                <div class="movement-side-head" data-role="fix-head">Checked fixes</div>
+                <div class="movement-fixes" data-role="selected-fixes"></div>
+              </div>
+              <div class="movement-side-sheet table hidden" data-role="side-sheet-table">
+                <div class="movement-table-toolbar">
+                  <div class="movement-table-toolbar-row">
+                    <label>Mode
+                      <select data-role="table-mode">
+                        <option value="fixes">Fix rows</option>
+                        <option value="segments">Flagged segments</option>
+                        <option value="auto_bursts">Automatic bursts</option>
+                      </select>
+                    </label>
+                    <label>Search
+                      <input type="search" data-role="table-filter" placeholder="Individual, issue, fix key">
+                    </label>
+                    <label>Sort
+                      <select data-role="table-sort">
+                        <option value="track_time">Track order</option>
+                        <option value="time_desc">Newest first</option>
+                        <option value="time_asc">Oldest first</option>
+                        <option value="status">Status</option>
+                        <option value="issue_type">Issue type</option>
+                      </select>
+                    </label>
+                    <button type="button" data-role="table-sort-direction" data-direction="asc">Ascending</button>
+                  </div>
+                  <div class="movement-table-toolbar-row">
+                    <button type="button" data-role="segment-clear">Clear range</button>
+                    <button type="button" class="movement-emphasis" data-role="segment-suspected">Mark segment suspected</button>
+                    <button type="button" class="movement-emphasis" data-role="segment-confirmed">Mark segment confirmed</button>
+                  </div>
+                </div>
+                <div class="movement-table-meta" data-role="table-meta"></div>
+                <div class="movement-table-wrap" data-role="table-wrap"></div>
+              </div>
+              <div class="movement-side-sheet ranking hidden" data-role="side-sheet-ranking">
+                <div class="movement-side-head">Burst anomaly ranking</div>
+                <div class="movement-anomaly-ranking" data-role="anomaly-ranking"></div>
+              </div>
+              <div class="movement-side-sheet feature-space hidden" data-role="side-sheet-feature-space">
+                <div class="movement-side-head">Burst feature space</div>
+                <div class="movement-feature-space" data-role="burst-feature-space"></div>
+              </div>
+            </div>
             <div class="movement-slider-row">
               <input class="movement-slider" data-role="slider" type="range" min="0" max="0" value="0" step="1">
               <div class="movement-time" data-role="time"></div>
@@ -972,8 +2156,10 @@ class MovementExampleApp {
               <select data-role="report-basemap">
                 <option value="current">Match current map when possible</option>
                 <option value="Positron">Positron</option>
-                <option value="Voyager">Voyager</option>
-                <option value="Dark Matter">Dark Matter</option>
+                <option value="OSM Streets">OSM Streets</option>
+                <option value="Satellite">Satellite</option>
+                <option value="Satellite + labels">Satellite + labels</option>
+                <option value="Topographic">Topographic</option>
               </select>
             </label>
             <label data-role="report-snapshot-limit-wrap">Auto snapshot sample
@@ -1019,6 +2205,7 @@ class MovementExampleApp {
     `;
 
     this.refs = {
+      main: this.mountEl.querySelector(".movement-main"),
       family: this.mountEl.querySelector('[data-role="family"]'),
       study: this.mountEl.querySelector('[data-role="study"]'),
       dataset: this.mountEl.querySelector('[data-role="dataset"]'),
@@ -1028,26 +2215,67 @@ class MovementExampleApp {
       showTrain: this.mountEl.querySelector('[data-role="show-train"]'),
       showTest: this.mountEl.querySelector('[data-role="show-test"]'),
       showPoints: this.mountEl.querySelector('[data-role="show-points"]'),
+      showBursts: this.mountEl.querySelector('[data-role="show-bursts"]'),
+      burstGapMode: this.mountEl.querySelector('[data-role="burst-gap-mode"]'),
+      burstGapSecondsLabel: this.mountEl.querySelector('[data-role="burst-gap-seconds-label"]'),
+      burstGapSeconds: this.mountEl.querySelector('[data-role="burst-gap-seconds"]'),
+      burstGapQuantile: this.mountEl.querySelector('[data-role="burst-gap-quantile"]'),
+      burstCount: this.mountEl.querySelector('[data-role="burst-count"]'),
       selectAll: this.mountEl.querySelector('[data-role="select-all"]'),
       selectNone: this.mountEl.querySelector('[data-role="select-none"]'),
       selectSuspicious: this.mountEl.querySelector('[data-role="select-suspicious"]'),
       clearFixes: this.mountEl.querySelector('[data-role="clear-fixes"]'),
+      candidateQuerySelect: this.mountEl.querySelector('[data-role="candidate-query-select"]'),
+      candidateQueryScope: this.mountEl.querySelector('[data-role="candidate-query-scope"]'),
+      candidateQueryMeta: this.mountEl.querySelector('[data-role="candidate-query-meta"]'),
+      candidateQueryParams: this.mountEl.querySelector('[data-role="candidate-query-params"]'),
+      runCandidateQuery: this.mountEl.querySelector('[data-role="run-candidate-query"]'),
+      checkCandidates: this.mountEl.querySelector('[data-role="check-candidates"]'),
+      clearCandidates: this.mountEl.querySelector('[data-role="clear-candidates"]'),
       resetView: this.mountEl.querySelector('[data-role="reset-view"]'),
       markSuspected: this.mountEl.querySelector('[data-role="mark-suspected"]'),
       markConfirmed: this.mountEl.querySelector('[data-role="mark-confirmed"]'),
+      anomalyFeatureSetControl: this.mountEl.querySelector('[data-role="anomaly-feature-set-control"]'),
+      anomalyFeatureSet: this.mountEl.querySelector('[data-role="anomaly-feature-set"]'),
+      runAnomalyRanking: this.mountEl.querySelector('[data-role="run-anomaly-ranking"]'),
+      runBurstFeatureSpace: this.mountEl.querySelector('[data-role="run-burst-feature-space"]'),
       generateReport: this.mountEl.querySelector('[data-role="generate-report"]'),
       removeConfirmed: this.mountEl.querySelector('[data-role="remove-confirmed"]'),
       undo: this.mountEl.querySelector('[data-role="undo"]'),
       status: this.mountEl.querySelector('[data-role="status"]'),
+      sideSheetTabs: this.mountEl.querySelector('[data-role="side-sheet-tabs"]'),
+      sideTabIndividuals: this.mountEl.querySelector('[data-role="side-tab-individuals"]'),
+      sideTabTable: this.mountEl.querySelector('[data-role="side-tab-table"]'),
+      sideTabRanking: this.mountEl.querySelector('[data-role="side-tab-ranking"]'),
+      sideTabFeatureSpace: this.mountEl.querySelector('[data-role="side-tab-feature-space"]'),
+      sideSheetIndividuals: this.mountEl.querySelector('[data-role="side-sheet-individuals"]'),
+      sideSheetTable: this.mountEl.querySelector('[data-role="side-sheet-table"]'),
+      sideSheetRanking: this.mountEl.querySelector('[data-role="side-sheet-ranking"]'),
+      sideSheetFeatureSpace: this.mountEl.querySelector('[data-role="side-sheet-feature-space"]'),
+      sideResize: this.mountEl.querySelector('[data-role="side-resize"]'),
+      individualSearch: this.mountEl.querySelector('[data-role="individual-search"]'),
       individuals: this.mountEl.querySelector('[data-role="individuals"]'),
       individualHead: this.mountEl.querySelector('[data-role="individual-head"]'),
       fixHead: this.mountEl.querySelector('[data-role="fix-head"]'),
       selectedFixes: this.mountEl.querySelector('[data-role="selected-fixes"]'),
+      anomalyRanking: this.mountEl.querySelector('[data-role="anomaly-ranking"]'),
+      burstFeatureSpace: this.mountEl.querySelector('[data-role="burst-feature-space"]'),
+      tableMode: this.mountEl.querySelector('[data-role="table-mode"]'),
+      tableFilter: this.mountEl.querySelector('[data-role="table-filter"]'),
+      tableSort: this.mountEl.querySelector('[data-role="table-sort"]'),
+      tableSortDirection: this.mountEl.querySelector('[data-role="table-sort-direction"]'),
+      tableMeta: this.mountEl.querySelector('[data-role="table-meta"]'),
+      tableWrap: this.mountEl.querySelector('[data-role="table-wrap"]'),
+      segmentClear: this.mountEl.querySelector('[data-role="segment-clear"]'),
+      segmentSuspected: this.mountEl.querySelector('[data-role="segment-suspected"]'),
+      segmentConfirmed: this.mountEl.querySelector('[data-role="segment-confirmed"]'),
       slider: this.mountEl.querySelector('[data-role="slider"]'),
       time: this.mountEl.querySelector('[data-role="time"]'),
       map: this.mountEl.querySelector('[data-role="map"]'),
+      mapAttribution: this.mountEl.querySelector('[data-role="map-attribution"]'),
       legend: this.mountEl.querySelector('[data-role="legend"]'),
       thresholdPane: this.mountEl.querySelector('[data-role="threshold-pane"]'),
+      fixPopup: this.mountEl.querySelector('[data-role="fix-popup"]'),
       overlay: this.mountEl.querySelector('[data-role="overlay"]'),
       issueModal: this.mountEl.querySelector('[data-role="issue-modal"]'),
       issueTitle: this.mountEl.querySelector('[data-role="issue-title"]'),
@@ -1090,21 +2318,68 @@ class MovementExampleApp {
       removeSubmit: this.mountEl.querySelector('[data-role="remove-submit"]'),
     };
 
-    for (const name of Object.keys(BASEMAP_STYLES)) {
+    for (const name of Object.keys(BASEMAP_PRESETS)) {
       const option = document.createElement("option");
       option.value = name;
       option.textContent = name;
       this.refs.basemap.appendChild(option);
     }
-    this.refs.basemap.value = BASEMAP_STYLES[this.uiState.basemap] ? this.uiState.basemap : "Blank";
+    const storedBasemap = BASEMAP_PRESETS[this.uiState.basemap]
+      ? this.uiState.basemap
+      : "Positron";
+    this.refs.basemap.value = (storedBasemap === "Blank" || storedBasemap === "OSM Streets")
+      ? "Positron"
+      : storedBasemap;
     this.refs.reportBasemap.value = "current";
     this.refs.showTrain.checked = this.uiState.showTrain !== false;
     this.refs.showTest.checked = this.uiState.showTest !== false;
     this.refs.showPoints.checked = this.uiState.showPoints !== false;
+    this.refs.showBursts.checked = this.uiState.showBursts !== false;
+    this.refs.burstGapMode.value = ["manual", "quantile"].includes(this.uiState.burstGapMode)
+      ? this.uiState.burstGapMode
+      : DEFAULT_BURST_GAP_MODE;
+    this.refs.burstGapSeconds.value = String(
+      Number.isFinite(Number(this.uiState.burstGapSeconds)) && Number(this.uiState.burstGapSeconds) > 0
+        ? Number(this.uiState.burstGapSeconds)
+        : DEFAULT_BURST_GAP_SECONDS,
+    );
+    this.refs.burstGapQuantile.value = String(
+      Number.isFinite(Number(this.uiState.burstGapQuantile))
+        && Number(this.uiState.burstGapQuantile) > 0
+        && Number(this.uiState.burstGapQuantile) <= 1
+        ? Number(this.uiState.burstGapQuantile)
+        : DEFAULT_BURST_GAP_QUANTILE,
+    );
+    this.refs.anomalyFeatureSet.value = this.uiState.anomalyFeatureSet === "movement_plus_context"
+      ? "movement_plus_context"
+      : "movement_only";
+    this.syncAnomalyFeatureSetOptions({ save: false });
+    this.syncBurstGapControls();
+    this.renderBurstCountIndicator();
+    this.refs.tableMode.value = this.uiState.tableMode || "fixes";
+    this.refs.tableSort.value = this.uiState.tableSort || "track_time";
+    this.refs.tableFilter.value = this.uiState.tableFilter || "";
+    this.refs.tableSortDirection.dataset.direction = this.uiState.tableDescending ? "desc" : "asc";
+    this.refs.tableSortDirection.textContent = this.uiState.tableDescending ? "Descending" : "Ascending";
+    this.refs.individualSearch.value = this.individualSearchQuery;
+    this.applySidePaneWidth(this.sidePaneWidthPx, { save: false, resizeMap: false });
+    this.setSideSheet(this.uiState.sideSheet || "individuals", { save: false });
+    this.renderAnomalyRanking();
+    this.renderBurstFeatureSpace();
     this.updateActionButtons();
   }
 
   bindEvents() {
+    window.addEventListener("resize", this.handleWindowResize);
+    this.refs.sideTabIndividuals.addEventListener("click", () => this.setSideSheet("individuals"));
+    this.refs.sideTabTable.addEventListener("click", () => this.setSideSheet("table"));
+    this.refs.sideTabRanking.addEventListener("click", () => this.setSideSheet("ranking"));
+    this.refs.sideTabFeatureSpace.addEventListener("click", () => this.setSideSheet("feature_space"));
+    this.refs.individualSearch.addEventListener("input", () => {
+      this.individualSearchQuery = this.refs.individualSearch.value || "";
+      this.renderIndividuals();
+    });
+    this.refs.sideResize.addEventListener("pointerdown", event => this.beginSidePaneResize(event));
     this.refs.family.addEventListener("change", async () => {
       try {
         await this.switchFamily(this.refs.family.value);
@@ -1145,6 +2420,7 @@ class MovementExampleApp {
     });
     this.refs.basemap.addEventListener("change", async () => {
       this.saveUiState();
+      this.updateMapAttribution();
       await this.rebuildMap(true);
     });
     this.refs.colorBy.addEventListener("change", () => {
@@ -1160,6 +2436,22 @@ class MovementExampleApp {
     this.refs.showPoints.addEventListener("change", () => {
       this.saveUiState();
       this.renderLayers();
+      this.renderTableSheet();
+    });
+    this.refs.showBursts.addEventListener("change", () => {
+      this.saveUiState();
+      this.renderLayers();
+      this.renderTableSheet();
+    });
+    this.refs.burstGapMode.addEventListener("change", () => this.handleBurstGapSettingsChange());
+    this.refs.burstGapSeconds.addEventListener("change", () => this.handleBurstGapSettingsChange());
+    this.refs.burstGapQuantile.addEventListener("change", () => this.handleBurstGapSettingsChange());
+    this.refs.anomalyFeatureSet.addEventListener("change", () => this.saveUiState());
+    this.refs.fixPopup.addEventListener("click", event => {
+      const closeButton = event.target.closest('[data-role="fix-popup-close"]');
+      if (closeButton) {
+        this.closeFixPopup();
+      }
     });
     this.refs.selectAll.addEventListener("click", () => {
       if (!this.data) return;
@@ -1201,9 +2493,26 @@ class MovementExampleApp {
       this.renderLayers();
       this.updateActionButtons();
     });
+    this.refs.candidateQuerySelect.addEventListener("change", () => this.selectCandidateQuery(this.refs.candidateQuerySelect.value));
+    this.refs.candidateQueryScope.addEventListener("change", () => this.selectCandidateQueryExecutionScope(this.refs.candidateQueryScope.value));
+    this.refs.candidateQueryParams.addEventListener("input", event => this.handleCandidateQueryParameterInput(event));
+    this.refs.candidateQueryParams.addEventListener("change", event => this.handleCandidateQueryParameterInput(event));
+    this.refs.runCandidateQuery.addEventListener("click", () => {
+      void this.runSelectedCandidateQuery();
+    });
+    this.refs.checkCandidates.addEventListener("click", () => {
+      void this.checkCandidateQueryPreview();
+    });
+    this.refs.clearCandidates.addEventListener("click", () => this.clearCandidateQueryPreview({ announce: true }));
     this.refs.resetView.addEventListener("click", () => this.resetView());
     this.refs.markSuspected.addEventListener("click", () => this.openIssueModal("suspected"));
     this.refs.markConfirmed.addEventListener("click", () => this.openIssueModal("confirmed"));
+    this.refs.runAnomalyRanking.addEventListener("click", () => {
+      void this.runBurstAnomalyRanking();
+    });
+    this.refs.runBurstFeatureSpace.addEventListener("click", () => {
+      void this.runBurstFeatureSpace();
+    });
     this.refs.generateReport.addEventListener("click", () => this.openReportModal());
     this.refs.removeConfirmed.addEventListener("click", () => this.openRemoveModal());
     this.refs.undo.addEventListener("click", async () => {
@@ -1217,6 +2526,36 @@ class MovementExampleApp {
     this.refs.thresholdPane.addEventListener("click", event => this.handleThresholdPaneClick(event));
     this.refs.thresholdPane.addEventListener("change", event => this.handleThresholdPaneChange(event));
     this.refs.thresholdPane.addEventListener("focusin", event => this.handleThresholdPaneFocusIn(event));
+    this.refs.tableMode.addEventListener("change", () => {
+      this.saveUiState();
+      this.renderTableSheet();
+    });
+    this.refs.tableFilter.addEventListener("input", () => {
+      this.saveUiState();
+      this.renderTableSheet();
+    });
+    this.refs.tableSort.addEventListener("change", () => {
+      this.saveUiState();
+      this.renderTableSheet();
+    });
+    this.refs.tableSortDirection.addEventListener("click", () => {
+      const nextDirection = this.refs.tableSortDirection.dataset.direction === "desc" ? "asc" : "desc";
+      this.refs.tableSortDirection.dataset.direction = nextDirection;
+      this.refs.tableSortDirection.textContent = nextDirection === "desc" ? "Descending" : "Ascending";
+      this.saveUiState();
+      this.renderTableSheet();
+    });
+    this.refs.segmentClear.addEventListener("click", () => this.clearTableSelection());
+    this.refs.segmentSuspected.addEventListener("click", () => this.openSegmentModal("suspected"));
+    this.refs.segmentConfirmed.addEventListener("click", () => this.openSegmentModal("confirmed"));
+    this.refs.tableWrap.addEventListener("click", event => this.handleTableWrapClick(event));
+    this.refs.tableWrap.addEventListener("scroll", () => this.handleTableWrapScroll());
+    this.refs.anomalyRanking.addEventListener("click", event => {
+      void this.handleAnomalyRankingClick(event);
+    });
+    this.refs.burstFeatureSpace.addEventListener("click", event => {
+      void this.handleBurstFeatureSpaceClick(event);
+    });
 
     this.refs.issueClose.addEventListener("click", () => this.closeModal(this.refs.issueModal, this.refs.issueSubmit));
     this.refs.issueSubmit.addEventListener("click", async () => this.submitIssueAction());
@@ -1300,6 +2639,10 @@ class MovementExampleApp {
       this.cancelRequest("overview");
       this.cancelRequest("detail");
       this.cancelRequest("reportDetail");
+      this.cancelRequest("osm");
+      this.cancelRequest("candidateQuery");
+      this.cancelRequest("anomalyRanking");
+      this.cancelRequest("burstFeatureSpace");
       return;
     }
     if (level === "study") {
@@ -1308,6 +2651,10 @@ class MovementExampleApp {
       this.cancelRequest("overview");
       this.cancelRequest("detail");
       this.cancelRequest("reportDetail");
+      this.cancelRequest("osm");
+      this.cancelRequest("candidateQuery");
+      this.cancelRequest("anomalyRanking");
+      this.cancelRequest("burstFeatureSpace");
       return;
     }
     if (level === "dataset") {
@@ -1315,13 +2662,1477 @@ class MovementExampleApp {
       this.cancelRequest("overview");
       this.cancelRequest("detail");
       this.cancelRequest("reportDetail");
+      this.cancelRequest("osm");
+      this.cancelRequest("candidateQuery");
+      this.cancelRequest("anomalyRanking");
+      this.cancelRequest("burstFeatureSpace");
       return;
     }
     if (level === "artifact") {
       this.cancelRequest("overview");
       this.cancelRequest("detail");
       this.cancelRequest("reportDetail");
+      this.cancelRequest("osm");
+      this.cancelRequest("candidateQuery");
+      this.cancelRequest("anomalyRanking");
+      this.cancelRequest("burstFeatureSpace");
     }
+  }
+
+  osmScopeFromPoint(fixOrLonLat, radiusM) {
+    return scopeFromPoint(fixOrLonLat, radiusM);
+  }
+
+  osmScopeFromMapBounds() {
+    return scopeFromMapBounds(this.map);
+  }
+
+  osmScopeFromSegmentBounds(fixes, paddingM) {
+    return scopeFromSegmentBounds(fixes, paddingM);
+  }
+
+  async queryOsmContext(query, options = {}) {
+    const controller = this.beginRequest("osm");
+    this.osmContextStatus = "loading";
+    this.osmContextError = "";
+    this.setStatus("Loading OSM context...");
+    this.updateActionButtons();
+    try {
+      const payload = await fetchOsmContext(query, {
+        ...options,
+        signal: controller.signal,
+      });
+      if (this.requestControllers.osm !== controller) {
+        return null;
+      }
+      this.osmContext = payload;
+      this.osmContextError = "";
+      this.osmContextStatus = "loaded";
+      this.setStatus(this.formatOsmContextStatus(payload));
+      this.renderLayers();
+      this.updateActionButtons();
+      return payload;
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return null;
+      }
+      if (this.requestControllers.osm === controller) {
+        this.osmContext = null;
+        this.osmContextError = error.message;
+        this.osmContextStatus = "error";
+        this.setStatus(`OSM context failed: ${error.message}`, true);
+        this.renderLayers();
+        this.updateActionButtons();
+      }
+      throw error;
+    }
+  }
+
+  clearOsmContext({ render = true, announce = false } = {}) {
+    this.cancelRequest("osm");
+    this.osmContext = null;
+    this.osmContextError = "";
+    this.osmContextStatus = "idle";
+    if (announce && this.refs) {
+      this.setStatus("OSM context cleared.");
+    }
+    if (render && this.refs) {
+      this.renderLayers();
+      this.updateActionButtons();
+    }
+  }
+
+  getOsmContextMetadata() {
+    return this.osmContext?.metadata || null;
+  }
+
+  getOsmDeckLayers() {
+    return buildOsmDeckLayers(this.osmContext, {
+      deckInstance: window.deck,
+      idPrefix: "movement-osm-context",
+    });
+  }
+
+  formatOsmContextStatus(payload) {
+    const metadata = payload?.metadata || {};
+    const featureCount = Number(metadata.feature_count ?? payload?.features?.length ?? 0) || 0;
+    const omittedCount = Number(metadata.omitted_feature_count || 0) || 0;
+    const scopeType = metadata.scope?.type || "scope";
+    const omittedText = omittedCount > 0 ? `; ${formatCount(omittedCount)} omitted` : "";
+    return `Loaded OSM context: ${formatCount(featureCount)} features from ${scopeType}${omittedText}.`;
+  }
+
+  makeEmptyCandidateQueryPreview() {
+    return {
+      analysisId: "",
+      matchKeys: new Set(),
+      candidates: [],
+      evidenceByFixKey: new Map(),
+      status: "idle",
+      warnings: [],
+      candidateCount: 0,
+      returnedCount: 0,
+    };
+  }
+
+  candidateQueryKey(query) {
+    return `${String(query?.query_id || "")}::${String(query?.version || "")}`;
+  }
+
+  getSelectedCandidateQuery() {
+    const key = this.candidateQueryLibrary.selectedKey;
+    return (this.candidateQueryLibrary.queries || []).find(query => this.candidateQueryKey(query) === key) || null;
+  }
+
+  defaultCandidateQueryExecutionScope(query) {
+    const requiredFields = Array.isArray(query?.required_fields) ? query.required_fields : [];
+    if (requiredFields.some(field => String(field || "").startsWith("osm:"))) {
+      return "current_individual";
+    }
+    return query?.evaluator?.type === "fix_osm_proximity" ? "current_individual" : "whole_study";
+  }
+
+  candidateQueryParameterDescriptors(query) {
+    const parameters = query?.parameters && typeof query.parameters === "object" && !Array.isArray(query.parameters)
+      ? query.parameters
+      : {};
+    return Object.entries(parameters).map(([name, rawSpec]) => {
+      const isSpecObject = rawSpec && typeof rawSpec === "object" && !Array.isArray(rawSpec);
+      const spec = isSpecObject ? rawSpec : { default: rawSpec };
+      const rawDefault = Object.prototype.hasOwnProperty.call(spec, "default")
+        ? spec.default
+        : Object.prototype.hasOwnProperty.call(spec, "value")
+          ? spec.value
+          : "";
+      let type = String(spec.type || spec.kind || "").trim().toLowerCase();
+      if (!["number", "string", "boolean"].includes(type)) {
+        if (typeof rawDefault === "number") {
+          type = "number";
+        } else if (typeof rawDefault === "boolean") {
+          type = "boolean";
+        } else {
+          type = "string";
+        }
+      }
+      return {
+        name: String(name),
+        label: String(spec.label || name),
+        description: String(spec.description || ""),
+        type,
+        defaultValue: rawDefault,
+      };
+    }).filter(item => item.name);
+  }
+
+  defaultCandidateQueryParameterValues(query) {
+    const values = {};
+    for (const descriptor of this.candidateQueryParameterDescriptors(query)) {
+      if (descriptor.type === "boolean") {
+        values[descriptor.name] = Boolean(descriptor.defaultValue);
+      } else if (descriptor.defaultValue === null || descriptor.defaultValue === undefined) {
+        values[descriptor.name] = "";
+      } else {
+        values[descriptor.name] = String(descriptor.defaultValue);
+      }
+    }
+    return values;
+  }
+
+  async loadCandidateQueryLibrary() {
+    const controller = this.beginRequest("queryLibrary");
+    this.candidateQueryLibrary.status = "loading";
+    this.candidateQueryLibrary.error = "";
+    this.renderCandidateQueryLibraryControls();
+    try {
+      const payload = await this.fetchJSON("/api/query-library/queries?app=movement", { signal: controller.signal });
+      if (this.requestControllers.queryLibrary !== controller) {
+        return;
+      }
+      const queries = Array.isArray(payload.queries) ? payload.queries : [];
+      this.candidateQueryLibrary.status = "loaded";
+      this.candidateQueryLibrary.queries = queries;
+      this.candidateQueryLibrary.error = "";
+      const currentStillExists = queries.some(query => this.candidateQueryKey(query) === this.candidateQueryLibrary.selectedKey);
+      const selected = currentStillExists ? this.getSelectedCandidateQuery() : queries[0] || null;
+      this.candidateQueryLibrary.selectedKey = selected ? this.candidateQueryKey(selected) : "";
+      this.candidateQueryLibrary.parameterValues = selected ? this.defaultCandidateQueryParameterValues(selected) : {};
+      if (!currentStillExists) {
+        this.candidateQueryLibrary.executionScope = this.defaultCandidateQueryExecutionScope(selected);
+      }
+      this.renderCandidateQueryLibraryControls();
+      this.updateActionButtons();
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return;
+      }
+      this.candidateQueryLibrary.status = "error";
+      this.candidateQueryLibrary.error = error.message;
+      this.candidateQueryLibrary.queries = [];
+      this.candidateQueryLibrary.selectedKey = "";
+      this.candidateQueryLibrary.parameterValues = {};
+      this.renderCandidateQueryLibraryControls();
+      this.updateActionButtons();
+    } finally {
+      if (this.requestControllers.queryLibrary === controller) {
+        this.requestControllers.queryLibrary = null;
+      }
+    }
+  }
+
+  selectCandidateQuery(key) {
+    this.candidateQueryLibrary.selectedKey = String(key || "");
+    const query = this.getSelectedCandidateQuery();
+    this.candidateQueryLibrary.parameterValues = query ? this.defaultCandidateQueryParameterValues(query) : {};
+    this.candidateQueryLibrary.executionScope = this.defaultCandidateQueryExecutionScope(query);
+    this.renderCandidateQueryLibraryControls();
+    this.updateActionButtons();
+  }
+
+  selectCandidateQueryExecutionScope(value) {
+    const allowed = new Set(["whole_study", "current_individual", "all_individuals_per_individual"]);
+    const nextValue = String(value || "whole_study");
+    this.candidateQueryLibrary.executionScope = allowed.has(nextValue) ? nextValue : "whole_study";
+    this.renderCandidateQueryLibraryControls();
+    this.updateActionButtons();
+  }
+
+  handleCandidateQueryParameterInput(event) {
+    const input = event.target.closest?.("[data-param-name]");
+    if (!input) {
+      return;
+    }
+    const name = String(input.dataset.paramName || "");
+    if (!name) {
+      return;
+    }
+    this.candidateQueryLibrary.parameterValues = {
+      ...(this.candidateQueryLibrary.parameterValues || {}),
+      [name]: input.type === "checkbox" ? input.checked : input.value,
+    };
+  }
+
+  renderCandidateQueryLibraryControls() {
+    if (!this.refs?.candidateQuerySelect || !this.refs?.candidateQueryScope || !this.refs?.candidateQueryMeta || !this.refs?.candidateQueryParams) {
+      return;
+    }
+    const select = this.refs.candidateQuerySelect;
+    const scopeSelect = this.refs.candidateQueryScope;
+    const queries = this.candidateQueryLibrary.queries || [];
+    select.innerHTML = "";
+    scopeSelect.value = this.candidateQueryLibrary.executionScope || "whole_study";
+    if (this.candidateQueryLibrary.status === "loading") {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "Loading queries...";
+      select.appendChild(option);
+      select.disabled = true;
+      scopeSelect.disabled = true;
+      this.refs.candidateQueryMeta.textContent = "Loading saved movement queries...";
+      this.refs.candidateQueryParams.innerHTML = "";
+      this.refs.candidateQueryParams.classList.add("hidden");
+      return;
+    }
+    if (this.candidateQueryLibrary.status === "error") {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "Could not load queries";
+      select.appendChild(option);
+      select.disabled = true;
+      scopeSelect.disabled = true;
+      this.refs.candidateQueryMeta.textContent = `Could not load query library: ${this.candidateQueryLibrary.error}`;
+      this.refs.candidateQueryParams.innerHTML = "";
+      this.refs.candidateQueryParams.classList.add("hidden");
+      return;
+    }
+    if (!queries.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No saved movement queries";
+      select.appendChild(option);
+      select.disabled = true;
+      scopeSelect.disabled = true;
+      this.refs.candidateQueryMeta.textContent = "No saved movement candidate queries.";
+      this.refs.candidateQueryParams.innerHTML = "";
+      this.refs.candidateQueryParams.classList.add("hidden");
+      return;
+    }
+    for (const query of queries) {
+      const option = document.createElement("option");
+      option.value = this.candidateQueryKey(query);
+      option.textContent = `${query.name || query.query_id} v${query.version}`;
+      select.appendChild(option);
+    }
+    select.disabled = false;
+    scopeSelect.disabled = false;
+    if (!this.candidateQueryLibrary.selectedKey || !queries.some(query => this.candidateQueryKey(query) === this.candidateQueryLibrary.selectedKey)) {
+      this.candidateQueryLibrary.selectedKey = this.candidateQueryKey(queries[0]);
+      this.candidateQueryLibrary.parameterValues = this.defaultCandidateQueryParameterValues(queries[0]);
+    }
+    select.value = this.candidateQueryLibrary.selectedKey;
+    const selected = this.getSelectedCandidateQuery();
+    if (!selected) {
+      this.refs.candidateQueryMeta.textContent = "Select a candidate query.";
+      return;
+    }
+    const evaluatorType = selected.evaluator?.type || "unknown";
+    const requiredFields = Array.isArray(selected.required_fields) && selected.required_fields.length
+      ? selected.required_fields.join(", ")
+      : "none";
+    const scopeHint = evaluatorType === "fix_osm_proximity"
+      ? " | OSM scope: select one individual, or choose all individuals separately"
+      : "";
+    this.refs.candidateQueryMeta.innerHTML = `
+      <strong>${escapeHtml(selected.name || selected.query_id)}</strong>
+      ${escapeHtml(selected.description || "No description.")}
+      v${escapeHtml(String(selected.version || ""))}
+      | ${escapeHtml(selected.candidate_kind || "candidate")}
+      | evaluator ${escapeHtml(evaluatorType)}
+      | fields ${escapeHtml(requiredFields)}
+      ${escapeHtml(scopeHint)}
+    `;
+    const descriptors = this.candidateQueryParameterDescriptors(selected);
+    if (!descriptors.length) {
+      this.refs.candidateQueryParams.innerHTML = "";
+      this.refs.candidateQueryParams.classList.add("hidden");
+      return;
+    }
+    const values = this.candidateQueryLibrary.parameterValues || {};
+    this.refs.candidateQueryParams.innerHTML = descriptors.map(descriptor => {
+      const rawValue = values[descriptor.name] ?? descriptor.defaultValue ?? "";
+      const title = descriptor.description ? ` title="${escapeHtml(descriptor.description)}"` : "";
+      if (descriptor.type === "boolean") {
+        return `
+          <label${title}>${escapeHtml(descriptor.label)}
+            <input type="checkbox" data-param-name="${escapeHtml(descriptor.name)}" ${rawValue ? "checked" : ""}>
+          </label>
+        `;
+      }
+      const inputType = descriptor.type === "number" ? "number" : "text";
+      const step = descriptor.type === "number" ? ' step="any"' : "";
+      return `
+        <label${title}>${escapeHtml(descriptor.label)}
+          <input type="${inputType}"${step} data-param-name="${escapeHtml(descriptor.name)}" value="${escapeHtml(String(rawValue))}">
+        </label>
+      `;
+    }).join("");
+    this.refs.candidateQueryParams.classList.remove("hidden");
+  }
+
+  getCandidateQueryParameterValues(query) {
+    const values = {};
+    const currentValues = this.candidateQueryLibrary.parameterValues || {};
+    for (const descriptor of this.candidateQueryParameterDescriptors(query)) {
+      const rawValue = currentValues[descriptor.name] ?? descriptor.defaultValue ?? "";
+      if (descriptor.type === "boolean") {
+        values[descriptor.name] = Boolean(rawValue);
+      } else if (descriptor.type === "number") {
+        const numericValue = Number(rawValue);
+        values[descriptor.name] = Number.isFinite(numericValue) ? numericValue : rawValue;
+      } else {
+        values[descriptor.name] = String(rawValue);
+      }
+    }
+    return values;
+  }
+
+  getCandidateQueryCurrentIndividual() {
+    if (!this.data) {
+      return "";
+    }
+    const selectedIndividuals = this.getSelectedIndividuals();
+    return selectedIndividuals.length === 1 ? selectedIndividuals[0] : "";
+  }
+
+  getCandidateQueryExecutionScope() {
+    const scope = this.candidateQueryLibrary.executionScope || "whole_study";
+    if (scope === "current_individual") {
+      const individual = this.getCandidateQueryCurrentIndividual();
+      return individual ? { type: "current_individual", individual } : null;
+    }
+    if (scope === "all_individuals_per_individual") {
+      return { type: "all_individuals_per_individual" };
+    }
+    return { type: "whole_study" };
+  }
+
+  getCandidateQueryMatchKeys() {
+    if (!this.data || !(this.candidateQueryPreview?.matchKeys instanceof Set)) {
+      return new Set();
+    }
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    const visibleSetNames = this.getVisibleSetNames();
+    return new Set(
+      [...this.candidateQueryPreview.matchKeys].filter(fixKey => {
+        const fix = this.data.fixByKey.get(fixKey);
+        return Boolean(fix && visibleIndividuals.has(fix.individual) && visibleSetNames.has(fix.setName));
+      }),
+    );
+  }
+
+  getCandidateQueryReturnedMatchKeys() {
+    if (!(this.candidateQueryPreview?.matchKeys instanceof Set)) {
+      return new Set();
+    }
+    return new Set(this.candidateQueryPreview.matchKeys);
+  }
+
+  clearCandidateQueryPreview({ render = true, announce = false } = {}) {
+    this.cancelRequest("candidateQuery");
+    this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
+    if (announce && this.refs) {
+      this.setStatus("Candidate preview cleared.");
+    }
+    if (render && this.refs) {
+      this.renderLayers();
+      this.updateActionButtons();
+    }
+  }
+
+  makeEmptyAnomalyRanking() {
+    return {
+      analysisId: "",
+      status: "idle",
+      rankedIndividuals: [],
+      warnings: [],
+      burstGap: null,
+      modelFit: null,
+    };
+  }
+
+  clearAnomalyRanking({ render = true } = {}) {
+    this.cancelRequest("anomalyRanking");
+    this.anomalyRanking = this.makeEmptyAnomalyRanking();
+    this.focusedRankingBurst = null;
+    if (render && this.refs) {
+      this.renderAnomalyRanking();
+      this.renderLayers();
+      this.updateActionButtons();
+    }
+  }
+
+  makeEmptyBurstFeatureSpace() {
+    return {
+      analysisId: "",
+      status: "idle",
+      featureSet: "movement_only",
+      points: [],
+      selectedBurstId: "",
+      warnings: [],
+      burstGap: null,
+      featureMatrix: null,
+      pca: null,
+    };
+  }
+
+  clearBurstFeatureSpace({ render = true } = {}) {
+    this.cancelRequest("burstFeatureSpace");
+    this.burstFeatureSpace = this.makeEmptyBurstFeatureSpace();
+    if (render && this.refs) {
+      this.renderBurstFeatureSpace();
+      this.updateActionButtons();
+    }
+  }
+
+  async runBurstAnomalyRanking() {
+    if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
+      return;
+    }
+    const controller = this.beginRequest("anomalyRanking");
+    this.anomalyRanking = {
+      ...this.makeEmptyAnomalyRanking(),
+      status: "loading",
+    };
+    const featureSet = this.getAnomalyFeatureSet();
+    const featureSetLabel = this.anomalyFeatureSetLabel(featureSet);
+    this.renderAnomalyRanking();
+    this.updateActionButtons();
+    this.setStatus(`Running burst anomaly ranking analysis (${featureSetLabel})...`);
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/run-burst-anomaly-ranking`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            burst_gap_mode: this.getBurstGapMode(),
+            burst_gap_seconds: this.getBurstGapSeconds(),
+            burst_gap_quantile: this.getBurstGapQuantile(),
+            feature_set: featureSet,
+            user: this.getUser() || "reviewer",
+          }),
+        },
+      );
+      if (this.requestControllers.anomalyRanking !== controller) {
+        return;
+      }
+      const summary = result?.summary || {};
+      this.anomalyRanking = {
+        analysisId: String(result?.analysis_id || result?.analysis?.analysis_id || ""),
+        status: String(summary.run_status || "completed"),
+        rankedIndividuals: Array.isArray(summary.ranked_individuals) ? summary.ranked_individuals : [],
+        warnings: Array.isArray(summary.warnings) ? summary.warnings : [],
+        burstGap: summary.burst_gap || null,
+        modelFit: summary.model_fit || summary.scorer || null,
+      };
+      this.setSideSheet("ranking");
+      this.renderAnomalyRanking();
+      this.updateActionButtons();
+      const count = formatCount(this.anomalyRanking.rankedIndividuals.length);
+      if (this.anomalyRanking.status === "unresolved") {
+        this.setStatus("Burst anomaly ranking could not be resolved for this artifact. Review its warnings below.", true);
+      } else {
+        const returnedFeatureSet = String(this.anomalyRanking.modelFit?.feature_set || featureSet);
+        this.setStatus(`Created ${this.anomalyFeatureSetLabel(returnedFeatureSet)} burst anomaly ranking analysis for ${count} individuals.`);
+      }
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return;
+      }
+      if (this.requestControllers.anomalyRanking === controller) {
+        this.anomalyRanking = {
+          ...this.makeEmptyAnomalyRanking(),
+          status: "error",
+          warnings: [error.message],
+        };
+        this.renderAnomalyRanking();
+        this.updateActionButtons();
+        this.setStatus(`Burst anomaly ranking failed: ${error.message}`, true);
+      }
+    } finally {
+      if (this.requestControllers.anomalyRanking === controller) {
+        this.requestControllers.anomalyRanking = null;
+        this.updateActionButtons();
+      }
+    }
+  }
+
+  async runBurstFeatureSpace() {
+    if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
+      return;
+    }
+    const controller = this.beginRequest("burstFeatureSpace");
+    const featureSet = this.getAnomalyFeatureSet();
+    const featureSetLabel = this.anomalyFeatureSetLabel(featureSet);
+    this.burstFeatureSpace = {
+      ...this.makeEmptyBurstFeatureSpace(),
+      status: "loading",
+      featureSet,
+    };
+    this.renderBurstFeatureSpace();
+    this.updateActionButtons();
+    this.setStatus(`Building burst feature space (${featureSetLabel})...`);
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/run-burst-feature-space`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            burst_gap_mode: this.getBurstGapMode(),
+            burst_gap_seconds: this.getBurstGapSeconds(),
+            burst_gap_quantile: this.getBurstGapQuantile(),
+            feature_set: featureSet,
+            user: this.getUser() || "reviewer",
+          }),
+        },
+      );
+      if (this.requestControllers.burstFeatureSpace !== controller) {
+        return;
+      }
+      const analysisId = String(result?.analysis_id || result?.analysis?.analysis_id || "");
+      if (!analysisId) {
+        throw new Error("Feature-space analysis did not return an analysis id.");
+      }
+      const artifact = await this.fetchJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis/${encodeURIComponent(analysisId)}/artifact/burst_feature_space.json`,
+        { signal: controller.signal },
+      );
+      if (this.requestControllers.burstFeatureSpace !== controller) {
+        return;
+      }
+      const points = Array.isArray(artifact?.points) ? artifact.points : [];
+      const focusedBurstId = String(this.focusedRankingBurst?.burstId || "");
+      this.burstFeatureSpace = {
+        analysisId,
+        status: String(artifact?.run_status || "completed"),
+        featureSet: String(artifact?.feature_set || featureSet),
+        points,
+        selectedBurstId: points.some(point => String(point?.burst_id || "") === focusedBurstId)
+          ? focusedBurstId
+          : "",
+        warnings: Array.isArray(artifact?.warnings) ? artifact.warnings : [],
+        burstGap: artifact?.burst_gap || null,
+        featureMatrix: artifact?.feature_matrix || null,
+        pca: artifact?.pca || null,
+      };
+      this.setSideSheet("feature_space");
+      this.renderBurstFeatureSpace();
+      this.updateActionButtons();
+      if (this.burstFeatureSpace.status === "unresolved") {
+        this.setStatus("Burst feature space could not be resolved for this artifact. Review its warnings below.", true);
+      } else {
+        this.setStatus(`Created ${featureSetLabel} burst feature space for ${formatCount(points.length)} bursts.`);
+      }
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return;
+      }
+      if (this.requestControllers.burstFeatureSpace === controller) {
+        this.burstFeatureSpace = {
+          ...this.makeEmptyBurstFeatureSpace(),
+          status: "error",
+          featureSet,
+          warnings: [error.message],
+        };
+        this.renderBurstFeatureSpace();
+        this.updateActionButtons();
+        this.setStatus(`Burst feature space failed: ${error.message}`, true);
+      }
+    } finally {
+      if (this.requestControllers.burstFeatureSpace === controller) {
+        this.requestControllers.burstFeatureSpace = null;
+        this.updateActionButtons();
+      }
+    }
+  }
+
+  getBurstFeatureSpacePoint(burstId) {
+    const target = String(burstId || "");
+    if (!target) {
+      return null;
+    }
+    return (this.burstFeatureSpace?.points || []).find(
+      point => String(point?.burst_id || "") === target,
+    ) || null;
+  }
+
+  selectBurstFeatureSpacePoint(burstId, { render = true } = {}) {
+    const point = this.getBurstFeatureSpacePoint(burstId);
+    if (!point || !this.burstFeatureSpace) {
+      return null;
+    }
+    this.burstFeatureSpace.selectedBurstId = String(point.burst_id || "");
+    if (render) {
+      this.renderBurstFeatureSpace();
+    }
+    return point;
+  }
+
+  getBurstFeatureSpaceNeighbors(point) {
+    return (Array.isArray(point?.nearest_neighbors) ? point.nearest_neighbors : [])
+      .map(item => ({
+        burstId: String(item?.burst_id || ""),
+        distance: finiteOrNull(item?.distance),
+        rank: finiteOrNull(item?.rank),
+      }))
+      .filter(item => item.burstId);
+  }
+
+  renderBurstFeatureSpaceSelection(point) {
+    if (!point) {
+      return "";
+    }
+    const neighbors = this.getBurstFeatureSpaceNeighbors(point);
+    const main = [
+      String(point.burst_id || ""),
+      point.individual ? `individual ${point.individual}` : "",
+      point.set_name ? `track ${point.set_name}` : "",
+      Number.isFinite(Number(point.n_fixes)) ? `${formatCount(point.n_fixes)} fixes` : "",
+    ].filter(Boolean);
+    return `
+      <div class="movement-feature-space-selection" data-role="feature-space-selection">
+        <div class="movement-feature-space-selection-main">
+          ${main.map((item, index) => (
+            index === 0
+              ? `<strong class="movement-table-cell-mono">${escapeHtml(item)}</strong>`
+              : `<span>${escapeHtml(item)}</span>`
+          )).join("")}
+        </div>
+        ${neighbors.length ? `
+          <div class="movement-feature-space-neighbors" data-role="feature-space-neighbors">
+            <span>Nearest</span>
+            ${neighbors.map(neighbor => {
+              const neighborPoint = this.getBurstFeatureSpacePoint(neighbor.burstId);
+              const label = neighborPoint?.burst_id || neighbor.burstId;
+              const distance = neighbor.distance === null ? "" : ` · ${formatMaybeNumber(neighbor.distance, "")}`;
+              return `<button type="button" data-action="focus-feature-space-neighbor" data-burst-id="${escapeHtml(neighbor.burstId)}">${escapeHtml(label)}${escapeHtml(distance)}</button>`;
+            }).join("")}
+          </div>
+        ` : ""}
+      </div>
+    `;
+  }
+
+  renderBurstFeatureSpacePlot(points, selectedPoint) {
+    const plottedPoints = points
+      .map(point => ({
+        point,
+        x: finiteOrNull(point?.pc1),
+        y: finiteOrNull(point?.pc2),
+      }))
+      .filter(item => item.x !== null && item.y !== null);
+    if (!plottedPoints.length) {
+      return '<div class="movement-table-empty">No projected burst points are available.</div>';
+    }
+    const width = 640;
+    const height = 420;
+    const padding = 30;
+    const xs = plottedPoints.map(item => item.x);
+    const ys = plottedPoints.map(item => item.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const spanX = maxX - minX || 1;
+    const spanY = maxY - minY || 1;
+    const scaleX = value => padding + ((value - minX) / spanX) * (width - (2 * padding));
+    const scaleY = value => height - padding - ((value - minY) / spanY) * (height - (2 * padding));
+    const selectedId = String(selectedPoint?.burst_id || "");
+    const neighborIds = new Set(this.getBurstFeatureSpaceNeighbors(selectedPoint).map(item => item.burstId));
+    const zeroX = minX <= 0 && maxX >= 0 ? scaleX(0) : null;
+    const zeroY = minY <= 0 && maxY >= 0 ? scaleY(0) : null;
+    return `
+      <div class="movement-feature-space-plot">
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="PCA projection of burst feature rows">
+          ${zeroX === null ? "" : `<line class="movement-feature-space-axis" x1="${zeroX}" x2="${zeroX}" y1="${padding}" y2="${height - padding}"></line>`}
+          ${zeroY === null ? "" : `<line class="movement-feature-space-axis" x1="${padding}" x2="${width - padding}" y1="${zeroY}" y2="${zeroY}"></line>`}
+          ${plottedPoints.map(item => {
+            const burstId = String(item.point?.burst_id || "");
+            const isSelected = burstId === selectedId;
+            const isNeighbor = neighborIds.has(burstId);
+            const classNames = [
+              "movement-feature-space-point",
+              isNeighbor ? "is-neighbor" : "",
+              isSelected ? "is-selected" : "",
+            ].filter(Boolean).join(" ");
+            const radius = isSelected ? 7 : isNeighbor ? 5 : 3;
+            return `
+              <circle
+                class="${classNames}"
+                data-action="focus-feature-space-burst"
+                data-burst-id="${escapeHtml(burstId)}"
+                cx="${scaleX(item.x)}"
+                cy="${scaleY(item.y)}"
+                r="${radius}"
+              ><title>${escapeHtml(burstId)}</title></circle>
+            `;
+          }).join("")}
+        </svg>
+      </div>
+    `;
+  }
+
+  renderBurstFeatureSpace() {
+    if (!this.refs?.burstFeatureSpace) {
+      return;
+    }
+    const result = this.burstFeatureSpace || this.makeEmptyBurstFeatureSpace();
+    if (result.status === "idle") {
+      this.refs.burstFeatureSpace.innerHTML = '<div class="movement-table-empty">Run feature space to project automatic bursts.</div>';
+      return;
+    }
+    if (result.status === "loading") {
+      this.refs.burstFeatureSpace.innerHTML = '<div class="movement-table-empty">Building burst feature space...</div>';
+      return;
+    }
+    const points = Array.isArray(result.points) ? result.points : [];
+    const explainedVariance = Array.isArray(result.pca?.explained_variance_ratio)
+      ? result.pca.explained_variance_ratio
+      : [];
+    const fittedFeatures = Array.isArray(result.featureMatrix?.fitted_features)
+      ? result.featureMatrix.fitted_features
+      : [];
+    const metadata = [
+      result.featureSet ? `Feature set: ${String(result.featureSet).replaceAll("_", " ")}` : "",
+      Number.isFinite(Number(explainedVariance[0])) ? `PC1: ${(Number(explainedVariance[0]) * 100).toFixed(1)}%` : "",
+      Number.isFinite(Number(explainedVariance[1])) ? `PC2: ${(Number(explainedVariance[1]) * 100).toFixed(1)}%` : "",
+      `Features: ${formatCount(fittedFeatures.length)}`,
+      `Bursts: ${formatCount(points.length)}`,
+    ].filter(Boolean);
+    const warningsHtml = result.warnings.length
+      ? `<div class="movement-anomaly-warnings">${result.warnings.map(warning => `<div class="movement-anomaly-warning">${escapeHtml(String(warning))}</div>`).join("")}</div>`
+      : "";
+    const selectedPoint = this.getBurstFeatureSpacePoint(result.selectedBurstId);
+    this.refs.burstFeatureSpace.innerHTML = `
+      <div class="movement-feature-space-meta">${metadata.map(item => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+      ${warningsHtml}
+      ${points.length ? this.renderBurstFeatureSpacePlot(points, selectedPoint) : '<div class="movement-table-empty">No burst feature-space points were produced.</div>'}
+      ${this.renderBurstFeatureSpaceSelection(selectedPoint)}
+    `;
+  }
+
+  async inspectBurstFeatureSpacePoint(burstId) {
+    const point = this.selectBurstFeatureSpacePoint(burstId);
+    if (!point) {
+      this.setStatus("Could not find that burst in the current feature-space result.", true);
+      return;
+    }
+    await this.inspectBurstRef(point, {
+      checkFixes: false,
+      isolateIndividual: true,
+    });
+  }
+
+  async inspectBurstFeatureSpaceNeighbor(burstId) {
+    const point = this.getBurstFeatureSpacePoint(burstId);
+    if (!point) {
+      this.setStatus("Could not find that neighbor burst in the current feature-space result.", true);
+      return;
+    }
+    await this.inspectBurstRef(point, {
+      checkFixes: false,
+      isolateIndividual: true,
+      preserveFeatureSpaceSelection: true,
+    });
+  }
+
+  async handleBurstFeatureSpaceClick(event) {
+    const target = event.target.closest("[data-action]");
+    if (!target) {
+      return;
+    }
+    const action = target.dataset.action || "";
+    if (action === "focus-feature-space-burst") {
+      await this.inspectBurstFeatureSpacePoint(target.dataset.burstId || "");
+    } else if (action === "focus-feature-space-neighbor") {
+      await this.inspectBurstFeatureSpaceNeighbor(target.dataset.burstId || "");
+    }
+  }
+
+  normalizeRankingBurstRefs(row) {
+    const refs = Array.isArray(row?.ranked_burst_refs) ? row.ranked_burst_refs : [];
+    return refs
+      .map(ref => ({
+        ...ref,
+        individual: String(ref?.individual || row?.individual || ""),
+        burst_id: String(ref?.burst_id || ""),
+        fix_keys: Array.isArray(ref?.fix_keys) ? ref.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
+      }))
+      .filter(ref => ref.burst_id);
+  }
+
+  normalizeAnomalyExplanationItems(items) {
+    return (Array.isArray(items) ? items : [])
+      .map(item => ({
+        feature: String(item?.feature || ""),
+        displayValue: String(item?.display_value ?? item?.displayValue ?? ""),
+        percentile: finiteOrNull(item?.percentile),
+        direction: String(item?.direction || ""),
+      }))
+      .filter(item => item.feature);
+  }
+
+  anomalyFeatureLabel(feature) {
+    const key = String(feature || "");
+    const labels = {
+      duration_s: "duration",
+      path_length_m: "path length",
+      mean_step_length_m: "mean step length",
+      sd_step_length_m: "step length variability",
+      net_displacement_m: "net displacement",
+      straightness: "straightness",
+      mean_speed_mps: "mean speed",
+      median_speed_mps: "median speed",
+      max_speed_mps: "max speed",
+      sd_speed_mps: "speed variability",
+      max_time_gap_s: "max time gap",
+    };
+    if (labels[key]) {
+      return labels[key];
+    }
+    let cleaned = key;
+    if (cleaned.startsWith("osm:")) {
+      cleaned = cleaned.replace(/^osm:nearest_/, "").replace(/_distance_m/g, " distance");
+    }
+    cleaned = cleaned
+      .replace(/__(mean|median|min|max|sd)$/g, " $1")
+      .replace(/_mps/g, "")
+      .replace(/_m/g, "")
+      .replace(/_s/g, "")
+      .replace(/_/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return cleaned || key;
+  }
+
+  explanationExtremeness(item) {
+    const percentile = finiteOrNull(item?.percentile);
+    if (percentile === null) {
+      return -1;
+    }
+    if (item.direction === "high") {
+      return percentile;
+    }
+    if (item.direction === "low") {
+      return 100 - percentile;
+    }
+    return -1;
+  }
+
+  isCompactWhyItem(item) {
+    const percentile = finiteOrNull(item?.percentile);
+    if (percentile === null) {
+      return false;
+    }
+    if (item.direction === "high") {
+      return percentile >= 80;
+    }
+    if (item.direction === "low") {
+      return percentile <= 20;
+    }
+    return false;
+  }
+
+  whyDirectionLabel(item) {
+    const percentile = finiteOrNull(item?.percentile);
+    if (item.direction === "high") {
+      return percentile >= 95 ? "very high" : "high";
+    }
+    if (item.direction === "low") {
+      return percentile <= 5 ? "very low" : "low";
+    }
+    return "";
+  }
+
+  hasAnomalyExplanationData(ref) {
+    return Boolean(
+      this.normalizeAnomalyExplanationItems(ref.top_high_quantile_features).length
+      || this.normalizeAnomalyExplanationItems(ref.top_low_quantile_features).length
+      || this.normalizeAnomalyExplanationItems(ref.missing_features).length
+    );
+  }
+
+  getCompactAnomalyWhyItems(ref) {
+    const high = this.normalizeAnomalyExplanationItems(ref.top_high_quantile_features)
+      .filter(item => item.direction === "high");
+    const low = this.normalizeAnomalyExplanationItems(ref.top_low_quantile_features)
+      .filter(item => item.direction === "low");
+    return [...high, ...low]
+      .filter(item => this.isCompactWhyItem(item))
+      .sort((left, right) => (
+        this.explanationExtremeness(right) - this.explanationExtremeness(left)
+        || left.feature.localeCompare(right.feature)
+      ))
+      .slice(0, 3);
+  }
+
+  renderAnomalyWhy(ref) {
+    const items = this.getCompactAnomalyWhyItems(ref);
+    if (!items.length) {
+      if (this.hasAnomalyExplanationData(ref)) {
+        return `<div class="movement-anomaly-why"><strong>Why:</strong> mixed feature pattern</div>`;
+      }
+      return "";
+    }
+    const parts = items.map(item => {
+      const directionLabel = this.whyDirectionLabel(item);
+      return `${directionLabel} ${this.anomalyFeatureLabel(item.feature)}`;
+    });
+    return `<div class="movement-anomaly-why"><strong>Why:</strong> ${escapeHtml(parts.join("; "))}</div>`;
+  }
+
+  formatAnomalyExplanationPercentile(percentile) {
+    const value = finiteOrNull(percentile);
+    if (value === null) {
+      return "";
+    }
+    const formatted = Math.abs(value - Math.round(value)) < 0.05
+      ? String(Math.round(value))
+      : value.toFixed(1);
+    return `${formatted}th percentile`;
+  }
+
+  renderAnomalyExplanationItems(label, items, direction) {
+    const normalized = this.normalizeAnomalyExplanationItems(items)
+      .filter(item => item.direction === direction)
+      .slice(0, direction === "missing" ? 5 : 3);
+    if (!normalized.length) {
+      return "";
+    }
+    const totalCount = this.normalizeAnomalyExplanationItems(items)
+      .filter(item => item.direction === direction).length;
+    const moreCount = Math.max(0, totalCount - normalized.length);
+    return `
+      <div class="movement-anomaly-explanation-section">
+        <span class="movement-anomaly-explanation-label">${escapeHtml(label)}</span>
+        ${normalized.map(item => {
+          const valueLabel = item.displayValue || (item.direction === "missing" ? "NA" : "n/a");
+          const percentileLabel = this.formatAnomalyExplanationPercentile(item.percentile);
+          return `
+            <span class="movement-anomaly-explanation-chip" data-explanation-direction="${escapeHtml(item.direction)}">
+              <span>${escapeHtml(item.feature)}</span>
+              <span>=</span>
+              <span>${escapeHtml(valueLabel)}</span>
+              ${percentileLabel ? `<span>(${escapeHtml(percentileLabel)})</span>` : ""}
+            </span>
+          `;
+        }).join("")}
+        ${moreCount ? `<span class="movement-subtle">+${escapeHtml(formatCount(moreCount))} more</span>` : ""}
+      </div>
+    `;
+  }
+
+  renderAnomalyBurstExplanation(ref) {
+    const highHtml = this.renderAnomalyExplanationItems(
+      "High observed quantiles",
+      ref.top_high_quantile_features,
+      "high",
+    );
+    const lowHtml = this.renderAnomalyExplanationItems(
+      "Low observed quantiles",
+      ref.top_low_quantile_features,
+      "low",
+    );
+    const missingHtml = this.renderAnomalyExplanationItems(
+      "Missing fitted features",
+      ref.missing_features,
+      "missing",
+    );
+    if (!highHtml && !lowHtml && !missingHtml) {
+      return "";
+    }
+    return `
+      <details class="movement-anomaly-explanation-details" data-role="ranking-burst-explanation">
+        <summary>Details</summary>
+        <div class="movement-anomaly-explanation">
+          <div class="movement-anomaly-explanation-note">Observed feature-value quantiles, not SHAP/model attribution.</div>
+          ${highHtml}
+          ${lowHtml}
+          ${missingHtml}
+        </div>
+      </details>
+    `;
+  }
+
+  renderAnomalyBurstRefs(row) {
+    const refs = this.normalizeRankingBurstRefs(row);
+    if (!refs.length) {
+      return "";
+    }
+    return `
+      <div class="movement-anomaly-bursts" data-role="ranking-burst-refs">
+        ${refs.map((ref, refIndex) => {
+          const isTopRankingBurst = refIndex === 0;
+          const fixCount = finiteOrNull(ref.n_fixes ?? ref.fix_count) ?? ref.fix_keys.length;
+          const meta = [
+            ref.set_name ? `track ${ref.set_name}` : "",
+            Number.isFinite(Number(fixCount)) ? `${formatCount(fixCount)} fixes` : "",
+          ].filter(Boolean).join(" • ");
+          return `
+            <div class="movement-anomaly-burst${isTopRankingBurst ? " is-ranking-burst" : ""}" data-ranking-burst-id="${escapeHtml(ref.burst_id)}">
+              <div class="movement-anomaly-burst-main">
+                ${isTopRankingBurst ? `<span class="movement-anomaly-burst-rank-badge" aria-label="ranking burst">★</span>` : ""}
+                <span class="movement-table-cell-mono">${escapeHtml(ref.burst_id)}</span>
+                <span>score ${escapeHtml(formatMaybeNumber(finiteOrNull(ref.anomaly_score), ""))}</span>
+                ${meta ? `<span class="movement-subtle">${escapeHtml(meta)}</span>` : ""}
+              </div>
+              ${this.renderAnomalyWhy(ref)}
+              ${this.renderAnomalyBurstExplanation(ref)}
+              <div class="movement-anomaly-burst-actions">
+                <button type="button" data-action="zoom-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Zoom to burst</button>
+                <button type="button" data-action="check-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Check fixes</button>
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+  }
+
+  getRankingBurstRef(burstId) {
+    const target = String(burstId || "");
+    if (!target || !this.anomalyRanking) {
+      return null;
+    }
+    for (const row of this.anomalyRanking.rankedIndividuals || []) {
+      const ref = this.normalizeRankingBurstRefs(row).find(item => item.burst_id === target);
+      if (ref) {
+        return ref;
+      }
+    }
+    return null;
+  }
+
+  getRankingBurstPath(ref) {
+    if (!this.data || !ref) {
+      return [];
+    }
+    const pathFromFixKeys = (ref.fix_keys || [])
+      .map(fixKey => this.data.fixByKey.get(fixKey))
+      .filter(Boolean)
+      .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey))
+      .map(fix => fix.position)
+      .filter(position => Array.isArray(position) && position.length >= 2);
+    if (pathFromFixKeys.length) {
+      return pathFromFixKeys;
+    }
+    const burst = this.data.autoBurstById?.get(ref.burst_id || "");
+    return burst?.path?.length ? burst.path : [];
+  }
+
+  setFocusedRankingBurst(ref) {
+    if (!ref?.burst_id) {
+      this.focusedRankingBurst = null;
+      return;
+    }
+    this.focusedRankingBurst = {
+      burstId: String(ref.burst_id || ""),
+      individual: String(ref.individual || ""),
+      setName: String(ref.set_name || ref.setName || ""),
+      fixKeys: Array.isArray(ref.fix_keys) ? ref.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
+    };
+    if (this.getBurstFeatureSpacePoint(this.focusedRankingBurst.burstId)) {
+      this.burstFeatureSpace.selectedBurstId = this.focusedRankingBurst.burstId;
+      this.renderBurstFeatureSpace();
+    }
+  }
+
+  clearFocusedRankingBurstIfHidden() {
+    if (
+      this.focusedRankingBurst?.individual
+      && this.data?.selectedIndividuals instanceof Set
+      && !this.data.selectedIndividuals.has(this.focusedRankingBurst.individual)
+    ) {
+      this.focusedRankingBurst = null;
+    }
+  }
+
+  getFocusedRankingBurstFixes() {
+    this.clearFocusedRankingBurstIfHidden();
+    if (!this.data || !this.focusedRankingBurst?.fixKeys?.length) {
+      return [];
+    }
+    const focusedFixes = this.focusedRankingBurst.fixKeys
+      .map(fixKey => this.data.fixByKey.get(fixKey))
+      .filter(Boolean)
+      .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
+    if (!focusedFixes.length) {
+      return [];
+    }
+    const visibleSetNames = this.getVisibleSetNames();
+    return focusedFixes.filter(fix => (
+      this.data.selectedIndividuals.has(fix.individual)
+      && visibleSetNames.has(fix.setName)
+    ));
+  }
+
+  mutedRankingContextColor(color, alpha = 42) {
+    const source = Array.isArray(color) ? color : [124, 136, 153, 255];
+    const red = Number(source[0]) || 0;
+    const green = Number(source[1]) || 0;
+    const blue = Number(source[2]) || 0;
+    const gray = Math.round((red * 0.2126) + (green * 0.7152) + (blue * 0.0722));
+    const mutedChannel = channel => Math.round((gray * 0.82) + (channel * 0.18));
+    return [mutedChannel(red), mutedChannel(green), mutedChannel(blue), alpha];
+  }
+
+  async inspectRankingBurst(burstId, { checkFixes = false } = {}) {
+    if (!this.data) {
+      return;
+    }
+    const ref = this.getRankingBurstRef(burstId);
+    if (!ref) {
+      this.setStatus("Could not find that ranked burst in the current ranking result.", true);
+      return;
+    }
+    await this.inspectBurstRef(ref, { checkFixes });
+  }
+
+  async inspectBurstRef(ref, { checkFixes = false, isolateIndividual = false, preserveFeatureSpaceSelection = false } = {}) {
+    if (!this.data || !ref?.burst_id) {
+      return;
+    }
+    const fixKeys = Array.isArray(ref.fix_keys) ? ref.fix_keys : [];
+    const preservedFixKeys = new Set(this.data.selectedFixKeys);
+    if (checkFixes) {
+      for (const fixKey of fixKeys) {
+        preservedFixKeys.add(fixKey);
+      }
+    }
+    if (ref.individual && isolateIndividual) {
+      this.data.selectedIndividuals = new Set([ref.individual]);
+    } else if (ref.individual) {
+      this.data.selectedIndividuals.add(ref.individual);
+    }
+    const startTimeMs = finiteOrNull(ref.start_time_ms);
+    if (startTimeMs !== null) {
+      this.currentTimeMs = startTimeMs;
+      this.refs.slider.value = String(startTimeMs);
+      this.updateTimeLabel();
+    }
+    this.saveUiState();
+    this.renderIndividuals();
+    await this.loadDetailForCurrentSelection({ preservedFixKeys });
+
+    const preservedFeatureSpaceBurstId = preserveFeatureSpaceSelection
+      ? String(this.burstFeatureSpace?.selectedBurstId || "")
+      : "";
+    this.setFocusedRankingBurst(ref);
+    if (preserveFeatureSpaceSelection && preservedFeatureSpaceBurstId) {
+      this.burstFeatureSpace.selectedBurstId = preservedFeatureSpaceBurstId;
+      this.renderBurstFeatureSpace();
+    }
+    if (checkFixes) {
+      const nextSelected = new Set(this.data.selectedFixKeys);
+      for (const fixKey of fixKeys) {
+        if (this.data.fixByKey.has(fixKey)) {
+          nextSelected.add(fixKey);
+        }
+      }
+      this.data.selectedFixKeys = nextSelected;
+      this.renderSelectedFixes();
+      this.renderThresholdPane();
+      this.updateActionButtons();
+    }
+    this.renderLayers();
+
+    const path = this.getRankingBurstPath(ref);
+    if (path.length) {
+      this.zoomToPath(path);
+      const action = checkFixes ? "checked and zoomed to" : "zoomed to";
+      this.setStatus(`Selected ${ref.individual || "individual"} and ${action} burst ${ref.burst_id}.`);
+    } else {
+      this.setStatus(`Selected ${ref.individual || "individual"}, but burst ${ref.burst_id} fixes are not loaded for zooming.`, true);
+    }
+  }
+
+  async handleAnomalyRankingClick(event) {
+    const actionButton = event.target.closest("button[data-action]");
+    if (!actionButton) {
+      return;
+    }
+    const action = actionButton.dataset.action || "";
+    if (action === "zoom-ranking-burst") {
+      await this.inspectRankingBurst(actionButton.dataset.burstId || "", { checkFixes: false });
+    } else if (action === "check-ranking-burst") {
+      await this.inspectRankingBurst(actionButton.dataset.burstId || "", { checkFixes: true });
+    }
+  }
+
+  renderAnomalyRanking() {
+    if (!this.refs?.anomalyRanking) {
+      return;
+    }
+    const result = this.anomalyRanking || this.makeEmptyAnomalyRanking();
+    if (result.status === "idle") {
+      this.refs.anomalyRanking.innerHTML = '<div class="movement-table-empty">Run burst ranking to prioritize individual review.</div>';
+      return;
+    }
+    if (result.status === "loading") {
+      this.refs.anomalyRanking.innerHTML = '<div class="movement-table-empty">Running burst anomaly ranking analysis...</div>';
+      return;
+    }
+    const burstGapLabel = result.burstGap
+      ? formatBurstGapMetadata(parseMovementBurstGap({ burst_gap: result.burstGap }))
+      : "";
+    const modelFit = result.modelFit || {};
+    const metadata = [
+      result.analysisId ? `Analysis: ${result.analysisId}` : "",
+      burstGapLabel ? `Burst gap: ${burstGapLabel}` : "",
+      modelFit.model ? `Model: ${modelFit.model}` : "",
+      modelFit.feature_set ? `Feature set: ${String(modelFit.feature_set).replaceAll("_", " ")}` : "",
+      Number.isFinite(Number(modelFit.scored_burst_count))
+        ? `Scored bursts: ${formatCount(modelFit.scored_burst_count)}`
+        : "",
+      Array.isArray(modelFit.fitted_features)
+        ? `Fitted features: ${formatCount(modelFit.fitted_features.length)}`
+        : "",
+      modelFit.excluded_by_feature_set && typeof modelFit.excluded_by_feature_set === "object"
+        ? `Feature-set exclusions: ${formatCount(Object.keys(modelFit.excluded_by_feature_set).length)}`
+        : "",
+    ].filter(Boolean);
+    const metadataHtml = metadata.length
+      ? `<div class="movement-anomaly-meta">${metadata.map(item => `<div>${escapeHtml(item)}</div>`).join("")}</div>`
+      : "";
+    const fittedFeatureNames = Array.isArray(modelFit.fitted_features)
+      ? modelFit.fitted_features.slice(0, 12).map(item => String(item))
+      : [];
+    const fittedFeaturesHtml = fittedFeatureNames.length
+      ? `<div class="movement-anomaly-meta"><div>Fitted feature sample: ${escapeHtml(fittedFeatureNames.join(", "))}${modelFit.fitted_features.length > fittedFeatureNames.length ? "..." : ""}</div></div>`
+      : "";
+    const warningsHtml = result.warnings.length
+      ? `<div class="movement-anomaly-warnings">${result.warnings.map(warning => `<div class="movement-anomaly-warning">${escapeHtml(String(warning))}</div>`).join("")}</div>`
+      : "";
+    const rows = Array.isArray(result.rankedIndividuals) ? result.rankedIndividuals : [];
+    if (!rows.length) {
+      const message = result.status === "error"
+        ? "The ranking analysis failed."
+        : "No individuals were ranked.";
+      this.refs.anomalyRanking.innerHTML = `${metadataHtml}${fittedFeaturesHtml}${warningsHtml}<div class="movement-table-empty">${escapeHtml(message)}</div>`;
+      return;
+    }
+    this.refs.anomalyRanking.innerHTML = `
+      ${metadataHtml}
+      ${fittedFeaturesHtml}
+      ${warningsHtml}
+      <table class="movement-table">
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Individual</th>
+            <th>Top score</th>
+            <th>Top burst</th>
+            <th>Bursts</th>
+            <th>Scored</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(row => {
+            const burstRefsHtml = this.renderAnomalyBurstRefs(row);
+            return `
+              <tr>
+                <td class="movement-table-cell-mono">${escapeHtml(String(row.rank ?? ""))}</td>
+                <td>${escapeHtml(String(row.individual || ""))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(finiteOrNull(row.top_burst_score), ""))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(String(row.top_burst_id || ""))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatCount(row.burst_count))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatCount(row.scored_burst_count))}</td>
+              </tr>
+              ${burstRefsHtml ? `<tr class="movement-anomaly-burst-row"><td colspan="6">${burstRefsHtml}</td></tr>` : ""}
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
+  async runSelectedCandidateQuery() {
+    if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
+      return;
+    }
+    const selectedQuery = this.getSelectedCandidateQuery();
+    if (!selectedQuery) {
+      this.setStatus("No saved movement candidate query is selected.", true);
+      return;
+    }
+    const executionScope = this.getCandidateQueryExecutionScope();
+    if (!executionScope) {
+      this.setStatus("Select exactly one individual before running the current-individual candidate query scope.", true);
+      return;
+    }
+    const controller = this.beginRequest("candidateQuery");
+    this.candidateQueryPreview = {
+      ...this.makeEmptyCandidateQueryPreview(),
+      status: "loading",
+    };
+    this.setStatus(`Running candidate query ${selectedQuery.name || selectedQuery.query_id}...`);
+    this.renderLayers();
+    this.updateActionButtons();
+
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/run-candidate-query`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            user: this.getUser() || "reviewer",
+            preview_limit: 1000,
+            query_id: selectedQuery.query_id,
+            query_version: selectedQuery.version,
+            query_parameters: this.getCandidateQueryParameterValues(selectedQuery),
+            execution_scope: executionScope,
+          }),
+        },
+      );
+      if (this.requestControllers.candidateQuery !== controller) {
+        return;
+      }
+      const summary = result?.summary || {};
+      const candidates = Array.isArray(summary.candidates) ? summary.candidates : [];
+      const matchKeys = new Set();
+      const evidenceByFixKey = new Map();
+      for (const candidate of candidates) {
+        const fixKey = String(candidate?.fix_key || "");
+        if (!fixKey) {
+          continue;
+        }
+        matchKeys.add(fixKey);
+        evidenceByFixKey.set(fixKey, candidate.evidence || {});
+      }
+      this.candidateQueryPreview = {
+        analysisId: String(result?.analysis_id || result?.analysis?.analysis_id || ""),
+        matchKeys,
+        candidates,
+        evidenceByFixKey,
+        status: String(summary.run_status || "success"),
+        warnings: Array.isArray(summary.warnings) ? summary.warnings : [],
+        candidateCount: Number(summary.candidate_count) || matchKeys.size,
+        returnedCount: Number(summary.returned_count) || candidates.length,
+      };
+      const visibleCount = this.getCandidateQueryMatchKeys().size;
+      const returnedCount = this.getCandidateQueryReturnedMatchKeys().size;
+      const warningText = this.candidateQueryPreview.warnings.length
+        ? ` ${this.candidateQueryPreview.warnings[0]}`
+        : "";
+      if (this.candidateQueryPreview.status === "unresolved") {
+        this.setStatus(`Candidate query unresolved. ${warningText}`.trim(), true);
+      } else {
+        const visibilityText = visibleCount === returnedCount
+          ? `${formatCount(visibleCount)} visible`
+          : `${formatCount(visibleCount)} visible now; ${formatCount(returnedCount)} returned and available to check`;
+        this.setStatus(`Candidate query found ${formatCount(this.candidateQueryPreview.candidateCount)} candidates; ${visibilityText}.${warningText}`.trim());
+      }
+      this.renderLayers();
+      this.updateActionButtons();
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return;
+      }
+      if (this.requestControllers.candidateQuery === controller) {
+        this.candidateQueryPreview = {
+          ...this.makeEmptyCandidateQueryPreview(),
+          status: "error",
+          warnings: [error.message],
+        };
+        this.setStatus(`Candidate query failed: ${error.message}`, true);
+        this.renderLayers();
+        this.updateActionButtons();
+      }
+    } finally {
+      if (this.requestControllers.candidateQuery === controller) {
+        this.requestControllers.candidateQuery = null;
+      }
+    }
+  }
+
+  async checkCandidateQueryPreview() {
+    if (!this.data) {
+      return;
+    }
+    const matchKeys = this.getCandidateQueryReturnedMatchKeys();
+    if (!matchKeys.size) {
+      return;
+    }
+    const candidateFixes = parseMovementFixes(this.candidateQueryPreview.candidates || []);
+    this.data.candidateFixes = candidateFixes;
+    refreshMovementFixCollections(this.data);
+    for (const fix of candidateFixes) {
+      if (fix.individual) {
+        this.data.selectedIndividuals.add(fix.individual);
+      }
+    }
+    const nextSelected = new Set(this.data.selectedFixKeys);
+    for (const fixKey of matchKeys) {
+      if (this.data.fixByKey.has(fixKey)) {
+        nextSelected.add(fixKey);
+      }
+    }
+    this.data.selectedFixKeys = nextSelected;
+    this.saveUiState();
+    this.setSideSheet("individuals");
+    this.renderIndividuals();
+    this.renderSelectedFixes();
+    this.renderThresholdPane();
+    this.renderLayers();
+    this.updateActionButtons();
+    await this.loadDetailForCurrentSelection({ preservedFixKeys: nextSelected });
   }
 
   handleVisibilityChange() {
@@ -1348,18 +4159,37 @@ class MovementExampleApp {
 
   clearLoadedStudyState() {
     this.clearThresholdState();
+    this.clearOsmContext({ render: false });
+    this.clearCandidateQueryPreview({ render: false });
+    this.clearAnomalyRanking({ render: false });
+    this.clearBurstFeatureSpace({ render: false });
+    this.activeFixPopup = null;
+    this.pendingIssueContext = null;
+    this.tableSelection = {
+      anchorFixKey: "",
+      focusFixKey: "",
+      selectedFixKeys: new Set(),
+    };
+    this.tableRenderState = {
+      signature: "",
+      rowLimit: TABLE_INITIAL_ROW_LIMIT,
+    };
     this.data = null;
     this.currentArtifactEntry = null;
     this.currentTimeMs = 0;
     this.lastReportLinks = [];
     this.refs.individuals.innerHTML = "";
     this.refs.selectedFixes.innerHTML = "";
+    this.renderAnomalyRanking();
+    this.renderBurstFeatureSpace();
     this.refs.individualHead.textContent = "Individuals and coverage";
     this.refs.fixHead.textContent = "Checked fixes";
     this.refs.slider.min = "0";
     this.refs.slider.max = "0";
     this.refs.slider.value = "0";
+    this.syncAnomalyFeatureSetOptions({ save: false });
     this.updateTimeLabel();
+    this.renderBurstCountIndicator();
     this.renderLayers();
     this.renderLegend();
     this.renderThresholdPane();
@@ -1565,11 +4395,13 @@ class MovementExampleApp {
       ) || null;
       this.clearLoadedStudyState();
       this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
+      this.syncAnomalyFeatureSetOptions({ save: false });
       this.currentTimeMs = this.data.minTimeMs;
       this.refs.slider.min = String(this.data.minTimeMs);
       this.refs.slider.max = String(this.data.maxTimeMs);
       this.refs.slider.value = String(this.currentTimeMs);
-      this.data.selectedIndividuals = new Set(this.data.individuals);
+      const initiallySelectedIndividuals = initialMovementVisibleIndividuals(this.data);
+      this.data.selectedIndividuals = new Set(initiallySelectedIndividuals);
       this.data.selectedFixKeys = new Set();
       this.populateColorByOptions();
       this.renderIndividuals();
@@ -1581,7 +4413,11 @@ class MovementExampleApp {
       await this.rebuildMap(false);
       this.resetView();
       this.updateActionButtons();
-      this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
+      if (initiallySelectedIndividuals.length) {
+        this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
+      } else {
+        this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
+      }
       void this.loadDetailForCurrentSelection();
     } catch (error) {
       if (this.isAbortError(error)) {
@@ -1685,6 +4521,8 @@ class MovementExampleApp {
 
   async loadArtifact(preservedFixKeys = new Set()) {
     this.cancelSelectionRequests("artifact");
+    this.clearAnomalyRanking();
+    this.clearBurstFeatureSpace();
     const familyName = this.currentFamily;
     const studyName = this.currentStudy;
     const datasetId = this.currentDatasetId;
@@ -1704,10 +4542,17 @@ class MovementExampleApp {
     }
     this.saveUiState();
     this.setStatus(`Loading overview for ${this.currentArtifact} from ${this.currentDatasetId}...`);
+    this.renderBurstCountIndicator("Loading bursts...");
     try {
       const controller = this.beginRequest("overview");
+      const overviewParams = new URLSearchParams({
+        logical_name: artifactName,
+        burst_gap_mode: this.getBurstGapMode(),
+        burst_gap_seconds: String(this.getBurstGapSeconds()),
+        burst_gap_quantile: String(this.getBurstGapQuantile()),
+      });
       const summary = await this.fetchJSON(
-        `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/dataset/${encodeURIComponent(datasetId)}/overview?${new URLSearchParams({ logical_name: artifactName }).toString()}`,
+        `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/dataset/${encodeURIComponent(datasetId)}/overview?${overviewParams.toString()}`,
         { signal: controller.signal },
       );
       if (
@@ -1721,11 +4566,14 @@ class MovementExampleApp {
         return;
       }
       this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
+      this.syncAnomalyFeatureSetOptions({ save: false });
+      this.renderBurstCountIndicator();
       this.currentTimeMs = this.data.minTimeMs;
       this.refs.slider.min = String(this.data.minTimeMs);
       this.refs.slider.max = String(this.data.maxTimeMs);
       this.refs.slider.value = String(this.currentTimeMs);
-      this.data.selectedIndividuals = new Set(this.data.individuals);
+      const initiallySelectedIndividuals = initialMovementVisibleIndividuals(this.data);
+      this.data.selectedIndividuals = new Set(initiallySelectedIndividuals);
       this.data.selectedFixKeys = new Set(
         [...preservedFixKeys].filter(key => this.data.fixByKey.has(key)),
       );
@@ -1739,7 +4587,11 @@ class MovementExampleApp {
       await this.rebuildMap(false);
       this.resetView();
       this.updateActionButtons();
-      this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
+      if (initiallySelectedIndividuals.length) {
+        this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
+      } else {
+        this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
+      }
       void this.loadDetailForCurrentSelection({ preservedFixKeys });
     } catch (error) {
       if (this.isAbortError(error) || requestId !== this.loadRequestId) {
@@ -1774,8 +4626,19 @@ class MovementExampleApp {
     if (!this.data) {
       return;
     }
-    this.refs.individualHead.textContent = `Individuals and coverage (${formatCount(this.data.individuals.length)})`;
-    for (const individual of this.data.individuals) {
+    const filteredIndividuals = this.getFilteredIndividuals();
+    const totalIndividuals = this.data.individuals.length;
+    this.refs.individualHead.textContent = filteredIndividuals.length === totalIndividuals
+      ? `Individuals and coverage (${formatCount(totalIndividuals)})`
+      : `Individuals and coverage (${formatCount(filteredIndividuals.length)} of ${formatCount(totalIndividuals)})`;
+    if (!filteredIndividuals.length) {
+      const empty = document.createElement("div");
+      empty.className = "movement-empty";
+      empty.textContent = "No individual IDs match the current search.";
+      this.refs.individuals.appendChild(empty);
+      return;
+    }
+    for (const individual of filteredIndividuals) {
       const stats = this.data.stats[individual];
       const coverage = this.data.coverageByIndividual[individual] || {};
       const isSelected = this.data.selectedIndividuals.has(individual);
@@ -1944,6 +4807,635 @@ class MovementExampleApp {
     }
   }
 
+  getVisibleDetailFixes() {
+    if (!this.data) {
+      return [];
+    }
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    const visibleSetNames = this.getVisibleSetNames();
+    const source = this.hasLoadedDetailSelection() && (this.data.detailFixes || []).length
+      ? this.data.detailFixes
+      : (this.data.overviewFixes || []);
+    return source.filter(
+      fix => visibleIndividuals.has(fix.individual) && visibleSetNames.has(fix.setName),
+    );
+  }
+
+  getVisibleSegments() {
+    if (!this.data) {
+      return [];
+    }
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    const visibleSetNames = this.getVisibleSetNames();
+    return (this.data.segments || []).filter(
+      segment => visibleIndividuals.has(segment.individual) && visibleSetNames.has(segment.setName),
+    );
+  }
+
+  getVisibleAutoBursts({ requireOverlay = true } = {}) {
+    if (!this.data || (requireOverlay && !this.refs.showBursts.checked)) {
+      return [];
+    }
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    const visibleSetNames = this.getVisibleSetNames();
+    return (this.data.autoBursts || []).filter(
+      burst => visibleIndividuals.has(burst.individual) && visibleSetNames.has(burst.setName),
+    );
+  }
+
+  getFilteredTableSegments() {
+    const filterText = String(this.refs.tableFilter.value || "").trim().toLowerCase();
+    const segments = this.getVisibleSegments().slice();
+    const filtered = filterText
+      ? segments.filter(segment => {
+        const haystack = [
+          segment.individual,
+          segment.setName,
+          segment.segmentId,
+          segment.status,
+          segment.issueType,
+          segment.startFixKey,
+          segment.endFixKey,
+          segment.issueNote,
+          segment.ownerQuestion,
+        ].join(" ").toLowerCase();
+        return haystack.includes(filterText);
+      })
+      : segments;
+    const direction = this.refs.tableSortDirection.dataset.direction === "desc" ? -1 : 1;
+    const sortKey = this.refs.tableSort.value || "track_time";
+    filtered.sort((left, right) => {
+      if (sortKey === "status") {
+        return direction * (
+          String(left.status || "").localeCompare(String(right.status || ""))
+          || left.startTimeMs - right.startTimeMs
+        );
+      }
+      if (sortKey === "issue_type") {
+        return direction * (
+          String(left.issueType || "").localeCompare(String(right.issueType || ""))
+          || left.startTimeMs - right.startTimeMs
+        );
+      }
+      if (sortKey === "time_desc") {
+        return direction * ((right.startTimeMs - left.startTimeMs) || left.segmentId.localeCompare(right.segmentId));
+      }
+      if (sortKey === "time_asc") {
+        return direction * ((left.startTimeMs - right.startTimeMs) || left.segmentId.localeCompare(right.segmentId));
+      }
+      return direction * (
+        left.individual.localeCompare(right.individual)
+        || left.setName.localeCompare(right.setName)
+        || left.startTimeMs - right.startTimeMs
+        || left.segmentId.localeCompare(right.segmentId)
+      );
+    });
+    return filtered;
+  }
+
+  getFilteredTableAutoBursts() {
+    const filterText = String(this.refs.tableFilter.value || "").trim().toLowerCase();
+    const bursts = this.getVisibleAutoBursts({ requireOverlay: false }).slice();
+    const filtered = filterText
+      ? bursts.filter(burst => {
+        const haystack = [
+          burst.individual,
+          burst.setName,
+          burst.burstId,
+          burst.startFixKey,
+          burst.endFixKey,
+        ].join(" ").toLowerCase();
+        return haystack.includes(filterText);
+      })
+      : bursts;
+    const direction = this.refs.tableSortDirection.dataset.direction === "desc" ? -1 : 1;
+    const sortKey = this.refs.tableSort.value || "track_time";
+    filtered.sort((left, right) => {
+      if (sortKey === "time_desc") {
+        return direction * ((right.startTimeMs - left.startTimeMs) || left.burstId.localeCompare(right.burstId));
+      }
+      if (sortKey === "time_asc") {
+        return direction * ((left.startTimeMs - right.startTimeMs) || left.burstId.localeCompare(right.burstId));
+      }
+      return direction * (
+        left.individual.localeCompare(right.individual)
+        || left.setName.localeCompare(right.setName)
+        || left.startTimeMs - right.startTimeMs
+        || left.burstId.localeCompare(right.burstId)
+      );
+    });
+    return filtered;
+  }
+
+  buildTableRenderSignature(mode, totalRows) {
+    const selectedIndividuals = this.getSelectedIndividuals().join("|");
+    const direction = this.refs.tableSortDirection.dataset.direction || "asc";
+    return [
+      this.currentDatasetId,
+      this.currentArtifact,
+      mode,
+      totalRows,
+      this.refs.tableFilter.value || "",
+      this.refs.tableSort.value || "track_time",
+      direction,
+      this.refs.showTrain.checked ? "train" : "",
+      this.refs.showTest.checked ? "test" : "",
+      this.refs.showBursts.checked ? "bursts" : "",
+      this.getBurstGapSeconds(),
+      selectedIndividuals,
+      this.data?.detailState || "idle",
+      this.data?.detailReturnedFixCount || 0,
+    ].join("::");
+  }
+
+  getRenderedTableRows(rows, mode) {
+    const totalRows = Array.isArray(rows) ? rows.length : 0;
+    const signature = this.buildTableRenderSignature(mode, totalRows);
+    if (this.tableRenderState.signature !== signature) {
+      this.tableRenderState.signature = signature;
+      this.tableRenderState.rowLimit = TABLE_INITIAL_ROW_LIMIT;
+    }
+    const renderedCount = mode === "fixes"
+      ? Math.min(totalRows, this.tableRenderState.rowLimit)
+      : totalRows;
+    return {
+      rows: rows.slice(0, renderedCount),
+      renderedCount,
+      totalRows,
+      hasMore: renderedCount < totalRows,
+    };
+  }
+
+  handleTableWrapScroll() {
+    if (!this.data || this.refs.tableMode.value !== "fixes") {
+      return;
+    }
+    const wrap = this.refs.tableWrap;
+    if (!wrap) {
+      return;
+    }
+    const thresholdPx = 240;
+    const distanceFromBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight;
+    if (distanceFromBottom > thresholdPx) {
+      return;
+    }
+    const rows = this.getFilteredTableFixRows();
+    if (this.tableRenderState.rowLimit >= rows.length) {
+      return;
+    }
+    this.tableRenderState.rowLimit = Math.min(rows.length, this.tableRenderState.rowLimit + TABLE_ROW_INCREMENT);
+    this.renderTableSheet();
+  }
+
+  getTrackOrderedVisibleFixes() {
+    return this.getVisibleDetailFixes()
+      .slice()
+      .sort((left, right) => (
+        left.individual.localeCompare(right.individual)
+        || left.setName.localeCompare(right.setName)
+        || left.timeMs - right.timeMs
+        || left.fixKey.localeCompare(right.fixKey)
+      ));
+  }
+
+  getFilteredTableFixRows() {
+    const filterText = String(this.refs.tableFilter.value || "").trim().toLowerCase();
+    const rows = this.getVisibleDetailFixes();
+    const filtered = filterText
+      ? rows.filter(fix => {
+        const segmentText = (fix.segments || []).map(segment => (
+          `${segment.segmentId} ${segment.issueType} ${segment.status}`
+        )).join(" ").toLowerCase();
+        const haystack = [
+          fix.individual,
+          fix.setName,
+          fix.fixKey,
+          fix.review?.status || "",
+          fix.review?.issueType || "",
+          segmentText,
+        ].join(" ").toLowerCase();
+        return haystack.includes(filterText);
+      })
+      : rows;
+    const direction = this.refs.tableSortDirection.dataset.direction === "desc" ? -1 : 1;
+    const sortKey = this.refs.tableSort.value || "track_time";
+    filtered.sort((left, right) => {
+      if (sortKey === "status") {
+        return direction * (
+          String(left.review?.status || "").localeCompare(String(right.review?.status || ""))
+          || left.timeMs - right.timeMs
+        );
+      }
+      if (sortKey === "issue_type") {
+        return direction * (
+          String(left.review?.issueType || "").localeCompare(String(right.review?.issueType || ""))
+          || left.timeMs - right.timeMs
+        );
+      }
+      if (sortKey === "time_desc") {
+        return direction * ((right.timeMs - left.timeMs) || left.fixKey.localeCompare(right.fixKey));
+      }
+      if (sortKey === "time_asc") {
+        return direction * ((left.timeMs - right.timeMs) || left.fixKey.localeCompare(right.fixKey));
+      }
+      return direction * (
+        left.individual.localeCompare(right.individual)
+        || left.setName.localeCompare(right.setName)
+        || left.timeMs - right.timeMs
+        || left.fixKey.localeCompare(right.fixKey)
+      );
+    });
+    return filtered;
+  }
+
+  resolveSegmentSelection(anchorFixKey, targetFixKey) {
+    if (!anchorFixKey || !targetFixKey) {
+      return null;
+    }
+    const ordered = this.getTrackOrderedVisibleFixes();
+    const byFixKey = new Map(ordered.map(fix => [fix.fixKey, fix]));
+    const anchor = byFixKey.get(anchorFixKey);
+    const target = byFixKey.get(targetFixKey);
+    if (!anchor || !target) {
+      return null;
+    }
+    if (anchor.individual !== target.individual || anchor.setName !== target.setName) {
+      return null;
+    }
+    const track = ordered.filter(fix => fix.individual === anchor.individual && fix.setName === anchor.setName);
+    const anchorIndex = track.findIndex(fix => fix.fixKey === anchorFixKey);
+    const targetIndex = track.findIndex(fix => fix.fixKey === targetFixKey);
+    if (anchorIndex < 0 || targetIndex < 0) {
+      return null;
+    }
+    const startIndex = Math.min(anchorIndex, targetIndex);
+    const endIndex = Math.max(anchorIndex, targetIndex);
+    const fixes = track.slice(startIndex, endIndex + 1);
+    return {
+      anchorFixKey,
+      startFixKey: fixes[0]?.fixKey || anchorFixKey,
+      endFixKey: fixes[fixes.length - 1]?.fixKey || targetFixKey,
+      selectedFixKeys: new Set(fixes.map(fix => fix.fixKey)),
+      fixes,
+      individual: anchor.individual,
+      setName: anchor.setName,
+    };
+  }
+
+  setTableSelection({ anchorFixKey = "", focusFixKey = "", selectedFixKeys = [] } = {}) {
+    const normalizedKeys = selectedFixKeys instanceof Set
+      ? new Set(selectedFixKeys)
+      : new Set(Array.isArray(selectedFixKeys) ? selectedFixKeys : []);
+    const anchor = normalizedKeys.has(anchorFixKey) ? anchorFixKey : (normalizedKeys.size ? [...normalizedKeys][0] : "");
+    const focus = normalizedKeys.has(focusFixKey) ? focusFixKey : (normalizedKeys.has(anchor) ? anchor : "");
+    this.tableSelection = {
+      anchorFixKey: anchor,
+      focusFixKey: focus,
+      selectedFixKeys: normalizedKeys,
+    };
+  }
+
+  applyTableSelectionInteraction(fixKey, { additive = false, range = false } = {}) {
+    if (!this.data?.fixByKey?.has(fixKey)) {
+      return;
+    }
+    if (range && this.tableSelection.anchorFixKey) {
+      const selection = this.resolveSegmentSelection(this.tableSelection.anchorFixKey, fixKey);
+      if (!selection) {
+        this.setStatus("Segment ranges must stay within one visible track.", true);
+        return;
+      }
+      this.setTableSelection({
+        anchorFixKey: selection.anchorFixKey,
+        focusFixKey: fixKey,
+        selectedFixKeys: selection.selectedFixKeys,
+      });
+      return;
+    }
+    if (additive) {
+      const nextKeys = new Set(this.tableSelection.selectedFixKeys || []);
+      if (nextKeys.has(fixKey)) {
+        nextKeys.delete(fixKey);
+      } else {
+        nextKeys.add(fixKey);
+      }
+      this.setTableSelection({
+        anchorFixKey: this.tableSelection.anchorFixKey || fixKey,
+        focusFixKey: fixKey,
+        selectedFixKeys: nextKeys,
+      });
+      return;
+    }
+    this.setTableSelection({
+      anchorFixKey: fixKey,
+      focusFixKey: fixKey,
+      selectedFixKeys: [fixKey],
+    });
+  }
+
+  clearTableSelection() {
+    this.setTableSelection();
+    this.renderTableSheet();
+    this.renderLayers();
+    this.updateActionButtons();
+  }
+
+  getCurrentSegmentSelection() {
+    if (!this.tableSelection.anchorFixKey || !this.tableSelection.focusFixKey || !this.tableSelection.selectedFixKeys.size) {
+      return null;
+    }
+    const selected = this.resolveSegmentSelection(
+      this.tableSelection.anchorFixKey,
+      this.tableSelection.focusFixKey,
+    );
+    if (!selected) {
+      return null;
+    }
+    if (selected.selectedFixKeys.size !== this.tableSelection.selectedFixKeys.size) {
+      return null;
+    }
+    for (const fixKey of selected.selectedFixKeys) {
+      if (!this.tableSelection.selectedFixKeys.has(fixKey)) {
+        return null;
+      }
+    }
+    return selected;
+  }
+
+  getVisibleTableSelectionFixes() {
+    const visibleSetNames = this.getVisibleSetNames();
+    const visibleIndividuals = new Set(this.getSelectedIndividuals());
+    return [...(this.tableSelection.selectedFixKeys || new Set())]
+      .map(fixKey => this.data?.fixByKey?.get(fixKey))
+      .filter(fix => Boolean(fix) && visibleIndividuals.has(fix.individual) && visibleSetNames.has(fix.setName));
+  }
+
+  zoomToPath(path) {
+    if (!this.map || !Array.isArray(path) || !path.length) {
+      return;
+    }
+    const bounds = buildWindowBounds(path.map((position, index) => ({
+      fixKey: `path_${index}`,
+      position,
+    })), { tight: false });
+    if (!bounds) {
+      return;
+    }
+    this.map.fitBounds(bounds, { padding: 44, duration: 0, maxZoom: 15 });
+  }
+
+  handleTableWrapClick(event) {
+    const actionButton = event.target.closest("button[data-action]");
+    if (actionButton) {
+      const action = actionButton.dataset.action || "";
+      if (action === "zoom-fix") {
+        const fix = this.data?.fixByKey.get(actionButton.dataset.fixKey || "");
+        if (fix) {
+          this.zoomToPath([fix.position]);
+        }
+      } else if (action === "zoom-segment") {
+        const segment = this.data?.segmentById?.get(actionButton.dataset.segmentId || "");
+        if (segment) {
+          this.zoomToPath(segment.path);
+        }
+      } else if (action === "zoom-auto-burst") {
+        const burst = this.data?.autoBurstById?.get(actionButton.dataset.burstId || "");
+        if (burst) {
+          this.zoomToPath(burst.path);
+        }
+      }
+      return;
+    }
+    const row = event.target.closest("tr[data-fix-key], tr[data-segment-id], tr[data-burst-id]");
+    if (!row) {
+      return;
+    }
+    if (row.dataset.segmentId && this.refs.tableMode.value === "segments") {
+      const segment = this.data?.segmentById?.get(row.dataset.segmentId || "");
+      if (segment) {
+        this.zoomToPath(segment.path);
+      }
+      return;
+    }
+    if (row.dataset.burstId && this.refs.tableMode.value === "auto_bursts") {
+      const burst = this.data?.autoBurstById?.get(row.dataset.burstId || "");
+      if (burst) {
+        this.zoomToPath(burst.path);
+      }
+      return;
+    }
+    if (this.refs.tableMode.value !== "fixes") {
+      return;
+    }
+    const fixKey = row.dataset.fixKey || "";
+    if (!fixKey) {
+      return;
+    }
+    this.applyTableSelectionInteraction(fixKey, {
+      additive: event.metaKey || event.ctrlKey,
+      range: event.shiftKey,
+    });
+    this.renderTableSheet();
+    this.renderLayers();
+    this.updateActionButtons();
+  }
+
+  renderTableSheet() {
+    if (!this.refs.tableWrap || !this.refs.tableMeta) {
+      return;
+    }
+    if (!this.data) {
+      this.refs.tableMeta.textContent = "Load a study to inspect fix rows and flagged segments.";
+      this.refs.tableWrap.innerHTML = '<div class="movement-table-empty">No table data yet.</div>';
+      return;
+    }
+    const mode = this.refs.tableMode.value || "fixes";
+    const hasDetail = this.hasLoadedDetailSelection() || this.data.overviewHasAllFixes;
+    const rows = mode === "fixes" ? this.getFilteredTableFixRows() : [];
+    const selection = this.getCurrentSegmentSelection();
+    this.refs.segmentClear.disabled = !this.tableSelection.selectedFixKeys.size;
+    const segmentActionDisabled = (
+      mode !== "fixes"
+      || !hasDetail
+      || !selection
+      || selection.fixes.length < 2
+    );
+    this.refs.segmentSuspected.disabled = segmentActionDisabled;
+    this.refs.segmentConfirmed.disabled = segmentActionDisabled;
+
+    if (mode === "segments") {
+      const segments = this.getFilteredTableSegments();
+      this.refs.tableMeta.textContent = `${formatCount(segments.length)} flagged segments in the current visible scope. Click a row to zoom to the full segment extent.`;
+      if (!segments.length) {
+        this.refs.tableWrap.innerHTML = '<div class="movement-table-empty">No flagged segments are visible for the current selection.</div>';
+        return;
+      }
+      this.refs.tableWrap.innerHTML = `
+        <table class="movement-table">
+          <thead>
+            <tr>
+              <th>Individual</th>
+              <th>Track</th>
+              <th>Status</th>
+              <th>Issue type</th>
+              <th>Fixes</th>
+              <th>Start</th>
+              <th>End</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${segments.map(segment => `
+              <tr class="is-segment-row" data-segment-id="${escapeHtml(segment.segmentId)}">
+                <td>${escapeHtml(segment.individual)}</td>
+                <td>${escapeHtml(segment.setName)}</td>
+                <td>${escapeHtml(segment.status || "unreviewed")}</td>
+                <td>${escapeHtml(segment.issueType || "Unspecified issue")}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(String(segment.fixCount))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(segment.startTimeMs))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(segment.endTimeMs))}</td>
+                <td class="movement-table-cell-actions"><button type="button" data-action="zoom-segment" data-segment-id="${escapeHtml(segment.segmentId)}">Zoom</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+      return;
+    }
+
+    if (mode === "auto_bursts") {
+      const bursts = this.getFilteredTableAutoBursts();
+      const overlayNote = this.refs.showBursts.checked ? "" : " Map overlay is hidden.";
+      this.refs.tableMeta.textContent = `${formatCount(bursts.length)} automatic bursts in the current visible scope at ${this.burstGapLabel() || `${formatCount(this.getBurstGapSeconds())} s`}. Click a row to zoom.${overlayNote}`;
+      if (!bursts.length) {
+        this.refs.tableWrap.innerHTML = '<div class="movement-table-empty">No automatic bursts are visible for the current selection.</div>';
+        return;
+      }
+      this.refs.tableWrap.innerHTML = `
+        <table class="movement-table">
+          <thead>
+            <tr>
+              <th>Color</th>
+              <th>Individual</th>
+              <th>Track</th>
+              <th>Burst</th>
+              <th>Fixes</th>
+              <th>Start</th>
+              <th>End</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${bursts.map(burst => `
+              <tr class="is-auto-burst-row" data-burst-id="${escapeHtml(burst.burstId)}">
+                <td><span class="movement-burst-swatch" style="background: ${escapeHtml(rgbaCss(autoBurstColor(burst, 215)))}"></span></td>
+                <td>${escapeHtml(burst.individual)}</td>
+                <td>${escapeHtml(burst.setName)}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(String(burst.burstIdx))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(String(burst.fixCount))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(burst.startTimeMs))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(burst.endTimeMs))}</td>
+                <td class="movement-table-cell-actions"><button type="button" data-action="zoom-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}">Zoom</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+      return;
+    }
+
+    if (!rows.length && !hasDetail) {
+      const message = this.data.detailState === "error"
+        ? "Visible fix rows could not be loaded for this selection."
+        : "Loading visible fix rows for the current selection...";
+      this.refs.tableMeta.textContent = "Fix rows depend on the visible-scope detail load.";
+      this.refs.tableWrap.innerHTML = `<div class="movement-table-empty">${escapeHtml(message)}</div>`;
+      return;
+    }
+
+    const selectedRowKeys = this.tableSelection.selectedFixKeys || new Set();
+    const anchorFixKey = this.tableSelection.anchorFixKey || "";
+    const renderedTable = this.getRenderedTableRows(rows, mode);
+    const renderedRows = renderedTable.rows;
+    const truncationNote = this.data.detailTruncated
+      ? ` Visible scope is truncated to ${formatCount(this.data.detailReturnedFixCount)} of ${formatCount(this.data.detailMatchingFixCount)} rows because of the ${formatCount(this.data.detailLimit)}-fix cap.`
+      : "";
+    const detailSourceNote = this.data.detailState === "error" && rows.length
+        ? " Showing overview rows because editable detail failed to load; segment actions stay disabled."
+        : !hasDetail && rows.length
+          ? " Showing overview rows while editable detail finishes loading; segment actions stay disabled until then."
+        : "";
+    let selectionSummary = "Click a row to set a segment anchor, then Shift-click another row on the same track to select the full inclusive range.";
+    if (anchorFixKey) {
+      selectionSummary = `Anchor set on ${anchorFixKey}. Shift-click another row on the same track to create a segment range.`;
+    }
+    if (selectedRowKeys.size === 1) {
+      selectionSummary = `${anchorFixKey} selected. Shift-click another row on the same track to create a segment range.`;
+    }
+    if (selectedRowKeys.size > 1) {
+      selectionSummary = `${formatCount(selectedRowKeys.size)} table rows selected. Shift-click within one track to turn the selection into a contiguous segment range.`;
+    }
+    if (selection && selection.fixes.length >= 2) {
+      selectionSummary = `${selection.individual} • ${selection.setName} • ${formatCount(selection.fixes.length)} fixes from ${formatTimestamp(selection.fixes[0].timeMs)} to ${formatTimestamp(selection.fixes[selection.fixes.length - 1].timeMs)}`;
+    }
+    const renderNote = renderedTable.hasMore
+      ? ` Rendering ${formatCount(renderedTable.renderedCount)} of ${formatCount(renderedTable.totalRows)} rows; scroll to load more.`
+      : "";
+    this.refs.tableMeta.textContent = `${formatCount(rows.length)} visible fix rows. ${selectionSummary}${truncationNote}${detailSourceNote}${renderNote}`;
+    if (!rows.length) {
+      this.refs.tableWrap.innerHTML = '<div class="movement-table-empty">No fix rows match the current table filters.</div>';
+      return;
+    }
+    this.refs.tableWrap.innerHTML = `
+      <table class="movement-table">
+        <thead>
+          <tr>
+            <th>Individual</th>
+            <th>Track</th>
+            <th>Timestamp</th>
+            <th>Status</th>
+            <th>Segment</th>
+            <th>Issue</th>
+            <th>Step (m)</th>
+            <th>Speed (m/s)</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${renderedRows.map(fix => {
+            const issueType = fix.review?.issueType || "Unreviewed";
+            const segmentLabel = (fix.segments || []).length
+              ? `${fix.segments[0].status || "flagged"} • ${fix.segments[0].issueType || "segment"}`
+              : "";
+            const rowClasses = [
+              anchorFixKey === fix.fixKey ? "is-anchor" : "",
+              selectedRowKeys.has(fix.fixKey) ? "is-selected-range" : "",
+              this.data.selectedFixKeys.has(fix.fixKey) ? "is-checked-fix" : "",
+            ].filter(Boolean).join(" ");
+            return `
+              <tr class="${rowClasses}" data-fix-key="${escapeHtml(fix.fixKey)}">
+                <td>${escapeHtml(fix.individual)}</td>
+                <td>${escapeHtml(fix.setName)}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(fix.timeMs))}</td>
+                <td>${escapeHtml(fix.review?.status || "unreviewed")}</td>
+                <td>${escapeHtml(segmentLabel || "—")}</td>
+                <td>${escapeHtml(issueType)}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(fix.attributes?.step_length_m, "m"))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(fix.attributes?.speed_mps, "m/s"))}</td>
+                <td class="movement-table-cell-actions"><button type="button" data-action="zoom-fix" data-fix-key="${escapeHtml(fix.fixKey)}">Zoom</button></td>
+              </tr>
+            `;
+          }).join("")}
+          ${renderedTable.hasMore ? `
+            <tr class="movement-table-more-row">
+              <td colspan="9" class="movement-table-more-cell">Scroll to load more rows.</td>
+            </tr>
+          ` : ""}
+        </tbody>
+      </table>
+    `;
+  }
+
   renderLegend() {
     const legendEl = this.refs.legend;
     if (!legendEl) {
@@ -1956,8 +5448,7 @@ class MovementExampleApp {
     }
 
     const field = this.data.colorFieldByKey.get(this.refs.colorBy.value) || this.data.colorFields[0];
-    const style = field ? this.data.colorStyles.get(field.key) : null;
-    if (!field || !style) {
+    if (!field) {
       legendEl.innerHTML = "";
       legendEl.classList.add("hidden");
       return;
@@ -1971,43 +5462,69 @@ class MovementExampleApp {
     `;
 
     let body = "";
-    if (style.kind === "numeric") {
-      const lowerLabel = style.range.observedMin < style.range.min
-        ? `<= ${formatColorValue(style.range.min, "numeric")}`
-        : formatColorValue(style.range.min, "numeric");
-      const upperLabel = style.range.observedMax > style.range.max
-        ? `>= ${formatColorValue(style.range.max, "numeric")}`
-        : formatColorValue(style.range.max, "numeric");
-      const observedSummary = style.range.observedMin === style.range.min && style.range.observedMax === style.range.max
-        ? "Scale uses the full observed numeric range."
-        : `Scale is clipped to the ${formatPercent(NUMERIC_COLOR_MIN_QUANTILE)}-${formatPercent(NUMERIC_COLOR_MAX_QUANTILE)} percentile range; observed range ${formatColorValue(style.range.observedMin, "numeric")} to ${formatColorValue(style.range.observedMax, "numeric")}.`;
+    if (field.key === INDIVIDUAL_COLOR_FIELD_KEY) {
+      const visibleIndividuals = this.getSelectedIndividuals();
+      const shownIndividuals = visibleIndividuals.slice(0, INDIVIDUAL_LEGEND_MAX_ITEMS);
+      const remainingCount = Math.max(0, visibleIndividuals.length - shownIndividuals.length);
+      const note = visibleIndividuals.length
+        ? remainingCount > 0
+          ? `Points use each individual's track color. Showing ${formatCount(shownIndividuals.length)} of ${formatCount(visibleIndividuals.length)} visible individuals.`
+          : `Points use each individual's track color across ${formatCount(visibleIndividuals.length)} visible individuals.`
+        : "Points use each individual's track color.";
       body = `
-        <div class="movement-legend-scale">
-          <div
-            class="movement-legend-gradient"
-            style="background: linear-gradient(90deg, ${numericLegendGradient()});"
-          ></div>
-          <div class="movement-legend-range">
-            <span>${escapeHtml(lowerLabel)}</span>
-            <span>${escapeHtml(upperLabel)}</span>
-          </div>
-          <div class="movement-legend-note">${escapeHtml(observedSummary)}</div>
-        </div>
-      `;
-    } else if (style.kind === "boolean") {
-      body = `
+        <div class="movement-legend-note">${escapeHtml(note)}</div>
         <div class="movement-legend-items">
-          ${legendItem("False", [96, 201, 170, POINT_ALPHA])}
-          ${legendItem("True", [246, 92, 110, POINT_ALPHA])}
-          ${legendItem("Missing", [120, 136, 153, 120])}
+          ${shownIndividuals.map(individual => legendItem(
+            individual,
+            [...(this.data.individualPalette[individual] || [124, 210, 255]), POINT_ALPHA],
+          )).join("")}
         </div>
       `;
     } else {
-      const items = Array.from(style.categories.entries())
-        .sort((left, right) => left[0].localeCompare(right[0], undefined, { sensitivity: "base" }))
-        .map(([label, color]) => legendItem(label, color))
-        .join("");
-      body = `<div class="movement-legend-items">${items}</div>`;
+      const style = this.data.colorStyles.get(field.key);
+      if (!style) {
+        legendEl.innerHTML = "";
+        legendEl.classList.add("hidden");
+        return;
+      }
+      if (style.kind === "numeric") {
+        const lowerLabel = style.range.observedMin < style.range.min
+          ? `<= ${formatColorValue(style.range.min, "numeric")}`
+          : formatColorValue(style.range.min, "numeric");
+        const upperLabel = style.range.observedMax > style.range.max
+          ? `>= ${formatColorValue(style.range.max, "numeric")}`
+          : formatColorValue(style.range.max, "numeric");
+        const observedSummary = style.range.observedMin === style.range.min && style.range.observedMax === style.range.max
+          ? "Scale uses the full observed numeric range."
+          : `Scale is clipped to the ${formatPercent(NUMERIC_COLOR_MIN_QUANTILE)}-${formatPercent(NUMERIC_COLOR_MAX_QUANTILE)} percentile range; observed range ${formatColorValue(style.range.observedMin, "numeric")} to ${formatColorValue(style.range.observedMax, "numeric")}.`;
+        body = `
+          <div class="movement-legend-scale">
+            <div
+              class="movement-legend-gradient"
+              style="background: linear-gradient(90deg, ${numericLegendGradient()});"
+            ></div>
+            <div class="movement-legend-range">
+              <span>${escapeHtml(lowerLabel)}</span>
+              <span>${escapeHtml(upperLabel)}</span>
+            </div>
+            <div class="movement-legend-note">${escapeHtml(observedSummary)}</div>
+          </div>
+        `;
+      } else if (style.kind === "boolean") {
+        body = `
+          <div class="movement-legend-items">
+            ${legendItem("False", [96, 201, 170, POINT_ALPHA])}
+            ${legendItem("True", [246, 92, 110, POINT_ALPHA])}
+            ${legendItem("Missing", [120, 136, 153, 120])}
+          </div>
+        `;
+      } else {
+        const items = Array.from(style.categories.entries())
+          .sort((left, right) => left[0].localeCompare(right[0], undefined, { sensitivity: "base" }))
+          .map(([label, color]) => legendItem(label, color))
+          .join("");
+        body = `<div class="movement-legend-items">${items}</div>`;
+      }
     }
 
     legendEl.innerHTML = `${header}${body}`;
@@ -2018,60 +5535,144 @@ class MovementExampleApp {
     if (!this.assetsLoaded || !window.maplibregl || !window.deck) {
       return;
     }
-    const style = BASEMAP_STYLES[this.refs.basemap.value] || BASEMAP_STYLES.Blank;
-    if (!this.map) {
-      this.map = new maplibregl.Map({
-        container: this.refs.map,
-        style,
-        center: this.data
-          ? [this.data.initialView.longitude, this.data.initialView.latitude]
-          : [0, 20],
-        zoom: this.data ? this.data.initialView.zoom : 1.3,
-        attributionControl: false,
-      });
-      this.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
-      this.map.on("load", () => {
-        this.mapLoaded = true;
-        this.renderLayers();
-      });
-      this.map.on("error", (event) => {
-        const message = event?.error?.message || "Map request failed";
-        if (message === this.mapErrorMessage) {
-          return;
+    const preset = BASEMAP_PRESETS[this.refs.basemap.value] || BASEMAP_PRESETS.Blank;
+    const style = preset.style;
+    this.updateMapAttribution();
+    if (!this.map || forceStyleReload) {
+      const currentView = this.map
+        ? {
+          center: [this.map.getCenter().lng, this.map.getCenter().lat],
+          zoom: this.map.getZoom(),
         }
-        this.mapErrorMessage = message;
-        if (this.refs.basemap.value !== "Blank") {
-          this.refs.basemap.value = "Blank";
-          this.saveUiState();
-          this.setStatus(`Map warning: ${message}. Falling back to Blank basemap.`, true);
-          void this.rebuildMap(true);
-          return;
-        }
-        this.setStatus(`Map warning: ${message}`, true);
-      });
-      this.overlay = new deck.MapboxOverlay({ interleaved: true, layers: [] });
-      this.map.addControl(this.overlay);
-      return;
-    }
-    if (forceStyleReload) {
-      this.mapLoaded = false;
-      this.map.setStyle(style);
-      this.map.once("style.load", () => {
-        this.mapLoaded = true;
-        this.renderLayers();
-      });
+        : {
+          center: this.data
+            ? [this.data.initialView.longitude, this.data.initialView.latitude]
+            : [0, 20],
+          zoom: this.data ? this.data.initialView.zoom : 1.3,
+        };
+      this.destroyMapInstance();
+      this.createMapInstance({ style, ...currentView });
       return;
     }
     this.renderLayers();
   }
 
+  createMapInstance({ style, center, zoom }) {
+    this.mapErrorMessage = "";
+    this.mapLoaded = false;
+    this.map = new maplibregl.Map({
+      container: this.refs.map,
+      style,
+      center,
+      zoom,
+      attributionControl: false,
+    });
+    this.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    this.map.addControl(new maplibregl.ScaleControl({ unit: "metric", maxWidth: 120 }), "top-right");
+    this.map.on("load", () => {
+      this.mapLoaded = true;
+      this.renderLayers();
+      this.updateActionButtons();
+    });
+    this.map.on("error", (event) => {
+      const message = event?.error?.message || "Map request failed";
+      if (message === this.mapErrorMessage) {
+        return;
+      }
+      this.mapErrorMessage = message;
+      this.setStatus(`Map warning: ${message}`, true);
+    });
+    this.ensureOverlayAttached();
+    this.map.on("click", event => this.handleMapClick(event));
+    this.map.on("contextmenu", event => this.handleMapContextMenu(event));
+  }
+
+  destroyMapInstance() {
+    this.mapLoaded = false;
+    this.activeFixPopup = null;
+    if (this.overlay) {
+      try {
+        this.overlay.finalize();
+      } catch {}
+    }
+    this.overlay = null;
+    if (this.map) {
+      try {
+        this.map.remove();
+      } catch {}
+    }
+    this.map = null;
+  }
+
+  ensureOverlayAttached() {
+    if (!this.map || !window.deck) {
+      return;
+    }
+    if (!this.overlay) {
+      this.overlay = new deck.MapboxOverlay({ interleaved: false, layers: [] });
+    }
+    try {
+      this.map.addControl(this.overlay);
+    } catch {}
+  }
+
+  detachOverlay() {
+    if (!this.map || !this.overlay) {
+      return;
+    }
+    try {
+      this.map.removeControl(this.overlay);
+    } catch {}
+  }
+
+  waitForStyleReload() {
+    if (!this.map) {
+      return;
+    }
+    let finished = false;
+    const finishReload = () => {
+      if (!this.map || finished) {
+        return;
+      }
+      finished = true;
+      this.map.off("styledata", maybeFinishReload);
+      this.mapLoaded = true;
+      this.ensureOverlayAttached();
+      this.renderLayers();
+    };
+    const maybeFinishReload = () => {
+      if (this.map?.isStyleLoaded?.()) {
+        finishReload();
+      }
+    };
+    this.map.once("style.load", finishReload);
+    this.map.on("styledata", maybeFinishReload);
+  }
+
+  updateMapAttribution() {
+    if (!this.refs?.mapAttribution) {
+      return;
+    }
+    const preset = BASEMAP_PRESETS[this.refs.basemap.value || "Blank"] || BASEMAP_PRESETS.Blank;
+    if (preset.attributionHtml) {
+      this.refs.mapAttribution.innerHTML = preset.attributionHtml;
+      this.refs.mapAttribution.classList.remove("hidden");
+      return;
+    }
+    this.refs.mapAttribution.innerHTML = "";
+    this.refs.mapAttribution.classList.add("hidden");
+  }
+
   renderLayers() {
+    this.renderBurstCountIndicator();
+    this.syncFixPopupVisibility();
     if (!this.data || !this.overlay || !this.mapLoaded) {
       if (this.overlay) {
         try {
           this.overlay.setProps({ layers: [] });
         } catch {}
       }
+      this.renderFixPopup();
       return;
     }
 
@@ -2081,20 +5682,86 @@ class MovementExampleApp {
     const pointData = [];
     const thresholdPointData = [];
     const selectedThresholdPointData = [];
+    const candidatePointData = [];
+    const selectedCandidatePointData = [];
     const selectedPointData = [];
     const cursorData = [];
-    const thresholdMatchKeys = this.getThresholdContext()?.matchKeys || new Set();
+    const showPoints = this.refs.showPoints.checked;
+    const visibleSegments = this.getVisibleSegments();
+    const visibleAutoBursts = this.getVisibleAutoBursts();
+    const suppressedBaseTrackKeys = new Set(
+      visibleAutoBursts.map(burst => movementTrackKey(burst.individual, burst.setName)),
+    );
+    const visibleAutoBurstPaths = visibleAutoBursts
+      .filter(burst => burst.path.length >= 2)
+      .map(burst => ({
+        burst,
+        path: burst.path,
+        color: autoBurstColor(burst, 185),
+      }));
+    const visibleAutoBurstPoints = visibleAutoBursts
+      .filter(burst => burst.path.length >= 1)
+      .map(burst => ({
+        burst,
+        position: burst.path[0],
+        color: autoBurstColor(burst, 220),
+        fillColor: autoBurstColor(burst, 48),
+      }));
+    const visibleTableSelection = this.getVisibleTableSelectionFixes();
+    const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
+    const tableSelectedPointData = visibleTableSelection.map(fix => ({
+      fixKey: fix.fixKey,
+      position: fix.position,
+      color: [87, 218, 174, 220],
+    }));
+    const segmentSelection = this.tableSelection.selectedFixKeys.size
+      ? this.getCurrentSegmentSelection()
+      : null;
+    const tableSelectionPath = segmentSelection?.fixes
+      ?.filter(fix => visibleTableSelectionKeys.has(fix.fixKey))
+      .map(fix => fix.position) || [];
+    const thresholdMatchKeys = showPoints ? this.getActiveThresholdMatchKeys() : new Set();
+    const candidateMatchKeys = showPoints ? this.getCandidateQueryMatchKeys() : new Set();
+    const focusedRankingBurstFixes = this.getFocusedRankingBurstFixes();
+    const focusedRankingBurstPath = focusedRankingBurstFixes
+      .map(fix => fix.position)
+      .filter(position => Array.isArray(position) && position.length >= 2);
+    const focusedRankingBurstPoints = focusedRankingBurstFixes.map(fix => ({
+      fixKey: fix.fixKey,
+      position: fix.position,
+    }));
+    const hasFocusedRankingBurst = focusedRankingBurstFixes.length > 0;
+    const focusedRankingBurstMarkers = [];
+    if (focusedRankingBurstFixes.length) {
+      const startFix = focusedRankingBurstFixes[0];
+      const endFix = focusedRankingBurstFixes[focusedRankingBurstFixes.length - 1];
+      focusedRankingBurstMarkers.push({
+        markerRole: "start",
+        fixKey: startFix.fixKey,
+        position: startFix.position,
+        fillColor: [34, 211, 238, 245],
+      });
+      if (endFix.fixKey !== startFix.fixKey) {
+        focusedRankingBurstMarkers.push({
+          markerRole: "end",
+          fixKey: endFix.fixKey,
+          position: endFix.position,
+          fillColor: [244, 114, 182, 245],
+        });
+      }
+    }
 
     for (const individual of this.data.individuals) {
       if (!visibleIndividuals.has(individual)) {
         continue;
       }
       for (const setName of visibleSetNames) {
-        const series = this.data.seriesByIndividual[individual]?.[setName];
+        const suppressBaseTrack = suppressedBaseTrackKeys.has(movementTrackKey(individual, setName));
+        const series = this.buildVisibleTrackSeries(individual, setName);
         if (!series) {
           continue;
         }
-        if (series.positions.length >= 2) {
+        if (!suppressBaseTrack && series.positions.length >= 2) {
           pathData.push({
             individual,
             setName,
@@ -2109,32 +5776,46 @@ class MovementExampleApp {
       }
     }
 
-    for (const fix of this.data.fixes) {
-      if (!visibleIndividuals.has(fix.individual) || !visibleSetNames.has(fix.setName)) {
-        continue;
-      }
-      const point = {
-        fixKey: fix.fixKey,
-        individual: fix.individual,
-        setName: fix.setName,
-        position: fix.position,
-        color: this.colorForFix(fix),
-      };
-      if (this.data.selectedFixKeys.has(fix.fixKey)) {
-        selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
-        if (thresholdMatchKeys.has(fix.fixKey)) {
-          selectedThresholdPointData.push({
-            fixKey: fix.fixKey,
-            position: fix.position,
-          });
+    if (showPoints) {
+      for (const fix of this.data.fixes) {
+        if (!visibleIndividuals.has(fix.individual) || !visibleSetNames.has(fix.setName)) {
+          continue;
         }
-      } else {
-        pointData.push(point);
-        if (thresholdMatchKeys.has(fix.fixKey)) {
-        thresholdPointData.push({
+        const point = {
           fixKey: fix.fixKey,
+          individual: fix.individual,
+          setName: fix.setName,
           position: fix.position,
-        });
+          color: this.colorForFix(fix),
+        };
+        if (this.data.selectedFixKeys.has(fix.fixKey)) {
+          selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
+          if (thresholdMatchKeys.has(fix.fixKey)) {
+            selectedThresholdPointData.push({
+              fixKey: fix.fixKey,
+              position: fix.position,
+            });
+          }
+          if (candidateMatchKeys.has(fix.fixKey)) {
+            selectedCandidatePointData.push({
+              fixKey: fix.fixKey,
+              position: fix.position,
+            });
+          }
+        } else {
+          pointData.push(point);
+          if (thresholdMatchKeys.has(fix.fixKey)) {
+            thresholdPointData.push({
+              fixKey: fix.fixKey,
+              position: fix.position,
+            });
+          }
+          if (candidateMatchKeys.has(fix.fixKey)) {
+            candidatePointData.push({
+              fixKey: fix.fixKey,
+              position: fix.position,
+            });
+          }
         }
       }
     }
@@ -2144,29 +5825,108 @@ class MovementExampleApp {
         id: "movement-paths",
         data: pathData,
         getPath: item => item.path,
-        getColor: item => item.color,
+        getColor: item => hasFocusedRankingBurst
+          ? this.mutedRankingContextColor(item.color, 34)
+          : item.color,
         getWidth: 2.5,
         widthMinPixels: 2,
         pickable: false,
       }),
     ];
 
-    if (this.refs.showPoints.checked) {
+    if (visibleAutoBurstPaths.length) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-auto-bursts",
+          data: visibleAutoBurstPaths,
+          getPath: item => item.path,
+          getColor: item => hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.color, 36)
+            : item.color,
+          getWidth: 5,
+          widthMinPixels: 3,
+          pickable: Boolean(this.burstFeatureSpace?.points?.length),
+        }),
+      );
+    }
+
+    if (visibleAutoBurstPoints.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-auto-burst-points",
+          data: visibleAutoBurstPoints,
+          getPosition: item => item.position,
+          getFillColor: item => hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.fillColor, 18)
+            : item.fillColor,
+          getLineColor: item => hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.color, 42)
+            : item.color,
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 2,
+          getRadius: 124,
+          radiusMinPixels: 6,
+          radiusMaxPixels: 15,
+          pickable: Boolean(this.burstFeatureSpace?.points?.length),
+        }),
+      );
+    }
+
+    if (visibleSegments.length) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-segment-outline",
+          data: visibleSegments,
+          getPath: segment => segment.path,
+          getColor: [255, 255, 255, 120],
+          getWidth: segment => segment.status === "confirmed" ? 8 : 7,
+          widthMinPixels: 4,
+          pickable: false,
+        }),
+      );
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-segments",
+          data: visibleSegments,
+          getPath: segment => segment.path,
+          getColor: segment => segment.status === "confirmed"
+            ? [241, 106, 124, 210]
+            : [245, 181, 54, 210],
+          getWidth: segment => segment.status === "confirmed" ? 5.5 : 4.5,
+          widthMinPixels: 3,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (tableSelectionPath.length >= 2) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-table-selection-path",
+          data: [{ path: tableSelectionPath }],
+          getPath: item => item.path,
+          getColor: [87, 218, 174, 210],
+          getWidth: 6,
+          widthMinPixels: 3,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (showPoints) {
       layers.push(
         new deck.ScatterplotLayer({
           id: "movement-points",
           data: pointData,
           getPosition: item => item.position,
-          getFillColor: item => item.color,
+          getFillColor: item => hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.color, 42)
+            : item.color,
           getRadius: 80,
           radiusMinPixels: 4,
           radiusMaxPixels: 10,
           pickable: true,
-          onClick: info => {
-            if (info.object) {
-              this.toggleFixSelection(info.object.fixKey);
-            }
-          },
         }),
       );
       layers.push(
@@ -2182,11 +5942,6 @@ class MovementExampleApp {
           radiusMinPixels: 6,
           radiusMaxPixels: 12,
           pickable: true,
-          onClick: info => {
-            if (info.object) {
-              this.toggleFixSelection(info.object.fixKey);
-            }
-          },
         }),
       );
       layers.push(
@@ -2206,22 +5961,133 @@ class MovementExampleApp {
       );
       layers.push(
         new deck.ScatterplotLayer({
+          id: "movement-candidate-query-points",
+          data: candidatePointData,
+          getPosition: item => item.position,
+          getLineColor: [72, 222, 255, 255],
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 2.5,
+          getRadius: 132,
+          radiusMinPixels: 8,
+          radiusMaxPixels: 15,
+          pickable: false,
+        }),
+      );
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-selected-candidate-query-points",
+          data: selectedCandidatePointData,
+          getPosition: item => item.position,
+          getLineColor: [72, 222, 255, 255],
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 3,
+          getRadius: 182,
+          radiusMinPixels: 11,
+          radiusMaxPixels: 21,
+          pickable: false,
+        }),
+      );
+      layers.push(
+        new deck.ScatterplotLayer({
           id: "movement-selected-points",
           data: selectedPointData,
           getPosition: item => item.position,
-          getFillColor: item => item.color,
-          getLineColor: [255, 255, 255, 255],
+          getFillColor: item => hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.color, 54)
+            : item.color,
+          getLineColor: hasFocusedRankingBurst
+            ? [255, 255, 255, 100]
+            : [255, 255, 255, 255],
           stroked: true,
           lineWidthMinPixels: 1.5,
           getRadius: 130,
           radiusMinPixels: 7,
           radiusMaxPixels: 14,
           pickable: true,
-          onClick: info => {
-            if (info.object) {
-              this.toggleFixSelection(info.object.fixKey);
-            }
-          },
+        }),
+      );
+    }
+
+    if (tableSelectedPointData.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-table-selected-points",
+          data: tableSelectedPointData,
+          getPosition: item => item.position,
+          getFillColor: [0, 0, 0, 0],
+          getLineColor: item => item.color,
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 3,
+          getRadius: 190,
+          radiusMinPixels: 10,
+          radiusMaxPixels: 22,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (focusedRankingBurstPath.length >= 2) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-focused-ranking-burst-path-outline",
+          data: [{ path: focusedRankingBurstPath }],
+          getPath: item => item.path,
+          getColor: [15, 23, 42, 235],
+          getWidth: 10,
+          widthMinPixels: 5,
+          pickable: false,
+        }),
+      );
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-focused-ranking-burst-path",
+          data: [{ path: focusedRankingBurstPath }],
+          getPath: item => item.path,
+          getColor: [216, 180, 254, 245],
+          getWidth: 6,
+          widthMinPixels: 3,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (focusedRankingBurstPoints.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-focused-ranking-burst-points",
+          data: focusedRankingBurstPoints,
+          getPosition: item => item.position,
+          getFillColor: [168, 85, 247, 220],
+          getLineColor: [15, 23, 42, 245],
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 2,
+          getRadius: 146,
+          radiusMinPixels: 7,
+          radiusMaxPixels: 16,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (focusedRankingBurstMarkers.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-focused-ranking-burst-markers",
+          data: focusedRankingBurstMarkers,
+          getPosition: item => item.position,
+          getFillColor: item => item.fillColor,
+          getLineColor: [255, 255, 255, 245],
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 2.5,
+          getRadius: 220,
+          radiusMinPixels: 12,
+          radiusMaxPixels: 24,
+          pickable: false,
         }),
       );
     }
@@ -2244,17 +6110,60 @@ class MovementExampleApp {
         }),
       );
     }
+
+    layers.push(...this.getOsmDeckLayers());
+
     try {
       this.overlay.setProps({ layers });
     } catch (error) {
       this.setStatus(`Map warning: ${error.message}`, true);
     }
+    this.renderFixPopup();
+  }
+
+  buildVisibleTrackSeries(individual, setName) {
+    const exactFixes = this.getExactVisibleTrackFixes(individual, setName);
+    if (exactFixes.length) {
+      return {
+        source: "exact-detail",
+        times: exactFixes.map(fix => fix.timeMs),
+        positions: exactFixes.map(fix => fix.position),
+      };
+    }
+    const series = this.data?.seriesByIndividual?.[individual]?.[setName] || null;
+    if (!series) {
+      return null;
+    }
+    return {
+      source: "sampled-overview",
+      times: Array.isArray(series.times) ? series.times : [],
+      positions: Array.isArray(series.positions) ? series.positions : [],
+    };
+  }
+
+  getExactVisibleTrackFixes(individual, setName) {
+    if (!this.data || (!this.hasLoadedDetailSelection() && !this.data.overviewHasAllFixes)) {
+      return [];
+    }
+    const source = this.hasLoadedDetailSelection() && (this.data.detailFixes || []).length
+      ? this.data.detailFixes
+      : (this.data.overviewFixes || []);
+    return source
+      .filter(fix => fix.individual === individual && fix.setName === setName)
+      .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
   }
 
   colorForFix(fix) {
     const field = this.data.colorFieldByKey.get(this.refs.colorBy.value) || this.data.colorFields[0];
     if (!field) {
       return [124, 210, 255, POINT_ALPHA];
+    }
+    if (field.key === INDIVIDUAL_COLOR_FIELD_KEY) {
+      return splitColor(
+        this.data.individualPalette[fix.individual] || [124, 210, 255],
+        fix.setName,
+        POINT_ALPHA,
+      );
     }
     const style = this.data.colorStyles.get(field.key);
     const value = fix.attributes[field.key];
@@ -2285,6 +6194,298 @@ class MovementExampleApp {
     this.renderSelectedFixes();
     this.renderLayers();
     this.updateActionButtons();
+  }
+
+  getMapPickedFeatureSpaceBurst(event) {
+    if (
+      !this.overlay
+      || !this.data
+      || this.refs?.sideSheetTabs?.dataset.activeSheet !== "feature_space"
+      || !(this.burstFeatureSpace?.points || []).length
+    ) {
+      return null;
+    }
+    const point = event?.point;
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+      return null;
+    }
+    const pickedObjects = this.overlay.pickMultipleObjects({
+      x: Number(point.x),
+      y: Number(point.y),
+      radius: 8,
+      depth: 20,
+    }) || [];
+    for (const picked of pickedObjects) {
+      const burstId = String(picked?.object?.burst?.burstId || "");
+      if (burstId && this.getBurstFeatureSpacePoint(burstId)) {
+        return this.data.autoBurstById?.get(burstId) || picked.object.burst;
+      }
+    }
+    return null;
+  }
+
+  selectMapBurstInFeatureSpace(burst) {
+    if (!burst?.burstId) {
+      return false;
+    }
+    const point = this.selectBurstFeatureSpacePoint(burst.burstId, { render: false });
+    if (!point) {
+      return false;
+    }
+    this.setFocusedRankingBurst({
+      burst_id: burst.burstId,
+      individual: burst.individual,
+      set_name: burst.setName,
+      start_time_ms: burst.startTimeMs,
+      end_time_ms: burst.endTimeMs,
+      n_fixes: burst.fixCount,
+      fix_keys: burst.fixKeys,
+    });
+    this.setSideSheet("feature_space");
+    this.renderBurstFeatureSpace();
+    this.renderLayers();
+    this.setStatus(`Selected burst ${burst.burstId} in feature space.`);
+    return true;
+  }
+
+  handleMapClick(event) {
+    if (!this.overlay || !this.data) {
+      return;
+    }
+    const pickedBurst = this.getMapPickedFeatureSpaceBurst(event);
+    if (pickedBurst && this.selectMapBurstInFeatureSpace(pickedBurst)) {
+      return;
+    }
+    const point = event?.point;
+    const picked = point && Number.isFinite(point.x) && Number.isFinite(point.y)
+      ? this.overlay.pickObject({
+        x: Number(point.x),
+        y: Number(point.y),
+        radius: 6,
+      })
+      : null;
+    if (!picked?.object?.fixKey) {
+      return;
+    }
+    const fixKey = picked.object.fixKey;
+    if (this.data.selectedFixKeys.has(fixKey)) {
+      this.data.selectedFixKeys.delete(fixKey);
+    } else {
+      this.data.selectedFixKeys.add(fixKey);
+    }
+    this.applyTableSelectionInteraction(fixKey, {
+      additive: event?.originalEvent?.metaKey || event?.originalEvent?.ctrlKey,
+      range: event?.originalEvent?.shiftKey,
+    });
+    this.renderThresholdPane();
+    this.renderSelectedFixes();
+    if (this.refs?.sideSheetTabs?.dataset.activeSheet === "table") {
+      this.renderTableSheet();
+    }
+    this.renderLayers();
+    this.updateActionButtons();
+  }
+
+  handleMapContextMenu(event) {
+    event?.preventDefault?.();
+    event?.originalEvent?.preventDefault?.();
+    if (!this.overlay || !this.data) {
+      this.closeFixPopup();
+      return;
+    }
+    const point = event?.point;
+    const picked = point && Number.isFinite(point.x) && Number.isFinite(point.y)
+      ? this.overlay.pickObject({
+        x: Number(point.x),
+        y: Number(point.y),
+        radius: 6,
+      })
+      : null;
+    if (!picked?.object?.fixKey) {
+      this.closeFixPopup();
+      return;
+    }
+    this.openFixPopup(picked.object, {
+      x: Number(point.x),
+      y: Number(point.y),
+    });
+  }
+
+  openFixPopup(point, info) {
+    const fixKey = String(point?.fixKey || "");
+    if (!fixKey) {
+      this.closeFixPopup();
+      return;
+    }
+    this.activeFixPopup = {
+      fixKey,
+      screenX: Number.isFinite(info?.x) ? Number(info.x) : this.refs.map.clientWidth / 2,
+      screenY: Number.isFinite(info?.y) ? Number(info.y) : this.refs.map.clientHeight / 2,
+    };
+    this.renderFixPopup();
+  }
+
+  closeFixPopup() {
+    this.activeFixPopup = null;
+    this.renderFixPopup();
+  }
+
+  getPopupFix() {
+    if (!this.data || !this.activeFixPopup?.fixKey) {
+      return null;
+    }
+    return this.data.fixByKey.get(this.activeFixPopup.fixKey) || null;
+  }
+
+  isFixVisibleOnMap(fix) {
+    if (!fix || !this.data || !this.refs.showPoints.checked) {
+      return false;
+    }
+    const visibleIndividuals = this.data.selectedIndividuals instanceof Set
+      ? this.data.selectedIndividuals
+      : new Set();
+    return visibleIndividuals.has(fix.individual) && this.getVisibleSetNames().has(fix.setName);
+  }
+
+  syncFixPopupVisibility() {
+    const fix = this.getPopupFix();
+    if (!fix || !this.isFixVisibleOnMap(fix)) {
+      this.activeFixPopup = null;
+    }
+  }
+
+  renderFixPopup() {
+    const popupEl = this.refs.fixPopup;
+    if (!popupEl) {
+      return;
+    }
+    const fix = this.getPopupFix();
+    if (!this.activeFixPopup || !fix || !this.isFixVisibleOnMap(fix)) {
+      popupEl.innerHTML = "";
+      popupEl.classList.add("hidden");
+      popupEl.style.left = "";
+      popupEl.style.top = "";
+      return;
+    }
+
+    const popupFields = this.buildPopupFields(fix);
+    popupEl.innerHTML = `
+      <div class="movement-fix-popup-head">
+        <div>
+          <div class="movement-fix-popup-title">Fix details</div>
+          <div class="movement-fix-popup-subtitle">${escapeHtml(fix.individual)}</div>
+        </div>
+        <button type="button" class="movement-fix-popup-close" data-role="fix-popup-close" aria-label="Close fix details">X</button>
+      </div>
+      <div class="movement-fix-popup-fields">
+        ${popupFields.map(field => `
+          <div class="movement-fix-popup-row">
+            <div class="movement-fix-popup-label">${escapeHtml(field.label)}</div>
+            <div class="movement-fix-popup-value">${escapeHtml(field.value)}</div>
+          </div>
+        `).join("")}
+      </div>
+    `;
+    popupEl.classList.remove("hidden");
+
+    const mapWidth = this.refs.map.clientWidth || popupEl.offsetWidth || 0;
+    const mapHeight = this.refs.map.clientHeight || popupEl.offsetHeight || 0;
+    const popupWidth = popupEl.offsetWidth || 0;
+    const popupHeight = popupEl.offsetHeight || 0;
+    const preferredLeft = this.activeFixPopup.screenX + FIX_POPUP_OFFSET_PX;
+    const preferredRight = this.activeFixPopup.screenX - popupWidth - FIX_POPUP_OFFSET_PX;
+    const preferredBelow = this.activeFixPopup.screenY + FIX_POPUP_OFFSET_PX;
+    const preferredAbove = this.activeFixPopup.screenY - popupHeight - FIX_POPUP_OFFSET_PX;
+    const left = preferredLeft + popupWidth <= (mapWidth - FIX_POPUP_EDGE_PADDING_PX)
+      ? preferredLeft
+      : preferredRight >= FIX_POPUP_EDGE_PADDING_PX
+        ? preferredRight
+        : clamp(preferredLeft, FIX_POPUP_EDGE_PADDING_PX, Math.max(FIX_POPUP_EDGE_PADDING_PX, mapWidth - popupWidth - FIX_POPUP_EDGE_PADDING_PX));
+    const top = preferredBelow + popupHeight <= (mapHeight - FIX_POPUP_EDGE_PADDING_PX)
+      ? preferredBelow
+      : preferredAbove >= FIX_POPUP_EDGE_PADDING_PX
+        ? preferredAbove
+        : clamp(preferredBelow, FIX_POPUP_EDGE_PADDING_PX, Math.max(FIX_POPUP_EDGE_PADDING_PX, mapHeight - popupHeight - FIX_POPUP_EDGE_PADDING_PX));
+    popupEl.style.left = `${left}px`;
+    popupEl.style.top = `${top}px`;
+  }
+
+  buildPopupFields(fix) {
+    const rows = [];
+    const seenKeys = new Set();
+    const addRow = (id, label, value, { allowMissing = false } = {}) => {
+      if (!allowMissing && (value === null || value === undefined || value === "")) {
+        return;
+      }
+      if (seenKeys.has(id)) {
+        return;
+      }
+      rows.push({ label, value: value === null || value === undefined || value === "" ? "missing" : String(value) });
+      seenKeys.add(id);
+    };
+    addRow("individual", "Individual", fix.individual, { allowMissing: true });
+    addRow("timestamp", "Timestamp", formatTimestamp(fix.timeMs), { allowMissing: true });
+
+    for (const fieldKey of FIX_POPUP_DEFAULT_FIELDS) {
+      const resolved = this.resolvePopupFieldValue(fix, fieldKey);
+      if (!resolved) {
+        continue;
+      }
+      addRow(resolved.id, resolved.label, resolved.value, { allowMissing: resolved.allowMissing === true });
+    }
+
+    const colorField = this.getCurrentColorField();
+    if (colorField) {
+      addRow(
+        colorField.key,
+        colorField.label,
+        formatColorValue(fix.attributes?.[colorField.key], colorField.kind),
+        { allowMissing: true },
+      );
+    }
+
+    return rows;
+  }
+
+  resolvePopupFieldValue(fix, fieldKey) {
+    switch (fieldKey) {
+      case "set":
+        return { id: "set", label: "Set", value: fix.setName };
+      case "fix_key":
+        return { id: "fix_key", label: "Fix key", value: fix.fixKey };
+      case "step_length_m":
+        return fix.attributes?.step_length_m === undefined
+          ? null
+          : { id: "step_length_m", label: "Step length", value: formatMaybeNumber(fix.attributes.step_length_m, "m") };
+      case "speed_mps":
+        return fix.attributes?.speed_mps === undefined
+          ? null
+          : { id: "speed_mps", label: "Speed", value: formatMaybeNumber(fix.attributes.speed_mps, "m/s") };
+      case "time_delta_s":
+        return fix.attributes?.time_delta_s === undefined
+          ? null
+          : { id: "time_delta_s", label: "Time delta", value: formatMaybeNumber(fix.attributes.time_delta_s, "s") };
+      case "review.status": {
+        const status = String(fix.review?.status || "").trim();
+        return status ? { id: "review.status", label: "Review", value: status } : null;
+      }
+      case "review.issue_type": {
+        const issueTypes = this.getPopupIssueTypes(fix);
+        return issueTypes.length ? { id: "review.issue_type", label: "Issue type", value: issueTypes.join(", ") } : null;
+      }
+      default:
+        return null;
+    }
+  }
+
+  getPopupIssueTypes(fix) {
+    const issues = Array.isArray(fix?.review?.issues) ? fix.review.issues : [];
+    const typedIssues = uniqueNonEmpty(issues.map(issue => issue.issueType || ""));
+    if (typedIssues.length) {
+      return typedIssues;
+    }
+    const legacyType = String(fix?.review?.issueType || "").trim();
+    return legacyType ? [legacyType] : [];
   }
 
   resetView() {
@@ -2371,6 +6572,24 @@ class MovementExampleApp {
         numericFixes: [],
         thresholdValue: null,
         histogram: null,
+        matchKeys: new Set(),
+        uncheckedMatchKeys: new Set(),
+      };
+    }
+    if (field.key === INDIVIDUAL_COLOR_FIELD_KEY) {
+      return {
+        field,
+        visibleFixes,
+        numericFixes: [],
+        thresholdValue: null,
+        histogram: null,
+        reverse: false,
+        histogramMode: "full",
+        histogramInputMin: null,
+        histogramInputMax: null,
+        selectedLevels: [],
+        levelOptions: [],
+        disabledReason: "Threshold selection is unavailable when coloring by individual ID. Use the Individuals panel to filter tracks instead.",
         matchKeys: new Set(),
         uncheckedMatchKeys: new Set(),
       };
@@ -2494,6 +6713,29 @@ class MovementExampleApp {
     };
   }
 
+  getActiveThresholdMatchKeys() {
+    if (!this.data) {
+      return new Set();
+    }
+    const field = this.getCurrentColorField();
+    if (!field || field.key === INDIVIDUAL_COLOR_FIELD_KEY || this.thresholdState.fieldKey !== field.key) {
+      return new Set();
+    }
+    if (field.kind === "numeric") {
+      if (!Number.isFinite(this.thresholdState.value)) {
+        return new Set();
+      }
+    } else {
+      const selectedLevels = Array.isArray(this.thresholdState.selectedLevels)
+        ? this.thresholdState.selectedLevels
+        : [];
+      if (!selectedLevels.length) {
+        return new Set();
+      }
+    }
+    return this.getThresholdContext()?.matchKeys || new Set();
+  }
+
   renderThresholdPane() {
     const pane = this.refs.thresholdPane;
     if (!pane) {
@@ -2513,6 +6755,7 @@ class MovementExampleApp {
     const reverse = context?.reverse === true;
     const selectedLevels = context?.selectedLevels || [];
     const levelOptions = context?.levelOptions || [];
+    const disabledReason = context?.disabledReason || "";
     const matchCount = context?.matchKeys?.size || 0;
     const uncheckedCount = context?.uncheckedMatchKeys?.size || 0;
     const histogram = context?.histogram;
@@ -2531,6 +6774,12 @@ class MovementExampleApp {
       body = `
         <div class="movement-threshold-empty">
           No visible fixes are in scope right now. Adjust the visible individuals or train/test toggles to build a threshold.
+        </div>
+      `;
+    } else if (disabledReason) {
+      body = `
+        <div class="movement-threshold-empty">
+          ${escapeHtml(disabledReason)}
         </div>
       `;
     } else if (field.kind !== "numeric") {
@@ -3011,6 +7260,8 @@ class MovementExampleApp {
       this.data.detailReturnedFixCount = 0;
       this.data.detailTruncated = false;
       this.data.detailFixes = [];
+      this.data.detailSegments = [];
+      this.data.detailAutoBursts = [];
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
       this.renderSelectedFixes();
@@ -3031,6 +7282,8 @@ class MovementExampleApp {
       this.data.detailIndividuals = [...selectedIndividuals];
       this.data.detailLimit = this.data.totalRows;
       this.data.detailFixes = [];
+      this.data.detailSegments = [];
+      this.data.detailAutoBursts = [];
       this.data.detailMatchingFixCount = this.getFixesForIndividualsFrom(this.data.overviewFixes, selectedIndividuals).length;
       this.data.detailReturnedFixCount = this.data.detailMatchingFixCount;
       this.data.detailTruncated = false;
@@ -3048,6 +7301,7 @@ class MovementExampleApp {
     this.data.detailState = "loading";
     this.data.detailIndividuals = [...selectedIndividuals];
     this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, selectedIndividuals);
+    this.renderBurstCountIndicator();
     this.renderSelectedFixes();
     this.renderThresholdPane();
     this.updateActionButtons();
@@ -3076,14 +7330,18 @@ class MovementExampleApp {
         return;
       }
       this.data.detailState = "loaded";
-      this.data.detailIndividuals = Array.isArray(payload.detail_scope?.individuals)
-        ? payload.detail_scope.individuals.map(value => String(value))
-        : [...selectedIndividuals];
+      const payloadIndividuals = Array.isArray(payload.detail_scope?.individuals)
+        ? payload.detail_scope.individuals.map(value => String(value)).filter(Boolean)
+        : [];
+      this.data.detailIndividuals = payloadIndividuals.length ? payloadIndividuals : [...selectedIndividuals];
       this.data.detailLimit = payload.detail_scope?.limit ?? null;
       this.data.detailMatchingFixCount = Number(payload.matching_fix_count) || 0;
       this.data.detailReturnedFixCount = Number(payload.returned_fix_count) || 0;
       this.data.detailTruncated = Boolean(payload.truncated);
+      this.data.burstGap = parseMovementBurstGap(payload);
       this.data.detailFixes = parseMovementFixes(payload.fixes || []);
+      this.data.detailSegments = parseMovementSegments(payload.segments || []);
+      this.data.detailAutoBursts = parseMovementAutoBursts(payload.auto_bursts || []);
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, this.data.detailIndividuals);
       this.renderSelectedFixes();
@@ -3105,6 +7363,8 @@ class MovementExampleApp {
       this.data.detailReturnedFixCount = 0;
       this.data.detailTruncated = false;
       this.data.detailFixes = [];
+      this.data.detailSegments = [];
+      this.data.detailAutoBursts = [];
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
       this.renderSelectedFixes();
@@ -3117,6 +7377,9 @@ class MovementExampleApp {
 
   buildFixesRequestUrl({ familyName, studyName, datasetId, artifactName, individuals = [], reviewStatus = "", limit } = {}) {
     const params = new URLSearchParams({ logical_name: artifactName });
+    params.set("burst_gap_mode", this.getBurstGapMode());
+    params.set("burst_gap_seconds", String(this.getBurstGapSeconds()));
+    params.set("burst_gap_quantile", String(this.getBurstGapQuantile()));
     const normalizedIndividuals = uniqueNonEmpty(individuals).sort((left, right) => left.localeCompare(right));
     const allIndividuals = this.data ? [...this.data.individuals].sort((left, right) => left.localeCompare(right)) : [];
     const shouldOmitIndividuals = normalizedIndividuals.length > 0 && arraysEqual(normalizedIndividuals, allIndividuals);
@@ -3379,16 +7642,16 @@ class MovementExampleApp {
     });
   }
 
-  getSelectedReportBasemapStyle() {
+  getSelectedReportBasemapPreset() {
     const choice = this.refs.reportBasemap.value || "current";
     if (choice === "current") {
       const currentName = this.refs.basemap.value || "Blank";
-      if (currentName !== "Blank" && BASEMAP_STYLES[currentName]) {
-        return BASEMAP_STYLES[currentName];
+      if (currentName !== "Blank" && BASEMAP_PRESETS[currentName]) {
+        return BASEMAP_PRESETS[currentName];
       }
-      return BASEMAP_STYLES.Positron;
+      return BASEMAP_PRESETS.Positron;
     }
-    return BASEMAP_STYLES[choice] || BASEMAP_STYLES.Positron;
+    return BASEMAP_PRESETS[choice] || BASEMAP_PRESETS.Positron;
   }
 
   updateReportModeUi() {
@@ -3444,8 +7707,19 @@ class MovementExampleApp {
         issue_note: fix.review.issueNote || "",
         owner_question: fix.review.ownerQuestion || "",
         review_user: fix.review.reviewUser || "",
-        reviewed_at: fix.review.reviewedAt || "",
+      reviewed_at: fix.review.reviewedAt || "",
       },
+      segments: (fix.segments || []).map(segment => ({
+        status: segment.status || "",
+        segment_id: segment.segmentId || "",
+        issue_type: segment.issueType || "",
+        start_fix_key: segment.startFixKey || "",
+        end_fix_key: segment.endFixKey || "",
+        issue_note: segment.issueNote || "",
+        owner_question: segment.ownerQuestion || "",
+        review_user: segment.reviewUser || "",
+        reviewed_at: segment.reviewedAt || "",
+      })),
     };
   }
 
@@ -3704,15 +7978,28 @@ class MovementExampleApp {
     const hasDetail = this.hasLoadedDetailSelection();
     const selectedCount = this.getSelectedFixes().length;
     const visibleSuspiciousCount = this.getSuspiciousFixes("", { scope: "visible" }).length;
+    const candidatePreviewLoading = this.candidateQueryPreview?.status === "loading";
+    const anomalyRankingLoading = this.anomalyRanking?.status === "loading";
+    const burstFeatureSpaceLoading = this.burstFeatureSpace?.status === "loading";
+    const returnedCandidateCount = this.getCandidateQueryReturnedMatchKeys().size;
+    const selectedCandidateQuery = this.getSelectedCandidateQuery();
     for (const button of [
       this.refs.selectSuspicious,
       this.refs.clearFixes,
+      this.refs.runCandidateQuery,
+      this.refs.checkCandidates,
+      this.refs.clearCandidates,
       this.refs.markSuspected,
       this.refs.markConfirmed,
+      this.refs.runAnomalyRanking,
+      this.refs.runBurstFeatureSpace,
       this.refs.generateReport,
       this.refs.removeConfirmed,
     ]) {
       button.hidden = !hasData;
+    }
+    if (this.refs.anomalyFeatureSetControl) {
+      this.refs.anomalyFeatureSetControl.hidden = !hasData;
     }
     this.refs.markSuspected.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
     this.refs.markConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
@@ -3720,7 +8007,18 @@ class MovementExampleApp {
     this.refs.removeConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
     this.refs.selectSuspicious.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || visibleSuspiciousCount === 0;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
+    this.refs.runCandidateQuery.disabled = !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
+    this.refs.runAnomalyRanking.disabled = !hasData || !this.currentArtifact || anomalyRankingLoading || burstFeatureSpaceLoading;
+    this.refs.runBurstFeatureSpace.disabled = !hasData || !this.currentArtifact || burstFeatureSpaceLoading || anomalyRankingLoading;
+    if (this.refs.anomalyFeatureSet) {
+      this.refs.anomalyFeatureSet.disabled = !hasData || anomalyRankingLoading || burstFeatureSpaceLoading;
+    }
+    this.refs.checkCandidates.disabled = !hasData || candidatePreviewLoading || returnedCandidateCount === 0;
+    this.refs.clearCandidates.disabled = !hasData || candidatePreviewLoading || this.candidateQueryPreview?.status === "idle";
     this.updateUndoButton();
+    if (this.refs?.sideSheetTabs?.dataset.activeSheet === "table") {
+      this.renderTableSheet();
+    }
   }
 
   updateUndoButton() {
@@ -3738,6 +8036,12 @@ class MovementExampleApp {
     const field = this.getCurrentColorField();
     const issueThreshold = this.getCurrentIssueThreshold();
     this.pendingIssueStatus = status;
+    this.pendingIssueContext = {
+      mode: "fixes",
+      fixes: selectedFixes,
+      issueField: field?.key || "",
+      issueThreshold,
+    };
     this.refs.issueTitle.textContent = `Mark fixes as ${status}`;
     this.refs.issueMeta.innerHTML = `
       <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
@@ -3756,6 +8060,50 @@ class MovementExampleApp {
     this.refs.issueType.value = "";
     this.refs.issueNote.value = "";
     this.refs.issueQuestion.value = "Could you confirm whether these fixes should be treated as outliers and explain the likely error source?";
+    this.refs.issueStatus.textContent = "";
+    this.refs.issueStatus.classList.remove("error");
+    this.refs.issueSubmit.disabled = false;
+    this.refs.issueClose.disabled = false;
+    this.refs.issueModal.classList.remove("hidden");
+    this.refs.issueType.focus();
+  }
+
+  openSegmentModal(status) {
+    const selection = this.getCurrentSegmentSelection();
+    if (!selection || selection.fixes.length < 2 || !this.currentArtifact) {
+      return;
+    }
+    this.pendingIssueStatus = status;
+    this.pendingIssueContext = {
+      mode: "segment",
+      fixes: selection.fixes,
+      startFixKey: selection.startFixKey,
+      endFixKey: selection.endFixKey,
+      selectedFixKeys: selection.fixes.map(fix => fix.fixKey),
+      individual: selection.individual,
+      setName: selection.setName,
+      issueField: "",
+      issueThreshold: "",
+    };
+    this.refs.issueTitle.textContent = `Mark segment as ${status}`;
+    this.refs.issueMeta.innerHTML = `
+      <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
+      <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
+      <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+      <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+      <div><strong>Track:</strong> ${escapeHtml(`${selection.individual} • ${selection.setName}`)}</div>
+      <div><strong>Segment fixes:</strong> ${escapeHtml(formatCount(selection.fixes.length))}</div>
+      <div><strong>Start:</strong> ${escapeHtml(`${formatTimestamp(selection.fixes[0].timeMs)} • ${selection.startFixKey}`)}</div>
+      <div><strong>End:</strong> ${escapeHtml(`${formatTimestamp(selection.fixes[selection.fixes.length - 1].timeMs)} • ${selection.endFixKey}`)}</div>
+    `;
+    this.refs.issueSelection.textContent = selection.fixes
+      .slice(0, 40)
+      .map(fix => `${fix.individual} • ${formatTimestamp(fix.timeMs)} • ${fix.fixKey}`)
+      .join("\n");
+    this.refs.issueUser.value = this.getUser();
+    this.refs.issueType.value = "";
+    this.refs.issueNote.value = "";
+    this.refs.issueQuestion.value = "Could you confirm whether this contiguous track segment reflects collar removal, transport, or another non-animal movement event?";
     this.refs.issueStatus.textContent = "";
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
@@ -3818,6 +8166,9 @@ class MovementExampleApp {
     if (submitButton.disabled) {
       return;
     }
+    if (modal === this.refs.issueModal) {
+      this.pendingIssueContext = null;
+    }
     modal.classList.add("hidden");
   }
 
@@ -3827,11 +8178,17 @@ class MovementExampleApp {
   }
 
   async submitIssueAction() {
-    const selectedFixes = this.getSelectedFixes();
+    const context = this.pendingIssueContext || {
+      mode: "fixes",
+      fixes: this.getSelectedFixes(),
+      issueField: this.getCurrentColorField()?.key || "",
+      issueThreshold: this.getCurrentIssueThreshold(),
+    };
+    const selectedFixes = Array.isArray(context.fixes) ? context.fixes : [];
     const user = this.refs.issueUser.value.trim();
     const issueType = this.refs.issueType.value.trim();
-    const issueField = this.getCurrentColorField()?.key || "";
-    const issueThreshold = this.getCurrentIssueThreshold();
+    const issueField = context.issueField || "";
+    const issueThreshold = context.issueThreshold || "";
     const issueNote = this.refs.issueNote.value.trim();
     const ownerQuestion = this.refs.issueQuestion.value.trim();
     if (!selectedFixes.length) {
@@ -3845,30 +8202,50 @@ class MovementExampleApp {
 
     this.refs.issueSubmit.disabled = true;
     this.refs.issueClose.disabled = true;
-    this.refs.issueStatus.textContent = `Marking ${formatCount(selectedFixes.length)} fixes as ${this.pendingIssueStatus}...`;
+    this.refs.issueStatus.textContent = context.mode === "segment"
+      ? `Marking ${formatCount(selectedFixes.length)} fixes as one ${this.pendingIssueStatus} segment...`
+      : `Marking ${formatCount(selectedFixes.length)} fixes as ${this.pendingIssueStatus}...`;
     this.refs.issueStatus.classList.remove("error");
     this.setStatus(this.refs.issueStatus.textContent);
 
     try {
+      const endpoint = context.mode === "segment"
+        ? `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/annotate-segment`
+        : `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/annotate-fixes`;
+      const body = context.mode === "segment"
+        ? {
+          dataset_id: this.currentDatasetId,
+          logical_name: this.currentArtifact,
+          selected_fix_keys: context.selectedFixKeys,
+          start_fix_key: context.startFixKey,
+          end_fix_key: context.endFixKey,
+          status: this.pendingIssueStatus,
+          issue_type: issueType,
+          issue_note: issueNote,
+          owner_question: ownerQuestion,
+          user,
+        }
+        : {
+          dataset_id: this.currentDatasetId,
+          logical_name: this.currentArtifact,
+          fix_keys: selectedFixes.map(fix => fix.fixKey),
+          status: this.pendingIssueStatus,
+          issue_type: issueType,
+          issue_field: issueField,
+          issue_threshold: issueThreshold,
+          issue_note: issueNote,
+          owner_question: ownerQuestion,
+          user,
+        };
       const result = await this.requestJSON(
-        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/annotate-fixes`,
+        endpoint,
         {
           method: "POST",
-          body: JSON.stringify({
-            dataset_id: this.currentDatasetId,
-            logical_name: this.currentArtifact,
-            fix_keys: selectedFixes.map(fix => fix.fixKey),
-            status: this.pendingIssueStatus,
-            issue_type: issueType,
-            issue_field: issueField,
-            issue_threshold: issueThreshold,
-            issue_note: issueNote,
-            owner_question: ownerQuestion,
-            user,
-          }),
+          body: JSON.stringify(body),
         },
       );
       this.setUser(user);
+      this.pendingIssueContext = null;
       this.refs.issueModal.classList.add("hidden");
       await this.loadStudyAtDataset(result.dataset.dataset_id);
       this.setStatus(`Created ${result.step.title} in ${result.dataset.dataset_id}.`);
@@ -4012,8 +8389,9 @@ class MovementExampleApp {
     if (!snapshotWindows.length) {
       return [];
     }
+    const preset = this.getSelectedReportBasemapPreset();
     const renderer = await createReportSnapshotRenderer({
-      style: this.getSelectedReportBasemapStyle(),
+      preset,
     });
     try {
       const snapshots = [];
@@ -4078,13 +8456,16 @@ class MovementExampleApp {
 }
 
 function buildDatasetFromSummary(summary, preferredColorBy) {
-  const individuals = Array.isArray(summary.individuals)
-    ? [...summary.individuals].sort((left, right) => left.localeCompare(right))
-    : [];
+  const individuals = collectSummaryIndividuals(summary);
   if (!individuals.length) {
     throw new Error("Dataset summary did not contain any individuals.");
   }
   const overviewFixes = parseMovementFixes(summary.fixes || []);
+  const overviewSegments = parseMovementSegments(summary.segments || []);
+  const overviewAutoBursts = parseMovementAutoBursts(summary.auto_bursts || []);
+  const burstGap = parseMovementBurstGap(summary);
+  const totalRows = Number(summary.total_rows) || 0;
+  const overviewTruncated = Boolean(summary.overview_truncated) || overviewFixes.length < totalRows;
 
   const seriesByIndividual = {};
   const coverageByIndividual = {};
@@ -4126,12 +8507,14 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     };
   });
 
-  const colorFields = Array.isArray(summary.color_fields) ? summary.color_fields.map(field => ({
-    key: String(field?.key || ""),
-    label: String(field?.label || field?.key || ""),
-    kind: String(field?.kind || "categorical"),
-    source: String(field?.source || "raw"),
-  })).filter(field => field.key) : [];
+  const colorFields = buildMovementColorFields(
+    Array.isArray(summary.color_fields) ? summary.color_fields.map(field => ({
+      key: String(field?.key || ""),
+      label: String(field?.label || field?.key || ""),
+      kind: String(field?.kind || "categorical"),
+      source: String(field?.source || "raw"),
+    })).filter(field => field.key) : [],
+  );
   const colorFieldByKey = new Map(colorFields.map(field => [field.key, field]));
 
   individuals.forEach((individual, index) => {
@@ -4155,7 +8538,7 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     : colorFields[0]?.key || "step_length_m";
 
   const data = {
-    totalRows: Number(summary.total_rows) || 0,
+    totalRows,
     individuals,
     speciesByIndividual: summary.species_by_individual || {},
     seriesByIndividual,
@@ -4163,9 +8546,22 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     stats,
     fixes: [],
     fixByKey: new Map(),
+    segments: [],
+    segmentById: new Map(),
+    autoBursts: [],
+    autoBurstById: new Map(),
     overviewFixes,
-    overviewHasAllFixes: overviewFixes.length >= (Number(summary.total_rows) || 0),
+    overviewSegments,
+    overviewAutoBursts,
+    burstGap,
+    overviewTruncated,
+    overviewFixLimit: Number(summary.overview_fix_limit) || null,
+    autoBurstsTruncated: Boolean(summary.auto_bursts_truncated),
+    overviewHasAllFixes: !overviewTruncated,
+    candidateFixes: [],
     detailFixes: [],
+    detailSegments: [],
+    detailAutoBursts: [],
     detailState: "idle",
     detailIndividuals: [],
     detailLimit: null,
@@ -4197,6 +8593,94 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
   return data;
 }
 
+function initialMovementVisibleIndividuals(data) {
+  if (!data) {
+    return [];
+  }
+  if (data.overviewTruncated) {
+    return [];
+  }
+  return data.individuals || [];
+}
+
+function parseMovementBurstGap(summary) {
+  const nested = summary?.burst_gap || {};
+  const mode = String(nested.mode ?? summary?.burst_gap_mode ?? DEFAULT_BURST_GAP_MODE).trim().toLowerCase();
+  const quantile = finiteOrNull(nested.quantile ?? summary?.burst_gap_quantile) ?? DEFAULT_BURST_GAP_QUANTILE;
+  const fallbackSeconds = finiteOrNull(nested.fallback_seconds ?? summary?.burst_gap_fallback_seconds) ?? DEFAULT_BURST_GAP_SECONDS;
+  const effectiveSeconds = finiteOrNull(nested.effective_seconds ?? summary?.burst_gap_seconds) ?? fallbackSeconds;
+  const gapCount = Math.max(0, Number(nested.gap_count ?? summary?.burst_gap_gap_count) || 0);
+  return {
+    mode: mode === "manual" || mode === "quantile" ? mode : DEFAULT_BURST_GAP_MODE,
+    quantile: quantile > 0 && quantile <= 1 ? quantile : DEFAULT_BURST_GAP_QUANTILE,
+    fallbackSeconds,
+    effectiveSeconds,
+    gapCount,
+    usedFallback: Boolean(nested.used_fallback ?? summary?.burst_gap_used_fallback),
+  };
+}
+
+function formatBurstGapQuantile(value) {
+  const quantileValue = Number(value);
+  if (!Number.isFinite(quantileValue) || quantileValue <= 0 || quantileValue > 1) {
+    return "p99.9";
+  }
+  const percentile = quantileValue * 100;
+  const decimals = Math.abs(percentile - Math.round(percentile)) < 0.0001 ? 0 : 3;
+  let formatted = percentile.toFixed(decimals);
+  if (formatted.includes(".")) {
+    formatted = formatted.replace(/0+$/, "").replace(/\.$/, "");
+  }
+  return `p${formatted}`;
+}
+
+function formatBurstGapMetadata(burstGap) {
+  if (!burstGap) {
+    return "";
+  }
+  const effectiveSeconds = finiteOrNull(burstGap.effectiveSeconds);
+  if (effectiveSeconds === null) {
+    return "";
+  }
+  const secondsLabel = formatMaybeNumber(effectiveSeconds, "s");
+  if (burstGap.mode === "quantile") {
+    let label = `${formatBurstGapQuantile(burstGap.quantile)} = ${secondsLabel}`;
+    if (Number(burstGap.gapCount) > 0) {
+      label += ` from ${formatCount(burstGap.gapCount)} gaps`;
+    }
+    if (burstGap.usedFallback) {
+      label += " (fallback)";
+    }
+    return label;
+  }
+  return `${secondsLabel} manual`;
+}
+
+function collectSummaryIndividuals(summary) {
+  const names = new Set();
+  const add = value => {
+    const name = String(value || "").trim();
+    if (name) {
+      names.add(name);
+    }
+  };
+  if (Array.isArray(summary.individuals)) {
+    summary.individuals.forEach(add);
+  }
+  for (const collection of [
+    summary.stats,
+    summary.series_by_individual,
+    summary.coverage_by_individual,
+    summary.species_by_individual,
+  ]) {
+    Object.keys(collection || {}).forEach(add);
+  }
+  for (const item of [...(summary.fixes || []), ...(summary.auto_bursts || [])]) {
+    add(item?.individual);
+  }
+  return [...names].sort((left, right) => left.localeCompare(right));
+}
+
 function parseMovementFixes(items) {
   return Array.isArray(items) ? items.map(item => ({
     fixKey: String(item?.fix_key || ""),
@@ -4204,7 +8688,10 @@ function parseMovementFixes(items) {
     setName: String(item?.set || "train") || "train",
     timeMs: Number(item?.time_ms) || 0,
     position: [Number(item?.lon) || 0, Number(item?.lat) || 0],
-    attributes: { ...(item?.attributes || {}) },
+    attributes: {
+      ...(item?.attributes || {}),
+      [INDIVIDUAL_COLOR_FIELD_KEY]: String(item?.individual || ""),
+    },
     review: {
       status: String(item?.review?.status || ""),
       issueId: String(item?.review?.issue_id || ""),
@@ -4217,7 +8704,54 @@ function parseMovementFixes(items) {
       reviewUser: String(item?.review?.review_user || ""),
       reviewedAt: String(item?.review?.reviewed_at || ""),
     },
+    segments: normalizeSegmentMemberships(item?.segments),
   })).filter(item => item.fixKey) : [];
+}
+
+function parseMovementSegments(items) {
+  return Array.isArray(items) ? items.map(item => ({
+    segmentId: String(item?.segment_id || ""),
+    individual: String(item?.individual || ""),
+    setName: String(item?.set_name || "train") || "train",
+    startFixKey: String(item?.start_fix_key || ""),
+    endFixKey: String(item?.end_fix_key || ""),
+    startTimeMs: Number(item?.start_time_ms) || 0,
+    endTimeMs: Number(item?.end_time_ms) || 0,
+    fixCount: Number(item?.fix_count) || 0,
+    status: String(item?.status || ""),
+    issueType: String(item?.issue_type || ""),
+    issueNote: String(item?.issue_note || ""),
+    ownerQuestion: String(item?.owner_question || ""),
+    reviewUser: String(item?.review_user || ""),
+    reviewedAt: String(item?.reviewed_at || ""),
+    fixKeys: Array.isArray(item?.fix_keys) ? item.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
+    path: Array.isArray(item?.path)
+      ? item.path
+        .map(position => [Number(position?.[0]) || 0, Number(position?.[1]) || 0])
+        .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]))
+      : [],
+  })).filter(item => item.segmentId) : [];
+}
+
+function parseMovementAutoBursts(items) {
+  return Array.isArray(items) ? items.map(item => ({
+    burstId: String(item?.burst_id || ""),
+    burstIdx: Number(item?.burst_idx) || 0,
+    individual: String(item?.individual || ""),
+    setName: String(item?.set_name || "train") || "train",
+    startFixKey: String(item?.start_fix_key || ""),
+    endFixKey: String(item?.end_fix_key || ""),
+    startTimeMs: Number(item?.start_time_ms) || 0,
+    endTimeMs: Number(item?.end_time_ms) || 0,
+    fixCount: Number(item?.fix_count) || 0,
+    burstGapSeconds: Number(item?.burst_gap_seconds) || DEFAULT_BURST_GAP_SECONDS,
+    fixKeys: Array.isArray(item?.fix_keys) ? item.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
+    path: Array.isArray(item?.path)
+      ? item.path
+        .map(position => [Number(position?.[0]) || 0, Number(position?.[1]) || 0])
+        .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]))
+      : [],
+  })).filter(item => item.burstId) : [];
 }
 
 function normalizeReviewIssues(review) {
@@ -4253,18 +8787,63 @@ function normalizeReviewIssues(review) {
   return legacyIssue.issueId || legacyIssue.issueType ? [legacyIssue] : [];
 }
 
+function normalizeSegmentMemberships(items) {
+  return Array.isArray(items) ? items
+    .filter(item => item && typeof item === "object")
+    .map(item => ({
+      status: String(item.status || "").trim(),
+      segmentId: String(item.segment_id || item.segmentId || "").trim(),
+      issueType: String(item.issue_type || item.issueType || "").trim(),
+      startFixKey: String(item.start_fix_key || item.startFixKey || "").trim(),
+      endFixKey: String(item.end_fix_key || item.endFixKey || "").trim(),
+      issueNote: String(item.issue_note || item.issueNote || "").trim(),
+      ownerQuestion: String(item.owner_question || item.ownerQuestion || "").trim(),
+      reviewUser: String(item.review_user || item.reviewUser || "").trim(),
+      reviewedAt: String(item.reviewed_at || item.reviewedAt || "").trim(),
+    }))
+    .filter(item => item.segmentId)
+    : [];
+}
+
 function refreshMovementFixCollections(data) {
   if (!data) {
     return;
   }
   const merged = new Map();
-  for (const fix of [...(data.overviewFixes || []), ...(data.detailFixes || [])]) {
+  for (const fix of [...(data.overviewFixes || []), ...(data.candidateFixes || []), ...(data.detailFixes || [])]) {
     merged.set(fix.fixKey, fix);
   }
   data.fixes = Array.from(merged.values())
     .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
   data.fixByKey = new Map(data.fixes.map(fix => [fix.fixKey, fix]));
+  const mergedSegments = new Map();
+  for (const segment of [...(data.overviewSegments || []), ...(data.detailSegments || [])]) {
+    mergedSegments.set(segment.segmentId, segment);
+  }
+  data.segments = Array.from(mergedSegments.values())
+    .sort((left, right) => left.startTimeMs - right.startTimeMs || left.segmentId.localeCompare(right.segmentId));
+  data.segmentById = new Map(data.segments.map(segment => [segment.segmentId, segment]));
+  const mergedAutoBursts = new Map();
+  for (const burst of [...(data.overviewAutoBursts || []), ...(data.detailAutoBursts || [])]) {
+    mergedAutoBursts.set(burst.burstId, burst);
+  }
+  data.autoBursts = Array.from(mergedAutoBursts.values())
+    .sort((left, right) => left.startTimeMs - right.startTimeMs || left.burstId.localeCompare(right.burstId));
+  data.autoBurstById = new Map(data.autoBursts.map(burst => [burst.burstId, burst]));
   data.colorStyles = computeMovementColorStyles(data.colorFields, data.fixes);
+}
+
+function buildMovementColorFields(fields) {
+  const merged = [INDIVIDUAL_COLOR_FIELD, ...(Array.isArray(fields) ? fields : [])];
+  const seen = new Set();
+  return merged.filter(field => {
+    const key = String(field?.key || "");
+    if (!key || seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function computeMovementColorStyles(colorFields, fixes) {
@@ -4546,6 +9125,18 @@ function formatPercent(value) {
     return "n/a";
   }
   return `${Number.isInteger(percent) ? percent.toFixed(0) : percent.toFixed(1)}th`;
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function cssEscape(value) {
+  const raw = String(value ?? "");
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(raw);
+  }
+  return raw.replace(/["\\]/g, "\\$&");
 }
 
 function formatTimestamp(timeMs) {
@@ -4991,7 +9582,42 @@ function formatSnapshotLatitude(value) {
   return `${Math.abs(value).toFixed(2)}°${direction}`;
 }
 
-function renderSnapshotCanvasWithGrid(sourceCanvas, map) {
+function metersPerCanvasPixel(map, sourceCanvas) {
+  const latitude = map?.getCenter?.()?.lat || 0;
+  const zoom = map?.getZoom?.() || 0;
+  const container = map?.getContainer?.();
+  const cssWidth = Math.max(1, container?.clientWidth || sourceCanvas.width || 1);
+  const canvasWidth = Math.max(1, sourceCanvas?.width || cssWidth);
+  const metersPerCssPixel = (156543.03392 * Math.cos((latitude * Math.PI) / 180)) / (2 ** zoom);
+  return metersPerCssPixel * (cssWidth / canvasWidth);
+}
+
+function niceScaleDistance(maxDistanceMeters) {
+  if (!Number.isFinite(maxDistanceMeters) || maxDistanceMeters <= 0) {
+    return 100;
+  }
+  const magnitude = 10 ** Math.floor(Math.log10(maxDistanceMeters));
+  let best = magnitude;
+  for (const multiplier of [1, 2, 5, 10]) {
+    const candidate = magnitude * multiplier;
+    if (candidate <= maxDistanceMeters) {
+      best = candidate;
+      continue;
+    }
+    break;
+  }
+  return best;
+}
+
+function formatScaleDistance(distanceMeters) {
+  if (distanceMeters >= 1000) {
+    const km = distanceMeters / 1000;
+    return `${Number.isInteger(km) ? km.toFixed(0) : km.toFixed(1)} km`;
+  }
+  return `${Math.round(distanceMeters)} m`;
+}
+
+function renderSnapshotCanvasWithOverlays(sourceCanvas, map, { showGrid = false, attributionText = "" } = {}) {
   const bounds = map?.getBounds?.();
   if (!bounds) {
     return sourceCanvas.toDataURL("image/png");
@@ -5008,8 +9634,8 @@ function renderSnapshotCanvasWithGrid(sourceCanvas, map) {
   const container = map.getContainer();
   const scaleX = sourceCanvas.width / Math.max(1, container.clientWidth || sourceCanvas.width);
   const scaleY = sourceCanvas.height / Math.max(1, container.clientHeight || sourceCanvas.height);
-  const bottomBand = 34 * scaleY;
-  const leftBand = 66 * scaleX;
+  const bottomBand = Math.max(34 * scaleY, 28);
+  const leftBand = showGrid ? Math.max(66 * scaleX, 56) : 0;
   const width = outputCanvas.width;
   const height = outputCanvas.height;
   const south = bounds.getSouth();
@@ -5022,52 +9648,84 @@ function renderSnapshotCanvasWithGrid(sourceCanvas, map) {
   const latTicks = buildSnapshotAxisTicks(south, north);
 
   ctx.save();
-  ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
+  ctx.fillStyle = "rgba(255, 255, 255, 0.74)";
   ctx.fillRect(0, height - bottomBand, width, bottomBand);
-  ctx.fillRect(0, 0, leftBand, height);
-  ctx.strokeStyle = "rgba(74, 98, 110, 0.65)";
-  ctx.lineWidth = Math.max(1, 1.2 * Math.min(scaleX, scaleY));
-  ctx.setLineDash([6 * scaleX, 8 * scaleY]);
+  if (showGrid) {
+    ctx.fillRect(0, 0, leftBand, height);
+    ctx.strokeStyle = "rgba(74, 98, 110, 0.65)";
+    ctx.lineWidth = Math.max(1, 1.2 * Math.min(scaleX, scaleY));
+    ctx.setLineDash([6 * scaleX, 8 * scaleY]);
 
-  for (const lon of lonTicks) {
-    const point = map.project([lon, midLat]);
-    const x = point.x * scaleX;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height - bottomBand);
-    ctx.stroke();
-  }
-  for (const lat of latTicks) {
-    const point = map.project([midLon, lat]);
-    const y = point.y * scaleY;
-    ctx.beginPath();
-    ctx.moveTo(leftBand, y);
-    ctx.lineTo(width, y);
-    ctx.stroke();
+    for (const lon of lonTicks) {
+      const point = map.project([lon, midLat]);
+      const x = point.x * scaleX;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height - bottomBand);
+      ctx.stroke();
+    }
+    for (const lat of latTicks) {
+      const point = map.project([midLon, lat]);
+      const y = point.y * scaleY;
+      ctx.beginPath();
+      ctx.moveTo(leftBand, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+    }
   }
 
   ctx.setLineDash([]);
   ctx.fillStyle = "#243b53";
   ctx.strokeStyle = "#243b53";
   ctx.font = `${Math.max(12, 12 * scaleY)}px Arial, sans-serif`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "alphabetic";
-  for (const lon of lonTicks) {
-    const point = map.project([lon, midLat]);
-    const x = point.x * scaleX;
-    ctx.beginPath();
-    ctx.moveTo(x, height - bottomBand);
-    ctx.lineTo(x, height - (bottomBand * 0.62));
-    ctx.stroke();
-    ctx.fillText(formatSnapshotLongitude(lon), x, height - (bottomBand * 0.24));
+  if (showGrid) {
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    for (const lon of lonTicks) {
+      const point = map.project([lon, midLat]);
+      const x = point.x * scaleX;
+      ctx.beginPath();
+      ctx.moveTo(x, height - bottomBand);
+      ctx.lineTo(x, height - (bottomBand * 0.62));
+      ctx.stroke();
+      ctx.fillText(formatSnapshotLongitude(lon), x, height - (bottomBand * 0.24));
+    }
+
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (const lat of latTicks) {
+      const point = map.project([midLon, lat]);
+      const y = point.y * scaleY;
+      ctx.fillText(formatSnapshotLatitude(lat), leftBand - (8 * scaleX), y);
+    }
   }
 
-  ctx.textAlign = "right";
-  ctx.textBaseline = "middle";
-  for (const lat of latTicks) {
-    const point = map.project([midLon, lat]);
-    const y = point.y * scaleY;
-    ctx.fillText(formatSnapshotLatitude(lat), leftBand - (8 * scaleX), y);
+  const maxScaleBarPx = Math.max(80, width * 0.18);
+  const metersPerPixel = metersPerCanvasPixel(map, sourceCanvas);
+  const scaleDistance = niceScaleDistance(metersPerPixel * maxScaleBarPx);
+  const scaleBarWidth = Math.max(40, scaleDistance / Math.max(metersPerPixel, 0.000001));
+  const barRight = width - (18 * scaleX);
+  const barLeft = Math.max(leftBand + (20 * scaleX), barRight - scaleBarWidth);
+  const barY = height - (bottomBand * 0.62);
+  ctx.lineWidth = Math.max(2, 2.3 * Math.min(scaleX, scaleY));
+  ctx.strokeStyle = "#102a43";
+  ctx.beginPath();
+  ctx.moveTo(barLeft, barY);
+  ctx.lineTo(barRight, barY);
+  ctx.moveTo(barLeft, barY - (6 * scaleY));
+  ctx.lineTo(barLeft, barY + (6 * scaleY));
+  ctx.moveTo(barRight, barY - (6 * scaleY));
+  ctx.lineTo(barRight, barY + (6 * scaleY));
+  ctx.stroke();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(formatScaleDistance(scaleDistance), (barLeft + barRight) / 2, barY - (8 * scaleY));
+
+  if (attributionText) {
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    ctx.font = `${Math.max(10, 10 * scaleY)}px Arial, sans-serif`;
+    ctx.fillText(attributionText, leftBand + (10 * scaleX), height - (bottomBand * 0.2));
   }
   ctx.restore();
   return outputCanvas.toDataURL("image/png");
@@ -5085,7 +9743,7 @@ function getReportSnapshotFitPadding(snapshotWindow) {
   return 36;
 }
 
-async function createReportSnapshotRenderer({ style }) {
+async function createReportSnapshotRenderer({ preset }) {
   const container = document.createElement("div");
   Object.assign(container.style, {
     position: "fixed",
@@ -5101,7 +9759,7 @@ async function createReportSnapshotRenderer({ style }) {
 
   const map = new maplibregl.Map({
     container,
-    style,
+    style: preset?.snapshotStyle || preset?.style || LOCAL_BLANK_STYLE,
     center: [0, 20],
     zoom: 2,
     attributionControl: false,
@@ -5136,10 +9794,10 @@ async function createReportSnapshotRenderer({ style }) {
       }
       await waitForAnimationFrames(2);
       try {
-        if (snapshotWindow?.showGrid) {
-          return renderSnapshotCanvasWithGrid(map.getCanvas(), map);
-        }
-        return map.getCanvas().toDataURL("image/png");
+        return renderSnapshotCanvasWithOverlays(map.getCanvas(), map, {
+          showGrid: snapshotWindow?.showGrid === true,
+          attributionText: preset?.attributionText || "",
+        });
       } catch {
         return null;
       }
@@ -5345,6 +10003,16 @@ function colorCss(rgb, setName, alpha) {
 function rgbaCss(color) {
   const [r, g, b, a = 255] = color;
   return `rgba(${r}, ${g}, ${b}, ${(a / 255).toFixed(3)})`;
+}
+
+function autoBurstColor(burst, alpha = 200) {
+  const burstIdx = Number(burst?.burstIdx) || 0;
+  const rgb = hslToRgb((burstIdx * 47 + 28) % 360, 0.86, 0.58);
+  return splitColor(rgb, burst?.setName || "train", alpha);
+}
+
+function movementTrackKey(individual, setName) {
+  return `${String(individual || "")}\u0000${String(setName || "train")}`;
 }
 
 function splitColor(rgb, setName, alpha) {

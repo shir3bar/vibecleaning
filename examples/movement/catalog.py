@@ -19,6 +19,8 @@ def validate_catalog_part(raw_value: object, *, label: str) -> str:
     value = raw_value.strip()
     if not value or not SAFE_PATH_PART.fullmatch(value):
         raise ValueError(f"Invalid {label}")
+    if value.startswith("."):
+        raise ValueError(f"Invalid {label}")
     return value
 
 
