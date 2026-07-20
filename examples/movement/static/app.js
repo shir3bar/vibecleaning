@@ -1369,12 +1369,15 @@ class MovementExampleApp {
           display: none;
         }
         .movement-side-sheet.individuals {
-          grid-template-rows: auto auto minmax(0, 0.8fr) auto minmax(120px, 0.85fr) auto minmax(0, 0.65fr);
+          grid-template-rows: auto auto minmax(0, 1fr) auto minmax(120px, 0.75fr);
         }
         .movement-side-sheet.table {
           grid-template-rows: auto auto minmax(0, 1fr);
         }
         .movement-side-sheet.feature-space {
+          grid-template-rows: auto minmax(0, 1fr);
+        }
+        .movement-side-sheet.ranking {
           grid-template-rows: auto minmax(0, 1fr);
         }
         .movement-side-head,
