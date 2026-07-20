@@ -93,6 +93,11 @@ def test_burst_feature_space_uses_standardized_correlation_pca_and_stable_signs(
     assert first["projection_method"] == "pca"
     assert first["feature_matrix"]["standardization"] == "median_imputed_standardized_features"
     assert first["feature_matrix"]["pca_type"] == "correlation_pca"
+    assert "n_fixes" in first["feature_matrix"]["requested_features"]
+    assert "n_fixes" in first["feature_matrix"]["candidate_model_features"]
+    assert "n_fixes" in first["feature_matrix"]["fitted_features"]
+    assert first["feature_matrix"]["feature_medians"]["n_fixes"] == 3.5
+    assert first["feature_matrix"]["feature_scales"]["n_fixes"] == pytest.approx(1.118033988749895)
     assert first["feature_matrix"]["feature_scales"]["feature_large"] == pytest.approx(111.80339887498948)
     assert first["feature_matrix"]["feature_scales"]["feature_small"] == pytest.approx(1.118033988749895)
     assert first["pca"]["n_components_fitted"] == 2
@@ -100,6 +105,10 @@ def test_burst_feature_space_uses_standardized_correlation_pca_and_stable_signs(
 
     pc1_loadings = first["pca"]["components"][0]["loadings"]
     assert abs(pc1_loadings["feature_large"]) == pytest.approx(
+        abs(pc1_loadings["feature_small"]),
+        rel=1e-6,
+    )
+    assert abs(pc1_loadings["n_fixes"]) == pytest.approx(
         abs(pc1_loadings["feature_small"]),
         rel=1e-6,
     )
@@ -121,6 +130,9 @@ def test_burst_feature_space_imputes_missing_values_and_uses_standardized_neighb
 
     assert result["run_status"] == "completed"
     metadata = result["feature_matrix"]
+    assert "n_fixes" in metadata["fitted_features"]
+    assert metadata["feature_medians"]["n_fixes"] == 3.5
+    assert metadata["feature_scales"]["n_fixes"] == pytest.approx(1.118033988749895)
     assert metadata["feature_medians"]["sparse_feature"] == 5.0
     assert metadata["imputed_value_counts"]["sparse_feature"] == 1
     rows_by_id = {row["burst_id"]: row for row in rows}
@@ -161,19 +173,21 @@ def test_burst_feature_space_feature_set_controls_osm_features():
     assert movement_only["feature_set"] == "movement_only"
     assert "osm:nearest_road_distance_m__mean" in movement_only["feature_matrix"]["requested_features"]
     assert "osm:nearest_road_distance_m__mean" not in movement_only["feature_matrix"]["fitted_features"]
+    assert "n_fixes" in movement_only["feature_matrix"]["fitted_features"]
     assert movement_only["feature_matrix"]["excluded_by_feature_set"] == {
         "osm:nearest_road_distance_m__mean": "context_feature_excluded_from_movement_only",
     }
     assert movement_plus_context["feature_set"] == "movement_plus_context"
     assert movement_plus_context["feature_matrix"]["excluded_by_feature_set"] == {}
     assert "osm:nearest_road_distance_m__mean" in movement_plus_context["feature_matrix"]["fitted_features"]
+    assert "n_fixes" in movement_plus_context["feature_matrix"]["fitted_features"]
 
 
 def test_burst_feature_space_supports_one_component_projection():
     rows = [
-        _feature_row(0, only_feature=1.0, constant_feature=8.0),
-        _feature_row(1, only_feature=2.0, constant_feature=8.0),
-        _feature_row(2, only_feature=3.0, constant_feature=8.0),
+        _feature_row(0, n_fixes=2, only_feature=1.0, constant_feature=8.0),
+        _feature_row(1, n_fixes=2, only_feature=2.0, constant_feature=8.0),
+        _feature_row(2, n_fixes=2, only_feature=3.0, constant_feature=8.0),
     ]
 
     result = build_burst_feature_space(rows)
@@ -183,6 +197,7 @@ def test_burst_feature_space_supports_one_component_projection():
     assert all(point["pc2"] == 0.0 for point in result["points"])
     assert result["feature_matrix"]["dropped_features"] == {
         "constant_feature": "constant",
+        "n_fixes": "constant",
     }
 
 
@@ -190,8 +205,8 @@ def test_burst_feature_space_returns_unresolved_for_too_few_rows_or_no_features(
     too_few = build_burst_feature_space([_feature_row(0, feature=1.0)])
     no_features = build_burst_feature_space(
         [
-            _feature_row(0, constant_feature=8.0),
-            _feature_row(1, constant_feature=8.0),
+            _feature_row(0, n_fixes=2, constant_feature=8.0),
+            _feature_row(1, n_fixes=2, constant_feature=8.0),
         ]
     )
 

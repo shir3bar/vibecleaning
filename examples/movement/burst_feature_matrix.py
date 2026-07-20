@@ -108,14 +108,23 @@ def prepare_burst_feature_matrix(
     *,
     feature_set: str = DEFAULT_FEATURE_SET,
     standardize: bool = False,
+    include_metadata_features: tuple[str, ...] = (),
 ) -> dict:
     if feature_set not in SUPPORTED_FEATURE_SETS:
         raise ValueError(f"Unsupported burst feature_set: {feature_set}")
     if not isinstance(standardize, bool):
         raise ValueError("standardize must be a boolean")
 
+    included_metadata = {
+        str(field).lower()
+        for field in include_metadata_features
+    }
     columns = sorted({str(field) for row in feature_rows for field in row})
-    excluded_metadata = [field for field in columns if is_metadata_column(field)]
+    excluded_metadata = [
+        field
+        for field in columns
+        if is_metadata_column(field) and field.lower() not in included_metadata
+    ]
     requested_features = [field for field in columns if field not in excluded_metadata]
     excluded_by_set = excluded_by_feature_set(requested_features, feature_set)
     candidate_model_features = [

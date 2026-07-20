@@ -115,6 +115,7 @@ def build_burst_feature_space(
         burst_rows,
         feature_set=feature_set,
         standardize=True,
+        include_metadata_features=("n_fixes",),
     )
     warnings = []
     if prepared["dropped_features"]:
