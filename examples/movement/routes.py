@@ -1,3 +1,4 @@
+from collections.abc import Callable
 import json
 import textwrap
 import uuid
@@ -38,12 +39,22 @@ from .summary import (
 )
 
 
-def _build_initial_study_payload(study_dir: Path) -> dict:
+ArtifactFilter = Callable[[dict], bool]
+
+
+def _build_initial_study_payload(
+    study_dir: Path,
+    artifact_filter: ArtifactFilter | None = None,
+) -> dict:
     state = project_state_payload(study_dir)
     graph = graph_payload(study_dir)
     dataset_id = state["current_dataset"]["dataset_id"]
     dataset = load_dataset(study_dir, dataset_id)
-    artifacts = list(dataset.get("artifacts") or [])
+    artifacts = [
+        artifact
+        for artifact in dataset.get("artifacts") or []
+        if artifact_filter is None or artifact_filter(artifact)
+    ]
     if not artifacts:
         raise ProjectStateError("Selected dataset has no artifacts")
     logical_name = str(artifacts[0].get("logical_name") or "").strip()
@@ -1740,8 +1751,29 @@ def _reviewed_csv_artifact_name(logical_name: str) -> str:
     return f"{stem or 'movement'}_reviewed.csv"
 
 
-def register_movement_routes(app: FastAPI, *, data_root: Path):
+def register_movement_routes(
+    app: FastAPI,
+    *,
+    data_root: Path,
+    allowed_families: set[str] | None = None,
+    artifact_filter: ArtifactFilter | None = None,
+):
     data_root = data_root.resolve()
+    configured_families = set(allowed_families or [])
+
+    def require_configured_family(family_name: str) -> str:
+        family = validate_path_part(family_name, label="family")
+        if configured_families and family not in configured_families:
+            raise ValueError("Unknown movement family")
+        return family
+
+    def configured_study_dir(family_name: str, study_name: str) -> Path:
+        return get_study_dir(data_root, require_configured_family(family_name), study_name)
+
+    def configured_artifact_filter(artifact: dict) -> bool:
+        logical_name = str(artifact.get("logical_name") or "")
+        is_csv = logical_name.lower().endswith(".csv")
+        return is_csv and (artifact_filter is None or artifact_filter(artifact))
 
     def parse_optional_int(raw_value: object, *, label: str) -> int | None:
         if raw_value in (None, ""):
@@ -1828,15 +1860,19 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
 
     @app.get("/api/apps/movement/families")
     async def get_movement_families():
-        return JSONResponse({"families": list_families(data_root)})
+        families = list_families(data_root)
+        if configured_families:
+            families = [item for item in families if item.get("name") in configured_families]
+        return JSONResponse({"families": families})
 
     @app.get("/api/apps/movement/family/{family_name}/studies")
     async def get_movement_studies(family_name: str):
         try:
+            family = require_configured_family(family_name)
             return JSONResponse(
                 {
-                    "family": validate_path_part(family_name, label="family"),
-                    "studies": list_studies(data_root, family_name),
+                    "family": family,
+                    "studies": list_studies(data_root, family),
                 }
             )
         except (ValueError, ProjectStateError) as exc:
@@ -1845,7 +1881,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/state")
     async def get_movement_study_state(family_name: str, study_name: str):
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             return JSONResponse(project_state_payload(study_dir))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
@@ -1853,7 +1889,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/graph")
     async def get_movement_study_graph(family_name: str, study_name: str):
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             return JSONResponse(graph_payload(study_dir))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
@@ -1861,15 +1897,21 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/load")
     async def get_movement_study_load(family_name: str, study_name: str):
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
-            return JSONResponse(await run_in_threadpool(_build_initial_study_payload, study_dir))
+            study_dir = configured_study_dir(family_name, study_name)
+            return JSONResponse(
+                await run_in_threadpool(
+                    _build_initial_study_payload,
+                    study_dir,
+                    configured_artifact_filter,
+                )
+            )
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}")
     async def get_movement_study_dataset(family_name: str, study_name: str, dataset_id: str):
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             return JSONResponse(load_dataset(study_dir, dataset_id))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
@@ -1885,7 +1927,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         burst_gap_quantile: float | None = None,
     ):
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
             payload = await run_in_threadpool(
                     build_movement_overview,
@@ -1922,7 +1964,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         burst_gap_quantile: float | None = None,
     ):
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
             individuals = parse_optional_individuals(request.query_params.getlist("individuals"))
             if not individuals:
@@ -1954,7 +1996,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}/summary")
     async def get_movement_study_summary(family_name: str, study_name: str, dataset_id: str, logical_name: str):
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
             payload = await run_in_threadpool(build_movement_summary, artifact_path)
             return JSONResponse(
@@ -1980,7 +2022,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         feature_set: str = "movement_only",
     ):
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             normalized_dataset_id = validate_path_part(dataset_id, label="dataset")
             normalized_logical_name = validate_path_part(logical_name, label="artifact")
             get_dataset_artifact(study_dir, normalized_dataset_id, normalized_logical_name)
@@ -2006,7 +2048,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         logical_name: str,
     ):
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             analysis_dir = project_paths(study_dir)["analyses"] / validate_path_part(analysis_id, label="analysis")
             artifact_name = validate_path_part(logical_name, label="artifact")
             artifact_path = (analysis_dir / "outputs" / artifact_name).resolve()
@@ -2024,7 +2066,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             user = body.get("user")
@@ -2077,7 +2119,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             feature_set = parse_anomaly_feature_set(body.get("feature_set"))
@@ -2122,7 +2164,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             feature_set = parse_anomaly_feature_set(body.get("feature_set"))
@@ -2163,7 +2205,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             search_radius_m = parse_osm_search_radius_m(body.get("search_radius_m"))
@@ -2206,7 +2248,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/undo")
     async def post_movement_study_undo(family_name: str, study_name: str):
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             return JSONResponse(undo_to_parent(study_dir))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
@@ -2217,7 +2259,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             dataset = load_dataset(study_dir, dataset_id)
@@ -2321,7 +2363,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             fix_keys = _validate_fix_keys(body.get("fix_keys"))
@@ -2368,7 +2410,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             selected_fix_keys = _validate_fix_keys(body.get("selected_fix_keys"))
@@ -2415,7 +2457,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             dataset = load_dataset(study_dir, dataset_id)
@@ -2501,7 +2543,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             dataset = load_dataset(study_dir, dataset_id)
@@ -2542,7 +2584,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
-            study_dir = get_study_dir(data_root, family_name, study_name)
+            study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             fix_keys = _validate_fix_keys(body.get("fix_keys"))

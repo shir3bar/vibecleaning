@@ -23,15 +23,23 @@ Repository layout:
 app/                  generic lineage, execution, preview, and HTTP internals
 server.py             default starter app server
 static/               default starter app frontend
-examples/trajectory/  richer reference app
-data/<project>/       project inputs plus .vibecleaning state
-docs/                 minimal contracts for agents
+examples/trajectory/   richer reference app
+examples/movement/     full movement development playground
+examples/slim_movement/ user-facing movement review app
+data/<project>/        project inputs plus .vibecleaning state
+docs/                  minimal contracts for agents
 ```
 
 Reference example:
 
 ```bashv1
 python examples/trajectory/server.py
+```
+
+Slim movement review:
+
+```bash
+python examples/slim_movement/server.py
 ```
 
 Contracts:

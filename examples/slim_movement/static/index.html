@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="vibecleaning-movement-mode" content="slim_movement">
+<title>vibecleaning · slim movement</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤙</text></svg>">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --panel: rgba(8, 17, 27, 0.88);
+    --border: rgba(148, 163, 184, 0.16);
+    --text: #e8eef7;
+    --muted: #92a4bd;
+  }
+  html, body { height: 100%; }
+  body {
+    background: linear-gradient(180deg, #09111a 0%, #050911 100%);
+    color: var(--text);
+    font-family: "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+  #app-shell { height: 100vh; display: flex; flex-direction: column; }
+  .topbar {
+    display: flex;
+    align-items: center;
+    padding: 11px 18px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    flex-shrink: 0;
+  }
+  .brand { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .brand h1 {
+    font: 700 18px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    letter-spacing: 0.03em;
+    text-transform: lowercase;
+  }
+  .brand span {
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  #app { flex: 1; min-height: 0; }
+</style>
+</head>
+<body>
+<div id="app-shell">
+  <header class="topbar">
+    <div class="brand">
+      <h1>vibecleaning</h1>
+      <span>slim movement review</span>
+    </div>
+  </header>
+  <main id="app"></main>
+</div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

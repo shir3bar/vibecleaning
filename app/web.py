@@ -64,9 +64,10 @@ async def parse_json_body(request: Request) -> dict | None:
     return body
 
 
-def create_app(*, data_root: Path, static_root: Path) -> FastAPI:
+def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = None) -> FastAPI:
     data_root = data_root.resolve()
     static_root = static_root.resolve()
+    resolved_index_path = (index_path or (static_root / "index.html")).resolve()
 
     app = FastAPI()
     app.state.data_root = data_root
@@ -119,7 +120,7 @@ def create_app(*, data_root: Path, static_root: Path) -> FastAPI:
 
     @app.get("/")
     async def index():
-        return FileResponse(static_root / "index.html")
+        return FileResponse(resolved_index_path)
 
     @app.get("/api/projects")
     async def get_projects():

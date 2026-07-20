@@ -1,13 +1,18 @@
 # Movement Outlier Review Example
 
-This example app is a movement-ecology workflow layered on top of Vibecleaning's generic DAG engine.
+This example app is the full movement-ecology development playground layered on
+top of Vibecleaning's generic DAG engine. The user-facing restricted profile is
+[`examples/slim_movement/`](../slim_movement/README.md); both applications reuse
+the routes and viewer implemented here.
 
 It adds:
 
 - a movement-owned family/study catalog on top of nested study lineage roots
 - a movement-specific summary route that exposes fix-level data for map review
 - point coloring by GPS/data-quality fields and derived movement metrics
-- persistent fix annotation as `suspected` or `confirmed` outliers
+- sidecar-backed fix, segment, burst, and individual annotation
+- restoration of compatible saved burst analyses
+- reviewed CSV export without mutating the source CSV
 - report generation as an analysis
 - confirmed-fix removal as a step
 
@@ -25,6 +30,9 @@ python examples/movement/server.py
 - `GET /api/apps/movement/family/{family}/study/{study}/graph`
 - `GET /api/apps/movement/family/{family}/study/{study}/dataset/{dataset_id}`
 - `GET /api/apps/movement/family/{family}/study/{study}/dataset/{dataset_id}/summary`
+- `GET /api/apps/movement/family/{family}/study/{study}/analyses`
+- `POST /api/apps/movement/family/{family}/study/{study}/actions/annotate-scope`
+- `POST /api/apps/movement/family/{family}/study/{study}/actions/export-reviewed-csv`
 - `POST /api/apps/movement/family/{family}/study/{study}/actions/annotate-fixes`
 - `POST /api/apps/movement/family/{family}/study/{study}/actions/generate-report`
 - `POST /api/apps/movement/family/{family}/study/{study}/actions/remove-confirmed-fixes`

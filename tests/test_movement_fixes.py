@@ -811,7 +811,8 @@ def test_movement_frontend_restores_saved_burst_analyses():
     assert "openIndividualReviewModal" in source
     assert "openBurstReviewModal" in source
     assert 'candidateGenerated ? "algorithm" : "manual"' in source
-    assert "grid-template-rows: auto auto minmax(0, 1fr) auto minmax(120px, 0.75fr);" in source
+    assert "--movement-individual-list-height" in source
+    assert 'data-role="individual-resize"' in source
     assert ".movement-side-sheet.ranking" in source
 
 

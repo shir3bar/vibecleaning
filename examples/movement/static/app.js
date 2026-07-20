@@ -6,6 +6,23 @@ import {
   scopeFromSegmentBounds,
 } from "/static/osm_layer.js";
 
+const MOVEMENT_APP_MODE = document
+  .querySelector('meta[name="vibecleaning-movement-mode"]')
+  ?.getAttribute("content") === "slim_movement"
+  ? "slim_movement"
+  : "movement";
+const MOVEMENT_APP_CONFIG = Object.freeze({
+  mode: MOVEMENT_APP_MODE,
+  defaultFamily: MOVEMENT_APP_MODE === "slim_movement" ? "movement_raw" : "movement_clean",
+  storageKey: MOVEMENT_APP_MODE === "slim_movement"
+    ? "vibecleaning_slim_movement_state"
+    : "vibecleaning_movement_example_state",
+  candidateQueries: MOVEMENT_APP_MODE !== "slim_movement",
+  featureSpace: MOVEMENT_APP_MODE !== "slim_movement",
+  osmDerivedFeatures: MOVEMENT_APP_MODE !== "slim_movement",
+  removeConfirmed: MOVEMENT_APP_MODE !== "slim_movement",
+});
+
 const LOCAL_BLANK_STYLE = {
   version: 8,
   sources: {},
@@ -177,8 +194,10 @@ const DEFAULT_SIDE_PANE_WIDTH_PX = 420;
 const MIN_SIDE_PANE_WIDTH_PX = 300;
 const MAX_SIDE_PANE_WIDTH_RATIO = 0.55;
 const SIDE_PANE_HANDLE_WIDTH_PX = 12;
+const MIN_INDIVIDUAL_LIST_HEIGHT_PX = 80;
+const MIN_CHECKED_FIXES_HEIGHT_PX = 120;
 const MAX_SELECTED_FIXES_SHOWN = 150;
-const DEFAULT_FAMILY = "movement_clean";
+const DEFAULT_FAMILY = MOVEMENT_APP_CONFIG.defaultFamily;
 const NUMERIC_COLOR_MIN_QUANTILE = 0.01;
 const NUMERIC_COLOR_MAX_QUANTILE = 0.99;
 const REPORT_SNAPSHOT_IDLE_TIMEOUT_MS = 12000;
@@ -347,15 +366,24 @@ class MovementExampleApp {
       active: false,
       pointerId: null,
     };
+    this.individualListHeightPx = finiteOrNull(this.uiState.individualListHeightPx);
+    this.individualPaneResize = {
+      active: false,
+      pointerId: null,
+    };
     this.handleWindowResize = () => this.handleLayoutResize();
     this.handleSidePanePointerMove = event => this.onSidePanePointerMove(event);
     this.handleSidePanePointerUp = event => this.onSidePanePointerUp(event);
+    this.handleIndividualPanePointerMove = event => this.onIndividualPanePointerMove(event);
+    this.handleIndividualPanePointerUp = event => this.onIndividualPanePointerUp(event);
   }
 
   async init() {
     this.renderShell();
     this.bindEvents();
-    this.renderCandidateQueryLibraryControls();
+    if (MOVEMENT_APP_CONFIG.candidateQueries) {
+      this.renderCandidateQueryLibraryControls();
+    }
     this.showOverlay("Loading the movement review workspace...");
     this.setStatus("Loading movement review workspace...");
     try {
@@ -367,13 +395,15 @@ class MovementExampleApp {
       this.setStatus(`Map assets could not be loaded: ${error.message}`, true);
       this.showOverlay("Map assets could not be loaded. You can still switch studies and inspect summaries.");
     }
-    void this.loadCandidateQueryLibrary();
+    if (MOVEMENT_APP_CONFIG.candidateQueries) {
+      void this.loadCandidateQueryLibrary();
+    }
     await this.loadFamilies();
   }
 
   loadUiState() {
     try {
-      const raw = localStorage.getItem("vibecleaning_movement_example_state");
+      const raw = localStorage.getItem(MOVEMENT_APP_CONFIG.storageKey);
       if (!raw) {
         throw new Error("missing");
       }
@@ -403,6 +433,7 @@ class MovementExampleApp {
         tableDescending: false,
         tableFilter: "",
         sidePaneWidthPx: DEFAULT_SIDE_PANE_WIDTH_PX,
+        individualListHeightPx: null,
       };
     }
   }
@@ -428,8 +459,9 @@ class MovementExampleApp {
       tableDescending: this.refs.tableSortDirection?.dataset.direction === "desc",
       tableFilter: this.refs.tableFilter?.value || "",
       sidePaneWidthPx: this.sidePaneWidthPx,
+      individualListHeightPx: this.individualListHeightPx,
     };
-    localStorage.setItem("vibecleaning_movement_example_state", JSON.stringify(this.uiState));
+    localStorage.setItem(MOVEMENT_APP_CONFIG.storageKey, JSON.stringify(this.uiState));
   }
 
   getUser() {
@@ -437,6 +469,9 @@ class MovementExampleApp {
   }
 
   getAnomalyFeatureSet() {
+    if (!MOVEMENT_APP_CONFIG.osmDerivedFeatures) {
+      return "movement_only";
+    }
     if (!this.hasOsmContextFeatures()) {
       return "movement_only";
     }
@@ -462,7 +497,7 @@ class MovementExampleApp {
       return;
     }
     const select = this.refs.anomalyFeatureSet;
-    const hasOsmContext = this.hasOsmContextFeatures();
+    const hasOsmContext = MOVEMENT_APP_CONFIG.osmDerivedFeatures && this.hasOsmContextFeatures();
     const previousValue = select.value || this.uiState.anomalyFeatureSet || "movement_only";
     select.innerHTML = `
       <option value="movement_only">Movement only</option>
@@ -627,6 +662,9 @@ class MovementExampleApp {
 
   handleLayoutResize() {
     this.applySidePaneWidth(this.sidePaneWidthPx, { save: false });
+    if (this.individualListHeightPx !== null) {
+      this.applyIndividualListHeight(this.individualListHeightPx, { save: false });
+    }
   }
 
   beginSidePaneResize(event) {
@@ -672,8 +710,119 @@ class MovementExampleApp {
     this.applySidePaneWidth(this.sidePaneWidthPx, { save: true });
   }
 
+  getIndividualListHeightBounds() {
+    const sheet = this.refs?.sideSheetIndividuals;
+    const list = this.refs?.individuals;
+    const resize = this.refs?.individualResize;
+    const fixHead = this.refs?.fixHead;
+    if (!sheet || !list) {
+      return null;
+    }
+    const sheetRect = sheet.getBoundingClientRect();
+    const listRect = list.getBoundingClientRect();
+    if (sheet.classList.contains("hidden") || sheetRect.height <= 0 || listRect.height <= 0) {
+      return null;
+    }
+    const remainingHeight = sheetRect.bottom
+      - listRect.top
+      - (resize?.offsetHeight || 0)
+      - (fixHead?.offsetHeight || 0)
+      - MIN_CHECKED_FIXES_HEIGHT_PX;
+    return {
+      min: MIN_INDIVIDUAL_LIST_HEIGHT_PX,
+      max: Math.max(MIN_INDIVIDUAL_LIST_HEIGHT_PX, Math.floor(remainingHeight)),
+    };
+  }
+
+  applyIndividualListHeight(height, { save = true } = {}) {
+    if (!this.refs?.sideSheetIndividuals || !this.refs?.individuals) {
+      return;
+    }
+    const numericHeight = Number(height);
+    const fallback = this.refs.individuals.getBoundingClientRect().height || MIN_INDIVIDUAL_LIST_HEIGHT_PX;
+    const requested = Number.isFinite(numericHeight) ? numericHeight : fallback;
+    const bounds = this.getIndividualListHeightBounds();
+    if (!bounds) {
+      return;
+    }
+    const nextHeight = Math.round(Math.min(bounds.max, Math.max(bounds.min, requested)));
+    this.individualListHeightPx = nextHeight;
+    this.refs.sideSheetIndividuals.style.setProperty("--movement-individual-list-height", `${nextHeight}px`);
+    this.refs.individualResize?.setAttribute("aria-valuenow", String(nextHeight));
+    this.refs.individualResize?.setAttribute("aria-valuemax", String(bounds.max));
+    if (save) {
+      this.saveUiState();
+    }
+  }
+
+  beginIndividualPaneResize(event) {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    if (this.individualListHeightPx === null) {
+      this.applyIndividualListHeight(this.refs.individuals?.getBoundingClientRect().height, { save: false });
+    }
+    this.individualPaneResize.active = true;
+    this.individualPaneResize.pointerId = event.pointerId;
+    this.refs.sideSheetIndividuals?.classList.add("is-resizing");
+    this.refs.individualResize?.setPointerCapture?.(event.pointerId);
+    window.addEventListener("pointermove", this.handleIndividualPanePointerMove);
+    window.addEventListener("pointerup", this.handleIndividualPanePointerUp);
+    window.addEventListener("pointercancel", this.handleIndividualPanePointerUp);
+  }
+
+  onIndividualPanePointerMove(event) {
+    if (!this.individualPaneResize.active || event.pointerId !== this.individualPaneResize.pointerId) {
+      return;
+    }
+    const listRect = this.refs.individuals?.getBoundingClientRect();
+    if (!listRect) {
+      return;
+    }
+    this.applyIndividualListHeight(event.clientY - listRect.top, { save: false });
+  }
+
+  onIndividualPanePointerUp(event) {
+    if (!this.individualPaneResize.active || event.pointerId !== this.individualPaneResize.pointerId) {
+      return;
+    }
+    this.individualPaneResize.active = false;
+    this.individualPaneResize.pointerId = null;
+    this.refs.sideSheetIndividuals?.classList.remove("is-resizing");
+    this.refs.individualResize?.releasePointerCapture?.(event.pointerId);
+    window.removeEventListener("pointermove", this.handleIndividualPanePointerMove);
+    window.removeEventListener("pointerup", this.handleIndividualPanePointerUp);
+    window.removeEventListener("pointercancel", this.handleIndividualPanePointerUp);
+    this.applyIndividualListHeight(this.individualListHeightPx, { save: true });
+  }
+
+  resizeIndividualPaneFromKeyboard(event) {
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    const bounds = this.getIndividualListHeightBounds();
+    if (!bounds) {
+      return;
+    }
+    const current = this.individualListHeightPx
+      ?? this.refs.individuals?.getBoundingClientRect().height
+      ?? bounds.min;
+    const step = event.shiftKey ? 40 : 10;
+    const nextHeight = event.key === "Home"
+      ? bounds.min
+      : event.key === "End"
+        ? bounds.max
+        : current + (event.key === "ArrowDown" ? step : -step);
+    this.applyIndividualListHeight(nextHeight, { save: true });
+  }
+
   setSideSheet(sheet, { save = true } = {}) {
-    const nextSheet = ["table", "ranking", "feature_space"].includes(sheet) ? sheet : "individuals";
+    const enabledSheets = MOVEMENT_APP_CONFIG.featureSpace
+      ? ["table", "ranking", "feature_space"]
+      : ["table", "ranking"];
+    const nextSheet = enabledSheets.includes(sheet) ? sheet : "individuals";
     if (this.refs?.sideSheetTabs) {
       this.refs.sideSheetTabs.dataset.activeSheet = nextSheet;
     }
@@ -708,6 +857,43 @@ class MovementExampleApp {
       this.renderTableSheet();
     } else if (nextSheet === "feature_space") {
       this.renderBurstFeatureSpace();
+    } else if (nextSheet === "individuals" && this.individualListHeightPx !== null) {
+      this.applyIndividualListHeight(this.individualListHeightPx, { save: false });
+    }
+  }
+
+  applyAppProfile() {
+    if (MOVEMENT_APP_CONFIG.mode !== "slim_movement") {
+      return;
+    }
+    this.mountEl.querySelector(".movement-root")?.classList.add("is-slim");
+    for (const element of [
+      this.refs.familyControl,
+      this.refs.artifactControl,
+      this.refs.showTrainControl,
+      this.refs.showTestControl,
+      this.refs.candidateQueryControl,
+      this.refs.checkCandidates,
+      this.refs.clearCandidates,
+      this.refs.anomalyFeatureSetControl,
+      this.refs.runBurstFeatureSpace,
+      this.refs.sideTabFeatureSpace,
+      this.refs.sideSheetFeatureSpace,
+      this.refs.removeConfirmed,
+    ]) {
+      if (element) {
+        element.hidden = true;
+        element.classList.add("movement-profile-hidden");
+      }
+    }
+    this.refs.sideTabRanking.textContent = "Ranking";
+    const overlayTitle = this.mountEl.querySelector(".movement-overlay-card h3");
+    const overlayDescription = this.mountEl.querySelector(".movement-overlay-card p");
+    if (overlayTitle) {
+      overlayTitle.textContent = "Slim Movement Review";
+    }
+    if (overlayDescription) {
+      overlayDescription.textContent = "Visualize raw movement data, review fixes and bursts, export flags, and generate reports.";
     }
   }
 
@@ -726,6 +912,10 @@ class MovementExampleApp {
             radial-gradient(circle at bottom right, rgba(72, 187, 255, 0.12), transparent 24%),
             linear-gradient(180deg, rgba(6, 12, 20, 0.98), rgba(4, 8, 14, 0.98));
         }
+        .movement-root .movement-profile-hidden,
+        .movement-root [hidden] {
+          display: none !important;
+        }
         .movement-toolbar {
           display: flex;
           flex-wrap: wrap;
@@ -734,6 +924,13 @@ class MovementExampleApp {
           padding: 14px 16px 10px;
           border-bottom: 1px solid rgba(255, 255, 255, 0.06);
           background: rgba(8, 17, 27, 0.82);
+        }
+        .movement-root.is-slim .movement-toolbar {
+          gap: 8px 10px;
+          padding-top: 10px;
+        }
+        .movement-root.is-slim .movement-anomaly-meta + .movement-anomaly-meta {
+          display: none;
         }
         .movement-toolbar label,
         .movement-toggle {
@@ -1369,7 +1566,40 @@ class MovementExampleApp {
           display: none;
         }
         .movement-side-sheet.individuals {
-          grid-template-rows: auto auto minmax(0, 1fr) auto minmax(120px, 0.75fr);
+          grid-template-rows: auto auto minmax(80px, var(--movement-individual-list-height, 1fr)) 10px auto minmax(120px, 0.75fr);
+        }
+        .movement-individual-resize {
+          position: relative;
+          cursor: row-resize;
+          touch-action: none;
+          background: rgba(255, 255, 255, 0.025);
+          border-top: 1px solid rgba(255, 255, 255, 0.04);
+          border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        }
+        .movement-individual-resize::before {
+          content: "";
+          position: absolute;
+          top: 3px;
+          left: 50%;
+          width: 48px;
+          height: 3px;
+          border-radius: 999px;
+          transform: translateX(-50%);
+          background: rgba(148, 163, 184, 0.58);
+        }
+        .movement-individual-resize:hover::before,
+        .movement-individual-resize:focus-visible::before,
+        .movement-side-sheet.individuals.is-resizing .movement-individual-resize::before {
+          background: #7dd3fc;
+        }
+        .movement-individual-resize:focus-visible {
+          outline: 2px solid rgba(125, 211, 252, 0.72);
+          outline-offset: -2px;
+        }
+        .movement-side-sheet.individuals.is-resizing,
+        .movement-side-sheet.individuals.is-resizing * {
+          cursor: row-resize !important;
+          user-select: none !important;
         }
         .movement-side-sheet.table {
           grid-template-rows: auto auto minmax(0, 1fr);
@@ -1956,14 +2186,14 @@ class MovementExampleApp {
       </style>
       <div class="movement-root">
         <div class="movement-toolbar">
-          <label>Family <select data-role="family"></select></label>
+          <label data-role="family-control">Family <select data-role="family"></select></label>
           <label>Study <select data-role="study"></select></label>
           <label>Version <select data-role="dataset"></select></label>
-          <label>Artifact <select data-role="artifact"></select></label>
+          <label data-role="artifact-control">Artifact <select data-role="artifact"></select></label>
           <label>Basemap <select data-role="basemap"></select></label>
           <label>Color by <select data-role="color-by"></select></label>
-          <label class="movement-toggle"><input type="checkbox" data-role="show-train"> Train</label>
-          <label class="movement-toggle"><input type="checkbox" data-role="show-test"> Test</label>
+          <label class="movement-toggle" data-role="show-train-control"><input type="checkbox" data-role="show-train"> Train</label>
+          <label class="movement-toggle" data-role="show-test-control"><input type="checkbox" data-role="show-test"> Test</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-points"> Points</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-bursts"> Bursts</label>
           <label>Burst gap
@@ -2051,6 +2281,15 @@ class MovementExampleApp {
                   </label>
                 </div>
                 <div class="movement-individuals" data-role="individuals"></div>
+                <div
+                  class="movement-individual-resize"
+                  data-role="individual-resize"
+                  role="separator"
+                  aria-label="Resize individual list vertically"
+                  aria-orientation="horizontal"
+                  aria-valuemin="${MIN_INDIVIDUAL_LIST_HEIGHT_PX}"
+                  tabindex="0"
+                ></div>
                 <div class="movement-side-head" data-role="fix-head">Checked fixes</div>
                 <div class="movement-fixes" data-role="selected-fixes"></div>
               </div>
@@ -2226,14 +2465,18 @@ class MovementExampleApp {
 
     this.refs = {
       main: this.mountEl.querySelector(".movement-main"),
+      familyControl: this.mountEl.querySelector('[data-role="family-control"]'),
       family: this.mountEl.querySelector('[data-role="family"]'),
       study: this.mountEl.querySelector('[data-role="study"]'),
       dataset: this.mountEl.querySelector('[data-role="dataset"]'),
+      artifactControl: this.mountEl.querySelector('[data-role="artifact-control"]'),
       artifact: this.mountEl.querySelector('[data-role="artifact"]'),
       basemap: this.mountEl.querySelector('[data-role="basemap"]'),
       colorBy: this.mountEl.querySelector('[data-role="color-by"]'),
       showTrain: this.mountEl.querySelector('[data-role="show-train"]'),
+      showTrainControl: this.mountEl.querySelector('[data-role="show-train-control"]'),
       showTest: this.mountEl.querySelector('[data-role="show-test"]'),
+      showTestControl: this.mountEl.querySelector('[data-role="show-test-control"]'),
       showPoints: this.mountEl.querySelector('[data-role="show-points"]'),
       showBursts: this.mountEl.querySelector('[data-role="show-bursts"]'),
       burstGapMode: this.mountEl.querySelector('[data-role="burst-gap-mode"]'),
@@ -2245,6 +2488,7 @@ class MovementExampleApp {
       selectNone: this.mountEl.querySelector('[data-role="select-none"]'),
       selectSuspicious: this.mountEl.querySelector('[data-role="select-suspicious"]'),
       clearFixes: this.mountEl.querySelector('[data-role="clear-fixes"]'),
+      candidateQueryControl: this.mountEl.querySelector('[data-role="candidate-query-control"]'),
       candidateQuerySelect: this.mountEl.querySelector('[data-role="candidate-query-select"]'),
       candidateQueryScope: this.mountEl.querySelector('[data-role="candidate-query-scope"]'),
       candidateQueryMeta: this.mountEl.querySelector('[data-role="candidate-query-meta"]'),
@@ -2277,6 +2521,7 @@ class MovementExampleApp {
       sideResize: this.mountEl.querySelector('[data-role="side-resize"]'),
       individualSearch: this.mountEl.querySelector('[data-role="individual-search"]'),
       individuals: this.mountEl.querySelector('[data-role="individuals"]'),
+      individualResize: this.mountEl.querySelector('[data-role="individual-resize"]'),
       individualHead: this.mountEl.querySelector('[data-role="individual-head"]'),
       fixHead: this.mountEl.querySelector('[data-role="fix-head"]'),
       selectedFixes: this.mountEl.querySelector('[data-role="selected-fixes"]'),
@@ -2340,6 +2585,8 @@ class MovementExampleApp {
       removeSubmit: this.mountEl.querySelector('[data-role="remove-submit"]'),
     };
 
+    this.applyAppProfile();
+
     for (const name of Object.keys(BASEMAP_PRESETS)) {
       const option = document.createElement("option");
       option.value = name;
@@ -2353,8 +2600,8 @@ class MovementExampleApp {
       ? "Positron"
       : storedBasemap;
     this.refs.reportBasemap.value = "current";
-    this.refs.showTrain.checked = this.uiState.showTrain !== false;
-    this.refs.showTest.checked = this.uiState.showTest !== false;
+    this.refs.showTrain.checked = MOVEMENT_APP_CONFIG.mode === "slim_movement" || this.uiState.showTrain !== false;
+    this.refs.showTest.checked = MOVEMENT_APP_CONFIG.mode === "slim_movement" || this.uiState.showTest !== false;
     this.refs.showPoints.checked = this.uiState.showPoints !== false;
     this.refs.showBursts.checked = this.uiState.showBursts !== false;
     this.refs.burstGapMode.value = ["manual", "quantile"].includes(this.uiState.burstGapMode)
@@ -2385,6 +2632,9 @@ class MovementExampleApp {
     this.refs.tableSortDirection.textContent = this.uiState.tableDescending ? "Descending" : "Ascending";
     this.refs.individualSearch.value = this.individualSearchQuery;
     this.applySidePaneWidth(this.sidePaneWidthPx, { save: false, resizeMap: false });
+    if (this.individualListHeightPx !== null) {
+      this.applyIndividualListHeight(this.individualListHeightPx, { save: false });
+    }
     this.setSideSheet(this.uiState.sideSheet || "individuals", { save: false });
     this.renderAnomalyRanking();
     this.renderBurstFeatureSpace();
@@ -2402,6 +2652,8 @@ class MovementExampleApp {
       this.renderIndividuals();
     });
     this.refs.sideResize.addEventListener("pointerdown", event => this.beginSidePaneResize(event));
+    this.refs.individualResize.addEventListener("pointerdown", event => this.beginIndividualPaneResize(event));
+    this.refs.individualResize.addEventListener("keydown", event => this.resizeIndividualPaneFromKeyboard(event));
     this.refs.family.addEventListener("change", async () => {
       try {
         await this.switchFamily(this.refs.family.value);
@@ -3216,7 +3468,7 @@ class MovementExampleApp {
           restored.push(`burst ranking from ${formatDateTime(ranking.created_at)}`);
         }));
       }
-      if (featureSpace) {
+      if (featureSpace && MOVEMENT_APP_CONFIG.featureSpace) {
         tasks.push(this.restoreSavedBurstFeatureSpace(featureSpace, controller.signal).then(() => {
           restored.push(`feature space from ${formatDateTime(featureSpace.created_at)}`);
         }));
@@ -4399,6 +4651,21 @@ class MovementExampleApp {
     select.disabled = true;
   }
 
+  selectableArtifacts(dataset = this.currentDataset) {
+    const artifacts = Array.isArray(dataset?.artifacts) ? dataset.artifacts : [];
+    return artifacts.filter(artifact => {
+      const logicalName = String(artifact?.logical_name || "");
+      if (!logicalName.toLowerCase().endsWith(".csv")) {
+        return false;
+      }
+      if (MOVEMENT_APP_CONFIG.mode !== "slim_movement") {
+        return true;
+      }
+      const lowerName = logicalName.toLowerCase();
+      return !lowerName.endsWith("_osm_context.csv") && !lowerName.endsWith("_reviewed.csv");
+    });
+  }
+
   async loadFamilies() {
     this.setStatus("Loading movement families...");
     try {
@@ -4547,14 +4814,15 @@ class MovementExampleApp {
       this.currentDatasetId = preferredDatasetId;
       this.currentArtifact = artifactName;
       if (this.currentDataset && Array.isArray(this.currentDataset.artifacts)) {
+        const artifacts = this.selectableArtifacts(this.currentDataset);
         this.refs.artifact.innerHTML = "";
-        for (const artifact of this.currentDataset.artifacts) {
+        for (const artifact of artifacts) {
           const option = document.createElement("option");
           option.value = artifact.logical_name;
           option.textContent = artifact.logical_name;
           this.refs.artifact.appendChild(option);
         }
-        this.refs.artifact.disabled = !this.currentDataset.artifacts.length;
+        this.refs.artifact.disabled = !artifacts.length;
         if (artifactName) {
           this.refs.artifact.value = artifactName;
         }
@@ -4670,7 +4938,7 @@ class MovementExampleApp {
       this.showOverlay(`Could not load dataset ${this.currentDatasetId}.`);
       return;
     }
-    const artifacts = Array.isArray(this.currentDataset.artifacts) ? this.currentDataset.artifacts : [];
+    const artifacts = this.selectableArtifacts(this.currentDataset);
     this.refs.artifact.innerHTML = "";
     for (const artifact of artifacts) {
       const option = document.createElement("option");
@@ -4784,15 +5052,18 @@ class MovementExampleApp {
     if (!this.data) {
       return;
     }
-    for (const field of this.data.colorFields) {
+    const colorFields = this.data.colorFields.filter(field => (
+      MOVEMENT_APP_CONFIG.osmDerivedFeatures || !String(field?.key || "").toLowerCase().startsWith("osm:")
+    ));
+    for (const field of colorFields) {
       const option = document.createElement("option");
       option.value = field.key;
       option.textContent = `${field.label} (${field.source})`;
       this.refs.colorBy.appendChild(option);
     }
-    const preferred = this.data.colorFields.some(field => field.key === this.uiState.colorBy)
+    const preferred = colorFields.some(field => field.key === this.uiState.colorBy)
       ? this.uiState.colorBy
-      : this.data.colorFields[0]?.key || "step_length_m";
+      : colorFields[0]?.key || "step_length_m";
     this.refs.colorBy.value = preferred;
     this.saveUiState();
   }
@@ -8200,6 +8471,18 @@ class MovementExampleApp {
     }
     if (this.refs.anomalyFeatureSetControl) {
       this.refs.anomalyFeatureSetControl.hidden = !hasData;
+    }
+    if (MOVEMENT_APP_CONFIG.mode === "slim_movement") {
+      for (const element of [
+        this.refs.runCandidateQuery,
+        this.refs.checkCandidates,
+        this.refs.clearCandidates,
+        this.refs.anomalyFeatureSetControl,
+        this.refs.runBurstFeatureSpace,
+        this.refs.removeConfirmed,
+      ]) {
+        element?.classList.add("movement-profile-hidden");
+      }
     }
     this.refs.markSuspected.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
     this.refs.markConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
