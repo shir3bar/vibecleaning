@@ -24,7 +24,9 @@ from app.state import (
 )
 from app.web import get_project_dir, json_error, parse_json_body, validate_path_part
 
+from .analysis_history import build_movement_analysis_history
 from .catalog import get_study_dir, list_families, list_studies
+from .review_annotations import apply_review_annotations, load_review_annotations
 from .summary import (
     DEFAULT_BURST_GAP_MODE,
     DEFAULT_BURST_GAP_QUANTILE,
@@ -54,6 +56,25 @@ def _build_initial_study_payload(study_dir: Path) -> dict:
         "dataset_id": dataset_id,
         "logical_name": logical_name,
     }
+
+
+def _apply_dataset_review_annotations(
+    study_dir: Path,
+    *,
+    dataset_id: str,
+    logical_name: str,
+    payload: dict,
+) -> dict:
+    try:
+        _, sidecar_path = get_dataset_artifact(
+            study_dir,
+            dataset_id,
+            "movement_review_annotations.json",
+        )
+    except ProjectStateError:
+        return payload
+    annotations = load_review_annotations(sidecar_path)
+    return apply_review_annotations(payload, annotations, source_artifact=logical_name)
 
 
 def _reusable_osm_enrichment_response(
@@ -1395,6 +1416,14 @@ OSM_ENRICHMENT_TEMPLATE_PATH = Path(__file__).with_name("osm_enrichment_template
 OSM_ENRICHMENT_SCRIPT = OSM_ENRICHMENT_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
 compile(OSM_ENRICHMENT_SCRIPT, str(OSM_ENRICHMENT_TEMPLATE_PATH), "exec")
 
+EXPORT_REVIEWED_CSV_TEMPLATE_PATH = Path(__file__).with_name("export_reviewed_csv_analysis_template.py")
+EXPORT_REVIEWED_CSV_SCRIPT = EXPORT_REVIEWED_CSV_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+compile(EXPORT_REVIEWED_CSV_SCRIPT, str(EXPORT_REVIEWED_CSV_TEMPLATE_PATH), "exec")
+
+ANNOTATE_SCOPE_TEMPLATE_PATH = Path(__file__).with_name("annotate_scope_step_template.py")
+ANNOTATE_SCOPE_SCRIPT = ANNOTATE_SCOPE_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+compile(ANNOTATE_SCOPE_SCRIPT, str(ANNOTATE_SCOPE_TEMPLATE_PATH), "exec")
+
 
 def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]:
     if value is None and allow_empty:
@@ -1705,6 +1734,12 @@ def _build_individual_report_artifacts(individuals: list[str]) -> list[dict]:
     return artifacts
 
 
+def _reviewed_csv_artifact_name(logical_name: str) -> str:
+    name = Path(logical_name).name
+    stem = name[:-4] if name.lower().endswith(".csv") else Path(name).stem
+    return f"{stem or 'movement'}_reviewed.csv"
+
+
 def register_movement_routes(app: FastAPI, *, data_root: Path):
     data_root = data_root.resolve()
 
@@ -1852,13 +1887,19 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         try:
             study_dir = get_study_dir(data_root, family_name, study_name)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
-            return JSONResponse(
-                await run_in_threadpool(
+            payload = await run_in_threadpool(
                     build_movement_overview,
                     artifact_path,
                     burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
                     burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
                     burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
+                )
+            return JSONResponse(
+                _apply_dataset_review_annotations(
+                    study_dir,
+                    dataset_id=dataset_id,
+                    logical_name=logical_name,
+                    payload=payload,
                 )
             )
         except (ValueError, ProjectStateError) as exc:
@@ -1900,6 +1941,12 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                 burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
                 burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
             )
+            payload = _apply_dataset_review_annotations(
+                study_dir,
+                dataset_id=dataset_id,
+                logical_name=logical_name,
+                payload=payload,
+            )
             return JSONResponse(payload)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
@@ -1909,7 +1956,45 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         try:
             study_dir = get_study_dir(data_root, family_name, study_name)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
-            return JSONResponse(await run_in_threadpool(build_movement_summary, artifact_path))
+            payload = await run_in_threadpool(build_movement_summary, artifact_path)
+            return JSONResponse(
+                _apply_dataset_review_annotations(
+                    study_dir,
+                    dataset_id=dataset_id,
+                    logical_name=logical_name,
+                    payload=payload,
+                )
+            )
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 404)
+
+    @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/analyses")
+    async def get_movement_study_analyses(
+        family_name: str,
+        study_name: str,
+        dataset_id: str,
+        logical_name: str,
+        burst_gap_mode: str | None = None,
+        burst_gap_seconds: float | None = None,
+        burst_gap_quantile: float | None = None,
+        feature_set: str = "movement_only",
+    ):
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            normalized_dataset_id = validate_path_part(dataset_id, label="dataset")
+            normalized_logical_name = validate_path_part(logical_name, label="artifact")
+            get_dataset_artifact(study_dir, normalized_dataset_id, normalized_logical_name)
+            return JSONResponse(
+                build_movement_analysis_history(
+                    study_dir,
+                    dataset_id=normalized_dataset_id,
+                    logical_name=normalized_logical_name,
+                    burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
+                    burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
+                    burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
+                    feature_set=parse_anomaly_feature_set(feature_set),
+                )
+            )
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
@@ -2126,6 +2211,110 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/annotate-scope")
+    async def post_movement_annotate_scope(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            dataset = load_dataset(study_dir, dataset_id)
+            get_dataset_artifact(study_dir, dataset_id, logical_name)
+            raw_scope = body.get("scope")
+            if not isinstance(raw_scope, dict):
+                raise ValueError("Review scope is required")
+            scope_kind = str(raw_scope.get("kind") or "").strip().lower()
+            if scope_kind not in {"fix", "segment", "burst", "individual"}:
+                raise ValueError("Invalid review scope")
+            scope: dict[str, object] = {"kind": scope_kind}
+            if scope_kind in {"fix", "segment"}:
+                scope["fix_keys"] = _validate_fix_keys(raw_scope.get("fix_keys"))
+                if scope_kind == "segment":
+                    scope["start_fix_key"] = _validate_fix_key(
+                        raw_scope.get("start_fix_key"),
+                        label="Start fix key",
+                    )
+                    scope["end_fix_key"] = _validate_fix_key(
+                        raw_scope.get("end_fix_key"),
+                        label="End fix key",
+                    )
+            elif scope_kind == "individual":
+                scope["individual"] = _normalize_individual_name(raw_scope.get("individual"))
+                scope["set_name"] = _validate_optional_text(
+                    raw_scope.get("set_name"),
+                    label="Set name",
+                    max_length=40,
+                )
+            else:
+                scope["burst_id"] = _validate_required_text(
+                    raw_scope.get("burst_id"),
+                    label="Burst id",
+                    max_length=240,
+                )
+
+            status = _validate_status(body.get("status"))
+            issue_type = _validate_required_text(body.get("issue_type"), label="Issue type", max_length=120)
+            comment = _validate_required_text(
+                body.get("comment", body.get("issue_note")),
+                label="Comment",
+                max_length=1200,
+            )
+            owner_question = _validate_optional_text(
+                body.get("owner_question"),
+                label="Owner question",
+                max_length=600,
+            )
+            source_analysis_id = _validate_optional_text(
+                body.get("source_analysis_id"),
+                label="Source analysis id",
+                max_length=120,
+            )
+            raw_origin = str(body.get("origin") or "").strip().lower()
+            if not raw_origin:
+                raw_origin = "threshold" if body.get("issue_field") or body.get("issue_threshold") else "manual"
+            if raw_origin not in {"manual", "threshold", "algorithm"}:
+                raise ValueError("Invalid annotation origin")
+            user = body.get("user")
+            input_artifacts = [logical_name]
+            if any(
+                artifact.get("logical_name") == "movement_review_annotations.json"
+                for artifact in dataset.get("artifacts", [])
+            ):
+                input_artifacts.append("movement_review_annotations.json")
+            payload = {
+                "user": user,
+                "title": f"Mark {scope_kind} as {status} in {logical_name}",
+                "kind": "python",
+                "script": ANNOTATE_SCOPE_SCRIPT,
+                "parameters": {
+                    "app": "movement",
+                    "action": "annotate_scope",
+                    "target_artifact": logical_name,
+                    "dataset_id": dataset_id,
+                    "scope": scope,
+                    "status": status,
+                    "origin": raw_origin,
+                    "issue_type": issue_type,
+                    "comment": comment,
+                    "owner_question": owner_question,
+                    "source_analysis_id": source_analysis_id,
+                    "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),
+                    "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
+                    "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
+                    "user": user,
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": input_artifacts,
+                "output_artifacts": ["movement_review_annotations.json"],
+                "set_as_head": True,
+            }
+            return JSONResponse(create_step(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/annotate-fixes")
     async def post_movement_annotate_fixes(family_name: str, study_name: str, request: Request):
         body = await parse_json_body(request)
@@ -2229,6 +2418,13 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             study_dir = get_study_dir(data_root, family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            dataset = load_dataset(study_dir, dataset_id)
+            report_input_artifacts = [logical_name]
+            if any(
+                artifact.get("logical_name") == "movement_review_annotations.json"
+                for artifact in dataset.get("artifacts", [])
+            ):
+                report_input_artifacts.append("movement_review_annotations.json")
             fix_keys = _validate_fix_keys(body.get("fix_keys"), allow_empty=True)
             issue_ids = _validate_issue_ids(body.get("issue_ids"))
             report_fixes = _validate_report_fixes(body.get("report_fixes"))
@@ -2275,7 +2471,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                 "kind": "python",
                 "script": GENERATE_REPORT_SCRIPT,
                 "dataset_id": dataset_id,
-                "input_artifacts": [logical_name],
+                "input_artifacts": report_input_artifacts,
                 "output_artifacts": output_artifacts,
                 "parameters": {
                     "app": "movement",
@@ -2291,6 +2487,48 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                     "screenshot_mode": screenshot_mode,
                     "snapshots": snapshots,
                     "individual_report_artifacts": individual_report_artifacts,
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
+                    "user": user,
+                },
+            }
+            return JSONResponse(create_analysis(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/export-reviewed-csv")
+    async def post_movement_export_reviewed_csv(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = get_study_dir(data_root, family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            dataset = load_dataset(study_dir, dataset_id)
+            get_dataset_artifact(study_dir, dataset_id, logical_name)
+            input_artifacts = [logical_name]
+            if any(
+                artifact.get("logical_name") == "movement_review_annotations.json"
+                for artifact in dataset.get("artifacts", [])
+            ):
+                input_artifacts.append("movement_review_annotations.json")
+            output_artifact = _reviewed_csv_artifact_name(logical_name)
+            user = body.get("user")
+            payload = {
+                "user": user,
+                "title": f"Export reviewed movement CSV for {logical_name}",
+                "kind": "python",
+                "script": EXPORT_REVIEWED_CSV_SCRIPT,
+                "dataset_id": dataset_id,
+                "input_artifacts": input_artifacts,
+                "output_artifacts": [output_artifact],
+                "parameters": {
+                    "app": "movement",
+                    "action": "export_reviewed_csv",
+                    "target_artifact": logical_name,
+                    "output_artifact": output_artifact,
+                    "dataset_id": dataset_id,
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
             }
@@ -2444,6 +2682,13 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
             project_dir = get_project_dir(data_root, project_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            dataset = load_dataset(project_dir, dataset_id)
+            report_input_artifacts = [logical_name]
+            if any(
+                artifact.get("logical_name") == "movement_review_annotations.json"
+                for artifact in dataset.get("artifacts", [])
+            ):
+                report_input_artifacts.append("movement_review_annotations.json")
             fix_keys = _validate_fix_keys(body.get("fix_keys"), allow_empty=True)
             issue_ids = _validate_issue_ids(body.get("issue_ids"))
             report_fixes = _validate_report_fixes(body.get("report_fixes"))
@@ -2490,7 +2735,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                 "kind": "python",
                 "script": GENERATE_REPORT_SCRIPT,
                 "dataset_id": dataset_id,
-                "input_artifacts": [logical_name],
+                "input_artifacts": report_input_artifacts,
                 "output_artifacts": output_artifacts,
                 "parameters": {
                     "app": "movement",
@@ -2506,6 +2751,7 @@ def register_movement_routes(app: FastAPI, *, data_root: Path):
                     "screenshot_mode": screenshot_mode,
                     "snapshots": snapshots,
                     "individual_report_artifacts": individual_report_artifacts,
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
             }

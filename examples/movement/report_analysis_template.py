@@ -3,6 +3,7 @@ import csv
 import html
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1799,6 +1800,9 @@ def main():
         summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
         spec = json.loads(spec_path.read_text())
         params = dict(spec["analysis"].get("parameters") or {})
+        repo_root = str(params.get("repo_root") or "").strip()
+        if repo_root:
+            sys.path.insert(0, repo_root)
         target_artifact = str(params.get("target_artifact") or "").strip()
         report_type = str(params.get("report_type") or "issue_first").strip().lower()
         output_mode = str(params.get("output_mode") or "combined").strip().lower()
@@ -1834,10 +1838,12 @@ def main():
 
         output_by_name = {artifact["logical_name"]: artifact for artifact in spec.get("output_artifacts", [])}
         source = None
+        sidecar = None
         for artifact in spec.get("input_artifacts", []):
             if artifact.get("logical_name") == target_artifact:
                 source = artifact
-                break
+            elif artifact.get("logical_name") == "movement_review_annotations.json":
+                sidecar = artifact
         if source is None:
             raise SystemExit("Target artifact was not provided as an input")
 
@@ -1870,6 +1876,16 @@ def main():
                 columns = detect_columns(fieldnames) if fieldnames else {}
             else:
                 fieldnames, columns, _, valid_records = load_rows_with_context(source["path"])
+                if sidecar is not None:
+                    from examples.movement.review_annotations import (
+                        apply_annotations_to_report_records,
+                        load_review_annotations,
+                    )
+                    apply_annotations_to_report_records(
+                        valid_records,
+                        load_review_annotations(Path(sidecar["path"])),
+                        source_artifact=target_artifact,
+                    )
                 matched_records = selected_contexts(
                     valid_records,
                     selected_fix_keys=selected_fix_keys,
@@ -1999,6 +2015,16 @@ def main():
             return
 
         fieldnames, columns, _, valid_records = load_rows_with_context(source["path"])
+        if sidecar is not None:
+            from examples.movement.review_annotations import (
+                apply_annotations_to_report_records,
+                load_review_annotations,
+            )
+            apply_annotations_to_report_records(
+                valid_records,
+                load_review_annotations(Path(sidecar["path"])),
+                source_artifact=target_artifact,
+            )
         sections = build_individual_profile_sections(
             valid_records,
             fieldnames,

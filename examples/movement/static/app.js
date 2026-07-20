@@ -299,6 +299,7 @@ class MovementExampleApp {
       queryLibrary: null,
       anomalyRanking: null,
       burstFeatureSpace: null,
+      analysisHistory: null,
     };
     this.map = null;
     this.mapLoaded = false;
@@ -858,6 +859,20 @@ class MovementExampleApp {
         .movement-status.error,
         .movement-modal-status.error {
           color: #ffb3c2;
+        }
+        .movement-output-links {
+          display: flex;
+          gap: 10px;
+          min-height: 0;
+          padding: 0 16px 10px;
+          font-size: 12px;
+        }
+        .movement-output-links:empty {
+          display: none;
+          padding: 0;
+        }
+        .movement-output-links a {
+          color: #9df6dc;
         }
         .movement-main {
           --movement-side-width: 420px;
@@ -1989,10 +2004,12 @@ class MovementExampleApp {
           <button type="button" data-role="run-anomaly-ranking">Rank bursts</button>
           <button type="button" data-role="run-burst-feature-space">Feature space</button>
           <button type="button" data-role="generate-report">Generate report</button>
+          <button type="button" data-role="export-reviewed-csv">Export reviewed CSV</button>
           <button type="button" class="movement-danger" data-role="remove-confirmed">Remove confirmed</button>
           <button type="button" data-role="undo">Undo</button>
         </div>
         <div class="movement-status" data-role="status"></div>
+        <div class="movement-output-links" data-role="output-links"></div>
         <div class="movement-main">
           <div class="movement-map-wrap">
             <div class="movement-map" data-role="map"></div>
@@ -2240,9 +2257,11 @@ class MovementExampleApp {
       runAnomalyRanking: this.mountEl.querySelector('[data-role="run-anomaly-ranking"]'),
       runBurstFeatureSpace: this.mountEl.querySelector('[data-role="run-burst-feature-space"]'),
       generateReport: this.mountEl.querySelector('[data-role="generate-report"]'),
+      exportReviewedCsv: this.mountEl.querySelector('[data-role="export-reviewed-csv"]'),
       removeConfirmed: this.mountEl.querySelector('[data-role="remove-confirmed"]'),
       undo: this.mountEl.querySelector('[data-role="undo"]'),
       status: this.mountEl.querySelector('[data-role="status"]'),
+      outputLinks: this.mountEl.querySelector('[data-role="output-links"]'),
       sideSheetTabs: this.mountEl.querySelector('[data-role="side-sheet-tabs"]'),
       sideTabIndividuals: this.mountEl.querySelector('[data-role="side-tab-individuals"]'),
       sideTabTable: this.mountEl.querySelector('[data-role="side-tab-table"]'),
@@ -2446,7 +2465,12 @@ class MovementExampleApp {
     this.refs.burstGapMode.addEventListener("change", () => this.handleBurstGapSettingsChange());
     this.refs.burstGapSeconds.addEventListener("change", () => this.handleBurstGapSettingsChange());
     this.refs.burstGapQuantile.addEventListener("change", () => this.handleBurstGapSettingsChange());
-    this.refs.anomalyFeatureSet.addEventListener("change", () => this.saveUiState());
+    this.refs.anomalyFeatureSet.addEventListener("change", () => {
+      this.saveUiState();
+      this.clearAnomalyRanking();
+      this.clearBurstFeatureSpace();
+      void this.restoreSavedAnalyses();
+    });
     this.refs.fixPopup.addEventListener("click", event => {
       const closeButton = event.target.closest('[data-role="fix-popup-close"]');
       if (closeButton) {
@@ -2514,6 +2538,9 @@ class MovementExampleApp {
       void this.runBurstFeatureSpace();
     });
     this.refs.generateReport.addEventListener("click", () => this.openReportModal());
+    this.refs.exportReviewedCsv.addEventListener("click", () => {
+      void this.exportReviewedCsv();
+    });
     this.refs.removeConfirmed.addEventListener("click", () => this.openRemoveModal());
     this.refs.undo.addEventListener("click", async () => {
       await this.undoCurrentHead();
@@ -2643,6 +2670,7 @@ class MovementExampleApp {
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
       this.cancelRequest("burstFeatureSpace");
+      this.cancelRequest("analysisHistory");
       return;
     }
     if (level === "study") {
@@ -2655,6 +2683,7 @@ class MovementExampleApp {
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
       this.cancelRequest("burstFeatureSpace");
+      this.cancelRequest("analysisHistory");
       return;
     }
     if (level === "dataset") {
@@ -2666,6 +2695,7 @@ class MovementExampleApp {
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
       this.cancelRequest("burstFeatureSpace");
+      this.cancelRequest("analysisHistory");
       return;
     }
     if (level === "artifact") {
@@ -2676,6 +2706,7 @@ class MovementExampleApp {
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
       this.cancelRequest("burstFeatureSpace");
+      this.cancelRequest("analysisHistory");
     }
   }
 
@@ -3096,6 +3127,9 @@ class MovementExampleApp {
       warnings: [],
       burstGap: null,
       modelFit: null,
+      createdAt: "",
+      user: "",
+      loadedFromHistory: false,
     };
   }
 
@@ -3121,6 +3155,9 @@ class MovementExampleApp {
       burstGap: null,
       featureMatrix: null,
       pca: null,
+      createdAt: "",
+      user: "",
+      loadedFromHistory: false,
     };
   }
 
@@ -3131,6 +3168,122 @@ class MovementExampleApp {
       this.renderBurstFeatureSpace();
       this.updateActionButtons();
     }
+  }
+
+  async restoreSavedAnalyses() {
+    if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
+      return;
+    }
+    const familyName = this.currentFamily;
+    const studyName = this.currentStudy;
+    const datasetId = this.currentDatasetId;
+    const artifactName = this.currentArtifact;
+    const controller = this.beginRequest("analysisHistory");
+    const params = new URLSearchParams({
+      dataset_id: datasetId,
+      logical_name: artifactName,
+      burst_gap_mode: this.getBurstGapMode(),
+      burst_gap_seconds: String(this.getBurstGapSeconds()),
+      burst_gap_quantile: String(this.getBurstGapQuantile()),
+      feature_set: this.getAnomalyFeatureSet(),
+    });
+    try {
+      const history = await this.fetchJSON(
+        `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/analyses?${params.toString()}`,
+        { signal: controller.signal },
+      );
+      if (
+        this.requestControllers.analysisHistory !== controller
+        || familyName !== this.currentFamily
+        || studyName !== this.currentStudy
+        || datasetId !== this.currentDatasetId
+        || artifactName !== this.currentArtifact
+      ) {
+        return;
+      }
+      const items = Array.isArray(history?.items) ? history.items : [];
+      const byId = new Map(items.map(item => [String(item?.analysis_id || ""), item]));
+      const latest = history?.latest_compatible_by_action || {};
+      const ranking = byId.get(String(latest.run_burst_anomaly_ranking || ""));
+      const featureSpace = byId.get(String(latest.run_burst_feature_space || ""));
+      const restored = [];
+      const tasks = [];
+      if (ranking) {
+        tasks.push(this.restoreSavedAnomalyRanking(ranking, controller.signal).then(() => {
+          restored.push(`burst ranking from ${formatDateTime(ranking.created_at)}`);
+        }));
+      }
+      if (featureSpace) {
+        tasks.push(this.restoreSavedBurstFeatureSpace(featureSpace, controller.signal).then(() => {
+          restored.push(`feature space from ${formatDateTime(featureSpace.created_at)}`);
+        }));
+      }
+      const results = await Promise.allSettled(tasks);
+      if (this.requestControllers.analysisHistory !== controller) {
+        return;
+      }
+      for (const result of results) {
+        if (result.status === "rejected" && !this.isAbortError(result.reason)) {
+          console.warn("Could not restore saved movement analysis", result.reason);
+        }
+      }
+      this.renderAnomalyRanking();
+      this.renderBurstFeatureSpace();
+      this.updateActionButtons();
+      if (restored.length) {
+        this.setStatus(`Restored saved ${restored.join(" and ")}.`);
+      }
+    } catch (error) {
+      if (!this.isAbortError(error)) {
+        console.warn("Could not load saved movement analyses", error);
+      }
+    } finally {
+      if (this.requestControllers.analysisHistory === controller) {
+        this.requestControllers.analysisHistory = null;
+      }
+    }
+  }
+
+  async restoreSavedAnomalyRanking(item, signal) {
+    const analysisId = String(item?.analysis_id || "");
+    const artifact = await this.fetchJSON(
+      `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis/${encodeURIComponent(analysisId)}/artifact/burst_anomaly_ranking.json`,
+      { signal },
+    );
+    this.anomalyRanking = {
+      analysisId,
+      status: String(artifact?.run_status || item?.summary?.run_status || "completed"),
+      rankedIndividuals: Array.isArray(artifact?.ranked_individuals) ? artifact.ranked_individuals : [],
+      warnings: Array.isArray(artifact?.warnings) ? artifact.warnings : [],
+      burstGap: artifact?.burst_gap || null,
+      modelFit: artifact?.model_fit || artifact?.scorer || null,
+      createdAt: String(item?.created_at || ""),
+      user: String(item?.user || ""),
+      loadedFromHistory: true,
+    };
+  }
+
+  async restoreSavedBurstFeatureSpace(item, signal) {
+    const analysisId = String(item?.analysis_id || "");
+    const artifact = await this.fetchJSON(
+      `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis/${encodeURIComponent(analysisId)}/artifact/burst_feature_space.json`,
+      { signal },
+    );
+    const points = Array.isArray(artifact?.points) ? artifact.points : [];
+    this.burstFeatureSpace = {
+      analysisId,
+      status: String(artifact?.run_status || item?.summary?.run_status || "completed"),
+      featureSet: String(artifact?.feature_set || item?.parameters?.feature_set || "movement_only"),
+      points,
+      selectedBurstId: "",
+      warnings: Array.isArray(artifact?.warnings) ? artifact.warnings : [],
+      burstGap: artifact?.burst_gap || null,
+      featureMatrix: artifact?.feature_matrix || null,
+      pca: artifact?.pca || null,
+      createdAt: String(item?.created_at || ""),
+      user: String(item?.user || ""),
+      loadedFromHistory: true,
+    };
   }
 
   async runBurstAnomalyRanking() {
@@ -3175,6 +3328,9 @@ class MovementExampleApp {
         warnings: Array.isArray(summary.warnings) ? summary.warnings : [],
         burstGap: summary.burst_gap || null,
         modelFit: summary.model_fit || summary.scorer || null,
+        createdAt: String(result?.analysis?.created_at || ""),
+        user: String(result?.analysis?.user || ""),
+        loadedFromHistory: false,
       };
       this.setSideSheet("ranking");
       this.renderAnomalyRanking();
@@ -3268,6 +3424,9 @@ class MovementExampleApp {
         burstGap: artifact?.burst_gap || null,
         featureMatrix: artifact?.feature_matrix || null,
         pca: artifact?.pca || null,
+        createdAt: String(result?.analysis?.created_at || ""),
+        user: String(result?.analysis?.user || ""),
+        loadedFromHistory: false,
       };
       this.setSideSheet("feature_space");
       this.renderBurstFeatureSpace();
@@ -3447,6 +3606,7 @@ class MovementExampleApp {
       ? result.featureMatrix.fitted_features
       : [];
     const metadata = [
+      result.createdAt ? `${result.loadedFromHistory ? "Restored" : "Created"}: ${formatDateTime(result.createdAt)}${result.user ? ` by ${result.user}` : ""}` : "",
       result.featureSet ? `Feature set: ${String(result.featureSet).replaceAll("_", " ")}` : "",
       Number.isFinite(Number(explainedVariance[0])) ? `PC1: ${(Number(explainedVariance[0]) * 100).toFixed(1)}%` : "",
       Number.isFinite(Number(explainedVariance[1])) ? `PC2: ${(Number(explainedVariance[1]) * 100).toFixed(1)}%` : "",
@@ -3735,6 +3895,7 @@ class MovementExampleApp {
               <div class="movement-anomaly-burst-actions">
                 <button type="button" data-action="zoom-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Zoom to burst</button>
                 <button type="button" data-action="check-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Check fixes</button>
+                <button type="button" data-action="flag-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Flag result</button>
               </div>
             </div>
           `;
@@ -3910,6 +4071,14 @@ class MovementExampleApp {
       await this.inspectRankingBurst(actionButton.dataset.burstId || "", { checkFixes: false });
     } else if (action === "check-ranking-burst") {
       await this.inspectRankingBurst(actionButton.dataset.burstId || "", { checkFixes: true });
+    } else if (action === "flag-ranking-burst") {
+      const ref = this.getRankingBurstRef(actionButton.dataset.burstId || "");
+      if (ref) {
+        this.openBurstReviewModal(ref, {
+          origin: "algorithm",
+          sourceAnalysisId: this.anomalyRanking?.analysisId || "",
+        });
+      }
     }
   }
 
@@ -3932,6 +4101,7 @@ class MovementExampleApp {
     const modelFit = result.modelFit || {};
     const metadata = [
       result.analysisId ? `Analysis: ${result.analysisId}` : "",
+      result.createdAt ? `${result.loadedFromHistory ? "Restored" : "Created"}: ${formatDateTime(result.createdAt)}${result.user ? ` by ${result.user}` : ""}` : "",
       burstGapLabel ? `Burst gap: ${burstGapLabel}` : "",
       modelFit.model ? `Model: ${modelFit.model}` : "",
       modelFit.feature_set ? `Feature set: ${String(modelFit.feature_set).replaceAll("_", " ")}` : "",
@@ -4178,6 +4348,7 @@ class MovementExampleApp {
     this.currentArtifactEntry = null;
     this.currentTimeMs = 0;
     this.lastReportLinks = [];
+    this.refs.outputLinks.innerHTML = "";
     this.refs.individuals.innerHTML = "";
     this.refs.selectedFixes.innerHTML = "";
     this.renderAnomalyRanking();
@@ -4419,6 +4590,7 @@ class MovementExampleApp {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
       }
       void this.loadDetailForCurrentSelection();
+      void this.restoreSavedAnalyses();
     } catch (error) {
       if (this.isAbortError(error)) {
         return;
@@ -4593,6 +4765,7 @@ class MovementExampleApp {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
       }
       void this.loadDetailForCurrentSelection({ preservedFixKeys });
+      void this.restoreSavedAnalyses();
     } catch (error) {
       if (this.isAbortError(error) || requestId !== this.loadRequestId) {
         return;
@@ -4670,7 +4843,18 @@ class MovementExampleApp {
       const total = document.createElement("span");
       total.className = "movement-subtle";
       total.textContent = formatCount(stats.rowCount);
-      header.append(left, total);
+      const actions = document.createElement("div");
+      actions.className = "movement-row-left";
+      const flagButton = document.createElement("button");
+      flagButton.type = "button";
+      flagButton.className = "movement-fix-remove";
+      flagButton.textContent = "Flag for review";
+      flagButton.addEventListener("click", event => {
+        event.stopPropagation();
+        this.openIndividualReviewModal(individual);
+      });
+      actions.append(total, flagButton);
+      header.append(left, actions);
       card.appendChild(header);
 
       const statsRow = document.createElement("div");
@@ -5203,6 +5387,11 @@ class MovementExampleApp {
         if (burst) {
           this.zoomToPath(burst.path);
         }
+      } else if (action === "flag-auto-burst") {
+        const burst = this.data?.autoBurstById?.get(actionButton.dataset.burstId || "");
+        if (burst) {
+          this.openBurstReviewModal(burst);
+        }
       }
       return;
     }
@@ -5335,7 +5524,10 @@ class MovementExampleApp {
                 <td class="movement-table-cell-mono">${escapeHtml(String(burst.fixCount))}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(burst.startTimeMs))}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(burst.endTimeMs))}</td>
-                <td class="movement-table-cell-actions"><button type="button" data-action="zoom-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}">Zoom</button></td>
+                <td class="movement-table-cell-actions">
+                  <button type="button" data-action="zoom-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}">Zoom</button>
+                  <button type="button" data-action="flag-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}">Flag</button>
+                </td>
               </tr>
             `).join("")}
           </tbody>
@@ -7703,6 +7895,10 @@ class MovementExampleApp {
           owner_question: issue.ownerQuestion || "",
           review_user: issue.reviewUser || "",
           reviewed_at: issue.reviewedAt || "",
+          origin: issue.origin || "",
+          step_id: issue.stepId || "",
+          source_analysis_id: issue.sourceAnalysisId || "",
+          scope_kind: issue.scopeKind || "",
         })),
         issue_note: fix.review.issueNote || "",
         owner_question: fix.review.ownerQuestion || "",
@@ -7994,6 +8190,7 @@ class MovementExampleApp {
       this.refs.runAnomalyRanking,
       this.refs.runBurstFeatureSpace,
       this.refs.generateReport,
+      this.refs.exportReviewedCsv,
       this.refs.removeConfirmed,
     ]) {
       button.hidden = !hasData;
@@ -8004,6 +8201,7 @@ class MovementExampleApp {
     this.refs.markSuspected.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
     this.refs.markConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
     this.refs.generateReport.disabled = !hasData || !(this.data?.individuals || []).length;
+    this.refs.exportReviewedCsv.disabled = !hasData;
     this.refs.removeConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
     this.refs.selectSuspicious.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || visibleSuspiciousCount === 0;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
@@ -8035,10 +8233,16 @@ class MovementExampleApp {
     }
     const field = this.getCurrentColorField();
     const issueThreshold = this.getCurrentIssueThreshold();
+    const candidateKeys = this.getCandidateQueryReturnedMatchKeys();
+    const candidateGenerated = Boolean(this.candidateQueryPreview?.analysisId)
+      && selectedFixes.every(fix => candidateKeys.has(fix.fixKey));
+    const origin = issueThreshold ? "threshold" : (candidateGenerated ? "algorithm" : "manual");
     this.pendingIssueStatus = status;
     this.pendingIssueContext = {
       mode: "fixes",
       fixes: selectedFixes,
+      origin,
+      sourceAnalysisId: candidateGenerated ? this.candidateQueryPreview.analysisId : "",
       issueField: field?.key || "",
       issueThreshold,
     };
@@ -8051,6 +8255,7 @@ class MovementExampleApp {
       <div><strong>Checked fixes:</strong> ${escapeHtml(formatCount(selectedFixes.length))}</div>
       <div><strong>Issue variable:</strong> ${escapeHtml(field?.label || "Not set")}</div>
       <div><strong>Issue threshold:</strong> ${escapeHtml(issueThreshold || "Not set")}</div>
+      <div><strong>Origin:</strong> ${escapeHtml(origin)}</div>
     `;
     this.refs.issueSelection.textContent = selectedFixes
       .slice(0, 25)
@@ -8110,6 +8315,86 @@ class MovementExampleApp {
     this.refs.issueClose.disabled = false;
     this.refs.issueModal.classList.remove("hidden");
     this.refs.issueType.focus();
+  }
+
+  openIndividualReviewModal(individual) {
+    if (!this.data || !individual || !this.currentArtifact) {
+      return;
+    }
+    const stats = this.data.stats[individual] || {};
+    this.pendingIssueStatus = "suspected";
+    this.pendingIssueContext = {
+      mode: "individual",
+      fixes: [],
+      individual,
+      setName: "",
+      origin: "manual",
+      issueField: "",
+      issueThreshold: "",
+    };
+    this.refs.issueTitle.textContent = "Flag individual for review";
+    this.refs.issueMeta.innerHTML = `
+      <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+      <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+      <div><strong>Individual:</strong> ${escapeHtml(individual)}</div>
+      <div><strong>Resolved fixes:</strong> ${escapeHtml(formatCount(stats.rowCount || 0))}</div>
+      <div><strong>Status:</strong> suspected</div>
+    `;
+    this.refs.issueSelection.textContent = `The annotation will apply to every fix for ${individual} across train and test tracks.`;
+    this.refs.issueUser.value = this.getUser();
+    this.refs.issueType.value = "individual review";
+    this.refs.issueNote.value = "";
+    this.refs.issueQuestion.value = "Could you confirm whether this individual's track should be treated as an outlier?";
+    this.refs.issueStatus.textContent = "";
+    this.refs.issueStatus.classList.remove("error");
+    this.refs.issueSubmit.disabled = false;
+    this.refs.issueClose.disabled = false;
+    this.refs.issueModal.classList.remove("hidden");
+    this.refs.issueNote.focus();
+  }
+
+  openBurstReviewModal(burst, { origin = "manual", sourceAnalysisId = "" } = {}) {
+    const burstId = String(burst?.burstId || burst?.burst_id || "");
+    if (!this.data || !burstId || !this.currentArtifact) {
+      return;
+    }
+    const individual = String(burst?.individual || "");
+    const setName = String(burst?.setName || burst?.set_name || "train");
+    const fixCount = Number(burst?.fixCount ?? burst?.fix_count ?? burst?.n_fixes) || 0;
+    this.pendingIssueStatus = "suspected";
+    this.pendingIssueContext = {
+      mode: "burst",
+      fixes: [],
+      burstId,
+      individual,
+      setName,
+      origin,
+      sourceAnalysisId,
+      issueField: "",
+      issueThreshold: "",
+    };
+    this.refs.issueTitle.textContent = "Flag burst for review";
+    this.refs.issueMeta.innerHTML = `
+      <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+      <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+      <div><strong>Burst:</strong> ${escapeHtml(burstId)}</div>
+      <div><strong>Track:</strong> ${escapeHtml(`${individual} • ${setName}`)}</div>
+      <div><strong>Resolved fixes:</strong> ${escapeHtml(formatCount(fixCount))}</div>
+      <div><strong>Origin:</strong> ${escapeHtml(origin)}</div>
+    `;
+    this.refs.issueSelection.textContent = sourceAnalysisId
+      ? `This annotation will retain provenance to analysis ${sourceAnalysisId}.`
+      : "The backend will resolve this burst using the current burst-gap settings.";
+    this.refs.issueUser.value = this.getUser();
+    this.refs.issueType.value = origin === "algorithm" ? "burst anomaly" : "burst review";
+    this.refs.issueNote.value = "";
+    this.refs.issueQuestion.value = "Could you confirm whether this burst should be treated as an outlier?";
+    this.refs.issueStatus.textContent = "";
+    this.refs.issueStatus.classList.remove("error");
+    this.refs.issueSubmit.disabled = false;
+    this.refs.issueClose.disabled = false;
+    this.refs.issueModal.classList.remove("hidden");
+    this.refs.issueNote.focus();
   }
 
   openReportModal() {
@@ -8191,7 +8476,8 @@ class MovementExampleApp {
     const issueThreshold = context.issueThreshold || "";
     const issueNote = this.refs.issueNote.value.trim();
     const ownerQuestion = this.refs.issueQuestion.value.trim();
-    if (!selectedFixes.length) {
+    const groupScope = context.mode === "individual" || context.mode === "burst";
+    if (!selectedFixes.length && !groupScope) {
       return;
     }
     if (!user || !issueType || !issueNote || !ownerQuestion) {
@@ -8204,39 +8490,58 @@ class MovementExampleApp {
     this.refs.issueClose.disabled = true;
     this.refs.issueStatus.textContent = context.mode === "segment"
       ? `Marking ${formatCount(selectedFixes.length)} fixes as one ${this.pendingIssueStatus} segment...`
-      : `Marking ${formatCount(selectedFixes.length)} fixes as ${this.pendingIssueStatus}...`;
+      : context.mode === "individual"
+        ? `Flagging individual ${context.individual} for review...`
+        : context.mode === "burst"
+          ? `Flagging burst ${context.burstId} for review...`
+          : `Marking ${formatCount(selectedFixes.length)} fixes as ${this.pendingIssueStatus}...`;
     this.refs.issueStatus.classList.remove("error");
     this.setStatus(this.refs.issueStatus.textContent);
 
     try {
-      const endpoint = context.mode === "segment"
-        ? `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/annotate-segment`
-        : `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/annotate-fixes`;
-      const body = context.mode === "segment"
-        ? {
-          dataset_id: this.currentDatasetId,
-          logical_name: this.currentArtifact,
-          selected_fix_keys: context.selectedFixKeys,
+      const endpoint = `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/annotate-scope`;
+      let scope;
+      if (context.mode === "segment") {
+        scope = {
+          kind: "segment",
+          fix_keys: context.selectedFixKeys,
           start_fix_key: context.startFixKey,
           end_fix_key: context.endFixKey,
-          status: this.pendingIssueStatus,
-          issue_type: issueType,
-          issue_note: issueNote,
-          owner_question: ownerQuestion,
-          user,
-        }
-        : {
-          dataset_id: this.currentDatasetId,
-          logical_name: this.currentArtifact,
-          fix_keys: selectedFixes.map(fix => fix.fixKey),
-          status: this.pendingIssueStatus,
-          issue_type: issueType,
-          issue_field: issueField,
-          issue_threshold: issueThreshold,
-          issue_note: issueNote,
-          owner_question: ownerQuestion,
-          user,
         };
+      } else if (context.mode === "individual") {
+        scope = {
+          kind: "individual",
+          individual: context.individual,
+          set_name: context.setName || "",
+        };
+      } else if (context.mode === "burst") {
+        scope = {
+          kind: "burst",
+          burst_id: context.burstId,
+        };
+      } else {
+        scope = {
+          kind: "fix",
+          fix_keys: selectedFixes.map(fix => fix.fixKey),
+        };
+      }
+      const body = {
+        dataset_id: this.currentDatasetId,
+        logical_name: this.currentArtifact,
+        scope,
+        status: this.pendingIssueStatus,
+        origin: context.origin || (issueThreshold ? "threshold" : "manual"),
+        issue_type: issueType,
+        issue_field: issueField,
+        issue_threshold: issueThreshold,
+        comment: issueNote,
+        owner_question: ownerQuestion,
+        source_analysis_id: context.sourceAnalysisId || "",
+        burst_gap_mode: this.getBurstGapMode(),
+        burst_gap_seconds: this.getBurstGapSeconds(),
+        burst_gap_quantile: this.getBurstGapQuantile(),
+        user,
+      };
       const result = await this.requestJSON(
         endpoint,
         {
@@ -8255,6 +8560,46 @@ class MovementExampleApp {
       this.refs.issueSubmit.disabled = false;
       this.refs.issueClose.disabled = false;
       this.setStatus(error.message, true);
+    }
+  }
+
+  async exportReviewedCsv() {
+    if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
+      return;
+    }
+    this.refs.exportReviewedCsv.disabled = true;
+    this.setStatus(`Exporting reviewed CSV for ${this.currentArtifact}...`);
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/export-reviewed-csv`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            user: this.getUser() || "reviewer",
+          }),
+        },
+      );
+      const analysisId = String(result?.analysis?.analysis_id || "");
+      if (!analysisId) {
+        throw new Error("Reviewed CSV export did not return an analysis id.");
+      }
+      const output = (result?.analysis?.realized_output_artifacts || [])
+        .find(item => String(item?.logical_name || "").endsWith("_reviewed.csv"));
+      const outputName = String(output?.logical_name || result?.analysis?.parameters?.output_artifact || "").trim();
+      if (!outputName) {
+        throw new Error("Reviewed CSV export did not return an output artifact.");
+      }
+      const href = `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis/${encodeURIComponent(analysisId)}/artifact/${encodeURIComponent(outputName)}`;
+      this.refs.outputLinks.innerHTML = `<a href="${href}" download="${escapeHtml(outputName)}">Download ${escapeHtml(outputName)}</a>`;
+      const flaggedCount = formatCount(result?.summary?.flagged_row_count || 0);
+      const rowCount = formatCount(result?.summary?.exported_row_count || 0);
+      this.setStatus(`Exported ${rowCount} rows with ${flaggedCount} flagged rows. The source dataset was not changed.`);
+    } catch (error) {
+      this.setStatus(`Reviewed CSV export failed: ${error.message}`, true);
+    } finally {
+      this.updateActionButtons();
     }
   }
 
@@ -8768,6 +9113,10 @@ function normalizeReviewIssues(review) {
       ownerQuestion: String(item.owner_question || item.ownerQuestion || "").trim(),
       reviewUser: String(item.review_user || item.reviewUser || "").trim(),
       reviewedAt: String(item.reviewed_at || item.reviewedAt || "").trim(),
+      origin: String(item.origin || "").trim(),
+      stepId: String(item.step_id || item.stepId || "").trim(),
+      sourceAnalysisId: String(item.source_analysis_id || item.sourceAnalysisId || "").trim(),
+      scopeKind: String(item.scope_kind || item.scopeKind || "").trim(),
     }))
     .filter(item => item.issueId || item.issueType);
   if (cleaned.length) {
@@ -8783,6 +9132,10 @@ function normalizeReviewIssues(review) {
     ownerQuestion: String(review?.owner_question || review?.ownerQuestion || "").trim(),
     reviewUser: String(review?.review_user || review?.reviewUser || "").trim(),
     reviewedAt: String(review?.reviewed_at || review?.reviewedAt || "").trim(),
+    origin: String(review?.origin || "").trim(),
+    stepId: String(review?.step_id || review?.stepId || "").trim(),
+    sourceAnalysisId: String(review?.source_analysis_id || review?.sourceAnalysisId || "").trim(),
+    scopeKind: String(review?.scope_kind || review?.scopeKind || "").trim(),
   };
   return legacyIssue.issueId || legacyIssue.issueType ? [legacyIssue] : [];
 }

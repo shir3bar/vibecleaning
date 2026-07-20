@@ -1,6 +1,9 @@
 from pathlib import Path
 import sys
 import base64
+import csv
+import io
+import json
 from math import isclose
 
 from fastapi.testclient import TestClient
@@ -12,11 +15,13 @@ if str(REPO_ROOT) not in sys.path:
 MOVEMENT_APP_JS = REPO_ROOT / "examples" / "movement" / "static" / "app.js"
 OSM_LAYER_JS = REPO_ROOT / "examples" / "movement" / "static" / "osm_layer.js"
 
-from app.state import load_project_state
+from app.execution import create_analysis, create_step
+from app.state import get_dataset_artifact, load_project_state
 from app.web import create_app
 from examples.movement.routes import (
     GENERATE_REPORT_SCRIPT,
     REPORT_ANALYSIS_TEMPLATE_PATH,
+    _reviewed_csv_artifact_name,
     register_movement_routes,
 )
 from examples.movement.report_analysis_template import (
@@ -29,6 +34,7 @@ from examples.movement.report_analysis_template import (
     load_rows_with_context,
     normalize_report_records,
 )
+from examples.movement.review_annotations import export_reviewed_csv
 from examples.movement.bursts import build_auto_bursts
 from examples.movement.movement_features import STEP_FEATURE_FIELDS, compute_track_movement
 import examples.movement.summary as movement_summary
@@ -648,6 +654,366 @@ def test_movement_overview_route_accepts_quantile_burst_gap_params(tmp_path):
     assert payload["burst_gap_fallback_seconds"] == 99.0
     assert payload["burst_gap_seconds"] == 3600.0
     assert payload["burst_gap_gap_count"] == 2
+
+
+def create_saved_movement_analysis(
+    tmp_path: Path,
+    *,
+    dataset_id: str,
+    action: str = "run_burst_anomaly_ranking",
+    output_name: str = "burst_anomaly_ranking.json",
+    feature_set: str = "movement_only",
+):
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+    script = f'''import json
+import os
+from pathlib import Path
+
+spec = json.loads(Path(os.environ["VIBECLEANING_SPEC_PATH"]).read_text())
+output = next(item for item in spec["output_artifacts"] if item["logical_name"] == "{output_name}")
+result = {{"run_status": "completed", "ranked_individuals": [], "points": []}}
+Path(output["path"]).write_text(json.dumps(result))
+Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text(json.dumps({{"run_status": "completed"}}))
+'''
+    return create_analysis(
+        study_dir,
+        {
+            "user": "reviewer",
+            "title": "Saved movement analysis",
+            "kind": "python",
+            "script": script,
+            "dataset_id": dataset_id,
+            "input_artifacts": ["movement.csv"],
+            "output_artifacts": [output_name],
+            "parameters": {
+                "app": "movement",
+                "action": action,
+                "target_artifact": "movement.csv",
+                "burst_gap_mode": "manual",
+                "burst_gap_seconds": 60,
+                "burst_gap_quantile": 0.75,
+                "feature_set": feature_set,
+            },
+        },
+    )
+
+
+def test_movement_analysis_history_finds_latest_compatible_saved_run(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+    first = create_saved_movement_analysis(tmp_path, dataset_id=dataset_id)
+    second = create_saved_movement_analysis(tmp_path, dataset_id=dataset_id)
+
+    response = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/analyses",
+        params={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": "60",
+            "burst_gap_quantile": "0.75",
+            "feature_set": "movement_only",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["analysis_id"] for item in payload["items"]] == [
+        second["analysis"]["analysis_id"],
+        first["analysis"]["analysis_id"],
+    ]
+    assert all(item["compatible"] for item in payload["items"])
+    assert payload["latest_compatible_by_action"]["run_burst_anomaly_ranking"] == second["analysis"]["analysis_id"]
+    assert payload["items"][0]["summary"]["run_status"] == "completed"
+
+
+def test_movement_analysis_history_explains_parameter_mismatches(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+    saved = create_saved_movement_analysis(tmp_path, dataset_id=dataset_id)
+
+    response = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/analyses",
+        params={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "burst_gap_mode": "quantile",
+            "burst_gap_seconds": "3600",
+            "burst_gap_quantile": "0.999",
+            "feature_set": "movement_plus_context",
+        },
+    )
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["analysis_id"] == saved["analysis"]["analysis_id"]
+    assert item["compatible"] is False
+    assert set(item["compatibility_reasons"]) == {
+        "burst gap mode differs",
+        "burst gap fallback differs",
+        "burst gap quantile differs",
+        "feature set differs",
+    }
+
+
+def test_movement_analysis_history_survives_sidecar_only_dataset_steps(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+    saved = create_saved_movement_analysis(tmp_path, dataset_id=dataset_id)
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+    step = create_step(
+        study_dir,
+        {
+            "user": "reviewer",
+            "title": "Add review sidecar",
+            "kind": "python",
+            "script": '''import json
+import os
+from pathlib import Path
+
+spec = json.loads(Path(os.environ["VIBECLEANING_SPEC_PATH"]).read_text())
+Path(spec["output_artifacts"][0]["path"]).write_text("[]\\n")
+Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text("{}\\n")
+''',
+            "parent_dataset_id": dataset_id,
+            "input_artifacts": [],
+            "output_artifacts": ["movement_review_annotations.json"],
+            "parameters": {"app": "movement", "action": "add_review_sidecar"},
+        },
+    )
+
+    response = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/analyses",
+        params={
+            "dataset_id": step["dataset"]["dataset_id"],
+            "logical_name": "movement.csv",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": "60",
+            "burst_gap_quantile": "0.75",
+            "feature_set": "movement_only",
+        },
+    )
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["analysis_id"] == saved["analysis"]["analysis_id"]
+    assert item["compatible"] is True
+
+
+def test_movement_frontend_restores_saved_burst_analyses():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "restoreSavedAnalyses" in source
+    assert "latest_compatible_by_action" in source
+    assert "burst_anomaly_ranking.json" in source
+    assert "burst_feature_space.json" in source
+    assert 'result.loadedFromHistory ? "Restored" : "Created"' in source
+    assert "exportReviewedCsv" in source
+    assert "Download ${escapeHtml(outputName)}" in source
+    assert "/actions/annotate-scope" in source
+    assert "openIndividualReviewModal" in source
+    assert "openBurstReviewModal" in source
+    assert 'candidateGenerated ? "algorithm" : "manual"' in source
+
+
+def test_export_reviewed_csv_combines_legacy_and_sidecar_annotations(tmp_path):
+    source_path = tmp_path / "movement.csv"
+    source_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,set,visible,vc_outlier_status,vc_issue_id,vc_issue_type,vc_issue_note,manually-marked-outlier,algorithm-marked-outlier,outlier_comments
+fix_1,alpha,2024-01-01T00:00:00Z,-70,40,train,true,suspected,legacy_1,drift,manual note,false,false,
+fix_2,beta,2024-01-01T01:00:00Z,-71,41,test,true,,,,,true,false,existing source note
+fix_3,gamma,2024-01-01T02:00:00Z,-72,42,train,false,,,,,false,true,
+""",
+        encoding="utf-8",
+    )
+    sidecar_path = tmp_path / "movement_review_annotations.json"
+    sidecar_path.write_text(
+        json.dumps(
+            {
+                "annotations": [
+                    {
+                        "annotation_id": "analysis_1",
+                        "source_artifact": "movement.csv",
+                        "status": "confirmed",
+                        "origin": "algorithm",
+                        "issue_type": "burst anomaly",
+                        "comment": "algorithm note",
+                        "scope": {"kind": "individual", "individual": "beta"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "reviewed.csv"
+
+    summary = export_reviewed_csv(
+        source_path,
+        output_path,
+        source_artifact="movement.csv",
+        sidecar_path=sidecar_path,
+        annotation_step_ids={"analysis_1": "step_historical"},
+    )
+
+    with output_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        fieldnames = list(reader.fieldnames or [])
+    assert not any(name.startswith("vc_") for name in fieldnames)
+    assert "manually_marked_outliers" not in fieldnames
+    assert "algorithm_marked_outliers" not in fieldnames
+    assert rows[0]["visible"] == "false"
+    assert rows[0]["manually-marked-outlier"] == "true"
+    assert rows[0]["algorithm-marked-outlier"] == "false"
+    assert rows[0]["outlier_issue_type"] == "drift"
+    assert rows[0]["outlier_comments"] == ""
+    assert rows[1]["visible"] == "false"
+    assert rows[1]["manually-marked-outlier"] == "true"
+    assert rows[1]["algorithm-marked-outlier"] == "true"
+    assert rows[1]["outlier_status"] == "confirmed"
+    assert rows[1]["outlier_issue_type"] == "burst anomaly"
+    assert rows[1]["outlier_comments"] == "Already flagged in source: manually-marked-outlier=true"
+    assert rows[1]["outlier_flag_step_ids"] == "step_historical"
+    assert rows[2]["visible"] == "false"
+    assert rows[2]["algorithm-marked-outlier"] == "true"
+    assert rows[2]["outlier_status"] == ""
+    assert rows[2]["outlier_comments"] == "Already flagged in source: algorithm-marked-outlier=true"
+    assert summary["flagged_row_count"] == 3
+
+
+def test_reviewed_csv_artifact_name_is_based_on_source_name():
+    assert (
+        _reviewed_csv_artifact_name("Kays_c8aac319_raw_merged.csv")
+        == "Kays_c8aac319_raw_merged_reviewed.csv"
+    )
+
+
+def test_export_migrates_deprecated_flag_names_and_is_idempotent(tmp_path):
+    source_path = tmp_path / "raw.csv"
+    source_path.write_text(
+        "eventid,individual,timestamp,longitude,latitude,manually_marked_outliers,algorithm_marked_outliers\n"
+        "fix_1,alpha,2024-01-01T00:00:00Z,-70,40,false,true\n",
+        encoding="utf-8",
+    )
+    first_output = tmp_path / "first.csv"
+    second_output = tmp_path / "second.csv"
+
+    export_reviewed_csv(source_path, first_output, source_artifact="raw.csv")
+    export_reviewed_csv(first_output, second_output, source_artifact="raw.csv")
+
+    with second_output.open(newline="", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert "manually_marked_outliers" not in row
+    assert "algorithm_marked_outliers" not in row
+    assert row["manually-marked-outlier"] == "false"
+    assert row["algorithm-marked-outlier"] == "true"
+    assert row["outlier_comments"].count("Already flagged in source") == 1
+
+
+def test_movement_export_reviewed_csv_route_creates_downloadable_analysis(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/export-reviewed-csv",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["analysis"]["parameters"]["action"] == "export_reviewed_csv"
+    assert payload["summary"]["exported_row_count"] == 5
+    analysis_id = payload["analysis"]["analysis_id"]
+    download = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/analysis/{analysis_id}/artifact/movement_reviewed.csv"
+    )
+    assert download.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(download.text)))
+    assert len(rows) == 5
+    assert rows[0]["visible"] == "false"
+    assert rows[0]["manually-marked-outlier"] == "false"
+    assert rows[0]["algorithm-marked-outlier"] == "true"
+    assert not any(name.startswith("vc_") for name in rows[0])
+
+
+def test_annotate_scope_persists_sidecar_without_rewriting_source_csv(tmp_path):
+    clean_csv = """eventid,individual,timestamp,longitude,latitude,set
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
+"""
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=clean_csv)
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+    source_before = (study_dir / "movement.csv").read_text(encoding="utf-8")
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "burst", "burst_id": "alpha:train:burst_000000"},
+            "status": "suspected",
+            "origin": "algorithm",
+            "issue_type": "burst anomaly",
+            "comment": "Ranked as an unusual burst",
+            "owner_question": "Please verify",
+            "source_analysis_id": "analysis_saved",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": 3600,
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    next_dataset_id = payload["dataset"]["dataset_id"]
+    assert payload["step"]["output_artifacts"] == ["movement_review_annotations.json"]
+    assert payload["step"]["summary"]["scope_kind"] == "burst"
+    assert payload["step"]["summary"]["resolved_fix_count"] == 2
+    assert (study_dir / "movement.csv").read_text(encoding="utf-8") == source_before
+    _, sidecar_path = get_dataset_artifact(study_dir, next_dataset_id, "movement_review_annotations.json")
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    annotation = sidecar["annotations"][0]
+    assert annotation["annotation_id"] == payload["step"]["step_id"]
+    assert annotation["step_id"] == payload["step"]["step_id"]
+    assert annotation["origin"] == "algorithm"
+    assert annotation["source_analysis_id"] == "analysis_saved"
+    assert annotation["scope"]["fix_keys"] == ["id:fix_a_1#row:1", "id:fix_a_2#row:2"]
+
+    fixes_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{next_dataset_id}/fixes",
+        params={"logical_name": "movement.csv", "burst_gap_mode": "manual", "burst_gap_seconds": "3600"},
+    )
+    assert fixes_response.status_code == 200
+    fixes = fixes_response.json()["fixes"]
+    reviewed = [fix for fix in fixes if fix.get("review", {}).get("status") == "suspected"]
+    assert [fix["fix_key"] for fix in reviewed] == ["id:fix_a_1#row:1", "id:fix_a_2#row:2"]
+    assert reviewed[0]["review"]["issues"][0]["origin"] == "algorithm"
+    assert reviewed[0]["review"]["issues"][0]["issue_note"] == "Ranked as an unusual burst"
+
+    export_response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/export-reviewed-csv",
+        json={
+            "dataset_id": next_dataset_id,
+            "logical_name": "movement.csv",
+            "user": "reviewer",
+        },
+    )
+    assert export_response.status_code == 200
+    export_analysis_id = export_response.json()["analysis"]["analysis_id"]
+    download = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/analysis/{export_analysis_id}/artifact/movement_reviewed.csv"
+    )
+    exported = list(csv.DictReader(io.StringIO(download.text)))
+    assert [row["algorithm-marked-outlier"] for row in exported] == ["true", "true", "false"]
+    assert [row["outlier_issue_type"] for row in exported] == ["burst anomaly", "burst anomaly", ""]
+    assert [row["outlier_flag_step_ids"] for row in exported] == [
+        payload["step"]["step_id"],
+        payload["step"]["step_id"],
+        "",
+    ]
+    assert all("Ranked as an unusual burst" not in row["outlier_comments"] for row in exported)
+    assert all("vc_outlier_status" not in row for row in exported)
 
 
 def test_movement_fixes_route_rejects_invalid_repeated_individual(tmp_path):
