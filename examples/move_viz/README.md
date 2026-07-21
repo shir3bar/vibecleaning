@@ -35,6 +35,9 @@ does not create a new dataset because it does not change the reviewed data.
 
 `move_viz` has no anomaly detection, OSM feature queries, or report workflow.
 
+Agents adapting the viewer to another SQLite schema should follow
+[`HANDOFF.md`](HANDOFF.md).
+
 ## Run
 
 ```bash

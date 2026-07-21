@@ -33,7 +33,7 @@ docs/                  minimal contracts for agents
 
 Reference example:
 
-```bashv1
+```bash
 python examples/trajectory/server.py
 ```
 
@@ -52,6 +52,6 @@ python examples/move_viz/server.py
 Contracts:
 
 - [AGENTS.md](AGENTS.md)
-- [docs/ARCHITECTURE.md](ARCHITECTURE.md)
-- [docs/STATE_MODEL.md](STATE_MODEL.md)
-- [docs/EXECUTION_CONTRACT.md](EXECUTION_CONTRACT.md)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/STATE_MODEL.md](docs/STATE_MODEL.md)
+- [docs/EXECUTION_CONTRACT.md](docs/EXECUTION_CONTRACT.md)
