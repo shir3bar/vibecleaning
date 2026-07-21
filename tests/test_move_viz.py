@@ -188,6 +188,8 @@ def test_move_viz_applies_row_limit_and_rejects_non_sqlite_files(tmp_path):
     assert loaded.status_code == 200
     assert loaded.json()["loaded_count"] == 2
     assert loaded.json()["matching_row_count"] == 3
+    assert loaded.json()["next_offset"] == 2
+    assert loaded.json()["has_more"] is True
     assert loaded.json()["truncated"] is True
     assert rejected.status_code == 400
     assert "not a SQLite database" in rejected.json()["error"]
@@ -217,7 +219,36 @@ def test_move_viz_large_table_open_is_overview_only_and_detail_is_bounded(tmp_pa
     assert detail.json()["matching_row_count"] == 1_000
     assert detail.json()["loaded_count"] == 500
     assert detail.json()["truncated"] is True
+    assert detail.json()["next_offset"] == 500
+    assert detail.json()["has_more"] is True
     assert isinstance(detail.json()["rows"][0]["values"], list)
+
+    next_page = client.post(
+        f"/api/apps/move-viz/sessions/{opened['session_id']}/fixes",
+        json={"table": "movement", "individuals": ["animal-00"], "offset": 500},
+    )
+    assert next_page.status_code == 200
+    assert next_page.json()["loaded_count"] == 500
+    assert next_page.json()["next_offset"] == 1_000
+    assert next_page.json()["has_more"] is False
+    first_keys = {row["key"] for row in detail.json()["rows"]}
+    next_keys = {row["key"] for row in next_page.json()["rows"]}
+    assert first_keys.isdisjoint(next_keys)
+
+    later_page_flag = client.post(
+        f"/api/apps/move-viz/sessions/{opened['session_id']}/review",
+        json={
+            "operation": "flag",
+            "dataset_id": overview.json()["dataset_id"],
+            "table": "movement",
+            "row_keys": [next_page.json()["rows"][0]["key"]],
+            "scope": "fix",
+            "comment": "Loaded from the second page",
+            "user": "reviewer",
+        },
+    )
+    assert later_page_flag.status_code == 200
+    assert next_page.json()["rows"][0]["key"] in later_page_flag.json()["flags"]
 
 
 def test_move_viz_health_and_bundled_example_bypass_browser_upload(tmp_path):
@@ -229,8 +260,9 @@ def test_move_viz_health_and_bundled_example_bypass_browser_upload(tmp_path):
     opened = client.post("/api/apps/move-viz/sessions/example")
 
     assert health.status_code == 200
-    assert health.json()["protocol"] == 4
+    assert health.json()["protocol"] == 5
     assert health.json()["max_rows"] == 25_000
+    assert health.json()["max_review_rows"] == 250_000
     assert health.json()["sample_available"] is True
     assert opened.status_code == 200
     assert opened.json()["filename"] == "movement.sqlite"
@@ -388,6 +420,9 @@ def test_move_viz_frontend_is_direct_and_lightweight(tmp_path):
     assert "/export" in source.text
     assert "/fixes" in source.text
     assert "No fixes are loaded into the map until you choose them" in source.text
+    assert "Load more fixes" in source.text
+    assert "append: true" in source.text
+    assert "next_offset" in source.text
     assert "an entire-individual flag would be incomplete" in source.text
     assert "flagStorageKey" not in source.text
     assert "saveFlags" not in source.text

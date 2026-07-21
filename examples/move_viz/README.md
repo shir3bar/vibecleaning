@@ -50,7 +50,7 @@ examples/move_viz/sample_data/synthetic_demo_cp2.sqlite
 
 You can also click **Load bundled example** to open the same database directly
 from the running server without a browser file upload. The header displays
-`client protocol 4`; if it does not, restart the server and hard-refresh the
+`client protocol 5`; if it does not, restart the server and hard-refresh the
 page.
 
 The example contains the 4,800 rows from
@@ -67,8 +67,10 @@ opening returns a small overview and leaves the map empty. Selecting one or
 more individuals requests only their fixes; changing the selection cancels any
 obsolete request.
 
-By default each explicit map request loads at most 25,000 rows and the server
-accepts databases up to 512 MB. A truncated request is labeled in the toolbar.
-Entire-individual review is disabled for a truncated selection so a partial
-track cannot be mislabeled as the whole individual. Override the limits with
-`MOVE_VIZ_MAX_ROWS` and `MOVE_VIZ_MAX_UPLOAD_BYTES` when appropriate.
+By default each map page loads at most 25,000 rows and the server accepts
+databases up to 512 MB. When more matching fixes exist, **Load more fixes**
+appends the next page without restarting the server or clearing selected review
+fixes. Entire-individual review remains disabled until every page for the
+current selection is loaded, so a partial track cannot be mislabeled as the
+whole individual. Override the page and upload limits with `MOVE_VIZ_MAX_ROWS`
+and `MOVE_VIZ_MAX_UPLOAD_BYTES` when appropriate.

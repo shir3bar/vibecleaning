@@ -1,5 +1,5 @@
 const PALETTE = ["#60a5fa", "#2dd4bf", "#fde047", "#fb923c", "#f472b6", "#a78bfa", "#34d399", "#f87171"];
-const MOVE_VIZ_PROTOCOL = 4;
+const MOVE_VIZ_PROTOCOL = 5;
 const SQLITE_UPLOAD_TIMEOUT_MS = 120_000;
 const SQLITE_READ_TIMEOUT_MS = 30_000;
 const SERVER_CHECK_TIMEOUT_MS = 5_000;
@@ -118,6 +118,7 @@ class MoveVizApp {
                 <button type="button" data-role="all">All</button>
                 <button type="button" data-role="none">None</button>
               </div>
+              <button type="button" class="load-more" data-role="load-more" disabled>Load more fixes</button>
             </div>
             <div class="individual-list" data-role="individuals"><div class="status">No movement data loaded.</div></div>
             <div class="review-controls">
@@ -171,6 +172,7 @@ class MoveVizApp {
     this.refs.search.addEventListener("input", () => this.renderIndividuals());
     this.refs.all.addEventListener("click", () => this.selectAllIndividuals());
     this.refs.none.addEventListener("click", () => this.selectNoIndividuals());
+    this.refs.loadMore.addEventListener("click", () => void this.loadVisibleIndividuals({ append: true }));
     this.refs.selectionMode.addEventListener("change", () => {
       this.selectionMode = this.refs.selectionMode.value;
       this.clearFixSelection();
@@ -381,6 +383,7 @@ class MoveVizApp {
       this.renderIndividuals();
       await this.initializeMap();
       this.renderData();
+      this.updateLoadMoreButton();
       this.showSelectionPrompt();
       this.setStatus(`${payload.row_count.toLocaleString()} fixes · ${payload.individuals.length.toLocaleString()} individuals · select individuals to load`);
     } catch (error) {
@@ -435,10 +438,13 @@ class MoveVizApp {
       this.data.loaded_count = 0;
       this.data.matching_row_count = 0;
       this.data.loaded_individuals = [];
+      this.data.next_offset = 0;
+      this.data.has_more = false;
       this.data.truncated = false;
     }
     this.renderIndividuals();
     this.renderData();
+    this.updateLoadMoreButton();
     this.showSelectionPrompt();
     if (this.data) {
       this.setStatus(`${this.data.row_count.toLocaleString()} fixes · select individuals to load`);
@@ -450,7 +456,16 @@ class MoveVizApp {
     this.refs.empty.classList.remove("hidden");
   }
 
-  async loadVisibleIndividuals() {
+  updateLoadMoreButton() {
+    if (!this.data) return;
+    const remaining = Math.max(0, (Number(this.data.matching_row_count) || 0) - (Number(this.data.next_offset) || 0));
+    this.refs.loadMore.disabled = this.reviewBusy || Boolean(this.detailController) || !this.data.has_more;
+    this.refs.loadMore.textContent = this.data.has_more
+      ? `Load more fixes (${remaining.toLocaleString()} remaining)`
+      : "Load more fixes";
+  }
+
+  async loadVisibleIndividuals({ append = false } = {}) {
     if (!this.session || !this.data) return;
     const individuals = [...this.selectedIndividuals].sort((left, right) => left.localeCompare(right));
     this.renderIndividuals();
@@ -458,28 +473,45 @@ class MoveVizApp {
       this.selectNoIndividuals();
       return;
     }
+    const loadedIndividuals = [...(this.data.loaded_individuals || [])].sort((left, right) => left.localeCompare(right));
+    const sameScope = individuals.length === loadedIndividuals.length
+      && individuals.every((individual, index) => individual === loadedIndividuals[index]);
+    if (append && (!sameScope || !this.data.has_more)) return;
     this.detailController?.abort();
     const controller = new AbortController();
     this.detailController = controller;
     const requestId = ++this.detailRequestId;
-    this.selectedFixes.clear();
-    this.segmentAnchorKey = "";
-    this.setStatus(`Loading fixes for ${individuals.length.toLocaleString()} selected individuals…`);
+    if (!append) {
+      this.selectedFixes.clear();
+      this.segmentAnchorKey = "";
+    }
+    const offset = append ? Number(this.data.next_offset) || 0 : 0;
+    this.updateLoadMoreButton();
+    this.setStatus(`${append ? "Loading more fixes" : "Loading fixes"} for ${individuals.length.toLocaleString()} selected individuals…`);
     try {
       const response = await fetch(`/api/apps/move-viz/sessions/${this.session.session_id}/fixes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ table: this.data.table, individuals }),
+        body: JSON.stringify({ table: this.data.table, individuals, offset }),
         signal: controller.signal,
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Could not load the selected individuals");
       if (requestId !== this.detailRequestId) return;
-      this.data.rows = payload.rows || [];
-      this.data.loaded_count = Number(payload.loaded_count) || 0;
+      const incomingRows = payload.rows || [];
+      if (append) {
+        const byKey = new Map(this.data.rows.map(row => [row.key, row]));
+        for (const row of incomingRows) byKey.set(row.key, row);
+        this.data.rows = [...byKey.values()];
+      } else {
+        this.data.rows = incomingRows;
+      }
+      this.data.loaded_count = this.data.rows.length;
       this.data.matching_row_count = Number(payload.matching_row_count) || 0;
-      this.data.skipped_count = Number(payload.skipped_count) || 0;
+      this.data.skipped_count = (append ? Number(this.data.skipped_count) || 0 : 0) + (Number(payload.skipped_count) || 0);
       this.data.loaded_individuals = payload.loaded_individuals || individuals;
+      this.data.next_offset = Number(payload.next_offset) || 0;
+      this.data.has_more = Boolean(payload.has_more);
       this.data.value_columns = payload.value_columns || [];
       this.valueColumnIndexes = new Map(this.data.value_columns.map((name, index) => [name, index]));
       this.data.truncated = Boolean(payload.truncated);
@@ -491,16 +523,17 @@ class MoveVizApp {
       } else {
         this.showSelectionPrompt();
       }
-      const limitNote = this.data.truncated
-        ? ` · showing first ${this.data.loaded_count.toLocaleString()} of ${this.data.matching_row_count.toLocaleString()}`
-        : "";
+      const limitNote = this.data.has_more
+        ? ` · ${this.data.matching_row_count.toLocaleString()} matching fixes total`
+        : " · complete selection loaded";
       const skippedNote = this.data.skipped_count ? ` · skipped ${this.data.skipped_count.toLocaleString()} invalid coordinates` : "";
-      this.setStatus(`${this.data.loaded_count.toLocaleString()} fixes loaded for ${individuals.length.toLocaleString()} individuals${limitNote}${skippedNote}`, this.data.truncated);
+      this.setStatus(`${this.data.loaded_count.toLocaleString()} fixes loaded for ${individuals.length.toLocaleString()} individuals${limitNote}${skippedNote}`);
     } catch (error) {
       if (error.name === "AbortError" || requestId !== this.detailRequestId) return;
       this.setStatus(error.message, true);
     } finally {
       if (this.detailController === controller) this.detailController = null;
+      this.updateLoadMoreButton();
     }
   }
 
@@ -741,6 +774,7 @@ class MoveVizApp {
     this.reviewBusy = busy;
     this.renderSelectionDetail();
     this.renderHistory();
+    this.updateLoadMoreButton();
   }
 
   reviewUser() {

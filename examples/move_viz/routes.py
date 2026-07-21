@@ -31,8 +31,9 @@ from app.state import (
 SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 DEFAULT_MAX_ROWS = 25_000
+DEFAULT_MAX_REVIEW_ROWS = 250_000
 NUMERIC_DECLARATIONS = ("INT", "REAL", "FLOA", "DOUB", "NUM", "DEC")
-MOVE_VIZ_PROTOCOL = 4
+MOVE_VIZ_PROTOCOL = 5
 SOURCE_ARTIFACT = "source.sqlite"
 REVIEW_ARTIFACT = "move_viz_review_annotations.json"
 REVIEW_STEP_SCRIPT = Path(__file__).with_name("review_step.py").read_text(encoding="utf-8")
@@ -168,6 +169,25 @@ def _json_value(value: object) -> object:
     return str(value)
 
 
+def _movement_row_key(event_value: object, row_number: object) -> str:
+    return (
+        f"event:{event_value}#row:{row_number}"
+        if event_value not in (None, "")
+        else f"row:{row_number}"
+    )
+
+
+def _row_number_from_key(row_key: str) -> int:
+    suffix = row_key.rsplit("#row:", 1)[-1] if "#row:" in row_key else row_key.removeprefix("row:")
+    try:
+        value = int(suffix)
+    except ValueError as exc:
+        raise ValueError("Invalid selected fix key") from exc
+    if value < 1:
+        raise ValueError("Invalid selected fix key")
+    return value
+
+
 def _validated_mapping(table: dict, requested: dict) -> dict[str, str | None]:
     columns = {str(column["name"]) for column in table["columns"]}
     detected = dict(table["detected"])
@@ -257,6 +277,11 @@ def load_movement_table(path: Path, payload: dict, *, max_rows: int) -> dict:
     table_identifier = _quoted_identifier(str(table["name"]))
     timestamp_column = mapping["timestamp"]
     order_clause = f" ORDER BY {_quoted_identifier(timestamp_column)}" if timestamp_column else ""
+    rowid_order_clause = (
+        f" ORDER BY {_quoted_identifier(timestamp_column)}, rowid"
+        if timestamp_column
+        else " ORDER BY rowid"
+    )
     raw_individuals = payload.get("individuals")
     if raw_individuals is None:
         individuals = []
@@ -266,6 +291,14 @@ def load_movement_table(path: Path, payload: dict, *, max_rows: int) -> dict:
         individuals = sorted({str(value) for value in raw_individuals if str(value)})
     if len(individuals) > 10_000:
         raise ValueError("Too many selected individuals")
+    try:
+        offset = int(payload.get("offset") or 0)
+        requested_limit = int(payload.get("limit") or max_rows)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid detail page") from exc
+    if offset < 0 or requested_limit < 1:
+        raise ValueError("Invalid detail page")
+    page_limit = min(requested_limit, max_rows)
     where_clause = ""
     query_parameters: list[object] = []
     if individuals and mapping["individual"]:
@@ -279,9 +312,11 @@ def load_movement_table(path: Path, payload: dict, *, max_rows: int) -> dict:
         query_parameters.extend(individuals)
     query_with_rowid = (
         f'SELECT rowid AS "__move_viz_rowid__", * FROM {table_identifier}'
-        f"{where_clause}{order_clause} LIMIT ?"
+        f"{where_clause}{rowid_order_clause} LIMIT ? OFFSET ?"
     )
-    query_without_rowid = f"SELECT * FROM {table_identifier}{where_clause}{order_clause} LIMIT ?"
+    query_without_rowid = (
+        f"SELECT * FROM {table_identifier}{where_clause}{order_clause} LIMIT ? OFFSET ?"
+    )
 
     with closing(_readonly_connection(path)) as connection:
         matching_row_count = int(
@@ -290,7 +325,7 @@ def load_movement_table(path: Path, payload: dict, *, max_rows: int) -> dict:
                 query_parameters,
             ).fetchone()[0]
         )
-        limited_parameters = [*query_parameters, max_rows]
+        limited_parameters = [*query_parameters, page_limit, offset]
         try:
             records = connection.execute(query_with_rowid, limited_parameters).fetchall()
             has_rowid = True
@@ -315,10 +350,10 @@ def load_movement_table(path: Path, payload: dict, *, max_rows: int) -> dict:
             continue
         values = [_json_value(record[column]) for column in value_columns]
         event_value = record[str(mapping["event_id"])] if mapping["event_id"] else None
-        rowid_value = record["__move_viz_rowid__"] if has_rowid else index + 1
+        rowid_value = record["__move_viz_rowid__"] if has_rowid else offset + index + 1
         rows.append(
             {
-                "key": f"event:{event_value}#row:{rowid_value}" if event_value not in (None, "") else f"row:{rowid_value}",
+                "key": _movement_row_key(event_value, rowid_value),
                 "rowid": rowid_value,
                 "longitude": longitude,
                 "latitude": latitude,
@@ -334,15 +369,63 @@ def load_movement_table(path: Path, payload: dict, *, max_rows: int) -> dict:
         "table": table["name"],
         "row_count": table["row_count"],
         "loaded_count": len(rows),
+        "returned_row_count": len(records),
         "skipped_count": skipped_rows,
         "matching_row_count": matching_row_count,
-        "truncated": matching_row_count > max_rows,
+        "offset": offset,
+        "next_offset": offset + len(records),
+        "has_more": offset + len(records) < matching_row_count,
+        "truncated": offset + len(records) < matching_row_count,
         "max_rows": max_rows,
         "mapping": mapping,
         "value_columns": value_columns,
         "loaded_individuals": individuals,
         "rows": rows,
     }
+
+
+def validate_movement_row_keys(path: Path, payload: dict, row_keys: list[str]) -> None:
+    table, mapping = _movement_table_context(path, payload)
+    table_identifier = _quoted_identifier(str(table["name"]))
+    event_column = mapping["event_id"]
+    event_expression = _quoted_identifier(str(event_column)) if event_column else "NULL"
+    requested = set(row_keys)
+    row_numbers = {_row_number_from_key(row_key) for row_key in requested}
+    available: set[str] = set()
+    with closing(_readonly_connection(path)) as connection:
+        try:
+            connection.execute(f"SELECT rowid FROM {table_identifier} LIMIT 0")
+            has_rowid = True
+        except sqlite3.OperationalError:
+            has_rowid = False
+        if has_rowid:
+            sorted_rowids = sorted(row_numbers)
+            for offset in range(0, len(sorted_rowids), 500):
+                chunk = sorted_rowids[offset : offset + 500]
+                placeholders = ", ".join("?" for _ in chunk)
+                records = connection.execute(
+                    f'SELECT rowid AS "__move_viz_rowid__", {event_expression} AS "__move_viz_event__" '
+                    f"FROM {table_identifier} WHERE rowid IN ({placeholders})",
+                    chunk,
+                )
+                for record in records:
+                    available.add(
+                        _movement_row_key(record["__move_viz_event__"], record["__move_viz_rowid__"])
+                    )
+        else:
+            timestamp_column = mapping["timestamp"]
+            order_clause = f" ORDER BY {_quoted_identifier(str(timestamp_column))}" if timestamp_column else ""
+            maximum = max(row_numbers)
+            records = connection.execute(
+                f'SELECT {event_expression} AS "__move_viz_event__" '
+                f"FROM {table_identifier}{order_clause} LIMIT ?",
+                (maximum,),
+            )
+            for index, record in enumerate(records, start=1):
+                if index in row_numbers:
+                    available.add(_movement_row_key(record["__move_viz_event__"], index))
+    if requested - available:
+        raise ValueError("Some selected fixes are not present in the loaded SQLite table")
 
 
 def register_move_viz_routes(
@@ -365,6 +448,7 @@ def register_move_viz_routes(
     app.state.move_viz_temporary_directory = owned_session_root
     upload_limit = max_upload_bytes or int(os.environ.get("MOVE_VIZ_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES))
     row_limit = max_rows or int(os.environ.get("MOVE_VIZ_MAX_ROWS", DEFAULT_MAX_ROWS))
+    review_row_limit = int(os.environ.get("MOVE_VIZ_MAX_REVIEW_ROWS", DEFAULT_MAX_REVIEW_ROWS))
     resolved_sample_database = sample_database.resolve() if sample_database else None
 
     def project_dir_for_name(project_name: str) -> Path:
@@ -475,6 +559,7 @@ def register_move_viz_routes(
                 "protocol": MOVE_VIZ_PROTOCOL,
                 "max_upload_bytes": upload_limit,
                 "max_rows": row_limit,
+                "max_review_rows": review_row_limit,
                 "sample_available": bool(resolved_sample_database and resolved_sample_database.is_file()),
             }
         )
@@ -596,24 +681,20 @@ def register_move_viz_routes(
             if operation not in {"flag", "unflag"}:
                 raise ValueError("Invalid review operation")
             table_name = str(body.get("table") or "").strip()
-            movement = await run_in_threadpool(
-                load_movement_table,
-                path,
-                {
-                    "table": table_name,
-                    "individuals": body.get("individuals"),
-                },
-                max_rows=row_limit,
-            )
-            available_keys = {str(row["key"]) for row in movement["rows"]}
             raw_keys = body.get("row_keys")
             if not isinstance(raw_keys, list):
                 raise ValueError("Select at least one fix")
             row_keys = sorted({str(item).strip() for item in raw_keys if str(item).strip()})
-            if not row_keys or len(row_keys) > row_limit:
+            if not row_keys:
                 raise ValueError("Select at least one fix")
-            if set(row_keys) - available_keys:
-                raise ValueError("Some selected fixes are not present in the loaded SQLite table")
+            if len(row_keys) > review_row_limit:
+                raise ValueError(f"A review step can include at most {review_row_limit} fixes")
+            await run_in_threadpool(
+                validate_movement_row_keys,
+                path,
+                {"table": table_name},
+                row_keys,
+            )
             scope = str(body.get("scope") or "fix").strip().lower()
             if scope not in {"fix", "segment", "individual"}:
                 raise ValueError("Invalid review scope")
@@ -657,7 +738,7 @@ def register_move_viz_routes(
             result = {"step_result": step_result}
             result.update(await run_in_threadpool(review_state, project_dir, table_name))
             return JSONResponse(result)
-        except (ValueError, ProjectStateError) as exc:
+        except (ValueError, sqlite3.DatabaseError, ProjectStateError) as exc:
             return _json_error(str(exc), 400)
 
     @app.post("/api/apps/move-viz/sessions/{session_id}/undo")
