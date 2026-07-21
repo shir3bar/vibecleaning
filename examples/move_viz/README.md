@@ -67,7 +67,7 @@ opening returns a small overview and leaves the map empty. Selecting one or
 more individuals requests only their fixes; changing the selection cancels any
 obsolete request.
 
-By default each map page loads at most 25,000 rows and the server accepts
+By default each map page loads at most 100,000 rows and the server accepts
 databases up to 512 MB. When more matching fixes exist, **Load more fixes**
 appends the next page without restarting the server or clearing selected review
 fixes. Entire-individual review remains disabled until every page for the

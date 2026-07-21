@@ -66,7 +66,7 @@ def create_large_test_database(path: Path, row_count: int = 30_000) -> None:
 def create_client(
     tmp_path: Path,
     *,
-    max_rows: int = 25_000,
+    max_rows: int = 100_000,
     sample_database: Path | None = None,
 ) -> TestClient:
     app = create_app(data_root=tmp_path / "data", static_root=MOVE_VIZ_STATIC_ROOT)
@@ -261,7 +261,7 @@ def test_move_viz_health_and_bundled_example_bypass_browser_upload(tmp_path):
 
     assert health.status_code == 200
     assert health.json()["protocol"] == 5
-    assert health.json()["max_rows"] == 25_000
+    assert health.json()["max_rows"] == 100_000
     assert health.json()["max_review_rows"] == 250_000
     assert health.json()["sample_available"] is True
     assert opened.status_code == 200
