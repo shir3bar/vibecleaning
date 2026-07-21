@@ -30,9 +30,9 @@ from app.state import (
 
 SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_MAX_UPLOAD_BYTES = 512 * 1024 * 1024
-DEFAULT_MAX_ROWS = 100_000
+DEFAULT_MAX_ROWS = 25_000
 NUMERIC_DECLARATIONS = ("INT", "REAL", "FLOA", "DOUB", "NUM", "DEC")
-MOVE_VIZ_PROTOCOL = 3
+MOVE_VIZ_PROTOCOL = 4
 SOURCE_ARTIFACT = "source.sqlite"
 REVIEW_ARTIFACT = "move_viz_review_annotations.json"
 REVIEW_STEP_SCRIPT = Path(__file__).with_name("review_step.py").read_text(encoding="utf-8")
@@ -183,7 +183,7 @@ def _validated_mapping(table: dict, requested: dict) -> dict[str, str | None]:
     return mapping
 
 
-def load_movement_table(path: Path, payload: dict, *, max_rows: int) -> dict:
+def _movement_table_context(path: Path, payload: dict) -> tuple[dict, dict[str, str | None]]:
     tables = inspect_sqlite(path)
     compatible = [table for table in tables if table["compatible"]]
     requested_table = str(payload.get("table") or "").strip()
@@ -193,35 +193,114 @@ def load_movement_table(path: Path, payload: dict, *, max_rows: int) -> dict:
     if table is None:
         raise ValueError("Select a movement-compatible table")
     mapping = _validated_mapping(table, payload)
+    return table, mapping
+
+
+def _color_columns(connection: sqlite3.Connection, table: dict, mapping: dict) -> list[dict]:
+    color_columns = []
+    for column in table["columns"]:
+        name = str(column["name"])
+        if name in {mapping["longitude"], mapping["latitude"]}:
+            continue
+        color_columns.append(
+            {
+                "name": name,
+                "kind": _column_kind(connection, str(table["name"]), column),
+            }
+        )
+    return color_columns
+
+
+def load_movement_overview(path: Path, payload: dict, *, max_rows: int) -> dict:
+    table, mapping = _movement_table_context(path, payload)
+    table_identifier = _quoted_identifier(str(table["name"]))
+    individual_column = mapping["individual"]
+    with closing(_readonly_connection(path)) as connection:
+        color_columns = _color_columns(connection, table, mapping)
+        if individual_column:
+            individual_identifier = _quoted_identifier(str(individual_column))
+            individual_rows = connection.execute(
+                f"SELECT {individual_identifier}, COUNT(*) FROM {table_identifier} "
+                f"GROUP BY {individual_identifier} ORDER BY {individual_identifier}"
+            ).fetchall()
+            counts: dict[str, int] = {}
+            for row in individual_rows:
+                individual = str(row[0]) if row[0] not in (None, "") else "All fixes"
+                counts[individual] = counts.get(individual, 0) + int(row[1])
+            individuals = [
+                {"individual": individual, "row_count": count}
+                for individual, count in sorted(counts.items())
+            ]
+        else:
+            individuals = [{"individual": "All fixes", "row_count": int(table["row_count"])}]
+
+    return {
+        "table": table["name"],
+        "row_count": table["row_count"],
+        "loaded_count": 0,
+        "matching_row_count": 0,
+        "skipped_count": 0,
+        "truncated": False,
+        "max_rows": max_rows,
+        "mapping": mapping,
+        "columns": color_columns,
+        "individuals": individuals,
+        "loaded_individuals": [],
+        "rows": [],
+        "demand_loaded": True,
+    }
+
+
+def load_movement_table(path: Path, payload: dict, *, max_rows: int) -> dict:
+    table, mapping = _movement_table_context(path, payload)
 
     table_identifier = _quoted_identifier(str(table["name"]))
     timestamp_column = mapping["timestamp"]
     order_clause = f" ORDER BY {_quoted_identifier(timestamp_column)}" if timestamp_column else ""
-    query_with_rowid = f'SELECT rowid AS "__move_viz_rowid__", * FROM {table_identifier}{order_clause} LIMIT ?'
-    query_without_rowid = f"SELECT * FROM {table_identifier}{order_clause} LIMIT ?"
+    raw_individuals = payload.get("individuals")
+    if raw_individuals is None:
+        individuals = []
+    elif not isinstance(raw_individuals, list):
+        raise ValueError("Invalid individual selection")
+    else:
+        individuals = sorted({str(value) for value in raw_individuals if str(value)})
+    if len(individuals) > 10_000:
+        raise ValueError("Too many selected individuals")
+    where_clause = ""
+    query_parameters: list[object] = []
+    if individuals and mapping["individual"]:
+        placeholders = ", ".join("?" for _ in individuals)
+        individual_identifier = _quoted_identifier(str(mapping["individual"]))
+        conditions = [f"{individual_identifier} IN ({placeholders})"]
+        if "All fixes" in individuals:
+            conditions.append(f"{individual_identifier} IS NULL")
+            conditions.append(f"CAST({individual_identifier} AS TEXT) = ''")
+        where_clause = f" WHERE ({' OR '.join(conditions)})"
+        query_parameters.extend(individuals)
+    query_with_rowid = (
+        f'SELECT rowid AS "__move_viz_rowid__", * FROM {table_identifier}'
+        f"{where_clause}{order_clause} LIMIT ?"
+    )
+    query_without_rowid = f"SELECT * FROM {table_identifier}{where_clause}{order_clause} LIMIT ?"
 
     with closing(_readonly_connection(path)) as connection:
+        matching_row_count = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM {table_identifier}{where_clause}",
+                query_parameters,
+            ).fetchone()[0]
+        )
+        limited_parameters = [*query_parameters, max_rows]
         try:
-            records = connection.execute(query_with_rowid, (max_rows,)).fetchall()
+            records = connection.execute(query_with_rowid, limited_parameters).fetchall()
             has_rowid = True
         except sqlite3.OperationalError:
-            records = connection.execute(query_without_rowid, (max_rows,)).fetchall()
+            records = connection.execute(query_without_rowid, limited_parameters).fetchall()
             has_rowid = False
-
-        color_columns = []
-        for column in table["columns"]:
-            name = str(column["name"])
-            if name in {mapping["longitude"], mapping["latitude"]}:
-                continue
-            color_columns.append(
-                {
-                    "name": name,
-                    "kind": _column_kind(connection, str(table["name"]), column),
-                }
-            )
 
     longitude_column = str(mapping["longitude"])
     latitude_column = str(mapping["latitude"])
+    value_columns = [str(column["name"]) for column in table["columns"]]
     rows = []
     skipped_rows = 0
     for index, record in enumerate(records):
@@ -234,11 +313,8 @@ def load_movement_table(path: Path, payload: dict, *, max_rows: int) -> dict:
         if not (-180 <= longitude <= 180 and -90 <= latitude <= 90):
             skipped_rows += 1
             continue
-        values = {
-            str(column["name"]): _json_value(record[str(column["name"])])
-            for column in table["columns"]
-        }
-        event_value = values.get(str(mapping["event_id"])) if mapping["event_id"] else None
+        values = [_json_value(record[column]) for column in value_columns]
+        event_value = record[str(mapping["event_id"])] if mapping["event_id"] else None
         rowid_value = record["__move_viz_rowid__"] if has_rowid else index + 1
         rows.append(
             {
@@ -259,10 +335,12 @@ def load_movement_table(path: Path, payload: dict, *, max_rows: int) -> dict:
         "row_count": table["row_count"],
         "loaded_count": len(rows),
         "skipped_count": skipped_rows,
-        "truncated": table["row_count"] > max_rows,
+        "matching_row_count": matching_row_count,
+        "truncated": matching_row_count > max_rows,
         "max_rows": max_rows,
         "mapping": mapping,
-        "columns": color_columns,
+        "value_columns": value_columns,
+        "loaded_individuals": individuals,
         "rows": rows,
     }
 
@@ -470,9 +548,31 @@ def register_move_viz_routes(
         if not isinstance(payload, dict):
             return _json_error("Invalid JSON body", 400)
         try:
-            result = await run_in_threadpool(load_movement_table, path, payload, max_rows=row_limit)
+            result = await run_in_threadpool(load_movement_overview, path, payload, max_rows=row_limit)
             project_dir = project_dir_for_name(str(record["project_name"]))
             result.update(await run_in_threadpool(review_state, project_dir, str(result["table"])))
+            return JSONResponse(result)
+        except (ValueError, sqlite3.DatabaseError) as exc:
+            return _json_error(str(exc), 400)
+
+    @app.post("/api/apps/move-viz/sessions/{session_id}/fixes")
+    async def load_session_fixes(session_id: str, request: Request):
+        try:
+            path = session_path(session_id)
+            session_record(session_id)
+        except ValueError as exc:
+            return _json_error(str(exc), 404)
+        try:
+            payload = await request.json()
+        except Exception:
+            return _json_error("Invalid JSON body", 400)
+        if not isinstance(payload, dict):
+            return _json_error("Invalid JSON body", 400)
+        raw_individuals = payload.get("individuals")
+        if not isinstance(raw_individuals, list) or not raw_individuals:
+            return _json_error("Select at least one individual", 400)
+        try:
+            result = await run_in_threadpool(load_movement_table, path, payload, max_rows=row_limit)
             return JSONResponse(result)
         except (ValueError, sqlite3.DatabaseError) as exc:
             return _json_error(str(exc), 400)
@@ -499,7 +599,10 @@ def register_move_viz_routes(
             movement = await run_in_threadpool(
                 load_movement_table,
                 path,
-                {"table": table_name},
+                {
+                    "table": table_name,
+                    "individuals": body.get("individuals"),
+                },
                 max_rows=row_limit,
             )
             available_keys = {str(row["key"]) for row in movement["rows"]}
@@ -594,7 +697,7 @@ def register_move_viz_routes(
         try:
             table_name = str(body.get("table") or "").strip()
             movement = await run_in_threadpool(
-                load_movement_table,
+                load_movement_overview,
                 path,
                 {"table": table_name},
                 max_rows=row_limit,

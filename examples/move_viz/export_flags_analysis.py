@@ -18,6 +18,28 @@ def truthy(value):
     return str(value or "").strip().lower() in {"true", "1", "yes", "y"}
 
 
+def flagged_rowids(flags):
+    rowids = []
+    for row_key in flags:
+        suffix = str(row_key).rsplit("#row:", 1)[-1] if "#row:" in str(row_key) else str(row_key).removeprefix("row:")
+        try:
+            rowids.append(int(suffix))
+        except ValueError:
+            continue
+    return sorted(set(rowids))
+
+
+def rows_for_rowids(connection, table, rowids):
+    for offset in range(0, len(rowids), 500):
+        chunk = rowids[offset : offset + 500]
+        placeholders = ", ".join("?" for _ in chunk)
+        yield from connection.execute(
+            f'SELECT rowid AS "__move_viz_rowid__", * FROM {table} '
+            f"WHERE rowid IN ({placeholders}) ORDER BY rowid",
+            chunk,
+        )
+
+
 def main():
     spec_path = Path(os.environ["VIBECLEANING_SPEC_PATH"])
     summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
@@ -47,13 +69,15 @@ def main():
     timestamp = str(mapping.get("timestamp") or "")
     order_clause = f" ORDER BY {quoted_identifier(timestamp)}" if timestamp else ""
     try:
-        rows = connection.execute(
-            f'SELECT rowid AS "__move_viz_rowid__", * FROM {table}{order_clause}'
-        ).fetchall()
+        connection.execute(f"SELECT rowid FROM {table} LIMIT 0")
         has_rowid = True
     except sqlite3.OperationalError:
-        rows = connection.execute(f"SELECT * FROM {table}{order_clause}").fetchall()
         has_rowid = False
+    rows = (
+        rows_for_rowids(connection, table, flagged_rowids(flags))
+        if has_rowid
+        else connection.execute(f"SELECT * FROM {table}{order_clause}")
+    )
     columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
 
     fieldnames = [

@@ -41,10 +41,32 @@ def create_test_database(path: Path) -> None:
         connection.execute("INSERT INTO notes VALUES ('not movement data')")
 
 
+def create_large_test_database(path: Path, row_count: int = 30_000) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            'CREATE TABLE movement ('
+            '"event-id" TEXT, "timestamp" INTEGER, "location-long" REAL, '
+            '"location-lat" REAL, "individual-local-identifier" TEXT, "habitat" TEXT)'
+        )
+        connection.execute(
+            'WITH RECURSIVE rows(value) AS ('
+            'SELECT 1 UNION ALL SELECT value + 1 FROM rows WHERE value < ?'
+            ') INSERT INTO movement '
+            'SELECT printf("fix-%d", value), value, -70.0 + (value % 1000) / 10000.0, '
+            '40.0 + (value % 1000) / 10000.0, printf("animal-%02d", value % 30), '
+            'CASE WHEN value % 2 = 0 THEN "forest" ELSE "field" END FROM rows',
+            (row_count,),
+        )
+        connection.execute(
+            'CREATE INDEX movement_individual_time '
+            'ON movement ("individual-local-identifier", "timestamp")'
+        )
+
+
 def create_client(
     tmp_path: Path,
     *,
-    max_rows: int = 100_000,
+    max_rows: int = 25_000,
     sample_database: Path | None = None,
 ) -> TestClient:
     app = create_app(data_root=tmp_path / "data", static_root=MOVE_VIZ_STATIC_ROOT)
@@ -99,7 +121,7 @@ def test_move_viz_upload_detects_movement_table_and_columns(tmp_path):
     assert notes["compatible"] is False
 
 
-def test_move_viz_loads_rows_color_fields_and_existing_flags_without_writes(tmp_path):
+def test_move_viz_loads_overview_then_selected_individuals_without_writes(tmp_path):
     database = tmp_path / "movement.sqlite"
     create_test_database(database)
     original = database.read_bytes()
@@ -114,14 +136,30 @@ def test_move_viz_loads_rows_color_fields_and_existing_flags_without_writes(tmp_
     assert response.status_code == 200
     payload = response.json()
     assert payload["row_count"] == 3
-    assert payload["loaded_count"] == 3
-    assert payload["truncated"] is False
-    assert {row["individual"] for row in payload["rows"]} == {"alpha", "beta"}
-    assert payload["rows"][0]["key"] == "event:fix-1#row:1"
-    assert payload["rows"][0]["values"]["manually-marked-outlier"] == "true"
+    assert payload["loaded_count"] == 0
+    assert payload["rows"] == []
+    assert payload["demand_loaded"] is True
+    assert payload["individuals"] == [
+        {"individual": "alpha", "row_count": 2},
+        {"individual": "beta", "row_count": 1},
+    ]
     kinds = {column["name"]: column["kind"] for column in payload["columns"]}
     assert kinds["ground-speed"] == "numeric"
     assert kinds["habitat"] == "categorical"
+
+    selected = client.post(
+        f"/api/apps/move-viz/sessions/{opened['session_id']}/fixes",
+        json={"table": "movement", "individuals": ["alpha"]},
+    )
+    assert selected.status_code == 200
+    payload = selected.json()
+    assert payload["loaded_count"] == 2
+    assert payload["matching_row_count"] == 2
+    assert payload["truncated"] is False
+    assert {row["individual"] for row in payload["rows"]} == {"alpha"}
+    assert payload["rows"][0]["key"] == "event:fix-1#row:1"
+    manual_index = payload["value_columns"].index("manually-marked-outlier")
+    assert payload["rows"][0]["values"][manual_index] == "true"
     assert database.read_bytes() == original
 
 
@@ -131,9 +169,13 @@ def test_move_viz_applies_row_limit_and_rejects_non_sqlite_files(tmp_path):
     client = create_client(tmp_path, max_rows=2)
     opened = upload_database(client, database)
 
-    loaded = client.post(
+    overview = client.post(
         f"/api/apps/move-viz/sessions/{opened['session_id']}/load",
         json={"table": "movement"},
+    )
+    loaded = client.post(
+        f"/api/apps/move-viz/sessions/{opened['session_id']}/fixes",
+        json={"table": "movement", "individuals": ["alpha", "beta"]},
     )
     rejected = client.post(
         "/api/apps/move-viz/sessions?filename=not-a-database.db",
@@ -141,11 +183,41 @@ def test_move_viz_applies_row_limit_and_rejects_non_sqlite_files(tmp_path):
         headers={"Content-Type": "application/octet-stream"},
     )
 
+    assert overview.status_code == 200
+    assert overview.json()["loaded_count"] == 0
     assert loaded.status_code == 200
     assert loaded.json()["loaded_count"] == 2
+    assert loaded.json()["matching_row_count"] == 3
     assert loaded.json()["truncated"] is True
     assert rejected.status_code == 400
     assert "not a SQLite database" in rejected.json()["error"]
+
+
+def test_move_viz_large_table_open_is_overview_only_and_detail_is_bounded(tmp_path):
+    database = tmp_path / "large.sqlite"
+    create_large_test_database(database)
+    client = create_client(tmp_path, max_rows=500)
+    opened = upload_database(client, database)
+
+    overview = client.post(
+        f"/api/apps/move-viz/sessions/{opened['session_id']}/load",
+        json={"table": "movement"},
+    )
+    assert overview.status_code == 200
+    assert overview.json()["row_count"] == 30_000
+    assert overview.json()["rows"] == []
+    assert len(overview.json()["individuals"]) == 30
+    assert len(overview.content) < 20_000
+
+    detail = client.post(
+        f"/api/apps/move-viz/sessions/{opened['session_id']}/fixes",
+        json={"table": "movement", "individuals": ["animal-00"]},
+    )
+    assert detail.status_code == 200
+    assert detail.json()["matching_row_count"] == 1_000
+    assert detail.json()["loaded_count"] == 500
+    assert detail.json()["truncated"] is True
+    assert isinstance(detail.json()["rows"][0]["values"], list)
 
 
 def test_move_viz_health_and_bundled_example_bypass_browser_upload(tmp_path):
@@ -157,7 +229,8 @@ def test_move_viz_health_and_bundled_example_bypass_browser_upload(tmp_path):
     opened = client.post("/api/apps/move-viz/sessions/example")
 
     assert health.status_code == 200
-    assert health.json()["protocol"] == 3
+    assert health.json()["protocol"] == 4
+    assert health.json()["max_rows"] == 25_000
     assert health.json()["sample_available"] is True
     assert opened.status_code == 200
     assert opened.json()["filename"] == "movement.sqlite"
@@ -179,6 +252,7 @@ def test_move_viz_flags_are_graph_steps_and_history_is_loadable(tmp_path):
             "operation": "flag",
             "dataset_id": root_dataset_id,
             "table": "movement",
+            "individuals": ["alpha"],
             "row_keys": ["event:fix-1#row:1", "event:fix-2#row:2"],
             "scope": "segment",
             "comment": "Review this segment",
@@ -254,6 +328,7 @@ def test_move_viz_flags_are_graph_steps_and_history_is_loadable(tmp_path):
             "operation": "unflag",
             "dataset_id": reopened["dataset_id"],
             "table": "movement",
+            "individuals": ["alpha"],
             "row_keys": ["event:fix-1#row:1"],
             "scope": "fix",
             "user": "reviewer",
@@ -293,7 +368,9 @@ def test_move_viz_frontend_is_direct_and_lightweight(tmp_path):
     assert 'type="file"' in source.text
     assert "XMLHttpRequest" in source.text
     assert "Checking move_viz server · protocol ${MOVE_VIZ_PROTOCOL}…" in source.text
-    assert "Reading selected file… 0%" in source.text
+    assert "Checking SQLite header…" in source.text
+    assert "file.slice(0, 16).arrayBuffer()" in source.text
+    assert "request.send(file)" in source.text
     assert "Uploading database… 0%" in source.text
     assert "Uploading database… ${percent}%" in source.text
     assert "Inspecting SQLite tables…" in source.text
@@ -309,6 +386,9 @@ def test_move_viz_frontend_is_direct_and_lightweight(tmp_path):
     assert "/undo" in source.text
     assert "/head" in source.text
     assert "/export" in source.text
+    assert "/fixes" in source.text
+    assert "No fixes are loaded into the map until you choose them" in source.text
+    assert "an entire-individual flag would be incomplete" in source.text
     assert "flagStorageKey" not in source.text
     assert "saveFlags" not in source.text
     assert "Reviewer name" in source.text

@@ -11,6 +11,8 @@ It provides:
 - all compatible SQLite columns as numeric or categorical color-by options
 - OSM, satellite, topographic, light, and dark basemaps
 - individual filtering and track/point visibility controls
+- overview-first loading: opening a table loads individual counts but no map
+  fixes until individuals are explicitly selected
 - explicit manual flagging of fixes, two-click track segments, or entire
   individuals as reproducible Vibecleaning graph steps
 - a compact history control for loading earlier datasets or undoing the current
@@ -48,7 +50,7 @@ examples/move_viz/sample_data/synthetic_demo_cp2.sqlite
 
 You can also click **Load bundled example** to open the same database directly
 from the running server without a browser file upload. The header displays
-`client protocol 3`; if it does not, restart the server and hard-refresh the
+`client protocol 4`; if it does not, restart the server and hard-refresh the
 page.
 
 The example contains the 4,800 rows from
@@ -59,6 +61,14 @@ with:
 python examples/move_viz/scripts/create_sample_sqlite.py
 ```
 
-By default the viewer loads at most 100,000 rows and accepts databases up to
-512 MB. Override these with `MOVE_VIZ_MAX_ROWS` and
-`MOVE_VIZ_MAX_UPLOAD_BYTES`.
+The browser reads only the SQLite header before uploading the original file,
+instead of buffering a second full copy in JavaScript. After upload, table
+opening returns a small overview and leaves the map empty. Selecting one or
+more individuals requests only their fixes; changing the selection cancels any
+obsolete request.
+
+By default each explicit map request loads at most 25,000 rows and the server
+accepts databases up to 512 MB. A truncated request is labeled in the toolbar.
+Entire-individual review is disabled for a truncated selection so a partial
+track cannot be mislabeled as the whole individual. Override the limits with
+`MOVE_VIZ_MAX_ROWS` and `MOVE_VIZ_MAX_UPLOAD_BYTES` when appropriate.

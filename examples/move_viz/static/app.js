@@ -1,5 +1,5 @@
 const PALETTE = ["#60a5fa", "#2dd4bf", "#fde047", "#fb923c", "#f472b6", "#a78bfa", "#34d399", "#f87171"];
-const MOVE_VIZ_PROTOCOL = 3;
+const MOVE_VIZ_PROTOCOL = 4;
 const SQLITE_UPLOAD_TIMEOUT_MS = 120_000;
 const SQLITE_READ_TIMEOUT_MS = 30_000;
 const SERVER_CHECK_TIMEOUT_MS = 5_000;
@@ -75,8 +75,11 @@ class MoveVizApp {
     this.selectionMode = "fix";
     this.segmentAnchorKey = "";
     this.flags = new Map();
+    this.valueColumnIndexes = new Map();
     this.colorBy = "";
     this.uploadRequest = null;
+    this.detailController = null;
+    this.detailRequestId = 0;
     this.reviewBusy = false;
     this.renderShell();
     this.bindEvents();
@@ -237,30 +240,29 @@ class MoveVizApp {
   }
 
   async readSqliteFile(file) {
-    this.setStatus("Reading selected file… 0%");
+    this.setStatus("Checking SQLite header…");
     let timeout;
     try {
-      const bytes = await Promise.race([
-        file.arrayBuffer(),
+      const headerBytes = await Promise.race([
+        file.slice(0, 16).arrayBuffer(),
         new Promise((_, reject) => {
           timeout = window.setTimeout(
-            () => reject(new Error("The browser could not read the selected file within 30 seconds.")),
+            () => reject(new Error("The browser could not read the SQLite header within 30 seconds.")),
             SQLITE_READ_TIMEOUT_MS,
           );
         }),
       ]);
-      const header = new TextDecoder("ascii").decode(bytes.slice(0, 16));
+      const header = new TextDecoder("ascii").decode(headerBytes);
       if (header !== "SQLite format 3\u0000") {
         throw new Error("The selected file is not a SQLite database.");
       }
-      this.setStatus("Reading selected file… 100%");
-      return bytes;
+      return file;
     } finally {
       window.clearTimeout(timeout);
     }
   }
 
-  uploadSqliteFile(file, bytes) {
+  uploadSqliteFile(file) {
     this.uploadRequest?.abort();
     return new Promise((resolve, reject) => {
       const request = new XMLHttpRequest();
@@ -297,7 +299,7 @@ class MoveVizApp {
         reject(new Error("The SQLite upload timed out after two minutes."));
       });
       request.addEventListener("abort", () => reject(new Error("The previous SQLite upload was cancelled.")));
-      request.send(bytes);
+      request.send(file);
     });
   }
 
@@ -320,8 +322,8 @@ class MoveVizApp {
     try {
       this.setStatus(`Checking move_viz server · protocol ${MOVE_VIZ_PROTOCOL}…`);
       await this.checkServer();
-      const bytes = await this.readSqliteFile(file);
-      const payload = await this.uploadSqliteFile(file, bytes);
+      await this.readSqliteFile(file);
+      const payload = await this.uploadSqliteFile(file);
       await this.activateSession(payload);
     } catch (error) {
       this.setStatus(error.message, true);
@@ -355,8 +357,11 @@ class MoveVizApp {
 
   async loadTable(table) {
     if (!this.session) return;
+    this.detailController?.abort();
+    this.detailController = null;
+    this.detailRequestId += 1;
     this.refs.table.value = table;
-    this.setStatus("Loading movement rows…");
+    this.setStatus("Loading movement overview…");
     try {
       const response = await fetch(`/api/apps/move-viz/sessions/${this.session.session_id}/load`, {
         method: "POST",
@@ -366,7 +371,8 @@ class MoveVizApp {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Could not load movement table");
       this.data = payload;
-      this.selectedIndividuals = new Set(payload.rows.map(row => row.individual));
+      this.valueColumnIndexes = new Map();
+      this.selectedIndividuals = new Set();
       this.selectedFixes.clear();
       this.segmentAnchorKey = "";
       this.refs.selectionMode.disabled = false;
@@ -375,10 +381,8 @@ class MoveVizApp {
       this.renderIndividuals();
       await this.initializeMap();
       this.renderData();
-      this.fitData();
-      this.refs.empty.classList.add("hidden");
-      const warning = payload.truncated ? ` · showing first ${payload.max_rows.toLocaleString()}` : "";
-      this.setStatus(`${payload.loaded_count.toLocaleString()} fixes · ${this.selectedIndividuals.size.toLocaleString()} individuals${warning}`);
+      this.showSelectionPrompt();
+      this.setStatus(`${payload.row_count.toLocaleString()} fixes · ${payload.individuals.length.toLocaleString()} individuals · select individuals to load`);
     } catch (error) {
       this.setStatus(error.message, true);
     }
@@ -394,8 +398,9 @@ class MoveVizApp {
 
   renderIndividuals() {
     if (!this.data) return;
-    const counts = new Map();
-    for (const row of this.data.rows) counts.set(row.individual, (counts.get(row.individual) || 0) + 1);
+    const counts = new Map(
+      (this.data.individuals || []).map(item => [String(item.individual), Number(item.row_count) || 0]),
+    );
     const query = this.refs.search.value.trim().toLowerCase();
     this.refs.individuals.innerHTML = [...counts.entries()]
       .filter(([individual]) => individual.toLowerCase().includes(query))
@@ -406,47 +411,127 @@ class MoveVizApp {
       checkbox.addEventListener("change", () => {
         if (checkbox.checked) this.selectedIndividuals.add(checkbox.dataset.individual);
         else this.selectedIndividuals.delete(checkbox.dataset.individual);
-        this.renderData();
+        void this.loadVisibleIndividuals();
       });
     }
   }
 
   selectAllIndividuals() {
     if (!this.data) return;
-    this.selectedIndividuals = new Set(this.data.rows.map(row => row.individual));
+    this.selectedIndividuals = new Set((this.data.individuals || []).map(item => String(item.individual)));
     this.renderIndividuals();
-    this.renderData();
+    void this.loadVisibleIndividuals();
   }
 
   selectNoIndividuals() {
+    this.detailController?.abort();
+    this.detailController = null;
+    this.detailRequestId += 1;
     this.selectedIndividuals.clear();
+    this.selectedFixes.clear();
+    this.segmentAnchorKey = "";
+    if (this.data) {
+      this.data.rows = [];
+      this.data.loaded_count = 0;
+      this.data.matching_row_count = 0;
+      this.data.loaded_individuals = [];
+      this.data.truncated = false;
+    }
     this.renderIndividuals();
     this.renderData();
+    this.showSelectionPrompt();
+    if (this.data) {
+      this.setStatus(`${this.data.row_count.toLocaleString()} fixes · select individuals to load`);
+    }
+  }
+
+  showSelectionPrompt() {
+    this.refs.empty.innerHTML = "<div><strong>Select individuals to display</strong>No fixes are loaded into the map until you choose them from the list.</div>";
+    this.refs.empty.classList.remove("hidden");
+  }
+
+  async loadVisibleIndividuals() {
+    if (!this.session || !this.data) return;
+    const individuals = [...this.selectedIndividuals].sort((left, right) => left.localeCompare(right));
+    this.renderIndividuals();
+    if (!individuals.length) {
+      this.selectNoIndividuals();
+      return;
+    }
+    this.detailController?.abort();
+    const controller = new AbortController();
+    this.detailController = controller;
+    const requestId = ++this.detailRequestId;
+    this.selectedFixes.clear();
+    this.segmentAnchorKey = "";
+    this.setStatus(`Loading fixes for ${individuals.length.toLocaleString()} selected individuals…`);
+    try {
+      const response = await fetch(`/api/apps/move-viz/sessions/${this.session.session_id}/fixes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ table: this.data.table, individuals }),
+        signal: controller.signal,
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Could not load the selected individuals");
+      if (requestId !== this.detailRequestId) return;
+      this.data.rows = payload.rows || [];
+      this.data.loaded_count = Number(payload.loaded_count) || 0;
+      this.data.matching_row_count = Number(payload.matching_row_count) || 0;
+      this.data.skipped_count = Number(payload.skipped_count) || 0;
+      this.data.loaded_individuals = payload.loaded_individuals || individuals;
+      this.data.value_columns = payload.value_columns || [];
+      this.valueColumnIndexes = new Map(this.data.value_columns.map((name, index) => [name, index]));
+      this.data.truncated = Boolean(payload.truncated);
+      this.data.max_rows = Number(payload.max_rows) || this.data.max_rows;
+      this.renderData();
+      if (this.data.rows.length) {
+        this.refs.empty.classList.add("hidden");
+        this.fitData();
+      } else {
+        this.showSelectionPrompt();
+      }
+      const limitNote = this.data.truncated
+        ? ` · showing first ${this.data.loaded_count.toLocaleString()} of ${this.data.matching_row_count.toLocaleString()}`
+        : "";
+      const skippedNote = this.data.skipped_count ? ` · skipped ${this.data.skipped_count.toLocaleString()} invalid coordinates` : "";
+      this.setStatus(`${this.data.loaded_count.toLocaleString()} fixes loaded for ${individuals.length.toLocaleString()} individuals${limitNote}${skippedNote}`, this.data.truncated);
+    } catch (error) {
+      if (error.name === "AbortError" || requestId !== this.detailRequestId) return;
+      this.setStatus(error.message, true);
+    } finally {
+      if (this.detailController === controller) this.detailController = null;
+    }
   }
 
   visibleRows() {
     return this.data ? this.data.rows.filter(row => this.selectedIndividuals.has(row.individual)) : [];
   }
 
+  rowValue(row, column) {
+    const index = this.valueColumnIndexes.get(column);
+    return index === undefined ? undefined : row.values[index];
+  }
+
   colorModel(rows) {
     const descriptor = this.data.columns.find(column => column.name === this.colorBy) || { kind: "categorical" };
     if (descriptor.kind === "numeric") {
-      const values = rows.map(row => Number(row.values[this.colorBy])).filter(Number.isFinite).sort((a, b) => a - b);
+      const values = rows.map(row => Number(this.rowValue(row, this.colorBy))).filter(Number.isFinite).sort((a, b) => a - b);
       const minimum = values[0] ?? 0;
       const maximum = values.at(-1) ?? minimum;
       return {
         color: row => {
-          const value = Number(row.values[this.colorBy]);
+          const value = Number(this.rowValue(row, this.colorBy));
           return Number.isFinite(value) ? colorAt(maximum === minimum ? 0.5 : (value - minimum) / (maximum - minimum)) : "#64748b";
         },
         legend: `<strong>${escapeHtml(this.colorBy)}</strong><div class="legend-gradient"></div><div>${escapeHtml(minimum)} <span style="float:right">${escapeHtml(maximum)}</span></div>`,
       };
     }
-    const levels = [...new Set(rows.map(row => String(row.values[this.colorBy] ?? "Missing")))];
+    const levels = [...new Set(rows.map(row => String(this.rowValue(row, this.colorBy) ?? "Missing")))];
     const colors = new Map(levels.map((level, index) => [level, PALETTE[index % PALETTE.length]]));
     const shown = levels.slice(0, 12);
     return {
-      color: row => colors.get(String(row.values[this.colorBy] ?? "Missing")),
+      color: row => colors.get(String(this.rowValue(row, this.colorBy) ?? "Missing")),
       legend: `<strong>${escapeHtml(this.colorBy)}</strong><div class="legend-levels">${shown.map(level => `<span class="legend-level"><i class="legend-swatch" style="background:${colors.get(level)}"></i>${escapeHtml(level)}</span>`).join("")}${levels.length > shown.length ? `<span>+${levels.length - shown.length} more</span>` : ""}</div>`,
     };
   }
@@ -456,8 +541,8 @@ class MoveVizApp {
     const rows = this.visibleRows();
     const colors = this.colorModel(rows);
     const pointFeatures = rows.map(row => {
-      const sourceManual = truthy(row.values["manually-marked-outlier"]);
-      const sourceAlgorithm = truthy(row.values["algorithm-marked-outlier"]);
+      const sourceManual = truthy(this.rowValue(row, "manually-marked-outlier"));
+      const sourceAlgorithm = truthy(this.rowValue(row, "algorithm-marked-outlier"));
       const selected = this.selectedFixes.has(row.key);
       const flagged = this.flags.has(row.key);
       const sourceFlagged = sourceManual || sourceAlgorithm;
@@ -585,8 +670,9 @@ class MoveVizApp {
   renderSelectionDetail() {
     const selected = this.data.rows.filter(row => this.selectedFixes.has(row.key));
     const segmentPending = this.selectionMode === "segment" && Boolean(this.segmentAnchorKey);
-    this.refs.flag.disabled = this.reviewBusy || !selected.length || segmentPending;
-    this.refs.unflag.disabled = this.reviewBusy || !selected.some(row => this.flags.has(row.key));
+    const incompleteIndividualScope = this.selectionMode === "individual" && this.data.truncated;
+    this.refs.flag.disabled = this.reviewBusy || !selected.length || segmentPending || incompleteIndividualScope;
+    this.refs.unflag.disabled = this.reviewBusy || incompleteIndividualScope || !selected.some(row => this.flags.has(row.key));
     this.refs.clearSelection.disabled = this.reviewBusy || !selected.length;
     this.refs.export.disabled = this.reviewBusy || !this.flags.size;
     if (!selected.length) {
@@ -602,14 +688,18 @@ class MoveVizApp {
       this.refs.detail.textContent = `Segment start selected for ${selected[0].individual}. Click a second fix from that individual.`;
       return;
     }
+    if (incompleteIndividualScope) {
+      this.refs.detail.textContent = `The selected scope is capped at ${this.data.max_rows.toLocaleString()} fixes, so an entire-individual flag would be incomplete. Select fewer fixes or raise MOVE_VIZ_MAX_ROWS before using this scope.`;
+      return;
+    }
     const row = selected[0];
     const entries = [
       ["Scope", this.selectionMode === "individual" ? "Entire individual" : this.selectionMode === "segment" ? "Track segment" : "Fix selection"],
       ["Selected", selected.length.toLocaleString()], ["Individual", row.individual], ["Timestamp", row.timestamp ?? ""],
       ["Longitude", row.longitude], ["Latitude", row.latitude], ["Row key", row.key],
     ];
-    if (truthy(row.values["manually-marked-outlier"])) entries.push(["Source flag", "manually-marked-outlier=true"]);
-    if (truthy(row.values["algorithm-marked-outlier"])) entries.push(["Source flag", "algorithm-marked-outlier=true"]);
+    if (truthy(this.rowValue(row, "manually-marked-outlier"))) entries.push(["Source flag", "manually-marked-outlier=true"]);
+    if (truthy(this.rowValue(row, "algorithm-marked-outlier"))) entries.push(["Source flag", "algorithm-marked-outlier=true"]);
     this.refs.detail.innerHTML = `<dl>${entries.map(([name, value]) => `<dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd>`).join("")}</dl>`;
   }
 
@@ -676,6 +766,7 @@ class MoveVizApp {
           operation,
           dataset_id: this.session.dataset_id,
           table: this.data.table,
+          individuals: this.data.loaded_individuals || [...this.selectedIndividuals],
           row_keys: [...this.selectedFixes],
           scope: this.selectionMode,
           comment: this.refs.comment.value.trim(),
