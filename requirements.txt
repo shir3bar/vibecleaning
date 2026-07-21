@@ -2,6 +2,8 @@ fastapi
 uvicorn
 httpx
 pytest
+numpy
 scikit-learn
 shapely
 osmium
+pandas

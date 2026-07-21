@@ -10,11 +10,13 @@ behavior.
 Read these files before changing code:
 
 1. [`AGENTS.md`](../../AGENTS.md) for repository rules.
-2. [`README.md`](README.md) for the current product behavior.
-3. [`docs/STATE_MODEL.md`](../../docs/STATE_MODEL.md) and
+2. [`docs/ENVIRONMENT.md`](../../docs/ENVIRONMENT.md) for installation and
+   verification.
+3. [`README.md`](README.md) for the current product behavior.
+4. [`docs/STATE_MODEL.md`](../../docs/STATE_MODEL.md) and
    [`docs/EXECUTION_CONTRACT.md`](../../docs/EXECUTION_CONTRACT.md) for graph
    persistence rules.
-4. [`routes.py`](routes.py), [`static/app.js`](static/app.js), and
+5. [`routes.py`](routes.py), [`static/app.js`](static/app.js), and
    [`tests/test_move_viz.py`](../../tests/test_move_viz.py) for the actual
    contract.
 
