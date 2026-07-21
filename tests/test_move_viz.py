@@ -260,7 +260,7 @@ def test_move_viz_health_and_bundled_example_bypass_browser_upload(tmp_path):
     opened = client.post("/api/apps/move-viz/sessions/example")
 
     assert health.status_code == 200
-    assert health.json()["protocol"] == 5
+    assert health.json()["protocol"] == 6
     assert health.json()["max_rows"] == 100_000
     assert health.json()["max_review_rows"] == 250_000
     assert health.json()["sample_available"] is True
@@ -467,12 +467,17 @@ def test_move_viz_supports_borderless_fixes_and_compact_scope_selection():
     assert '<option value="segment">Track segment (2 clicks)</option>' in source
     assert '<option value="individual">Entire individual</option>' in source
     assert "selectSegmentEndpoint(row)" in source
-    assert "candidate.individual === row.individual" in source
+    assert "this.rowsByIndividual.get(row.individual)" in source
     assert "track.slice(start, end + 1)" in source
-    assert 'borderColor: selected ? "#7dd3fc"' in source
+    assert '"circle-stroke-color": "#7dd3fc"' in source
     assert 'sourceFlagged ? "#fbbf24" : "rgba(0,0,0,0)"' in source
     assert '"circle-stroke-width": ["get", "borderWidth"]' in source
     assert 'scope: this.selectionMode' in source
+    click_handler = source[source.index("handleMapClick(event)") : source.index("\n  selectSegmentEndpoint(row)")]
+    assert "this.rowByKey.get(key)" in click_handler
+    assert "this.renderReviewSelection()" in click_handler
+    assert "this.renderData()" not in click_handler
+    assert 'id: "move-viz-selected-track"' in source
 
 
 def test_committed_sample_database_matches_raw_demo_shape():

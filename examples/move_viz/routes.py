@@ -33,7 +33,7 @@ DEFAULT_MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 DEFAULT_MAX_ROWS = 100_000
 DEFAULT_MAX_REVIEW_ROWS = 250_000
 NUMERIC_DECLARATIONS = ("INT", "REAL", "FLOA", "DOUB", "NUM", "DEC")
-MOVE_VIZ_PROTOCOL = 5
+MOVE_VIZ_PROTOCOL = 6
 SOURCE_ARTIFACT = "source.sqlite"
 REVIEW_ARTIFACT = "move_viz_review_annotations.json"
 REVIEW_STEP_SCRIPT = Path(__file__).with_name("review_step.py").read_text(encoding="utf-8")

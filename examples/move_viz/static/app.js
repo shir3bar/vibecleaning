@@ -1,5 +1,5 @@
 const PALETTE = ["#60a5fa", "#2dd4bf", "#fde047", "#fb923c", "#f472b6", "#a78bfa", "#34d399", "#f87171"];
-const MOVE_VIZ_PROTOCOL = 5;
+const MOVE_VIZ_PROTOCOL = 6;
 const SQLITE_UPLOAD_TIMEOUT_MS = 120_000;
 const SQLITE_READ_TIMEOUT_MS = 30_000;
 const SERVER_CHECK_TIMEOUT_MS = 5_000;
@@ -72,6 +72,8 @@ class MoveVizApp {
     this.data = null;
     this.selectedIndividuals = new Set();
     this.selectedFixes = new Set();
+    this.rowByKey = new Map();
+    this.rowsByIndividual = new Map();
     this.selectionMode = "fix";
     this.segmentAnchorKey = "";
     this.flags = new Map();
@@ -374,6 +376,7 @@ class MoveVizApp {
       if (!response.ok) throw new Error(payload.error || "Could not load movement table");
       this.data = payload;
       this.valueColumnIndexes = new Map();
+      this.rebuildRowIndexes();
       this.selectedIndividuals = new Set();
       this.selectedFixes.clear();
       this.segmentAnchorKey = "";
@@ -435,6 +438,7 @@ class MoveVizApp {
     this.segmentAnchorKey = "";
     if (this.data) {
       this.data.rows = [];
+      this.rebuildRowIndexes();
       this.data.loaded_count = 0;
       this.data.matching_row_count = 0;
       this.data.loaded_individuals = [];
@@ -514,6 +518,7 @@ class MoveVizApp {
       this.data.has_more = Boolean(payload.has_more);
       this.data.value_columns = payload.value_columns || [];
       this.valueColumnIndexes = new Map(this.data.value_columns.map((name, index) => [name, index]));
+      this.rebuildRowIndexes();
       this.data.truncated = Boolean(payload.truncated);
       this.data.max_rows = Number(payload.max_rows) || this.data.max_rows;
       this.renderData();
@@ -538,7 +543,18 @@ class MoveVizApp {
   }
 
   visibleRows() {
-    return this.data ? this.data.rows.filter(row => this.selectedIndividuals.has(row.individual)) : [];
+    if (!this.data) return [];
+    return [...this.selectedIndividuals].flatMap(individual => this.rowsByIndividual.get(individual) || []);
+  }
+
+  rebuildRowIndexes() {
+    this.rowByKey = new Map();
+    this.rowsByIndividual = new Map();
+    for (const row of this.data?.rows || []) {
+      this.rowByKey.set(row.key, row);
+      if (!this.rowsByIndividual.has(row.individual)) this.rowsByIndividual.set(row.individual, []);
+      this.rowsByIndividual.get(row.individual).push(row);
+    }
   }
 
   rowValue(row, column) {
@@ -576,8 +592,6 @@ class MoveVizApp {
     const pointFeatures = rows.map(row => {
       const sourceManual = truthy(this.rowValue(row, "manually-marked-outlier"));
       const sourceAlgorithm = truthy(this.rowValue(row, "algorithm-marked-outlier"));
-      const selected = this.selectedFixes.has(row.key);
-      const flagged = this.flags.has(row.key);
       const sourceFlagged = sourceManual || sourceAlgorithm;
       return {
         type: "Feature",
@@ -585,9 +599,8 @@ class MoveVizApp {
         properties: {
           key: row.key,
           displayColor: colors.color(row),
-          borderColor: selected ? "#7dd3fc" : flagged ? "#fb7185" : sourceFlagged ? "#fbbf24" : "rgba(0,0,0,0)",
-          borderWidth: selected ? 3 : flagged ? 2.5 : sourceFlagged ? 2 : 0,
-          selected: selected ? 1 : 0,
+          borderColor: sourceFlagged ? "#fbbf24" : "rgba(0,0,0,0)",
+          borderWidth: sourceFlagged ? 2 : 0,
         },
       };
     });
@@ -607,16 +620,105 @@ class MoveVizApp {
       type: "circle",
       paint: {
         "circle-color": ["get", "displayColor"],
-        "circle-radius": ["case", ["==", ["get", "selected"], 1], 7, 4],
+        "circle-radius": 4,
         "circle-opacity": 0.88,
         "circle-stroke-color": ["get", "borderColor"],
         "circle-stroke-width": ["get", "borderWidth"],
       },
       layout: { visibility: this.refs.points.checked ? "visible" : "none" },
     });
+    this.renderReviewFlags();
+    this.renderReviewSelection();
     this.refs.legend.innerHTML = colors.legend;
     this.refs.legend.classList.toggle("hidden", !rows.length);
+  }
+
+  renderReviewSelection() {
+    if (!this.mapReady || !this.data) return;
+    const selectedRows = this.selectionMode === "individual"
+      ? []
+      : [...this.selectedFixes].map(key => this.rowByKey.get(key)).filter(Boolean);
+    const pointFeatures = selectedRows.map(row => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [row.longitude, row.latitude] },
+      properties: { key: row.key },
+    }));
+    this.setGeoJson("move-viz-review-selection", pointFeatures, {
+      type: "circle",
+      paint: {
+        "circle-color": "rgba(0,0,0,0)",
+        "circle-radius": 7,
+        "circle-stroke-color": "#7dd3fc",
+        "circle-stroke-width": 3,
+      },
+      layout: { visibility: pointFeatures.length ? "visible" : "none" },
+    });
+    if (!this.map.getLayer("move-viz-selected-track")) {
+      this.map.addLayer(
+        {
+          id: "move-viz-selected-track",
+          type: "line",
+          source: "move-viz-tracks",
+          paint: { "line-color": "#7dd3fc", "line-opacity": 0.92, "line-width": 3 },
+        },
+        this.map.getLayer("move-viz-points") ? "move-viz-points" : undefined,
+      );
+    }
+    const selectedRow = this.rowByKey.get(this.selectedFixes.values().next().value);
+    const selectedTrack = this.selectionMode === "individual" ? selectedRow?.individual : "";
+    this.map.setFilter(
+      "move-viz-selected-track",
+      selectedTrack
+        ? ["==", ["get", "individual"], selectedTrack]
+        : ["==", ["get", "individual"], "__move_viz_no_selected_track__"],
+    );
     this.renderSelectionDetail();
+  }
+
+  renderReviewFlags() {
+    if (!this.mapReady || !this.data) return;
+    const flaggedIndividuals = new Set();
+    const pointFeatures = [];
+    for (const [key, flag] of this.flags) {
+      const row = this.rowByKey.get(key);
+      if (!row) continue;
+      if (flag?.scope === "individual") {
+        flaggedIndividuals.add(row.individual);
+        continue;
+      }
+      pointFeatures.push({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [row.longitude, row.latitude] },
+        properties: { key },
+      });
+    }
+    this.setGeoJson("move-viz-review-flags", pointFeatures, {
+      type: "circle",
+      paint: {
+        "circle-color": "rgba(0,0,0,0)",
+        "circle-radius": 5.5,
+        "circle-stroke-color": "#fb7185",
+        "circle-stroke-width": 2.5,
+      },
+      layout: { visibility: pointFeatures.length ? "visible" : "none" },
+    });
+    if (!this.map.getLayer("move-viz-flagged-tracks")) {
+      this.map.addLayer(
+        {
+          id: "move-viz-flagged-tracks",
+          type: "line",
+          source: "move-viz-tracks",
+          paint: { "line-color": "#fb7185", "line-opacity": 0.88, "line-width": 2.5 },
+        },
+        this.map.getLayer("move-viz-points") ? "move-viz-points" : undefined,
+      );
+    }
+    this.map.setFilter(
+      "move-viz-flagged-tracks",
+      flaggedIndividuals.size
+        ? ["in", ["get", "individual"], ["literal", [...flaggedIndividuals]]]
+        : ["==", ["get", "individual"], "__move_viz_no_flagged_track__"],
+    );
   }
 
   setGeoJson(id, features, layerDefinition) {
@@ -659,12 +761,10 @@ class MoveVizApp {
   handleMapClick(event) {
     const key = event.features?.[0]?.properties?.key;
     if (!key) return;
-    const row = this.data?.rows.find(candidate => candidate.key === key);
+    const row = this.rowByKey.get(key);
     if (!row) return;
     if (this.selectionMode === "individual") {
-      const individualKeys = this.data.rows
-        .filter(candidate => candidate.individual === row.individual)
-        .map(candidate => candidate.key);
+      const individualKeys = (this.rowsByIndividual.get(row.individual) || []).map(candidate => candidate.key);
       const remove = individualKeys.every(candidateKey => this.selectedFixes.has(candidateKey));
       this.selectedFixes = new Set(remove ? [] : individualKeys);
       this.segmentAnchorKey = "";
@@ -675,17 +775,17 @@ class MoveVizApp {
       if (this.selectedFixes.has(key)) this.selectedFixes.delete(key);
       else this.selectedFixes.add(key);
     }
-    this.renderData();
+    this.renderReviewSelection();
   }
 
   selectSegmentEndpoint(row) {
-    const anchor = this.data.rows.find(candidate => candidate.key === this.segmentAnchorKey);
+    const anchor = this.rowByKey.get(this.segmentAnchorKey);
     if (!anchor || anchor.individual !== row.individual) {
       this.segmentAnchorKey = row.key;
       this.selectedFixes = new Set([row.key]);
       return;
     }
-    const track = this.data.rows.filter(candidate => candidate.individual === row.individual);
+    const track = this.rowsByIndividual.get(row.individual) || [];
     const anchorIndex = track.findIndex(candidate => candidate.key === anchor.key);
     const endpointIndex = track.findIndex(candidate => candidate.key === row.key);
     const start = Math.min(anchorIndex, endpointIndex);
@@ -697,18 +797,28 @@ class MoveVizApp {
   clearFixSelection() {
     this.selectedFixes.clear();
     this.segmentAnchorKey = "";
-    this.renderData();
+    this.renderReviewSelection();
   }
 
   renderSelectionDetail() {
-    const selected = this.data.rows.filter(row => this.selectedFixes.has(row.key));
+    const selectedCount = this.selectedFixes.size;
+    const row = this.rowByKey.get(this.selectedFixes.values().next().value);
+    let selectedHasFlag = false;
+    if (this.flags.size) {
+      for (const key of this.selectedFixes) {
+        if (this.flags.has(key)) {
+          selectedHasFlag = true;
+          break;
+        }
+      }
+    }
     const segmentPending = this.selectionMode === "segment" && Boolean(this.segmentAnchorKey);
     const incompleteIndividualScope = this.selectionMode === "individual" && this.data.truncated;
-    this.refs.flag.disabled = this.reviewBusy || !selected.length || segmentPending || incompleteIndividualScope;
-    this.refs.unflag.disabled = this.reviewBusy || incompleteIndividualScope || !selected.some(row => this.flags.has(row.key));
-    this.refs.clearSelection.disabled = this.reviewBusy || !selected.length;
+    this.refs.flag.disabled = this.reviewBusy || !selectedCount || segmentPending || incompleteIndividualScope;
+    this.refs.unflag.disabled = this.reviewBusy || incompleteIndividualScope || !selectedHasFlag;
+    this.refs.clearSelection.disabled = this.reviewBusy || !selectedCount;
     this.refs.export.disabled = this.reviewBusy || !this.flags.size;
-    if (!selected.length) {
+    if (!selectedCount || !row) {
       const instruction = this.selectionMode === "individual"
         ? "Click any fix to select its entire individual."
         : this.selectionMode === "segment"
@@ -718,17 +828,16 @@ class MoveVizApp {
       return;
     }
     if (segmentPending) {
-      this.refs.detail.textContent = `Segment start selected for ${selected[0].individual}. Click a second fix from that individual.`;
+      this.refs.detail.textContent = `Segment start selected for ${row.individual}. Click a second fix from that individual.`;
       return;
     }
     if (incompleteIndividualScope) {
       this.refs.detail.textContent = `The selected scope is capped at ${this.data.max_rows.toLocaleString()} fixes, so an entire-individual flag would be incomplete. Select fewer fixes or raise MOVE_VIZ_MAX_ROWS before using this scope.`;
       return;
     }
-    const row = selected[0];
     const entries = [
       ["Scope", this.selectionMode === "individual" ? "Entire individual" : this.selectionMode === "segment" ? "Track segment" : "Fix selection"],
-      ["Selected", selected.length.toLocaleString()], ["Individual", row.individual], ["Timestamp", row.timestamp ?? ""],
+      ["Selected", selectedCount.toLocaleString()], ["Individual", row.individual], ["Timestamp", row.timestamp ?? ""],
       ["Longitude", row.longitude], ["Latitude", row.latitude], ["Row key", row.key],
     ];
     if (truthy(this.rowValue(row, "manually-marked-outlier"))) entries.push(["Source flag", "manually-marked-outlier=true"]);
@@ -810,7 +919,8 @@ class MoveVizApp {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Could not save the review graph step");
       this.applyReviewState(payload);
-      this.renderData();
+      this.renderReviewFlags();
+      this.renderReviewSelection();
       const stepId = payload.step_result?.step?.step_id || "saved step";
       this.setStatus(`Review graph updated · ${stepId}`);
     } catch (error) {
@@ -841,7 +951,8 @@ class MoveVizApp {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Could not undo the current review step");
       this.applyReviewState(payload);
-      this.renderData();
+      this.renderReviewFlags();
+      this.renderReviewSelection();
       this.setStatus("Moved to the parent dataset.");
     } catch (error) {
       this.setStatus(error.message, true);
@@ -863,7 +974,8 @@ class MoveVizApp {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Could not load that history stage");
       this.applyReviewState(payload);
-      this.renderData();
+      this.renderReviewFlags();
+      this.renderReviewSelection();
       this.setStatus("Review history stage loaded.");
     } catch (error) {
       this.setStatus(error.message, true);

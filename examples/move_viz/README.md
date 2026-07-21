@@ -13,6 +13,8 @@ It provides:
 - individual filtering and track/point visibility controls
 - overview-first loading: opening a table loads individual counts but no map
   fixes until individuals are explicitly selected
+- lightweight review overlays, so selecting or flagging one individual does
+  not rebuild every loaded point and track
 - explicit manual flagging of fixes, two-click track segments, or entire
   individuals as reproducible Vibecleaning graph steps
 - a compact history control for loading earlier datasets or undoing the current
@@ -50,7 +52,7 @@ examples/move_viz/sample_data/synthetic_demo_cp2.sqlite
 
 You can also click **Load bundled example** to open the same database directly
 from the running server without a browser file upload. The header displays
-`client protocol 5`; if it does not, restart the server and hard-refresh the
+`client protocol 6`; if it does not, restart the server and hard-refresh the
 page.
 
 The example contains the 4,800 rows from
