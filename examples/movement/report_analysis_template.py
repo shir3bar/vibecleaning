@@ -382,6 +382,10 @@ def load_rows_with_context(source_path):
         review = {}
         for name in REVIEW_COLUMNS:
             review[name] = str(raw.get(name, "")).strip()
+        if not review.get("vc_outlier_status"):
+            review["vc_outlier_status"] = str(raw.get("outlier_status", "")).strip()
+        if not review.get("vc_issue_type"):
+            review["vc_issue_type"] = str(raw.get("outlier_issue_type", "")).strip()
         review["issues"] = parse_issue_refs(raw)
         segments = parse_segment_refs(raw)
         valid_records.append(
@@ -403,6 +407,39 @@ def load_rows_with_context(source_path):
             }
         )
     return fieldnames, columns, rows, valid_records
+
+
+def recompute_analytical_movement_context(valid_records):
+    previous_by_group = {}
+    for record in sorted(
+        valid_records,
+        key=lambda item: (item["individual"], item.get("set_name", "train"), item["time_ms"], item["fix_key"]),
+    ):
+        record["time_delta_s"] = None
+        record["step_length_m"] = None
+        record["speed_mps"] = None
+        status = normalize_review_status((record.get("review") or {}).get("vc_outlier_status"))
+        visible = str((record.get("raw") or {}).get("visible", "")).strip().lower()
+        if status == "confirmed" or visible in {"false", "f", "no", "n", "0"}:
+            record["analytically_excluded"] = True
+            continue
+        record["analytically_excluded"] = False
+        group_key = (record["individual"], record.get("set_name", "train"))
+        previous = previous_by_group.get(group_key)
+        if previous and record["time_ms"] > previous["time_ms"]:
+            time_delta_s = (record["time_ms"] - previous["time_ms"]) / 1000.0
+            from math import atan2, cos, radians, sin, sqrt
+            phi1 = radians(previous["lat"])
+            phi2 = radians(record["lat"])
+            delta_phi = radians(record["lat"] - previous["lat"])
+            delta_lambda = radians(record["lon"] - previous["lon"])
+            a = sin(delta_phi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(delta_lambda / 2) ** 2
+            step_length_m = 6371000.0 * 2 * atan2(sqrt(a), sqrt(1 - a))
+            record["time_delta_s"] = time_delta_s
+            record["step_length_m"] = step_length_m
+            record["speed_mps"] = step_length_m / time_delta_s if time_delta_s > 0 else None
+        previous_by_group[group_key] = record
+    return valid_records
 
 
 def selected_contexts(valid_records, selected_fix_keys=None, selected_issue_ids=None):
@@ -1377,8 +1414,7 @@ def build_individual_profile_sections(valid_records, fieldnames, columns, select
             item["intervals_s"].append(float(record["time_delta_s"]))
         if record["speed_mps"] is not None:
             item["speed_values_mps"].append(float(record["speed_mps"]))
-            if normalize_review_status(record["review"].get("vc_outlier_status")) != "suspected":
-                item["speed_values_excluding_suspected_mps"].append(float(record["speed_mps"]))
+            item["speed_values_excluding_suspected_mps"].append(float(record["speed_mps"]))
         if normalize_review_status(record["review"].get("vc_outlier_status")):
             item["reviewed_records"].append(record)
         if record["time_ms"] < item["start_ms"]:
@@ -1491,7 +1527,7 @@ def build_individual_profile_markdown_section(section, snapshots_by_key):
                 "### Issue Summary",
                 "",
                 f"- Flagged fixes: {section['reviewed_fix_count']}",
-                f"- Median speed excluding suspected fixes: {section.get('median_speed_excluding_suspected_text', 'n/a')}",
+                f"- Median speed excluding confirmed outliers: {section.get('median_speed_excluding_suspected_text', 'n/a')}",
             ]
         )
         for line in section["issue_summary_lines"]:
@@ -1543,7 +1579,7 @@ def build_individual_profile_html_section(section, snapshots_by_key):
             "<h3>Issue Summary</h3>"
             '<ul class="meta">'
             f"<li><strong>Flagged fixes:</strong> {section['reviewed_fix_count']}</li>"
-            f"<li><strong>Median speed excluding suspected fixes:</strong> {html_escape(section.get('median_speed_excluding_suspected_text', 'n/a'))}</li>"
+            f"<li><strong>Median speed excluding confirmed outliers:</strong> {html_escape(section.get('median_speed_excluding_suspected_text', 'n/a'))}</li>"
             "</ul>"
             f'<ul class="evidence">{items}</ul>'
         )
@@ -1886,6 +1922,7 @@ def main():
                         load_review_annotations(Path(sidecar["path"])),
                         source_artifact=target_artifact,
                     )
+                recompute_analytical_movement_context(valid_records)
                 matched_records = selected_contexts(
                     valid_records,
                     selected_fix_keys=selected_fix_keys,
@@ -2025,6 +2062,7 @@ def main():
                 load_review_annotations(Path(sidecar["path"])),
                 source_artifact=target_artifact,
             )
+        recompute_analytical_movement_context(valid_records)
         sections = build_individual_profile_sections(
             valid_records,
             fieldnames,

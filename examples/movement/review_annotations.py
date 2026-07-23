@@ -59,6 +59,8 @@ def normalize_annotation(raw: dict) -> dict:
     return {
         "annotation_id": str(raw.get("annotation_id") or "").strip(),
         "step_id": str(raw.get("step_id") or "").strip(),
+        "parent_annotation_id": str(raw.get("parent_annotation_id") or "").strip(),
+        "annotation_kind": str(raw.get("annotation_kind") or "issue").strip().lower(),
         "source_artifact": str(raw.get("source_artifact") or "").strip(),
         "source_dataset_id": str(raw.get("source_dataset_id") or "").strip(),
         "status": status,
@@ -121,6 +123,27 @@ def annotation_applies(annotation: dict, *, fix_key: str, individual: str, set_n
     return fix_key in set(scope.get("fix_keys") or [])
 
 
+def confirmed_exclusion_scopes(
+    annotations: list[dict],
+    *,
+    source_artifact: str,
+) -> tuple[set[str], set[tuple[str, str]]]:
+    fix_keys: set[str] = set()
+    individual_tracks: set[tuple[str, str]] = set()
+    for annotation in annotations:
+        if annotation.get("status") != "confirmed":
+            continue
+        if annotation.get("source_artifact") and annotation["source_artifact"] != source_artifact:
+            continue
+        scope = annotation.get("scope") or {}
+        fix_keys.update(str(item) for item in scope.get("fix_keys") or [] if str(item))
+        if str(scope.get("kind") or "") == "individual":
+            individual = str(scope.get("individual") or "").strip()
+            if individual:
+                individual_tracks.add((individual, str(scope.get("set_name") or "").strip()))
+    return fix_keys, individual_tracks
+
+
 def apply_review_annotations(summary: dict, annotations: list[dict], *, source_artifact: str) -> dict:
     relevant = [
         item
@@ -156,6 +179,8 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
                     "step_id": item["step_id"],
                     "source_analysis_id": item["source_analysis_id"],
                     "scope_kind": item["scope"].get("kind"),
+                    "parent_annotation_id": item["parent_annotation_id"],
+                    "annotation_kind": item["annotation_kind"],
                 }
             )
         latest = matches[-1]
@@ -271,6 +296,8 @@ def apply_annotations_to_report_records(
                     "reviewed_at": item["created_at"],
                     "origin": item["origin"],
                     "step_id": item["step_id"],
+                    "parent_annotation_id": item["parent_annotation_id"],
+                    "annotation_kind": item["annotation_kind"],
                 }
             )
         latest = matches[-1]
@@ -407,7 +434,7 @@ def export_reviewed_csv(
                 if step_id and step_id not in flag_step_ids:
                     flag_step_ids.append(step_id)
             output_row = {name: raw.get(name, "") for name in output_fields}
-            output_row["visible"] = "true" if _original_visible(raw.get("visible")) and not flagged else "false"
+            output_row["visible"] = "true" if _original_visible(raw.get("visible")) and not confirmed else "false"
             output_row["manually-marked-outlier"] = "true" if manual else "false"
             output_row["algorithm-marked-outlier"] = "true" if algorithm else "false"
             output_row["outlier_status"] = status

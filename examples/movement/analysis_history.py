@@ -17,6 +17,7 @@ from .bursts import (
     DEFAULT_BURST_GAP_QUANTILE,
     DEFAULT_BURST_GAP_SECONDS,
 )
+from .review_annotations import confirmed_exclusion_scopes, load_review_annotations
 
 
 RESTORABLE_ANALYSIS_OUTPUTS = {
@@ -39,6 +40,27 @@ def _artifact_signature(artifact: dict) -> str:
 def _source_signature(project_dir: Path, dataset_id: str, logical_name: str) -> str:
     dataset = load_dataset(project_dir, dataset_id)
     return _artifact_signature(get_dataset_artifact_entry(dataset, logical_name))
+
+
+def _review_exclusion_signature(project_dir: Path, dataset_id: str, logical_name: str) -> str:
+    dataset = load_dataset(project_dir, dataset_id)
+    try:
+        sidecar = get_dataset_artifact_entry(dataset, "movement_review_annotations.json")
+    except ProjectStateError:
+        annotations = []
+    else:
+        sidecar_path = project_dir / str(sidecar.get("path") or "")
+        annotations = load_review_annotations(sidecar_path)
+    fix_keys, individual_tracks = confirmed_exclusion_scopes(
+        annotations,
+        source_artifact=logical_name,
+    )
+    payload = {
+        "fix_keys": sorted(fix_keys),
+        "individual_tracks": sorted([list(item) for item in individual_tracks]),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _float_matches(left: object, right: object) -> bool:
@@ -123,6 +145,11 @@ def build_movement_analysis_history(
     feature_set: str = "movement_only",
 ) -> dict:
     current_signature = _source_signature(project_dir, dataset_id, logical_name)
+    current_exclusion_signature = _review_exclusion_signature(
+        project_dir,
+        dataset_id,
+        logical_name,
+    )
     items = []
     analyses = sorted(
         list_history(project_dir)["analyses"],
@@ -137,6 +164,7 @@ def build_movement_analysis_history(
         target_artifact = str(parameters.get("target_artifact") or "").strip()
         reasons = []
         source_matches = False
+        exclusion_matches = False
         if target_artifact != logical_name:
             reasons.append("target artifact differs")
         else:
@@ -147,10 +175,19 @@ def build_movement_analysis_history(
                     target_artifact,
                 )
                 source_matches = stored_signature == current_signature
+                stored_exclusion_signature = _review_exclusion_signature(
+                    project_dir,
+                    str(analysis.get("dataset_id") or ""),
+                    target_artifact,
+                )
+                exclusion_matches = stored_exclusion_signature == current_exclusion_signature
             except (KeyError, ProjectStateError):
                 source_matches = False
+                exclusion_matches = False
             if not source_matches:
                 reasons.append("source artifact differs")
+            if not exclusion_matches:
+                reasons.append("confirmed exclusion state differs")
 
         parameters_match, parameter_reasons = _analysis_parameters_match(
             action,
@@ -180,7 +217,7 @@ def build_movement_analysis_history(
                 "summary": summary,
                 "realized_output_artifacts": realized_outputs,
                 "expected_output_artifact": expected_output,
-                "compatible": source_matches and parameters_match and not reasons,
+                "compatible": source_matches and exclusion_matches and parameters_match and not reasons,
                 "compatibility_reasons": reasons,
             }
         )
@@ -194,6 +231,7 @@ def build_movement_analysis_history(
         "dataset_id": dataset_id,
         "logical_name": logical_name,
         "source_signature": current_signature,
+        "confirmed_exclusion_signature": current_exclusion_signature,
         "items": items,
         "latest_compatible_by_action": latest_compatible,
     }

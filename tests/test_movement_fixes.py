@@ -33,6 +33,7 @@ from examples.movement.report_analysis_template import (
     format_temporal_resolution,
     load_rows_with_context,
     normalize_report_records,
+    recompute_analytical_movement_context,
 )
 from examples.movement.review_annotations import export_reviewed_csv
 from examples.movement.bursts import build_auto_bursts
@@ -327,6 +328,51 @@ fix_b,beta,2024-01-01T00:00:00Z,-71.0,41.0,train
         not any(key.endswith("anomaly_score") for key in fix.get("attributes", {}))
         for fix in fixes
     )
+
+
+def test_confirmed_fix_is_excluded_without_forcing_a_new_burst(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,visible,outlier_status
+fix_a,alpha,2024-01-01T00:00:00Z,-70.0,40.0,true,
+fix_b,alpha,2024-01-01T01:00:00Z,-75.0,45.0,false,confirmed
+fix_c,alpha,2024-01-01T02:00:00Z,-70.2,40.2,true,
+""",
+        encoding="utf-8",
+    )
+
+    same_burst = build_movement_fixes(
+        csv_path,
+        burst_gap_mode="manual",
+        burst_gap_seconds=10_800,
+    )
+    by_key = {fix["fix_key"]: fix for fix in same_burst["fixes"]}
+    excluded = by_key["id:fix_b#row:2"]
+    after_exclusion = by_key["id:fix_c#row:3"]
+
+    assert excluded["analytically_excluded"] is True
+    assert "step_length_m" not in excluded.get("attributes", {})
+    assert after_exclusion["attributes"]["time_delta_s"] == 7200.0
+    assert isclose(
+        after_exclusion["attributes"]["speed_mps"],
+        after_exclusion["attributes"]["step_length_m"] / 7200.0,
+        rel_tol=1e-12,
+    )
+    assert len(same_burst["auto_bursts"]) == 1
+    assert same_burst["auto_bursts"][0]["fix_keys"] == [
+        "id:fix_a#row:1",
+        "id:fix_c#row:3",
+    ]
+
+    split_burst = build_movement_fixes(
+        csv_path,
+        burst_gap_mode="manual",
+        burst_gap_seconds=3600,
+    )
+    assert [burst["fix_keys"] for burst in split_burst["auto_bursts"]] == [
+        ["id:fix_a#row:1"],
+        ["id:fix_c#row:3"],
+    ]
 
 
 def test_build_movement_overview_auto_bursts_use_sorted_track_order(tmp_path):
@@ -634,6 +680,28 @@ def test_movement_fixes_route_supports_legacy_individual_query(tmp_path):
     assert {fix["individual"] for fix in payload["fixes"]} == {"beta"}
 
 
+def test_movement_fixes_route_loads_only_requested_review_status(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+
+    response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/fixes",
+        params={"logical_name": "movement.csv", "review_status": "suspected"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["matching_fix_count"] == 2
+    assert payload["returned_fix_count"] == 2
+    assert payload["truncated"] is False
+    assert payload["segments"] == []
+    assert payload["auto_bursts"] == []
+    assert {
+        fix["fix_key"]
+        for fix in payload["fixes"]
+    } == {"id:fix_a_1#row:1", "id:fix_b_2#row:4"}
+    assert all(fix["review"]["status"] == "suspected" for fix in payload["fixes"])
+
+
 def test_movement_overview_route_accepts_quantile_burst_gap_params(tmp_path):
     client, dataset_id = create_movement_test_client(tmp_path)
 
@@ -653,7 +721,7 @@ def test_movement_overview_route_accepts_quantile_burst_gap_params(tmp_path):
     assert payload["burst_gap_quantile"] == 1.0
     assert payload["burst_gap_fallback_seconds"] == 99.0
     assert payload["burst_gap_seconds"] == 3600.0
-    assert payload["burst_gap_gap_count"] == 2
+    assert payload["burst_gap_gap_count"] == 1
 
 
 def create_saved_movement_analysis(
@@ -797,6 +865,63 @@ Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text("{}\\n")
     assert item["compatible"] is True
 
 
+def test_movement_analysis_history_invalidates_saved_run_after_confirmation(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+    saved = create_saved_movement_analysis(tmp_path, dataset_id=dataset_id)
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+    step = create_step(
+        study_dir,
+        {
+            "user": "reviewer",
+            "title": "Add confirmed review exclusion",
+            "kind": "python",
+            "script": '''import json
+import os
+from pathlib import Path
+
+spec = json.loads(Path(os.environ["VIBECLEANING_SPEC_PATH"]).read_text())
+payload = {
+    "schema_version": 2,
+    "annotations": [{
+        "annotation_id": "confirmation_1",
+        "parent_annotation_id": "issue_1",
+        "annotation_kind": "confirmation",
+        "source_artifact": "movement.csv",
+        "status": "confirmed",
+        "origin": "manual",
+        "issue_type": "drift",
+        "scope": {"kind": "confirmation", "fix_keys": ["id:fix_a_1#row:1"]},
+    }],
+}
+Path(spec["output_artifacts"][0]["path"]).write_text(json.dumps(payload))
+Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text("{}\\n")
+''',
+            "parent_dataset_id": dataset_id,
+            "input_artifacts": [],
+            "output_artifacts": ["movement_review_annotations.json"],
+            "parameters": {"app": "movement", "action": "confirm_issues"},
+        },
+    )
+
+    response = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/analyses",
+        params={
+            "dataset_id": step["dataset"]["dataset_id"],
+            "logical_name": "movement.csv",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": "60",
+            "burst_gap_quantile": "0.75",
+            "feature_set": "movement_only",
+        },
+    )
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["analysis_id"] == saved["analysis"]["analysis_id"]
+    assert item["compatible"] is False
+    assert item["compatibility_reasons"] == ["confirmed exclusion state differs"]
+
+
 def test_movement_frontend_restores_saved_burst_analyses():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
@@ -814,6 +939,22 @@ def test_movement_frontend_restores_saved_burst_analyses():
     assert "--movement-individual-list-height" in source
     assert 'data-role="individual-resize"' in source
     assert ".movement-side-sheet.ranking" in source
+    assert 'data-role="confirm-modal"' in source
+    assert "/actions/confirm-issues" in source
+    assert 'id: "movement-confirmed-exclusions"' in source
+    assert "getUnresolvedSuspectedIssueGroups" in source
+
+
+def test_movement_frontend_loads_suspicious_fixes_on_demand():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert 'data-role="select-suspicious">Load suspicious fixes</button>' in source
+    assert "async loadSuspiciousFixes()" in source
+    assert 'reviewStatus: "suspected"' in source
+    assert "this.data.suspiciousFixes = suspiciousFixes" in source
+    assert "this.data.selectedIndividuals = new Set(suspiciousFixes.map" in source
+    assert "this.zoomToPath(suspiciousFixes.map" in source
+    assert "...(data.suspiciousFixes || [])" in source
 
 
 def test_export_reviewed_csv_combines_legacy_and_sidecar_annotations(tmp_path):
@@ -862,7 +1003,7 @@ fix_3,gamma,2024-01-01T02:00:00Z,-72,42,train,false,,,,,false,true,
     assert not any(name.startswith("vc_") for name in fieldnames)
     assert "manually_marked_outliers" not in fieldnames
     assert "algorithm_marked_outliers" not in fieldnames
-    assert rows[0]["visible"] == "false"
+    assert rows[0]["visible"] == "true"
     assert rows[0]["manually-marked-outlier"] == "true"
     assert rows[0]["algorithm-marked-outlier"] == "false"
     assert rows[0]["outlier_issue_type"] == "drift"
@@ -933,7 +1074,7 @@ def test_movement_export_reviewed_csv_route_creates_downloadable_analysis(tmp_pa
     assert download.status_code == 200
     rows = list(csv.DictReader(io.StringIO(download.text)))
     assert len(rows) == 5
-    assert rows[0]["visible"] == "false"
+    assert rows[0]["visible"] == "true"
     assert rows[0]["manually-marked-outlier"] == "false"
     assert rows[0]["algorithm-marked-outlier"] == "true"
     assert not any(name.startswith("vc_") for name in rows[0])
@@ -994,6 +1135,23 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     assert reviewed[0]["review"]["issues"][0]["origin"] == "algorithm"
     assert reviewed[0]["review"]["issues"][0]["issue_note"] == "Ranked as an unusual burst"
 
+    suspicious_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{next_dataset_id}/fixes",
+        params={
+            "logical_name": "movement.csv",
+            "review_status": "suspected",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": "3600",
+        },
+    )
+    assert suspicious_response.status_code == 200
+    suspicious_payload = suspicious_response.json()
+    assert suspicious_payload["matching_fix_count"] == 2
+    assert [
+        fix["fix_key"]
+        for fix in suspicious_payload["fixes"]
+    ] == ["id:fix_a_1#row:1", "id:fix_a_2#row:2"]
+
     export_response = client.post(
         "/api/apps/movement/family/movement_clean/study/test_study/actions/export-reviewed-csv",
         json={
@@ -1017,6 +1175,124 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     ]
     assert all("Ranked as an unusual burst" not in row["outlier_comments"] for row in exported)
     assert all("vc_outlier_status" not in row for row in exported)
+
+
+def test_annotate_scope_rejects_direct_confirmation(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "fix", "fix_keys": ["id:fix_a_1#row:1"]},
+            "status": "confirmed",
+            "origin": "manual",
+            "issue_type": "drift",
+            "comment": "Direct confirmation should not be allowed",
+            "owner_question": "Please verify",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "confirm-issues" in response.json()["error"]
+
+
+def test_confirm_issues_updates_derived_csv_and_links_original_suspicion(tmp_path):
+    clean_csv = """eventid,individual,timestamp,longitude,latitude,set
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
+"""
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=clean_csv)
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+    source_before = (study_dir / "movement.csv").read_text(encoding="utf-8")
+
+    suspected_response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "fix", "fix_keys": ["id:fix_a_2#row:2"]},
+            "status": "suspected",
+            "origin": "threshold",
+            "issue_type": "speed threshold",
+            "comment": "Above selected speed threshold",
+            "owner_question": "Is this movement plausible?",
+            "user": "reviewer",
+        },
+    )
+    assert suspected_response.status_code == 200
+    suspected_payload = suspected_response.json()
+    suspected_dataset_id = suspected_payload["dataset"]["dataset_id"]
+    suspected_annotation_id = suspected_payload["step"]["step_id"]
+
+    confirm_response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/confirm-issues",
+        json={
+            "dataset_id": suspected_dataset_id,
+            "logical_name": "movement.csv",
+            "confirmations": [
+                {
+                    "parent_annotation_id": suspected_annotation_id,
+                    "fix_keys": ["id:fix_a_2#row:2"],
+                }
+            ],
+            "note": "Confirmed during track review",
+            "user": "confirmer",
+        },
+    )
+
+    assert confirm_response.status_code == 200
+    confirmed_payload = confirm_response.json()
+    confirmed_dataset_id = confirmed_payload["dataset"]["dataset_id"]
+    assert confirmed_payload["step"]["output_artifacts"] == [
+        "movement.csv",
+        "movement_review_annotations.json",
+    ]
+    assert confirmed_payload["step"]["summary"]["confirmed_fix_count"] == 1
+    assert confirmed_payload["step"]["summary"]["algorithm_marked_fix_count"] == 1
+    assert (study_dir / "movement.csv").read_text(encoding="utf-8") == source_before
+
+    _, confirmed_csv_path = get_dataset_artifact(
+        study_dir,
+        confirmed_dataset_id,
+        "movement.csv",
+    )
+    rows = list(csv.DictReader(confirmed_csv_path.open(encoding="utf-8")))
+    assert rows[0]["visible"] == "true"
+    assert rows[0]["algorithm-marked-outlier"] == "false"
+    assert rows[1]["visible"] == "false"
+    assert rows[1]["manually-marked-outlier"] == "false"
+    assert rows[1]["algorithm-marked-outlier"] == "true"
+    assert rows[1]["outlier_status"] == "confirmed"
+    assert rows[1]["outlier_issue_type"] == "speed threshold"
+    assert suspected_annotation_id in rows[1]["outlier_flag_step_ids"]
+    assert confirmed_payload["step"]["step_id"] in rows[1]["outlier_flag_step_ids"]
+    assert not any(name.startswith("vc_") for name in rows[1])
+
+    _, sidecar_path = get_dataset_artifact(
+        study_dir,
+        confirmed_dataset_id,
+        "movement_review_annotations.json",
+    )
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    confirmation = sidecar["annotations"][-1]
+    assert sidecar["schema_version"] == 2
+    assert confirmation["annotation_kind"] == "confirmation"
+    assert confirmation["parent_annotation_id"] == suspected_annotation_id
+    assert confirmation["origin"] == "threshold"
+    assert confirmation["scope"]["fix_keys"] == ["id:fix_a_2#row:2"]
+
+    confirmed_fixes_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{confirmed_dataset_id}/fixes",
+        params={"logical_name": "movement.csv", "review_status": "confirmed"},
+    )
+    assert confirmed_fixes_response.status_code == 200
+    confirmed_fixes = confirmed_fixes_response.json()["fixes"]
+    assert [fix["fix_key"] for fix in confirmed_fixes] == ["id:fix_a_2#row:2"]
+    assert confirmed_fixes[0]["review"]["issues"][-1]["parent_annotation_id"] == suspected_annotation_id
 
 
 def test_movement_fixes_route_rejects_invalid_repeated_individual(tmp_path):
@@ -1391,6 +1667,26 @@ def test_build_individual_profile_sections_extracts_metadata_and_bursts(tmp_path
     assert "°W" in svg or "°E" in svg
 
 
+def test_report_features_recompute_across_confirmed_fix(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        "eventid,individual,timestamp,longitude,latitude,outlier_status,visible\n"
+        "fix_a,alpha,2024-01-01T00:00:00Z,-70.0,40.0,,true\n"
+        "fix_b,alpha,2024-01-01T01:00:00Z,-70.1,40.1,confirmed,false\n"
+        "fix_c,alpha,2024-01-01T02:00:00Z,-70.2,40.2,,true\n",
+        encoding="utf-8",
+    )
+
+    _, _, _, records = load_rows_with_context(csv_path)
+    recompute_analytical_movement_context(records)
+
+    assert records[1]["analytically_excluded"] is True
+    assert records[1]["speed_mps"] is None
+    assert records[2]["analytically_excluded"] is False
+    assert records[2]["time_delta_s"] == 7200.0
+    assert records[2]["step_length_m"] is not None
+
+
 def test_build_individual_profile_html_report_omits_optional_fields_when_missing():
     sections = [
         {
@@ -1500,7 +1796,7 @@ def test_build_individual_profile_html_report_collapses_reviewed_fix_summary():
     html = build_individual_profile_html_report("movement.csv", "tester", sections)
 
     assert "<strong>Flagged fixes:</strong> 2" in html
-    assert "<strong>Median speed excluding suspected fixes:</strong> 3.80 m/s" in html
+    assert "<strong>Median speed excluding confirmed outliers:</strong> 3.80 m/s" in html
     assert "Reviewed fixes" not in html
     assert "Status counts" not in html
 

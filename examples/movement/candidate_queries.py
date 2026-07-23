@@ -110,6 +110,8 @@ def run_candidate_query(
     logical_name: str = "",
     preview_limit: int | None = None,
     execution_scope: object = None,
+    confirmed_fix_keys: set[str] | list[str] | tuple[str, ...] | None = None,
+    confirmed_individual_tracks: set[tuple[str, str]] | list[tuple[str, str]] | tuple[tuple[str, str], ...] | None = None,
 ) -> dict:
     snapshot = dict(query_definition or {})
     evaluator = dict(snapshot.get("evaluator") or {})
@@ -123,6 +125,8 @@ def run_candidate_query(
             logical_name=logical_name,
             preview_limit=preview_limit,
             execution_scope=execution_scope,
+            confirmed_fix_keys=confirmed_fix_keys,
+            confirmed_individual_tracks=confirmed_individual_tracks,
         )
     if evaluator_type == "fix_string_comparison":
         return run_fix_string_candidate_query(
@@ -133,6 +137,8 @@ def run_candidate_query(
             logical_name=logical_name,
             preview_limit=preview_limit,
             execution_scope=execution_scope,
+            confirmed_fix_keys=confirmed_fix_keys,
+            confirmed_individual_tracks=confirmed_individual_tracks,
         )
     if evaluator_type == "fix_osm_proximity":
         return run_fix_osm_proximity_candidate_query(
@@ -143,6 +149,8 @@ def run_candidate_query(
             logical_name=logical_name,
             preview_limit=preview_limit,
             execution_scope=execution_scope,
+            confirmed_fix_keys=confirmed_fix_keys,
+            confirmed_individual_tracks=confirmed_individual_tracks,
         )
     raise CandidateQueryError("Unsupported candidate query evaluator")
 
@@ -156,6 +164,8 @@ def run_fix_numeric_candidate_query(
     logical_name: str = "",
     preview_limit: int | None = None,
     execution_scope: object = None,
+    confirmed_fix_keys: set[str] | list[str] | tuple[str, ...] | None = None,
+    confirmed_individual_tracks: set[tuple[str, str]] | list[tuple[str, str]] | tuple[tuple[str, str], ...] | None = None,
 ) -> dict:
     parameters = dict(parameters or {})
     snapshot = dict(query_definition or {})
@@ -220,11 +230,19 @@ def run_fix_numeric_candidate_query(
             op=op,
             expected_value=threshold,
             value_kind="numeric",
+            confirmed_fix_keys=confirmed_fix_keys,
+            confirmed_individual_tracks=confirmed_individual_tracks,
         )
 
     preview_limit_value = _normalize_preview_limit(preview_limit)
-    payload = build_movement_fixes(artifact_path, limit=None)
+    payload = build_movement_fixes(
+        artifact_path,
+        limit=None,
+        confirmed_fix_keys=confirmed_fix_keys,
+        confirmed_individual_tracks=confirmed_individual_tracks,
+    )
     fixes = payload.get("fixes") if isinstance(payload.get("fixes"), list) else []
+    fixes = [fix for fix in fixes if not fix.get("analytically_excluded")]
     scope_context = _resolve_execution_groups(fixes, execution_scope)
     required_fields = _required_fields(snapshot, field)
     evaluation_digest = run_digest(
@@ -329,6 +347,8 @@ def run_fix_string_candidate_query(
     logical_name: str = "",
     preview_limit: int | None = None,
     execution_scope: object = None,
+    confirmed_fix_keys: set[str] | list[str] | tuple[str, ...] | None = None,
+    confirmed_individual_tracks: set[tuple[str, str]] | list[tuple[str, str]] | tuple[tuple[str, str], ...] | None = None,
 ) -> dict:
     parameters = dict(parameters or {})
     snapshot = dict(query_definition or {})
@@ -393,11 +413,19 @@ def run_fix_string_candidate_query(
             op=op,
             expected_value=expected_value,
             value_kind="string",
+            confirmed_fix_keys=confirmed_fix_keys,
+            confirmed_individual_tracks=confirmed_individual_tracks,
         )
 
     preview_limit_value = _normalize_preview_limit(preview_limit)
-    payload = build_movement_fixes(artifact_path, limit=None)
+    payload = build_movement_fixes(
+        artifact_path,
+        limit=None,
+        confirmed_fix_keys=confirmed_fix_keys,
+        confirmed_individual_tracks=confirmed_individual_tracks,
+    )
     fixes = payload.get("fixes") if isinstance(payload.get("fixes"), list) else []
+    fixes = [fix for fix in fixes if not fix.get("analytically_excluded")]
     scope_context = _resolve_execution_groups(fixes, execution_scope)
     required_fields = _required_fields(snapshot, field)
     evaluation_digest = run_digest(
@@ -505,6 +533,8 @@ def _run_raw_csv_attribute_candidate_query(
     op: str,
     expected_value: object,
     value_kind: str,
+    confirmed_fix_keys: set[str] | list[str] | tuple[str, ...] | None,
+    confirmed_individual_tracks: set[tuple[str, str]] | list[tuple[str, str]] | tuple[tuple[str, str], ...] | None,
 ) -> dict:
     snapshot = dict(query_definition or {})
     digest = query_digest(snapshot)
@@ -579,9 +609,25 @@ def _run_raw_csv_attribute_candidate_query(
         track_fixes = []
         matched_fix_keys = set()
         evidence_by_fix_key = {}
+        confirmed_fix_key_set = {str(item) for item in (confirmed_fix_keys or [])}
+        confirmed_individual_track_set = {
+            (str(item[0]), str(item[1]))
+            for item in (confirmed_individual_tracks or [])
+            if isinstance(item, (list, tuple)) and len(item) == 2
+        }
         for row_index, raw in enumerate(reader, start=1):
             row = _raw_csv_candidate_row(raw, columns, row_index)
             if row is None:
+                continue
+            visible_value = str(raw.get("visible") or "").strip().lower()
+            status_value = str(raw.get("outlier_status") or raw.get("vc_outlier_status") or "").strip().lower()
+            if (
+                visible_value in {"false", "f", "no", "n", "0"}
+                or status_value == "confirmed"
+                or row["fix_key"] in confirmed_fix_key_set
+                or (row["individual"], "") in confirmed_individual_track_set
+                or (row["individual"], row.get("set_name", "train")) in confirmed_individual_track_set
+            ):
                 continue
             group = _raw_csv_group_for_row(row, scope_context, groups_by_scope_id)
             if group is None:
@@ -679,6 +725,8 @@ def run_fix_osm_proximity_candidate_query(
     logical_name: str = "",
     preview_limit: int | None = None,
     execution_scope: object = None,
+    confirmed_fix_keys: set[str] | list[str] | tuple[str, ...] | None = None,
+    confirmed_individual_tracks: set[tuple[str, str]] | list[tuple[str, str]] | tuple[tuple[str, str], ...] | None = None,
 ) -> dict:
     parameters = dict(parameters or {})
     snapshot = dict(query_definition or {})
@@ -735,8 +783,14 @@ def run_fix_osm_proximity_candidate_query(
         )
 
     preview_limit_value = _normalize_preview_limit(preview_limit)
-    payload = build_movement_fixes(artifact_path, limit=None)
+    payload = build_movement_fixes(
+        artifact_path,
+        limit=None,
+        confirmed_fix_keys=confirmed_fix_keys,
+        confirmed_individual_tracks=confirmed_individual_tracks,
+    )
     fixes = payload.get("fixes") if isinstance(payload.get("fixes"), list) else []
+    fixes = [fix for fix in fixes if not fix.get("analytically_excluded")]
     scope_context = _resolve_execution_groups(fixes, execution_scope)
     resolved_fields = ["lat", "lon"]
     evaluation_digest = run_digest(

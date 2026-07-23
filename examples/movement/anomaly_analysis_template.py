@@ -35,6 +35,7 @@ def main():
 
     from examples.movement.anomaly_ranking import rank_individuals, score_bursts
     from examples.movement.burst_features import build_burst_feature_rows
+    from examples.movement.review_annotations import confirmed_exclusion_scopes, load_review_annotations
     from examples.movement.summary import build_movement_fixes
 
     target_artifact = str(params.get("target_artifact") or "").strip()
@@ -47,15 +48,26 @@ def main():
         raise SystemExit("Burst anomaly ranking output artifact was not declared")
     if source is None:
         raise SystemExit("Target movement artifact was not provided as an input")
+    sidecar = _declared_artifact(spec, "input_artifacts", "movement_review_annotations.json")
+    annotations = load_review_annotations(Path(sidecar["path"]) if sidecar else None)
+    confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
+        annotations,
+        source_artifact=target_artifact,
+    )
 
     movement = build_movement_fixes(
         Path(source["path"]),
         limit=None,
+        confirmed_fix_keys=confirmed_fix_keys,
+        confirmed_individual_tracks=confirmed_individual_tracks,
         burst_gap_mode=params.get("burst_gap_mode"),
         burst_gap_seconds=params.get("burst_gap_seconds"),
         burst_gap_quantile=params.get("burst_gap_quantile"),
     )
-    feature_rows = build_burst_feature_rows(movement["fixes"], movement["auto_bursts"])
+    eligible_fixes = [
+        fix for fix in movement["fixes"] if not fix.get("analytically_excluded")
+    ]
+    feature_rows = build_burst_feature_rows(eligible_fixes, movement["auto_bursts"])
     feature_set = str(params.get("feature_set") or "movement_only").strip()
     scoring = score_bursts(feature_rows, config={"feature_set": feature_set})
     individual_ranking = rank_individuals(scoring["scored_bursts"])
@@ -73,6 +85,7 @@ def main():
             "content_type": source.get("content_type"),
         },
         "burst_gap": movement["burst_gap"],
+        "confirmed_exclusion_count": len(confirmed_fix_keys),
         "burst_feature_count": len(feature_rows),
         "model_fit": {
             key: value for key, value in scoring.items() if key != "scored_bursts"

@@ -507,12 +507,17 @@ def _build_color_fields(fieldnames: list[str], columns: dict[str, str | None], f
 
 def _compact_review(raw: dict) -> dict:
     issues = _review_issues(raw)
-    status = _normalize_review_status(raw.get("vc_outlier_status"))
+    status = (
+        _normalize_review_status(raw.get("vc_outlier_status"))
+        or _normalize_review_status(raw.get("outlier_status"))
+    )
     has_active_review = bool(status or issues)
     review = {
         "status": status,
         "issue_id": str(raw.get("vc_issue_id", "")).strip() if has_active_review else "",
-        "issue_type": str(raw.get("vc_issue_type", "")).strip() if has_active_review else "",
+        "issue_type": str(
+            raw.get("vc_issue_type", "") or raw.get("outlier_issue_type", "")
+        ).strip() if has_active_review else "",
         "issue_field": str(raw.get("vc_issue_field", "")).strip() if has_active_review else "",
         "issue_threshold": str(raw.get("vc_issue_threshold", "")).strip() if has_active_review else "",
         "issue_note": str(raw.get("vc_issue_note", "")).strip() if has_active_review else "",
@@ -523,6 +528,34 @@ def _compact_review(raw: dict) -> dict:
     if issues:
         review["issues"] = issues
     return {key: value for key, value in review.items() if _is_present(value)}
+
+
+def _portable_row_is_visible(raw: dict) -> bool:
+    value = str(raw.get("visible") or "").strip().lower()
+    return value not in {"false", "f", "no", "n", "0"}
+
+
+def _row_is_analytically_excluded(
+    raw: dict,
+    *,
+    fix_key: str,
+    individual: str,
+    set_name: str,
+    confirmed_fix_keys: set[str],
+    confirmed_individual_tracks: set[tuple[str, str]],
+) -> bool:
+    if not _portable_row_is_visible(raw):
+        return True
+    if _normalize_review_status(raw.get("outlier_status")) == "confirmed":
+        return True
+    if _normalize_review_status(raw.get("vc_outlier_status")) == "confirmed":
+        return True
+    if fix_key in confirmed_fix_keys:
+        return True
+    return (
+        (individual, "") in confirmed_individual_tracks
+        or (individual, set_name) in confirmed_individual_tracks
+    )
 
 
 def _review_issues(raw: dict) -> list[dict]:
@@ -626,6 +659,7 @@ def _build_fix_record(
     attributes: dict,
     review: dict,
     segment_memberships: list[dict],
+    analytically_excluded: bool = False,
 ) -> dict:
     fix = {
         "fix_key": _make_fix_key(row_index, fix_id, individual, time_ms),
@@ -642,6 +676,8 @@ def _build_fix_record(
         fix["review"] = review
     if segment_memberships:
         fix["segments"] = [dict(item) for item in segment_memberships]
+    if analytically_excluded:
+        fix["analytically_excluded"] = True
     return fix
 
 
@@ -893,6 +929,8 @@ def diagnose_track_topology(path: Path) -> dict:
 def build_movement_overview(
     path: Path,
     *,
+    confirmed_fix_keys: list[str] | tuple[str, ...] | set[str] | None = None,
+    confirmed_individual_tracks: list[tuple[str, str]] | tuple[tuple[str, str], ...] | set[tuple[str, str]] | None = None,
     burst_gap_mode: str = DEFAULT_BURST_GAP_MODE,
     burst_gap_seconds: float = DEFAULT_BURST_GAP_SECONDS,
     burst_gap_quantile: float = DEFAULT_BURST_GAP_QUANTILE,
@@ -900,6 +938,14 @@ def build_movement_overview(
     normalized_burst_gap_mode = normalize_burst_gap_mode(burst_gap_mode)
     normalized_burst_gap_seconds = normalize_burst_gap_seconds(burst_gap_seconds)
     normalized_burst_gap_quantile = normalize_burst_gap_quantile(burst_gap_quantile)
+    normalized_confirmed_fix_keys = tuple(sorted({
+        str(item).strip() for item in (confirmed_fix_keys or []) if str(item).strip()
+    }))
+    normalized_confirmed_individual_tracks = tuple(sorted({
+        (str(item[0]).strip(), str(item[1]).strip())
+        for item in (confirmed_individual_tracks or [])
+        if isinstance(item, (list, tuple)) and len(item) == 2 and str(item[0]).strip()
+    }))
     overview_fix_limit = max(0, int(DEFAULT_OVERVIEW_FIX_LIMIT))
     path_str, mtime_ns, size = _cache_metadata(path)
     params = {
@@ -907,6 +953,8 @@ def build_movement_overview(
         "burst_gap_seconds": normalized_burst_gap_seconds,
         "burst_gap_quantile": normalized_burst_gap_quantile,
         "overview_fix_limit": overview_fix_limit,
+        "confirmed_fix_keys": normalized_confirmed_fix_keys,
+        "confirmed_individual_tracks": normalized_confirmed_individual_tracks,
     }
     cached = _load_cached_response(path, kind="overview", params=params, mtime_ns=mtime_ns, size=size)
     if cached is not None:
@@ -915,6 +963,8 @@ def build_movement_overview(
         path_str,
         mtime_ns,
         size,
+        normalized_confirmed_fix_keys,
+        normalized_confirmed_individual_tracks,
         normalized_burst_gap_mode,
         normalized_burst_gap_seconds,
         normalized_burst_gap_quantile,
@@ -929,6 +979,8 @@ def _build_movement_overview_cached(
     path_str: str,
     mtime_ns: int,
     size: int,
+    confirmed_fix_keys: tuple[str, ...],
+    confirmed_individual_tracks: tuple[tuple[str, str], ...],
     burst_gap_mode: str,
     burst_gap_seconds: float,
     burst_gap_quantile: float,
@@ -970,11 +1022,14 @@ def _build_movement_overview_cached(
     species_by_individual: dict[str, str] = {}
     row_counts: dict[str, int] = {}
     track_records_by_group: dict[tuple[str, str], list[dict]] = {}
+    eligible_track_records_by_group: dict[tuple[str, str], list[dict]] = {}
     review_counts = {"suspected": 0, "confirmed": 0}
     review_counts_by_individual: dict[str, dict[str, int]] = {}
     overview_fix_contexts: list[dict] = []
     overview_segments_by_id: dict[str, dict] = {}
     overview_truncated = False
+    confirmed_fix_key_set = set(confirmed_fix_keys)
+    confirmed_individual_track_set = set(confirmed_individual_tracks)
 
     total_rows = 0
     min_lon = float("inf")
@@ -1033,6 +1088,19 @@ def _build_movement_overview_cached(
                 "position": [float(lon), float(lat)],
             }
             track_records_by_group.setdefault(_track_key(individual, set_name), []).append(overview_record)
+            analytically_excluded = _row_is_analytically_excluded(
+                raw,
+                fix_key=fix_key,
+                individual=individual,
+                set_name=set_name,
+                confirmed_fix_keys=confirmed_fix_key_set,
+                confirmed_individual_tracks=confirmed_individual_track_set,
+            )
+            if not analytically_excluded:
+                eligible_track_records_by_group.setdefault(
+                    _track_key(individual, set_name),
+                    [],
+                ).append(overview_record)
 
             if segment_memberships:
                 _accumulate_segments(
@@ -1068,6 +1136,7 @@ def _build_movement_overview_cached(
                         "raw": raw,
                         "review": review,
                         "segment_memberships": segment_memberships,
+                        "analytically_excluded": analytically_excluded,
                     }
                 )
             elif not overview_truncated:
@@ -1076,7 +1145,7 @@ def _build_movement_overview_cached(
     if total_rows == 0 or min_time_ms is None or max_time_ms is None:
         raise ValueError("CSV did not contain any valid movement rows")
 
-    movement_by_fix_key, stat_samples = compute_track_movement(track_records_by_group)
+    movement_by_fix_key, stat_samples = compute_track_movement(eligible_track_records_by_group)
 
     color_fields = list(DERIVED_FIELDS)
     for review_field in REVIEW_COLUMNS:
@@ -1122,25 +1191,30 @@ def _build_movement_overview_cached(
             ),
             review=context["review"],
             segment_memberships=context["segment_memberships"],
+            analytically_excluded=context["analytically_excluded"],
         )
         for context in sorted(overview_fix_contexts, key=_record_sort_key)
     ]
     overview_segments = _finalize_segments(overview_segments_by_id)
     burst_gap = resolve_burst_gap_strategy(
-        track_records_by_group,
+        eligible_track_records_by_group,
         burst_gap_mode=burst_gap_mode,
         burst_gap_seconds=burst_gap_seconds,
         burst_gap_quantile=burst_gap_quantile,
     )
     auto_bursts = [] if overview_truncated else build_auto_bursts(
-        [record for _, sorted_records in _sorted_track_records(track_records_by_group) for record in sorted_records],
+        [
+            record
+            for _, sorted_records in _sorted_track_records(eligible_track_records_by_group)
+            for record in sorted_records
+        ],
         burst_gap_seconds=burst_gap["effective_seconds"],
     )
 
     individuals = sorted(row_counts)
     series_by_individual: dict[str, dict[str, dict[str, list]]] = {}
     coverage_by_individual: dict[str, dict[str, dict[str, int]]] = {}
-    for (individual, set_name), sorted_records in _sorted_track_records(track_records_by_group):
+    for (individual, set_name), sorted_records in _sorted_track_records(eligible_track_records_by_group):
         sorted_samples = _downsample_sorted_records(sorted_records, MAX_SERIES_POINTS)
         series_by_individual.setdefault(individual, {})[set_name] = {
             "times": [int(item["time_ms"]) for item in sorted_samples],
@@ -1216,6 +1290,10 @@ def build_movement_fixes(
     *,
     individual: str = "",
     individuals: list[str] | tuple[str, ...] | set[str] | None = None,
+    additional_review_fix_keys: list[str] | tuple[str, ...] | set[str] | None = None,
+    additional_review_individuals: list[str] | tuple[str, ...] | set[str] | None = None,
+    confirmed_fix_keys: list[str] | tuple[str, ...] | set[str] | None = None,
+    confirmed_individual_tracks: list[tuple[str, str]] | tuple[tuple[str, str], ...] | set[tuple[str, str]] | None = None,
     start_ms: int | None = None,
     end_ms: int | None = None,
     review_status: str = "",
@@ -1234,9 +1312,31 @@ def build_movement_fixes(
         raise ValueError("Invalid review status")
     limit_value = None if limit is None else max(1, int(limit))
     normalized_individuals = normalize_individual_filters(individual=individual, individuals=individuals)
+    normalized_review_fix_keys = tuple(sorted({
+        str(item).strip()
+        for item in (additional_review_fix_keys or [])
+        if str(item).strip()
+    }))
+    normalized_review_individuals = tuple(sorted({
+        str(item).strip()
+        for item in (additional_review_individuals or [])
+        if str(item).strip()
+    }))
+    normalized_confirmed_fix_keys = tuple(sorted({
+        str(item).strip() for item in (confirmed_fix_keys or []) if str(item).strip()
+    }))
+    normalized_confirmed_individual_tracks = tuple(sorted({
+        (str(item[0]).strip(), str(item[1]).strip())
+        for item in (confirmed_individual_tracks or [])
+        if isinstance(item, (list, tuple)) and len(item) == 2 and str(item[0]).strip()
+    }))
     params = {
         "individual": normalized_individuals[0] if len(normalized_individuals) == 1 else "",
         "individuals": normalized_individuals,
+        "additional_review_fix_keys": normalized_review_fix_keys,
+        "additional_review_individuals": normalized_review_individuals,
+        "confirmed_fix_keys": normalized_confirmed_fix_keys,
+        "confirmed_individual_tracks": normalized_confirmed_individual_tracks,
         "start_ms": start_ms,
         "end_ms": end_ms,
         "review_status": normalized_status,
@@ -1254,6 +1354,10 @@ def build_movement_fixes(
         mtime_ns,
         size,
         normalized_individuals,
+        normalized_review_fix_keys,
+        normalized_review_individuals,
+        normalized_confirmed_fix_keys,
+        normalized_confirmed_individual_tracks,
         start_ms,
         end_ms,
         normalized_status,
@@ -1272,6 +1376,10 @@ def _build_movement_fixes_cached(
     mtime_ns: int,
     size: int,
     individuals: tuple[str, ...],
+    additional_review_fix_keys: tuple[str, ...],
+    additional_review_individuals: tuple[str, ...],
+    confirmed_fix_keys: tuple[str, ...],
+    confirmed_individual_tracks: tuple[tuple[str, str], ...],
     start_ms: int | None,
     end_ms: int | None,
     review_status: str,
@@ -1291,6 +1399,10 @@ def _build_movement_fixes_cached(
     records: list[dict] = []
     gap_records_by_group: dict[tuple[str, str], list[dict]] = {}
     individual_filters = set(individuals)
+    additional_review_fix_key_set = set(additional_review_fix_keys)
+    additional_review_individual_set = set(additional_review_individuals)
+    confirmed_fix_key_set = set(confirmed_fix_keys)
+    confirmed_individual_track_set = set(confirmed_individual_tracks)
 
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -1305,15 +1417,24 @@ def _build_movement_fixes_cached(
             lat = valid["lat"]
             set_name = valid["set_name"]
             fix_key = _make_fix_key(row_index, valid["fix_id"], item_individual, time_ms)
-            gap_records_by_group.setdefault(_track_key(item_individual, set_name), []).append(
-                {
-                    "row_index": row_index,
-                    "fix_key": fix_key,
-                    "individual": item_individual,
-                    "set_name": set_name,
-                    "time_ms": time_ms,
-                }
+            analytically_excluded = _row_is_analytically_excluded(
+                raw,
+                fix_key=fix_key,
+                individual=item_individual,
+                set_name=set_name,
+                confirmed_fix_keys=confirmed_fix_key_set,
+                confirmed_individual_tracks=confirmed_individual_track_set,
             )
+            if not analytically_excluded:
+                gap_records_by_group.setdefault(_track_key(item_individual, set_name), []).append(
+                    {
+                        "row_index": row_index,
+                        "fix_key": fix_key,
+                        "individual": item_individual,
+                        "set_name": set_name,
+                        "time_ms": time_ms,
+                    }
+                )
             if individual_filters and item_individual not in individual_filters:
                 continue
             records.append(
@@ -1330,11 +1451,14 @@ def _build_movement_fixes_cached(
                     "raw": raw,
                     "review": _compact_review(raw),
                     "segment_memberships": _segment_memberships(raw),
+                    "analytically_excluded": analytically_excluded,
                 }
             )
 
     records_by_group = _group_track_records(records)
-    movement_by_fix_key, _stat_samples = compute_track_movement(records_by_group)
+    eligible_records = [record for record in records if not record["analytically_excluded"]]
+    eligible_records_by_group = _group_track_records(eligible_records)
+    movement_by_fix_key, _stat_samples = compute_track_movement(eligible_records_by_group)
     burst_gap = resolve_burst_gap_strategy(
         gap_records_by_group,
         burst_gap_mode=burst_gap_mode,
@@ -1350,7 +1474,8 @@ def _build_movement_fixes_cached(
             if end_ms is not None and time_ms > end_ms:
                 continue
 
-            auto_burst_records.append(record)
+            if not record["analytically_excluded"]:
+                auto_burst_records.append(record)
             segment_memberships = record["segment_memberships"]
             if segment_memberships:
                 _accumulate_segments(
@@ -1366,9 +1491,17 @@ def _build_movement_fixes_cached(
                 )
             review = record["review"]
             status = str(review.get("status", "")).strip().lower()
-            if review_status == "reviewed" and not review:
+            is_additional_review_candidate = (
+                record["fix_key"] in additional_review_fix_key_set
+                or record["individual"] in additional_review_individual_set
+            )
+            if review_status == "reviewed" and not review and not is_additional_review_candidate:
                 continue
-            if review_status in {"suspected", "confirmed"} and status != review_status:
+            if (
+                review_status in {"suspected", "confirmed"}
+                and status != review_status
+                and not is_additional_review_candidate
+            ):
                 continue
 
             matching_fix_count += 1
@@ -1394,6 +1527,7 @@ def _build_movement_fixes_cached(
                     ),
                     review=review,
                     segment_memberships=segment_memberships,
+                    analytically_excluded=record["analytically_excluded"],
                 )
             )
 
@@ -1423,9 +1557,23 @@ def _build_movement_fixes_cached(
     }
 
 
-def build_movement_summary(path: Path) -> dict:
-    overview = build_movement_overview(path)
-    full_detail = build_movement_fixes(path, limit=None)
+def build_movement_summary(
+    path: Path,
+    *,
+    confirmed_fix_keys: list[str] | tuple[str, ...] | set[str] | None = None,
+    confirmed_individual_tracks: list[tuple[str, str]] | tuple[tuple[str, str], ...] | set[tuple[str, str]] | None = None,
+) -> dict:
+    overview = build_movement_overview(
+        path,
+        confirmed_fix_keys=confirmed_fix_keys,
+        confirmed_individual_tracks=confirmed_individual_tracks,
+    )
+    full_detail = build_movement_fixes(
+        path,
+        limit=None,
+        confirmed_fix_keys=confirmed_fix_keys,
+        confirmed_individual_tracks=confirmed_individual_tracks,
+    )
     payload = dict(overview)
     payload["fixes"] = full_detail["fixes"]
     payload["segments"] = full_detail["segments"]

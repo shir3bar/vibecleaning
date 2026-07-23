@@ -312,6 +312,8 @@ class MovementExampleApp {
       dataset: null,
       overview: null,
       detail: null,
+      suspicious: null,
+      confirmed: null,
       reportDetail: null,
       osm: null,
       candidateQuery: null,
@@ -351,6 +353,7 @@ class MovementExampleApp {
     this.thresholdInputPendingBlur = false;
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
+    this.pendingConfirmationGroups = [];
     this.focusedRankingBurst = null;
     this.tableSelection = {
       anchorFixKey: "",
@@ -422,6 +425,7 @@ class MovementExampleApp {
         showTest: true,
         showPoints: true,
         showBursts: true,
+        showConfirmed: true,
         burstGapMode: DEFAULT_BURST_GAP_MODE,
         burstGapSeconds: DEFAULT_BURST_GAP_SECONDS,
         burstGapQuantile: DEFAULT_BURST_GAP_QUANTILE,
@@ -448,6 +452,7 @@ class MovementExampleApp {
       showTest: this.refs.showTest.checked,
       showPoints: this.refs.showPoints.checked,
       showBursts: this.refs.showBursts.checked,
+      showConfirmed: this.refs.showConfirmed.checked,
       burstGapMode: this.getBurstGapMode(),
       burstGapSeconds: this.getBurstGapSeconds(),
       burstGapQuantile: this.getBurstGapQuantile(),
@@ -2196,6 +2201,7 @@ class MovementExampleApp {
           <label class="movement-toggle" data-role="show-test-control"><input type="checkbox" data-role="show-test"> Test</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-points"> Points</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-bursts"> Bursts</label>
+          <label class="movement-toggle"><input type="checkbox" data-role="show-confirmed"> Confirmed exclusions</label>
           <label>Burst gap
             <select data-role="burst-gap-mode">
               <option value="quantile">Quantile</option>
@@ -2209,7 +2215,7 @@ class MovementExampleApp {
           </label>
           <button type="button" data-role="select-all">All individuals</button>
           <button type="button" data-role="select-none">No individuals</button>
-          <button type="button" data-role="select-suspicious">Select all suspicious</button>
+          <button type="button" data-role="select-suspicious">Load suspicious fixes</button>
           <button type="button" data-role="clear-fixes">Clear checked fixes</button>
           <div class="movement-candidate-query-control" data-role="candidate-query-control">
             <label>Candidate query <select data-role="candidate-query-select"></select></label>
@@ -2373,6 +2379,30 @@ class MovementExampleApp {
         </div>
       </div>
 
+      <div class="movement-modal hidden" data-role="confirm-modal">
+        <div class="movement-modal-card">
+          <div class="movement-modal-head">
+            <h3>Confirm suspected outliers</h3>
+            <button type="button" data-role="confirm-close">Close</button>
+          </div>
+          <div class="movement-modal-body">
+            <div data-role="confirm-meta"></div>
+            <div class="movement-selection-list" data-role="confirm-groups"></div>
+            <label>User
+              <input type="text" data-role="confirm-user" placeholder="Name used for attribution">
+            </label>
+            <label>Confirmation note (optional)
+              <textarea data-role="confirm-note" placeholder="Add any final review context."></textarea>
+            </label>
+            <div class="movement-modal-status" data-role="confirm-status"></div>
+          </div>
+          <div class="movement-modal-foot">
+            <span>Only the selected fixes in checked issue groups will be confirmed.</span>
+            <button type="button" class="movement-emphasis" data-role="confirm-submit">Confirm selected issues</button>
+          </div>
+        </div>
+      </div>
+
       <div class="movement-modal hidden" data-role="report-modal">
         <div class="movement-modal-card">
           <div class="movement-modal-head">
@@ -2479,6 +2509,7 @@ class MovementExampleApp {
       showTestControl: this.mountEl.querySelector('[data-role="show-test-control"]'),
       showPoints: this.mountEl.querySelector('[data-role="show-points"]'),
       showBursts: this.mountEl.querySelector('[data-role="show-bursts"]'),
+      showConfirmed: this.mountEl.querySelector('[data-role="show-confirmed"]'),
       burstGapMode: this.mountEl.querySelector('[data-role="burst-gap-mode"]'),
       burstGapSecondsLabel: this.mountEl.querySelector('[data-role="burst-gap-seconds-label"]'),
       burstGapSeconds: this.mountEl.querySelector('[data-role="burst-gap-seconds"]'),
@@ -2555,6 +2586,14 @@ class MovementExampleApp {
       issueStatus: this.mountEl.querySelector('[data-role="issue-status"]'),
       issueClose: this.mountEl.querySelector('[data-role="issue-close"]'),
       issueSubmit: this.mountEl.querySelector('[data-role="issue-submit"]'),
+      confirmModal: this.mountEl.querySelector('[data-role="confirm-modal"]'),
+      confirmMeta: this.mountEl.querySelector('[data-role="confirm-meta"]'),
+      confirmGroups: this.mountEl.querySelector('[data-role="confirm-groups"]'),
+      confirmUser: this.mountEl.querySelector('[data-role="confirm-user"]'),
+      confirmNote: this.mountEl.querySelector('[data-role="confirm-note"]'),
+      confirmStatus: this.mountEl.querySelector('[data-role="confirm-status"]'),
+      confirmClose: this.mountEl.querySelector('[data-role="confirm-close"]'),
+      confirmSubmit: this.mountEl.querySelector('[data-role="confirm-submit"]'),
       reportModal: this.mountEl.querySelector('[data-role="report-modal"]'),
       reportMeta: this.mountEl.querySelector('[data-role="report-meta"]'),
       reportUser: this.mountEl.querySelector('[data-role="report-user"]'),
@@ -2604,6 +2643,7 @@ class MovementExampleApp {
     this.refs.showTest.checked = MOVEMENT_APP_CONFIG.mode === "slim_movement" || this.uiState.showTest !== false;
     this.refs.showPoints.checked = this.uiState.showPoints !== false;
     this.refs.showBursts.checked = this.uiState.showBursts !== false;
+    this.refs.showConfirmed.checked = this.uiState.showConfirmed !== false;
     this.refs.burstGapMode.value = ["manual", "quantile"].includes(this.uiState.burstGapMode)
       ? this.uiState.burstGapMode
       : DEFAULT_BURST_GAP_MODE;
@@ -2717,6 +2757,13 @@ class MovementExampleApp {
       this.renderLayers();
       this.renderTableSheet();
     });
+    this.refs.showConfirmed.addEventListener("change", () => {
+      this.saveUiState();
+      this.renderLayers();
+      if (this.refs.showConfirmed.checked && this.data?.confirmedState === "idle") {
+        void this.loadConfirmedFixes();
+      }
+    });
     this.refs.burstGapMode.addEventListener("change", () => this.handleBurstGapSettingsChange());
     this.refs.burstGapSeconds.addEventListener("change", () => this.handleBurstGapSettingsChange());
     this.refs.burstGapQuantile.addEventListener("change", () => this.handleBurstGapSettingsChange());
@@ -2757,12 +2804,7 @@ class MovementExampleApp {
       void this.loadDetailForCurrentSelection();
     });
     this.refs.selectSuspicious.addEventListener("click", () => {
-      if (!this.data) return;
-      this.data.selectedFixKeys = new Set(this.getSuspiciousFixes().map(fix => fix.fixKey));
-      this.renderThresholdPane();
-      this.renderSelectedFixes();
-      this.renderLayers();
-      this.updateActionButtons();
+      void this.loadSuspiciousFixes();
     });
     this.refs.clearFixes.addEventListener("click", () => {
       if (!this.data) return;
@@ -2785,7 +2827,7 @@ class MovementExampleApp {
     this.refs.clearCandidates.addEventListener("click", () => this.clearCandidateQueryPreview({ announce: true }));
     this.refs.resetView.addEventListener("click", () => this.resetView());
     this.refs.markSuspected.addEventListener("click", () => this.openIssueModal("suspected"));
-    this.refs.markConfirmed.addEventListener("click", () => this.openIssueModal("confirmed"));
+    this.refs.markConfirmed.addEventListener("click", () => this.openConfirmModal());
     this.refs.runAnomalyRanking.addEventListener("click", () => {
       void this.runBurstAnomalyRanking();
     });
@@ -2829,7 +2871,10 @@ class MovementExampleApp {
     });
     this.refs.segmentClear.addEventListener("click", () => this.clearTableSelection());
     this.refs.segmentSuspected.addEventListener("click", () => this.openSegmentModal("suspected"));
-    this.refs.segmentConfirmed.addEventListener("click", () => this.openSegmentModal("confirmed"));
+    this.refs.segmentConfirmed.addEventListener("click", () => {
+      const selection = this.getCurrentSegmentSelection();
+      this.openConfirmModal(selection?.fixes || []);
+    });
     this.refs.tableWrap.addEventListener("click", event => this.handleTableWrapClick(event));
     this.refs.tableWrap.addEventListener("scroll", () => this.handleTableWrapScroll());
     this.refs.anomalyRanking.addEventListener("click", event => {
@@ -2841,6 +2886,8 @@ class MovementExampleApp {
 
     this.refs.issueClose.addEventListener("click", () => this.closeModal(this.refs.issueModal, this.refs.issueSubmit));
     this.refs.issueSubmit.addEventListener("click", async () => this.submitIssueAction());
+    this.refs.confirmClose.addEventListener("click", () => this.closeModal(this.refs.confirmModal, this.refs.confirmSubmit));
+    this.refs.confirmSubmit.addEventListener("click", async () => this.submitConfirmIssues());
     this.refs.reportClose.addEventListener("click", () => this.closeModal(this.refs.reportModal, this.refs.reportSubmit));
     this.refs.reportType.addEventListener("change", () => {
       void this.handleReportTypeChange();
@@ -2858,11 +2905,13 @@ class MovementExampleApp {
     this.refs.removeClose.addEventListener("click", () => this.closeModal(this.refs.removeModal, this.refs.removeSubmit));
     this.refs.removeSubmit.addEventListener("click", async () => this.submitRemoveConfirmed());
 
-    for (const modal of [this.refs.issueModal, this.refs.reportModal, this.refs.removeModal]) {
+    for (const modal of [this.refs.issueModal, this.refs.confirmModal, this.refs.reportModal, this.refs.removeModal]) {
       modal.addEventListener("click", (event) => {
         if (event.target === modal) {
           const submitButton = modal === this.refs.issueModal
             ? this.refs.issueSubmit
+            : modal === this.refs.confirmModal
+              ? this.refs.confirmSubmit
             : modal === this.refs.reportModal
               ? this.refs.reportSubmit
               : this.refs.removeSubmit;
@@ -2920,6 +2969,8 @@ class MovementExampleApp {
       this.cancelRequest("dataset");
       this.cancelRequest("overview");
       this.cancelRequest("detail");
+      this.cancelRequest("suspicious");
+      this.cancelRequest("confirmed");
       this.cancelRequest("reportDetail");
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
@@ -2933,6 +2984,8 @@ class MovementExampleApp {
       this.cancelRequest("dataset");
       this.cancelRequest("overview");
       this.cancelRequest("detail");
+      this.cancelRequest("suspicious");
+      this.cancelRequest("confirmed");
       this.cancelRequest("reportDetail");
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
@@ -2945,6 +2998,8 @@ class MovementExampleApp {
       this.cancelRequest("dataset");
       this.cancelRequest("overview");
       this.cancelRequest("detail");
+      this.cancelRequest("suspicious");
+      this.cancelRequest("confirmed");
       this.cancelRequest("reportDetail");
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
@@ -2956,6 +3011,8 @@ class MovementExampleApp {
     if (level === "artifact") {
       this.cancelRequest("overview");
       this.cancelRequest("detail");
+      this.cancelRequest("suspicious");
+      this.cancelRequest("confirmed");
       this.cancelRequest("reportDetail");
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
@@ -4590,6 +4647,7 @@ class MovementExampleApp {
     this.clearBurstFeatureSpace({ render: false });
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
+    this.pendingConfirmationGroups = [];
     this.tableSelection = {
       anchorFixKey: "",
       focusFixKey: "",
@@ -4604,6 +4662,7 @@ class MovementExampleApp {
     this.currentTimeMs = 0;
     this.lastReportLinks = [];
     this.refs.outputLinks.innerHTML = "";
+    this.refs.selectSuspicious.textContent = "Load suspicious fixes";
     this.refs.individuals.innerHTML = "";
     this.refs.selectedFixes.innerHTML = "";
     this.renderAnomalyRanking();
@@ -4861,6 +4920,9 @@ class MovementExampleApp {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
       }
       void this.loadDetailForCurrentSelection();
+      if (this.refs.showConfirmed.checked) {
+        void this.loadConfirmedFixes();
+      }
       void this.restoreSavedAnalyses();
     } catch (error) {
       if (this.isAbortError(error)) {
@@ -5036,6 +5098,9 @@ class MovementExampleApp {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
       }
       void this.loadDetailForCurrentSelection({ preservedFixKeys });
+      if (this.refs.showConfirmed.checked) {
+        void this.loadConfirmedFixes();
+      }
       void this.restoreSavedAnalyses();
     } catch (error) {
       if (this.isAbortError(error) || requestId !== this.loadRequestId) {
@@ -5271,10 +5336,7 @@ class MovementExampleApp {
     }
     const visibleIndividuals = new Set(this.getSelectedIndividuals());
     const visibleSetNames = this.getVisibleSetNames();
-    const source = this.hasLoadedDetailSelection() && (this.data.detailFixes || []).length
-      ? this.data.detailFixes
-      : (this.data.overviewFixes || []);
-    return source.filter(
+    return (this.data.fixes || []).filter(
       fix => visibleIndividuals.has(fix.individual) && visibleSetNames.has(fix.setName),
     );
   }
@@ -5724,7 +5786,7 @@ class MovementExampleApp {
       || selection.fixes.length < 2
     );
     this.refs.segmentSuspected.disabled = segmentActionDisabled;
-    this.refs.segmentConfirmed.disabled = segmentActionDisabled;
+    this.refs.segmentConfirmed.disabled = segmentActionDisabled || !this.canConfirmFixes(selection?.fixes || []);
 
     if (mode === "segments") {
       const segments = this.getFilteredTableSegments();
@@ -6151,8 +6213,30 @@ class MovementExampleApp {
     const candidatePointData = [];
     const selectedCandidatePointData = [];
     const selectedPointData = [];
+    const confirmedPointData = [];
     const cursorData = [];
     const showPoints = this.refs.showPoints.checked;
+    if (this.refs.showConfirmed.checked) {
+      const seenConfirmed = new Set();
+      for (const fix of this.data.fixes || []) {
+        if (
+          !fix.analyticallyExcluded
+          && fix.review?.status !== "confirmed"
+        ) {
+          continue;
+        }
+        if (seenConfirmed.has(fix.fixKey)) {
+          continue;
+        }
+        seenConfirmed.add(fix.fixKey);
+        confirmedPointData.push({
+          fixKey: fix.fixKey,
+          individual: fix.individual,
+          setName: fix.setName,
+          position: fix.position,
+        });
+      }
+    }
     const visibleSegments = this.getVisibleSegments();
     const visibleAutoBursts = this.getVisibleAutoBursts();
     const suppressedBaseTrackKeys = new Set(
@@ -6244,7 +6328,12 @@ class MovementExampleApp {
 
     if (showPoints) {
       for (const fix of this.data.fixes) {
-        if (!visibleIndividuals.has(fix.individual) || !visibleSetNames.has(fix.setName)) {
+        if (
+          fix.analyticallyExcluded
+          || fix.review?.status === "confirmed"
+          || !visibleIndividuals.has(fix.individual)
+          || !visibleSetNames.has(fix.setName)
+        ) {
           continue;
         }
         const point = {
@@ -6476,6 +6565,25 @@ class MovementExampleApp {
       );
     }
 
+    if (confirmedPointData.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-confirmed-exclusions",
+          data: confirmedPointData,
+          getPosition: item => item.position,
+          getFillColor: [63, 20, 29, 115],
+          getLineColor: [248, 113, 113, 245],
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 3,
+          getRadius: 142,
+          radiusMinPixels: 8,
+          radiusMaxPixels: 17,
+          pickable: true,
+        }),
+      );
+    }
+
     if (tableSelectedPointData.length) {
       layers.push(
         new deck.ScatterplotLayer({
@@ -6615,7 +6723,12 @@ class MovementExampleApp {
       ? this.data.detailFixes
       : (this.data.overviewFixes || []);
     return source
-      .filter(fix => fix.individual === individual && fix.setName === setName)
+      .filter(fix => (
+        !fix.analyticallyExcluded
+        && fix.review?.status !== "confirmed"
+        && fix.individual === individual
+        && fix.setName === setName
+      ))
       .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
   }
 
@@ -6804,7 +6917,13 @@ class MovementExampleApp {
   }
 
   isFixVisibleOnMap(fix) {
-    if (!fix || !this.data || !this.refs.showPoints.checked) {
+    if (!fix || !this.data) {
+      return false;
+    }
+    if (fix.analyticallyExcluded || fix.review?.status === "confirmed") {
+      return this.refs.showConfirmed.checked;
+    }
+    if (!this.refs.showPoints.checked) {
       return false;
     }
     const visibleIndividuals = this.data.selectedIndividuals instanceof Set
@@ -7704,6 +7823,155 @@ class MovementExampleApp {
       .sort((left, right) => left.individual.localeCompare(right.individual) || left.timeMs - right.timeMs);
   }
 
+  async loadConfirmedFixes() {
+    if (!this.data || !this.currentArtifact || this.data.confirmedState === "loading") {
+      return;
+    }
+    this.data.confirmedState = "loading";
+    const familyName = this.currentFamily;
+    const studyName = this.currentStudy;
+    const datasetId = this.currentDatasetId;
+    const artifactName = this.currentArtifact;
+    try {
+      const controller = this.beginRequest("confirmed");
+      const payload = await this.fetchJSON(
+        this.buildFixesRequestUrl({
+          familyName,
+          studyName,
+          datasetId,
+          artifactName,
+          reviewStatus: "confirmed",
+        }),
+        { signal: controller.signal },
+      );
+      if (
+        this.requestControllers.confirmed !== controller
+        || familyName !== this.currentFamily
+        || studyName !== this.currentStudy
+        || datasetId !== this.currentDatasetId
+        || artifactName !== this.currentArtifact
+        || !this.data
+      ) {
+        return;
+      }
+      const confirmedFixes = parseMovementFixes(payload.fixes || [])
+        .filter(fix => fix.review.status === "confirmed")
+        .map(fix => ({ ...fix, analyticallyExcluded: true }));
+      this.data.confirmedFixes = confirmedFixes;
+      this.data.confirmedState = "loaded";
+      this.data.confirmedLimit = payload.detail_scope?.limit ?? null;
+      this.data.confirmedMatchingFixCount = Number(payload.matching_fix_count) || 0;
+      this.data.confirmedReturnedFixCount = Number(payload.returned_fix_count) || confirmedFixes.length;
+      this.data.confirmedTruncated = Boolean(payload.truncated);
+      refreshMovementFixCollections(this.data);
+      this.renderLegend();
+      this.renderLayers();
+      this.updateActionButtons();
+      if (this.data.confirmedTruncated) {
+        this.setStatus(
+          `Loaded ${formatCount(confirmedFixes.length)} of ${formatCount(this.data.confirmedMatchingFixCount)} confirmed exclusions for the audit layer.`,
+          true,
+        );
+      }
+    } catch (error) {
+      if (this.isAbortError(error) || !this.data) {
+        return;
+      }
+      this.data.confirmedState = "error";
+      this.setStatus(`Confirmed exclusions could not be loaded: ${error.message}`, true);
+    }
+  }
+
+  async loadSuspiciousFixes() {
+    if (!this.data || !this.currentArtifact) {
+      return;
+    }
+    this.cancelRequest("detail");
+    this.data.suspiciousState = "loading";
+    this.refs.selectSuspicious.textContent = "Loading suspicious fixes...";
+    this.updateActionButtons();
+    this.setStatus(`Loading suspicious fixes from ${this.currentArtifact}...`);
+
+    const familyName = this.currentFamily;
+    const studyName = this.currentStudy;
+    const datasetId = this.currentDatasetId;
+    const artifactName = this.currentArtifact;
+    try {
+      const controller = this.beginRequest("suspicious");
+      const payload = await this.fetchJSON(
+        this.buildFixesRequestUrl({
+          familyName,
+          studyName,
+          datasetId,
+          artifactName,
+          reviewStatus: "suspected",
+        }),
+        { signal: controller.signal },
+      );
+      if (
+        this.requestControllers.suspicious !== controller
+        || familyName !== this.currentFamily
+        || studyName !== this.currentStudy
+        || datasetId !== this.currentDatasetId
+        || artifactName !== this.currentArtifact
+        || !this.data
+      ) {
+        return;
+      }
+
+      const suspiciousFixes = parseMovementFixes(payload.fixes || [])
+        .filter(fix => fix.review.status === "suspected");
+      this.clearThresholdState();
+      this.setTableSelection();
+      this.data.suspiciousFixes = suspiciousFixes;
+      this.data.suspiciousState = "loaded";
+      this.data.suspiciousLimit = payload.detail_scope?.limit ?? null;
+      this.data.suspiciousMatchingFixCount = Number(payload.matching_fix_count) || 0;
+      this.data.suspiciousReturnedFixCount = Number(payload.returned_fix_count) || suspiciousFixes.length;
+      this.data.suspiciousTruncated = Boolean(payload.truncated);
+      refreshMovementFixCollections(this.data);
+      this.data.selectedFixKeys = new Set(suspiciousFixes.map(fix => fix.fixKey));
+      this.data.selectedIndividuals = new Set(suspiciousFixes.map(fix => fix.individual));
+      this.refs.showTrain.checked = true;
+      this.refs.showTest.checked = true;
+      this.refs.showPoints.checked = true;
+      this.saveUiState();
+      this.renderIndividuals();
+      this.renderSelectedFixes();
+      this.renderThresholdPane();
+      this.renderLegend();
+      this.renderLayers();
+      this.updateActionButtons();
+
+      if (!suspiciousFixes.length) {
+        this.setStatus(`No suspicious fixes were found in ${artifactName}.`);
+        return;
+      }
+      this.zoomToPath(suspiciousFixes.map(fix => fix.position));
+      if (this.data.suspiciousTruncated) {
+        this.setStatus(
+          `Loaded ${formatCount(suspiciousFixes.length)} of ${formatCount(this.data.suspiciousMatchingFixCount)} suspicious fixes due to the ${formatCount(this.data.suspiciousLimit)}-fix cap.`,
+          true,
+        );
+      } else {
+        this.setStatus(
+          `Loaded and checked ${formatCount(suspiciousFixes.length)} suspicious fixes across ${formatCount(this.data.selectedIndividuals.size)} individuals.`,
+        );
+      }
+    } catch (error) {
+      if (this.isAbortError(error) || !this.data) {
+        return;
+      }
+      this.data.suspiciousState = "error";
+      this.setStatus(`Suspicious fixes could not be loaded: ${error.message}`, true);
+      this.updateActionButtons();
+    } finally {
+      if (this.data && this.data.suspiciousState !== "loading") {
+        this.refs.selectSuspicious.textContent = "Load suspicious fixes";
+      }
+    }
+  }
+
   hasLoadedDetailSelection() {
     if (!this.data || this.data.detailState !== "loaded") {
       return false;
@@ -8173,6 +8441,8 @@ class MovementExampleApp {
           step_id: issue.stepId || "",
           source_analysis_id: issue.sourceAnalysisId || "",
           scope_kind: issue.scopeKind || "",
+          parent_annotation_id: issue.parentAnnotationId || "",
+          annotation_kind: issue.annotationKind || "issue",
         })),
         issue_note: fix.review.issueNote || "",
         owner_question: fix.review.ownerQuestion || "",
@@ -8446,8 +8716,18 @@ class MovementExampleApp {
     const hasData = Boolean(this.data);
     const hasSelectedIndividuals = this.getSelectedIndividuals().length > 0;
     const hasDetail = this.hasLoadedDetailSelection();
-    const selectedCount = this.getSelectedFixes().length;
-    const visibleSuspiciousCount = this.getSuspiciousFixes("", { scope: "visible" }).length;
+    const selectedFixes = this.getSelectedFixes();
+    const selectedCount = selectedFixes.length;
+    const loadedSuspiciousKeys = new Set(
+      (this.data?.suspiciousFixes || []).map(fix => fix.fixKey),
+    );
+    const selectedAreLoadedSuspicious = (
+      selectedCount > 0
+      && selectedFixes.every(fix => loadedSuspiciousKeys.has(fix.fixKey))
+    );
+    const canEditSelectedFixes = hasDetail || selectedAreLoadedSuspicious;
+    const canConfirmSelectedFixes = this.canConfirmFixes(selectedFixes);
+    const suspiciousLoading = this.data?.suspiciousState === "loading";
     const candidatePreviewLoading = this.candidateQueryPreview?.status === "loading";
     const anomalyRankingLoading = this.anomalyRanking?.status === "loading";
     const burstFeatureSpaceLoading = this.burstFeatureSpace?.status === "loading";
@@ -8484,12 +8764,15 @@ class MovementExampleApp {
         element?.classList.add("movement-profile-hidden");
       }
     }
-    this.refs.markSuspected.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
-    this.refs.markConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
+    this.refs.markSuspected.disabled = !hasData || !hasSelectedIndividuals || !canEditSelectedFixes || selectedCount === 0;
+    this.refs.markConfirmed.disabled = (
+      !hasData
+      || !canConfirmSelectedFixes
+    );
     this.refs.generateReport.disabled = !hasData || !(this.data?.individuals || []).length;
     this.refs.exportReviewedCsv.disabled = !hasData;
-    this.refs.removeConfirmed.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || selectedCount === 0;
-    this.refs.selectSuspicious.disabled = !hasData || !hasSelectedIndividuals || !hasDetail || visibleSuspiciousCount === 0;
+    this.refs.removeConfirmed.disabled = !hasData || !hasSelectedIndividuals || !canEditSelectedFixes || selectedCount === 0;
+    this.refs.selectSuspicious.disabled = !hasData || !this.currentArtifact || suspiciousLoading;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
     this.refs.runCandidateQuery.disabled = !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
     this.refs.runAnomalyRanking.disabled = !hasData || !this.currentArtifact || anomalyRankingLoading || burstFeatureSpaceLoading;
@@ -8510,6 +8793,158 @@ class MovementExampleApp {
     const selectedIsCurrentHead = Boolean(currentHeadDatasetId) && this.currentDatasetId === currentHeadDatasetId;
     const canUndo = selectedIsCurrentHead && Boolean(this.currentDataset?.parent_dataset_id);
     this.refs.undo.disabled = !canUndo;
+  }
+
+  getUnresolvedSuspectedIssueGroups(fixes = this.getSelectedFixes()) {
+    const groups = new Map();
+    for (const fix of fixes || []) {
+      if (!fix?.fixKey) {
+        continue;
+      }
+      const issues = Array.isArray(fix.review?.issues) ? fix.review.issues : [];
+      const confirmedParentIds = new Set(
+        issues
+          .filter(issue => issue.status === "confirmed" && issue.parentAnnotationId)
+          .map(issue => issue.parentAnnotationId),
+      );
+      for (const issue of issues) {
+        if (issue.status !== "suspected" || !issue.issueId || confirmedParentIds.has(issue.issueId)) {
+          continue;
+        }
+        let group = groups.get(issue.issueId);
+        if (!group) {
+          group = {
+            parentAnnotationId: issue.issueId,
+            issueType: issue.issueType || "Unspecified issue",
+            origin: issue.origin || (issue.issueField || issue.issueThreshold ? "threshold" : "manual"),
+            stepId: issue.stepId || "",
+            sourceAnalysisId: issue.sourceAnalysisId || "",
+            reviewedAt: issue.reviewedAt || "",
+            reviewUser: issue.reviewUser || "",
+            fixes: [],
+          };
+          groups.set(issue.issueId, group);
+        }
+        if (!group.fixes.some(item => item.fixKey === fix.fixKey)) {
+          group.fixes.push(fix);
+        }
+      }
+    }
+    return [...groups.values()].sort((left, right) => (
+      left.issueType.localeCompare(right.issueType)
+      || left.parentAnnotationId.localeCompare(right.parentAnnotationId)
+    ));
+  }
+
+  canConfirmFixes(fixes = this.getSelectedFixes()) {
+    const selected = Array.isArray(fixes) ? fixes.filter(Boolean) : [];
+    if (!selected.length) {
+      return false;
+    }
+    const coveredFixKeys = new Set(
+      this.getUnresolvedSuspectedIssueGroups(selected)
+        .flatMap(group => group.fixes.map(fix => fix.fixKey)),
+    );
+    return selected.every(fix => coveredFixKeys.has(fix.fixKey));
+  }
+
+  openConfirmModal(fixes = this.getSelectedFixes()) {
+    const selectedFixes = Array.isArray(fixes) ? fixes.filter(Boolean) : [];
+    const groups = this.getUnresolvedSuspectedIssueGroups(selectedFixes);
+    if (!selectedFixes.length || !groups.length || !this.canConfirmFixes(selectedFixes)) {
+      this.setStatus("Select fixes with unresolved suspected issues before confirming them.", true);
+      return;
+    }
+    this.pendingConfirmationGroups = groups;
+    const checkByDefault = groups.length === 1;
+    this.refs.confirmMeta.innerHTML = `
+      <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+      <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+      <div><strong>Selected fixes:</strong> ${escapeHtml(formatCount(selectedFixes.length))}</div>
+      <div><strong>Originating issues:</strong> ${escapeHtml(formatCount(groups.length))}</div>
+    `;
+    this.refs.confirmGroups.innerHTML = groups.map((group, index) => {
+      const provenance = [
+        group.origin,
+        group.stepId ? `step ${group.stepId}` : "",
+        group.sourceAnalysisId ? `analysis ${group.sourceAnalysisId}` : "",
+        group.reviewedAt ? formatTimestamp(Date.parse(group.reviewedAt)) : "",
+      ].filter(Boolean).join(" • ");
+      return `
+        <label class="movement-inline-check">
+          <input type="checkbox" data-confirm-group-index="${index}"${checkByDefault ? " checked" : ""}>
+          <span>
+            <strong>${escapeHtml(group.issueType)}</strong><br>
+            ${escapeHtml(formatCount(group.fixes.length))} selected fix(es)<br>
+            <span class="movement-subtle">${escapeHtml(provenance || group.parentAnnotationId)}</span>
+          </span>
+        </label>
+      `;
+    }).join("");
+    this.refs.confirmUser.value = this.getUser();
+    this.refs.confirmNote.value = "";
+    this.refs.confirmStatus.textContent = groups.length > 1
+      ? "Choose the originating issue groups to confirm."
+      : "";
+    this.refs.confirmStatus.classList.remove("error");
+    this.refs.confirmSubmit.disabled = false;
+    this.refs.confirmClose.disabled = false;
+    this.refs.confirmModal.classList.remove("hidden");
+    this.refs.confirmUser.focus();
+  }
+
+  async submitConfirmIssues() {
+    if (!this.pendingConfirmationGroups.length || !this.currentArtifact) {
+      return;
+    }
+    const selectedGroups = [...this.refs.confirmGroups.querySelectorAll("input[data-confirm-group-index]:checked")]
+      .map(input => this.pendingConfirmationGroups[Number(input.dataset.confirmGroupIndex)])
+      .filter(Boolean);
+    const user = this.refs.confirmUser.value.trim();
+    if (!selectedGroups.length) {
+      this.refs.confirmStatus.textContent = "Choose at least one originating issue group.";
+      this.refs.confirmStatus.classList.add("error");
+      return;
+    }
+    if (!user) {
+      this.refs.confirmStatus.textContent = "User is required.";
+      this.refs.confirmStatus.classList.add("error");
+      return;
+    }
+    this.refs.confirmSubmit.disabled = true;
+    this.refs.confirmClose.disabled = true;
+    this.refs.confirmStatus.textContent = `Confirming ${formatCount(selectedGroups.length)} issue group(s)...`;
+    this.refs.confirmStatus.classList.remove("error");
+    this.setStatus(this.refs.confirmStatus.textContent);
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/confirm-issues`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            confirmations: selectedGroups.map(group => ({
+              parent_annotation_id: group.parentAnnotationId,
+              fix_keys: group.fixes.map(fix => fix.fixKey),
+            })),
+            note: this.refs.confirmNote.value.trim(),
+            user,
+          }),
+        },
+      );
+      this.setUser(user);
+      this.pendingConfirmationGroups = [];
+      this.refs.confirmModal.classList.add("hidden");
+      await this.loadStudyAtDataset(result.dataset.dataset_id);
+      this.setStatus(`Confirmed suspected outliers in ${result.dataset.dataset_id}.`);
+    } catch (error) {
+      this.refs.confirmStatus.textContent = error.message;
+      this.refs.confirmStatus.classList.add("error");
+      this.refs.confirmSubmit.disabled = false;
+      this.refs.confirmClose.disabled = false;
+      this.setStatus(error.message, true);
+    }
   }
 
   openIssueModal(status) {
@@ -8739,6 +9174,9 @@ class MovementExampleApp {
     }
     if (modal === this.refs.issueModal) {
       this.pendingIssueContext = null;
+    }
+    if (modal === this.refs.confirmModal) {
+      this.pendingConfirmationGroups = [];
     }
     modal.classList.add("hidden");
   }
@@ -9190,6 +9628,18 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     autoBurstsTruncated: Boolean(summary.auto_bursts_truncated),
     overviewHasAllFixes: !overviewTruncated,
     candidateFixes: [],
+    suspiciousFixes: [],
+    suspiciousState: "idle",
+    suspiciousLimit: null,
+    suspiciousMatchingFixCount: 0,
+    suspiciousReturnedFixCount: 0,
+    suspiciousTruncated: false,
+    confirmedFixes: [],
+    confirmedState: "idle",
+    confirmedLimit: null,
+    confirmedMatchingFixCount: 0,
+    confirmedReturnedFixCount: 0,
+    confirmedTruncated: false,
     detailFixes: [],
     detailSegments: [],
     detailAutoBursts: [],
@@ -9336,6 +9786,7 @@ function parseMovementFixes(items) {
       reviewedAt: String(item?.review?.reviewed_at || ""),
     },
     segments: normalizeSegmentMemberships(item?.segments),
+    analyticallyExcluded: Boolean(item?.analytically_excluded),
   })).filter(item => item.fixKey) : [];
 }
 
@@ -9399,10 +9850,15 @@ function normalizeReviewIssues(review) {
       ownerQuestion: String(item.owner_question || item.ownerQuestion || "").trim(),
       reviewUser: String(item.review_user || item.reviewUser || "").trim(),
       reviewedAt: String(item.reviewed_at || item.reviewedAt || "").trim(),
-      origin: String(item.origin || "").trim(),
+      origin: String(
+        item.origin
+        || ((item.issue_field || item.issueField || item.issue_threshold || item.issueThreshold) ? "threshold" : "manual"),
+      ).trim(),
       stepId: String(item.step_id || item.stepId || "").trim(),
       sourceAnalysisId: String(item.source_analysis_id || item.sourceAnalysisId || "").trim(),
       scopeKind: String(item.scope_kind || item.scopeKind || "").trim(),
+      parentAnnotationId: String(item.parent_annotation_id || item.parentAnnotationId || "").trim(),
+      annotationKind: String(item.annotation_kind || item.annotationKind || "issue").trim(),
     }))
     .filter(item => item.issueId || item.issueType);
   if (cleaned.length) {
@@ -9422,6 +9878,8 @@ function normalizeReviewIssues(review) {
     stepId: String(review?.step_id || review?.stepId || "").trim(),
     sourceAnalysisId: String(review?.source_analysis_id || review?.sourceAnalysisId || "").trim(),
     scopeKind: String(review?.scope_kind || review?.scopeKind || "").trim(),
+    parentAnnotationId: String(review?.parent_annotation_id || review?.parentAnnotationId || "").trim(),
+    annotationKind: String(review?.annotation_kind || review?.annotationKind || "issue").trim(),
   };
   return legacyIssue.issueId || legacyIssue.issueType ? [legacyIssue] : [];
 }
@@ -9449,7 +9907,13 @@ function refreshMovementFixCollections(data) {
     return;
   }
   const merged = new Map();
-  for (const fix of [...(data.overviewFixes || []), ...(data.candidateFixes || []), ...(data.detailFixes || [])]) {
+  for (const fix of [
+    ...(data.overviewFixes || []),
+    ...(data.candidateFixes || []),
+    ...(data.detailFixes || []),
+    ...(data.suspiciousFixes || []),
+    ...(data.confirmedFixes || []),
+  ]) {
     merged.set(fix.fixKey, fix);
   }
   data.fixes = Array.from(merged.values())

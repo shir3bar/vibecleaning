@@ -27,7 +27,11 @@ from app.web import get_project_dir, json_error, parse_json_body, validate_path_
 
 from .analysis_history import build_movement_analysis_history
 from .catalog import get_study_dir, list_families, list_studies
-from .review_annotations import apply_review_annotations, load_review_annotations
+from .review_annotations import (
+    apply_review_annotations,
+    confirmed_exclusion_scopes,
+    load_review_annotations,
+)
 from .summary import (
     DEFAULT_BURST_GAP_MODE,
     DEFAULT_BURST_GAP_QUANTILE,
@@ -76,6 +80,11 @@ def _apply_dataset_review_annotations(
     logical_name: str,
     payload: dict,
 ) -> dict:
+    annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+    return apply_review_annotations(payload, annotations, source_artifact=logical_name)
+
+
+def _load_dataset_review_annotations(study_dir: Path, *, dataset_id: str) -> list[dict]:
     try:
         _, sidecar_path = get_dataset_artifact(
             study_dir,
@@ -83,9 +92,64 @@ def _apply_dataset_review_annotations(
             "movement_review_annotations.json",
         )
     except ProjectStateError:
-        return payload
-    annotations = load_review_annotations(sidecar_path)
-    return apply_review_annotations(payload, annotations, source_artifact=logical_name)
+        return []
+    return load_review_annotations(sidecar_path)
+
+
+def _review_annotation_candidates(
+    annotations: list[dict],
+    *,
+    logical_name: str,
+) -> tuple[set[str], set[str]]:
+    fix_keys: set[str] = set()
+    individuals: set[str] = set()
+    for annotation in annotations:
+        if not annotation.get("status"):
+            continue
+        source_artifact = str(annotation.get("source_artifact") or "")
+        if source_artifact and source_artifact != logical_name:
+            continue
+        scope = annotation.get("scope") or {}
+        fix_keys.update(str(item) for item in scope.get("fix_keys") or [] if str(item))
+        if str(scope.get("kind") or "") == "individual":
+            individual = str(scope.get("individual") or "").strip()
+            if individual:
+                individuals.add(individual)
+    return fix_keys, individuals
+
+
+def _filter_review_status_payload(payload: dict, *, review_status: str, limit: int | None) -> dict:
+    fixes = list(payload.get("fixes") or [])
+    if review_status == "reviewed":
+        matches = [fix for fix in fixes if bool(fix.get("review"))]
+    else:
+        matches = [
+            fix
+            for fix in fixes
+            if str((fix.get("review") or {}).get("status") or "").strip().lower() == review_status
+        ]
+    returned = matches if limit is None else matches[:limit]
+    payload["fixes"] = returned
+    payload["segments"] = []
+    payload["auto_bursts"] = []
+    payload["matching_fix_count"] = len(matches)
+    payload["returned_fix_count"] = len(returned)
+    payload["truncated"] = len(returned) < len(matches)
+    detail_scope = dict(payload.get("detail_scope") or {})
+    detail_scope["review_status"] = review_status
+    detail_scope["limit"] = limit
+    payload["detail_scope"] = detail_scope
+    return payload
+
+
+def _movement_analysis_input_names(dataset: dict, logical_name: str) -> list[str]:
+    names = [logical_name]
+    if any(
+        artifact.get("logical_name") == "movement_review_annotations.json"
+        for artifact in dataset.get("artifacts", [])
+    ):
+        names.append("movement_review_annotations.json")
+    return names
 
 
 def _reusable_osm_enrichment_response(
@@ -1435,6 +1499,10 @@ ANNOTATE_SCOPE_TEMPLATE_PATH = Path(__file__).with_name("annotate_scope_step_tem
 ANNOTATE_SCOPE_SCRIPT = ANNOTATE_SCOPE_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
 compile(ANNOTATE_SCOPE_SCRIPT, str(ANNOTATE_SCOPE_TEMPLATE_PATH), "exec")
 
+CONFIRM_ISSUES_TEMPLATE_PATH = Path(__file__).with_name("confirm_issues_step_template.py")
+CONFIRM_ISSUES_SCRIPT = CONFIRM_ISSUES_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
+compile(CONFIRM_ISSUES_SCRIPT, str(CONFIRM_ISSUES_TEMPLATE_PATH), "exec")
+
 
 def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]:
     if value is None and allow_empty:
@@ -1453,6 +1521,31 @@ def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]
     if not unique and not allow_empty:
         raise ValueError("Select at least one fix")
     return unique
+
+
+def _validate_confirmations(value: object) -> list[dict]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("Select at least one suspected issue")
+    confirmations = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid confirmation list")
+        parent_annotation_id = _validate_required_text(
+            item.get("parent_annotation_id"),
+            label="Suspected issue id",
+            max_length=240,
+        )
+        fix_keys = _validate_fix_keys(item.get("fix_keys"))
+        key = (parent_annotation_id, tuple(fix_keys))
+        if key in seen:
+            continue
+        seen.add(key)
+        confirmations.append({
+            "parent_annotation_id": parent_annotation_id,
+            "fix_keys": fix_keys,
+        })
+    return confirmations
 
 
 def _validate_fix_key(value: object, *, label: str) -> str:
@@ -1929,20 +2022,22 @@ def register_movement_routes(
         try:
             study_dir = configured_study_dir(family_name, study_name)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
+            annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+            confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
+                annotations,
+                source_artifact=logical_name,
+            )
             payload = await run_in_threadpool(
-                    build_movement_overview,
-                    artifact_path,
-                    burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
-                    burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
-                    burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
-                )
+                build_movement_overview,
+                artifact_path,
+                confirmed_fix_keys=confirmed_fix_keys,
+                confirmed_individual_tracks=confirmed_individual_tracks,
+                burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
+                burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
+                burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
+            )
             return JSONResponse(
-                _apply_dataset_review_annotations(
-                    study_dir,
-                    dataset_id=dataset_id,
-                    logical_name=logical_name,
-                    payload=payload,
-                )
+                apply_review_annotations(payload, annotations, source_artifact=logical_name)
             )
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
@@ -1971,24 +2066,42 @@ def register_movement_routes(
                 single_individual = parse_optional_individual(individual)
                 if single_individual:
                     individuals = [single_individual]
+            normalized_review_status = str(review_status or "").strip().lower()
+            if normalized_review_status not in {"", "reviewed", "suspected", "confirmed"}:
+                raise ValueError("Invalid review status")
+            requested_limit = parse_optional_limit(limit) if limit not in (None, "") else DEFAULT_FIX_LIMIT
+            annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+            annotation_fix_keys, annotation_individuals = _review_annotation_candidates(
+                annotations,
+                logical_name=logical_name,
+            )
+            confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
+                annotations,
+                source_artifact=logical_name,
+            )
             payload = await run_in_threadpool(
                 build_movement_fixes,
                 artifact_path,
                 individuals=individuals or None,
+                additional_review_fix_keys=annotation_fix_keys if normalized_review_status else None,
+                additional_review_individuals=annotation_individuals if normalized_review_status else None,
+                confirmed_fix_keys=confirmed_fix_keys,
+                confirmed_individual_tracks=confirmed_individual_tracks,
                 start_ms=parse_optional_int(start_ms, label="start_ms"),
                 end_ms=parse_optional_int(end_ms, label="end_ms"),
-                review_status=str(review_status or "").strip().lower(),
-                limit=parse_optional_limit(limit) if limit not in (None, "") else DEFAULT_FIX_LIMIT,
+                review_status=normalized_review_status,
+                limit=None if normalized_review_status else requested_limit,
                 burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
                 burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
                 burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
             )
-            payload = _apply_dataset_review_annotations(
-                study_dir,
-                dataset_id=dataset_id,
-                logical_name=logical_name,
-                payload=payload,
-            )
+            payload = apply_review_annotations(payload, annotations, source_artifact=logical_name)
+            if normalized_review_status:
+                payload = _filter_review_status_payload(
+                    payload,
+                    review_status=normalized_review_status,
+                    limit=requested_limit,
+                )
             return JSONResponse(payload)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
@@ -1998,14 +2111,19 @@ def register_movement_routes(
         try:
             study_dir = configured_study_dir(family_name, study_name)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
-            payload = await run_in_threadpool(build_movement_summary, artifact_path)
+            annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+            confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
+                annotations,
+                source_artifact=logical_name,
+            )
+            payload = await run_in_threadpool(
+                build_movement_summary,
+                artifact_path,
+                confirmed_fix_keys=confirmed_fix_keys,
+                confirmed_individual_tracks=confirmed_individual_tracks,
+            )
             return JSONResponse(
-                _apply_dataset_review_annotations(
-                    study_dir,
-                    dataset_id=dataset_id,
-                    logical_name=logical_name,
-                    payload=payload,
-                )
+                apply_review_annotations(payload, annotations, source_artifact=logical_name)
             )
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
@@ -2069,6 +2187,7 @@ def register_movement_routes(
             study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            dataset = load_dataset(study_dir, dataset_id)
             user = body.get("user")
             query_parameters = _validate_query_parameters(body.get("query_parameters", body.get("parameters")))
             execution_scope = body.get("execution_scope")
@@ -2092,7 +2211,7 @@ def register_movement_routes(
                 "kind": "python",
                 "script": CANDIDATE_QUERY_ANALYSIS_SCRIPT,
                 "dataset_id": dataset_id,
-                "input_artifacts": [logical_name],
+                "input_artifacts": _movement_analysis_input_names(dataset, logical_name),
                 "output_artifacts": ["candidate_query_results.json"],
                 "parameters": {
                     "app": "movement",
@@ -2122,6 +2241,7 @@ def register_movement_routes(
             study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            dataset = load_dataset(study_dir, dataset_id)
             feature_set = parse_anomaly_feature_set(body.get("feature_set"))
             feature_set_label = (
                 "movement + OSM context"
@@ -2135,7 +2255,7 @@ def register_movement_routes(
                 "kind": "python",
                 "script": BURST_ANOMALY_ANALYSIS_SCRIPT,
                 "dataset_id": dataset_id,
-                "input_artifacts": [logical_name],
+                "input_artifacts": _movement_analysis_input_names(dataset, logical_name),
                 "output_artifacts": ["burst_anomaly_ranking.json"],
                 "parameters": {
                     "app": "movement",
@@ -2167,6 +2287,7 @@ def register_movement_routes(
             study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            dataset = load_dataset(study_dir, dataset_id)
             feature_set = parse_anomaly_feature_set(body.get("feature_set"))
             feature_set_label = (
                 "movement + OSM context"
@@ -2180,7 +2301,7 @@ def register_movement_routes(
                 "kind": "python",
                 "script": BURST_FEATURE_SPACE_ANALYSIS_SCRIPT,
                 "dataset_id": dataset_id,
-                "input_artifacts": [logical_name],
+                "input_artifacts": _movement_analysis_input_names(dataset, logical_name),
                 "output_artifacts": ["burst_feature_space.json"],
                 "parameters": {
                     "app": "movement",
@@ -2297,6 +2418,8 @@ def register_movement_routes(
                 )
 
             status = _validate_status(body.get("status"))
+            if status != "suspected":
+                raise ValueError("Use the confirm-issues action to confirm an existing suspected issue")
             issue_type = _validate_required_text(body.get("issue_type"), label="Issue type", max_length=120)
             comment = _validate_required_text(
                 body.get("comment", body.get("issue_note")),
@@ -2357,6 +2480,53 @@ def register_movement_routes(
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/confirm-issues")
+    async def post_movement_confirm_issues(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            dataset = load_dataset(study_dir, dataset_id)
+            get_dataset_artifact(study_dir, dataset_id, logical_name)
+            confirmations = _validate_confirmations(body.get("confirmations"))
+            note = _validate_optional_text(
+                body.get("note"),
+                label="Confirmation note",
+                max_length=1200,
+            )
+            input_artifacts = [logical_name]
+            if any(
+                artifact.get("logical_name") == "movement_review_annotations.json"
+                for artifact in dataset.get("artifacts", [])
+            ):
+                input_artifacts.append("movement_review_annotations.json")
+            payload = {
+                "user": body.get("user"),
+                "title": f"Confirm {sum(len(item['fix_keys']) for item in confirmations)} suspected fix(es) in {logical_name}",
+                "kind": "python",
+                "script": CONFIRM_ISSUES_SCRIPT,
+                "parameters": {
+                    "app": "movement",
+                    "action": "confirm_issues",
+                    "target_artifact": logical_name,
+                    "dataset_id": dataset_id,
+                    "confirmations": confirmations,
+                    "note": note,
+                    "repo_root": str(Path(__file__).resolve().parents[2]),
+                    "user": body.get("user"),
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": input_artifacts,
+                "output_artifacts": [logical_name, "movement_review_annotations.json"],
+                "set_as_head": True,
+            }
+            return JSONResponse(create_step(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/annotate-fixes")
     async def post_movement_annotate_fixes(family_name: str, study_name: str, request: Request):
         body = await parse_json_body(request)
@@ -2368,6 +2538,8 @@ def register_movement_routes(
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             fix_keys = _validate_fix_keys(body.get("fix_keys"))
             status = _validate_status(body.get("status"))
+            if status != "suspected":
+                raise ValueError("Use the confirm-issues action to confirm an existing suspected issue")
             issue_type = _validate_required_text(body.get("issue_type"), label="Issue type", max_length=120)
             issue_field = _validate_optional_text(body.get("issue_field"), label="Issue field", max_length=120)
             issue_threshold = _validate_optional_text(body.get("issue_threshold"), label="Issue threshold", max_length=120)

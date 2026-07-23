@@ -26,6 +26,7 @@ def main():
         run_candidate_query,
         unresolved_candidate_query_result,
     )
+    from examples.movement.review_annotations import confirmed_exclusion_scopes, load_review_annotations
 
     target_artifact = str(params.get("target_artifact") or "").strip()
     query_definition = dict(params.get("query_definition") or {})
@@ -60,6 +61,19 @@ def main():
             warnings=["Target artifact was not provided as an input."],
         )
     else:
+        sidecar = next(
+            (
+                artifact
+                for artifact in spec.get("input_artifacts", [])
+                if artifact.get("logical_name") == "movement_review_annotations.json"
+            ),
+            None,
+        )
+        annotations = load_review_annotations(Path(sidecar["path"]) if sidecar else None)
+        confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
+            annotations,
+            source_artifact=target_artifact,
+        )
         result = run_candidate_query(
             Path(source["path"]),
             query_definition=query_definition,
@@ -68,7 +82,10 @@ def main():
             logical_name=target_artifact,
             preview_limit=preview_limit,
             execution_scope=execution_scope,
+            confirmed_fix_keys=confirmed_fix_keys,
+            confirmed_individual_tracks=confirmed_individual_tracks,
         )
+        result["confirmed_exclusion_count"] = len(confirmed_fix_keys)
 
     output_path = Path(output["path"])
     output_path.parent.mkdir(parents=True, exist_ok=True)

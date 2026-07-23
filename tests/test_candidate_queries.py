@@ -325,6 +325,23 @@ def test_numeric_candidate_query_evaluator_uses_movement_fixes(tmp_path):
     assert result["evaluator_provenance"]["source_digest"]
 
 
+def test_numeric_candidate_query_excludes_confirmed_fix_and_recomputes_neighbors(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(FAST_MOVEMENT_CSV, encoding="utf-8")
+
+    result = run_fix_numeric_candidate_query(
+        csv_path,
+        query_definition=numeric_query_definition(),
+        dataset_id="dataset_test",
+        logical_name="movement.csv",
+        confirmed_fix_keys={"id:fix_2#row:2"},
+    )
+
+    assert result["run_status"] == "success"
+    assert result["candidate_count"] == 0
+    assert result["candidates"] == []
+
+
 def test_precomputed_osm_distance_queries_use_enriched_attributes_without_overpass(monkeypatch, tmp_path):
     csv_path = tmp_path / "movement_osm_context.csv"
     csv_path.write_text(OSM_CONTEXT_CSV, encoding="utf-8")
