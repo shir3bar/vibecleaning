@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from copy import deepcopy
 import json
 import textwrap
 import uuid
@@ -119,6 +120,7 @@ def _review_annotation_candidates(
 
 
 def _filter_review_status_payload(payload: dict, *, review_status: str, limit: int | None) -> dict:
+    payload = deepcopy(payload)
     fixes = list(payload.get("fixes") or [])
     if review_status == "reviewed":
         matches = [fix for fix in fixes if bool(fix.get("review"))]

@@ -552,7 +552,10 @@ class MovementExampleApp {
     this.syncBurstGapControls();
     this.saveUiState();
     if (this.currentArtifact) {
-      void this.loadArtifact(new Set(this.data?.selectedFixKeys || []));
+      void this.loadArtifact(
+        new Set(this.data?.selectedFixKeys || []),
+        this.data ? new Set(this.data.selectedIndividuals) : null,
+      );
     }
   }
 
@@ -2722,6 +2725,12 @@ class MovementExampleApp {
       await this.loadDataset();
     });
     this.refs.artifact.addEventListener("change", async () => {
+      const preservedIndividuals = this.data
+        ? new Set(this.data.selectedIndividuals)
+        : null;
+      const preservedFixKeys = this.data
+        ? new Set(this.data.selectedFixKeys)
+        : new Set();
       this.currentArtifact = this.refs.artifact.value;
       this.saveUiState();
       if (!this.currentArtifact) {
@@ -2730,7 +2739,7 @@ class MovementExampleApp {
         this.setStatus("Select a study to load the map.");
         return;
       }
-      await this.loadArtifact();
+      await this.loadArtifact(preservedFixKeys, preservedIndividuals);
     });
     this.refs.basemap.addEventListener("change", async () => {
       this.saveUiState();
@@ -4818,7 +4827,7 @@ class MovementExampleApp {
     }
   }
 
-  async loadStudy() {
+  async loadStudy({ preservedIndividuals = null } = {}) {
     this.cancelRequest("study");
     this.cancelRequest("dataset");
     this.cancelRequest("overview");
@@ -4901,7 +4910,10 @@ class MovementExampleApp {
       this.refs.slider.min = String(this.data.minTimeMs);
       this.refs.slider.max = String(this.data.maxTimeMs);
       this.refs.slider.value = String(this.currentTimeMs);
-      const initiallySelectedIndividuals = initialMovementVisibleIndividuals(this.data);
+      const initiallySelectedIndividuals = movementVisibleIndividualsForReload(
+        this.data,
+        preservedIndividuals,
+      );
       this.data.selectedIndividuals = new Set(initiallySelectedIndividuals);
       this.data.selectedFixKeys = new Set();
       this.populateColorByOptions();
@@ -4965,6 +4977,9 @@ class MovementExampleApp {
     const datasetId = this.currentDatasetId;
     const datasetLoadId = ++this.datasetLoadId;
     const preservedFixKeys = this.data ? new Set(this.data.selectedFixKeys) : new Set();
+    const preservedIndividuals = this.data
+      ? new Set(this.data.selectedIndividuals)
+      : null;
     this.clearLoadedStudyState();
     this.currentDataset = null;
     this.currentArtifactEntry = null;
@@ -5021,10 +5036,10 @@ class MovementExampleApp {
     this.refs.artifact.value = this.currentArtifact;
     this.refs.artifact.disabled = false;
     this.saveUiState();
-      await this.loadArtifact(preservedFixKeys);
+      await this.loadArtifact(preservedFixKeys, preservedIndividuals);
     }
 
-  async loadArtifact(preservedFixKeys = new Set()) {
+  async loadArtifact(preservedFixKeys = new Set(), preservedIndividuals = null) {
     this.cancelSelectionRequests("artifact");
     this.clearAnomalyRanking();
     this.clearBurstFeatureSpace();
@@ -5077,7 +5092,10 @@ class MovementExampleApp {
       this.refs.slider.min = String(this.data.minTimeMs);
       this.refs.slider.max = String(this.data.maxTimeMs);
       this.refs.slider.value = String(this.currentTimeMs);
-      const initiallySelectedIndividuals = initialMovementVisibleIndividuals(this.data);
+      const initiallySelectedIndividuals = movementVisibleIndividualsForReload(
+        this.data,
+        preservedIndividuals,
+      );
       this.data.selectedIndividuals = new Set(initiallySelectedIndividuals);
       this.data.selectedFixKeys = new Set(
         [...preservedFixKeys].filter(key => this.data.fixByKey.has(key)),
@@ -9525,8 +9543,11 @@ class MovementExampleApp {
   }
 
   async loadStudyAtDataset(datasetId) {
+    const preservedIndividuals = this.data
+      ? new Set(this.data.selectedIndividuals)
+      : null;
     this.currentDatasetId = datasetId;
-    await this.loadStudy();
+    await this.loadStudy({ preservedIndividuals });
   }
 
   async undoCurrentHead() {
@@ -9708,6 +9729,15 @@ function initialMovementVisibleIndividuals(data) {
   }
   return data.individuals || [];
 }
+
+
+function movementVisibleIndividualsForReload(data, preservedIndividuals) {
+  if (!(preservedIndividuals instanceof Set)) {
+    return initialMovementVisibleIndividuals(data);
+  }
+  return (data?.individuals || []).filter(individual => preservedIndividuals.has(individual));
+}
+
 
 function parseMovementBurstGap(summary) {
   const nested = summary?.burst_gap || {};

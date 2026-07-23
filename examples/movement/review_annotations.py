@@ -1,4 +1,5 @@
 import csv
+from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -152,6 +153,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
     ]
     if not relevant:
         return summary
+    summary = deepcopy(summary)
     for fix in summary.get("fixes") or []:
         fix_key = str(fix.get("fix_key") or "")
         individual = str(fix.get("individual") or "")

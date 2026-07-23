@@ -42,6 +42,18 @@ def _source_signature(project_dir: Path, dataset_id: str, logical_name: str) -> 
     return _artifact_signature(get_dataset_artifact_entry(dataset, logical_name))
 
 
+def _ancestor_dataset_ids(project_dir: Path, dataset_id: str) -> set[str]:
+    ancestors = set()
+    current_id = str(dataset_id or "").strip()
+    while current_id:
+        if current_id in ancestors:
+            raise ProjectStateError("Dataset lineage contains a cycle")
+        ancestors.add(current_id)
+        dataset = load_dataset(project_dir, current_id)
+        current_id = str(dataset.get("parent_dataset_id") or "").strip()
+    return ancestors
+
+
 def _review_exclusion_signature(project_dir: Path, dataset_id: str, logical_name: str) -> str:
     dataset = load_dataset(project_dir, dataset_id)
     try:
@@ -145,6 +157,7 @@ def build_movement_analysis_history(
     feature_set: str = "movement_only",
 ) -> dict:
     current_signature = _source_signature(project_dir, dataset_id, logical_name)
+    ancestor_dataset_ids = _ancestor_dataset_ids(project_dir, dataset_id)
     current_exclusion_signature = _review_exclusion_signature(
         project_dir,
         dataset_id,
@@ -157,6 +170,9 @@ def build_movement_analysis_history(
         reverse=True,
     )
     for analysis in analyses:
+        analysis_dataset_id = str(analysis.get("dataset_id") or "").strip()
+        if analysis_dataset_id not in ancestor_dataset_ids:
+            continue
         parameters = dict(analysis.get("parameters") or {})
         if str(parameters.get("app") or "") != "movement":
             continue

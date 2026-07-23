@@ -35,7 +35,11 @@ from examples.movement.report_analysis_template import (
     normalize_report_records,
     recompute_analytical_movement_context,
 )
-from examples.movement.review_annotations import export_reviewed_csv
+from examples.movement.review_annotations import (
+    apply_review_annotations,
+    export_reviewed_csv,
+    normalize_annotation,
+)
 from examples.movement.bursts import build_auto_bursts
 from examples.movement.movement_features import STEP_FEATURE_FIELDS, compute_track_movement
 import examples.movement.summary as movement_summary
@@ -423,6 +427,37 @@ fix_3,alpha,2024-01-01T02:20:00Z,-70.3,40.3,train
     ]
 
 
+def test_review_annotations_do_not_mutate_cached_movement_payload(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude
+fix_a,alpha,2024-01-01T00:00:00Z,-70.0,40.0
+fix_b,alpha,2024-01-01T01:00:00Z,-70.1,40.1
+""",
+        encoding="utf-8",
+    )
+    base = build_movement_overview(csv_path)
+    annotation = normalize_annotation({
+        "annotation_id": "issue_child",
+        "source_artifact": "movement.csv",
+        "status": "suspected",
+        "origin": "manual",
+        "issue_type": "drift",
+        "scope": {"kind": "fix", "fix_keys": ["id:fix_a#row:1"]},
+    })
+
+    child_payload = apply_review_annotations(
+        base,
+        [annotation],
+        source_artifact="movement.csv",
+    )
+    ancestor_payload = build_movement_overview(csv_path)
+
+    assert child_payload["fixes"][0]["review"]["status"] == "suspected"
+    assert not ancestor_payload["fixes"][0].get("review")
+    assert ancestor_payload.get("review_annotations") in (None, [])
+
+
 def test_duplicate_timestamps_use_row_order_without_per_fix_branching(tmp_path):
     csv_path = tmp_path / "movement.csv"
     csv_path.write_text(
@@ -601,7 +636,8 @@ def test_movement_frontend_uses_on_demand_individual_loading_for_truncated_overv
     assert "overviewTruncated" in source
     assert "Select individuals to load fixes on demand." in source
     assert "initialMovementVisibleIndividuals(data)" in source
-    assert "initialMovementVisibleIndividuals(this.data)" in source
+    assert "movementVisibleIndividualsForReload(" in source
+    assert "return initialMovementVisibleIndividuals(data);" in source
     assert "if (data.overviewTruncated) {" in source
     assert "getActiveThresholdMatchKeys()" in source
     assert "showPoints ? this.getActiveThresholdMatchKeys() : new Set()" in source
@@ -950,6 +986,69 @@ Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text("{}\\n")
     assert item["compatibility_reasons"] == ["confirmed exclusion state differs"]
 
 
+def test_movement_analysis_history_does_not_leak_descendant_run_into_ancestor(tmp_path):
+    client, root_dataset_id = create_movement_test_client(tmp_path)
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+    step = create_step(
+        study_dir,
+        {
+            "user": "reviewer",
+            "title": "Create child dataset",
+            "kind": "python",
+            "script": '''import json
+import os
+from pathlib import Path
+
+spec = json.loads(Path(os.environ["VIBECLEANING_SPEC_PATH"]).read_text())
+Path(spec["output_artifacts"][0]["path"]).write_text('{"annotations": []}\\n')
+Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text("{}\\n")
+''',
+            "parent_dataset_id": root_dataset_id,
+            "input_artifacts": [],
+            "output_artifacts": ["movement_review_annotations.json"],
+            "parameters": {"app": "movement", "action": "child_dataset"},
+        },
+    )
+    child_dataset_id = step["dataset"]["dataset_id"]
+    child_analysis = create_saved_movement_analysis(
+        tmp_path,
+        dataset_id=child_dataset_id,
+    )
+
+    ancestor_response = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/analyses",
+        params={
+            "dataset_id": root_dataset_id,
+            "logical_name": "movement.csv",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": "60",
+            "burst_gap_quantile": "0.75",
+            "feature_set": "movement_only",
+        },
+    )
+    child_response = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/analyses",
+        params={
+            "dataset_id": child_dataset_id,
+            "logical_name": "movement.csv",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": "60",
+            "burst_gap_quantile": "0.75",
+            "feature_set": "movement_only",
+        },
+    )
+
+    analysis_id = child_analysis["analysis"]["analysis_id"]
+    assert ancestor_response.status_code == 200
+    assert analysis_id not in {
+        item["analysis_id"] for item in ancestor_response.json()["items"]
+    }
+    assert child_response.status_code == 200
+    assert analysis_id in {
+        item["analysis_id"] for item in child_response.json()["items"]
+    }
+
+
 def test_movement_frontend_restores_saved_burst_analyses():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
@@ -974,6 +1073,8 @@ def test_movement_frontend_restores_saved_burst_analyses():
     assert "getFillColor: [92, 101, 110, 24]" in source
     assert "|| !visibleIndividuals.has(fix.individual)" in source
     assert "getUnresolvedSuspectedIssueGroups" in source
+    assert "movementVisibleIndividualsForReload" in source
+    assert "loadStudy({ preservedIndividuals })" in source
 
 
 def test_movement_frontend_loads_suspicious_fixes_on_demand():
