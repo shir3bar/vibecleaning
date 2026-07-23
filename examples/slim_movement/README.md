@@ -10,7 +10,8 @@ movement example's backend and frontend components with a restricted profile:
 - fix, segment, burst, and individual suspicion annotations
 - issue-linked confirmation that retains confirmed rows as invisible analytical
   exclusions and exposes them in a map audit layer
-- reviewed CSV export and owner report generation
+- reviewed CSV export and owner report generation, with browser-rendered map
+  captures retained as checksummed analysis inputs
 - automatic restoration of the latest compatible burst ranking
 - no artifact, train/test, candidate-query, ranking-feature, OSM-derived
   feature, or burst feature-space controls

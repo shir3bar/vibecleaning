@@ -32,7 +32,6 @@ from examples.movement.report_analysis_template import (
     format_monitoring_span,
     format_temporal_resolution,
     load_rows_with_context,
-    normalize_report_records,
     recompute_analytical_movement_context,
 )
 from examples.movement.review_annotations import (
@@ -1529,7 +1528,7 @@ def test_movement_report_generator_uses_compilable_template_file():
 def test_build_issue_sections_keeps_all_issue_types_when_snapshots_are_sampled():
     matched_records = [
         {
-            "fix_key": "fix_a",
+            "fix_key": "row:1",
             "individual": "alpha",
             "set_name": "train",
             "time_ms": 1,
@@ -1549,7 +1548,7 @@ def test_build_issue_sections_keeps_all_issue_types_when_snapshots_are_sampled()
             "raw": {"hdop": "1.2"},
         },
         {
-            "fix_key": "fix_b",
+            "fix_key": "row:2",
             "individual": "beta",
             "set_name": "train",
             "time_ms": 2,
@@ -1577,10 +1576,10 @@ def test_build_issue_sections_keeps_all_issue_types_when_snapshots_are_sampled()
             "set_name": "train",
             "issue_type": "spike",
             "issue_types": ["spike"],
-            "anchor_fix_keys": ["fix_a"],
-            "report_fix_keys": ["fix_a"],
-            "start_fix_key": "fix_a",
-            "end_fix_key": "fix_a",
+            "anchor_row_ranges": [[1, 1]],
+            "report_row_ranges": [[1, 1]],
+            "start_fix_key": "row:1",
+            "end_fix_key": "row:1",
             "start_time_ms": 1,
             "end_time_ms": 1,
             "start_time_text": "2024-01-01T00:00:00Z",
@@ -1604,7 +1603,7 @@ def test_build_issue_sections_keeps_all_issue_types_when_snapshots_are_sampled()
 def test_build_issue_sections_adds_issue_field_summary_per_individual():
     matched_records = [
         {
-            "fix_key": "fix_a",
+            "fix_key": "row:1",
             "individual": "alpha",
             "set_name": "train",
             "time_ms": 1,
@@ -1661,7 +1660,7 @@ def test_build_issue_sections_adds_issue_field_summary_per_individual():
 def test_build_issue_sections_keeps_window_examples_with_their_captured_issue_type():
     matched_records = [
         {
-            "fix_key": "fix_a",
+            "fix_key": "row:1",
             "individual": "alpha",
             "set_name": "train",
             "time_ms": 1,
@@ -1693,10 +1692,10 @@ def test_build_issue_sections_keeps_window_examples_with_their_captured_issue_ty
             "set_name": "train",
             "issue_type": "gps",
             "issue_types": ["gps"],
-            "anchor_fix_keys": ["fix_a"],
-            "report_fix_keys": ["fix_a"],
-            "start_fix_key": "fix_a",
-            "end_fix_key": "fix_a",
+            "anchor_row_ranges": [[1, 1]],
+            "report_row_ranges": [[1, 1]],
+            "start_fix_key": "row:1",
+            "end_fix_key": "row:1",
             "start_time_ms": 1,
             "end_time_ms": 1,
             "start_time_text": "2024-01-01T00:00:00Z",
@@ -1715,40 +1714,6 @@ def test_build_issue_sections_keeps_window_examples_with_their_captured_issue_ty
     examples_by_issue = {section["issue_type"]: section["examples"] for section in sections}
     assert examples_by_issue["gps"][0]["snapshot_key"] == "snapshot_gps"
     assert examples_by_issue["speed"][0]["snapshot_key"] == ""
-
-
-def test_normalize_report_records_ignores_cleared_issue_metadata():
-    records = normalize_report_records(
-        [
-            {
-                "fix_key": "fix_a",
-                "individual": "alpha",
-                "set_name": "train",
-                "time_ms": 1,
-                "time_text": "2024-01-01T00:00:00Z",
-                "lon": -70.0,
-                "lat": 40.0,
-                "review": {
-                    "status": "",
-                    "issue_id": "issue_clear",
-                    "issue_type": "drift",
-                    "issues": [
-                        {
-                            "status": "",
-                            "issue_id": "issue_clear",
-                            "issue_type": "drift",
-                        }
-                    ],
-                },
-            }
-        ]
-    )
-
-    assert len(records) == 1
-    assert records[0]["review"]["status"] == ""
-    assert records[0]["review"]["issue_id"] == ""
-    assert records[0]["review"]["issue_type"] == ""
-    assert records[0]["review"]["issues"] == []
 
 
 def test_html_report_generates_svg_fallback_when_auto_snapshot_is_missing():
@@ -2063,6 +2028,10 @@ def test_movement_generate_report_route_keeps_issue_first_behavior(tmp_path):
     assert html_response.status_code == 200
     assert appendix_response.status_code == 200
     assert "Movement Outlier Review Report" in html_response.text
+    parameters = response.json()["analysis"]["parameters"]
+    assert parameters["fix_row_ranges"] == [[1, 1]]
+    assert "fix_keys" not in parameters
+    assert "report_fixes" not in parameters
 
 
 def test_movement_generate_report_route_supports_single_individual_profile(tmp_path):
@@ -2094,6 +2063,63 @@ def test_movement_generate_report_route_supports_single_individual_profile(tmp_p
     assert "data:image/svg+xml;base64," in html_response.text
     assert "Study ID" in html_response.text
     assert "Issue Summary" not in html_response.text
+
+
+def test_movement_report_stores_snapshot_as_checksummed_analysis_input(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=PROFILE_CSV_CONTENT)
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+        "AAIAAAoAAv/lPAAAAABJRU5ErkJggg=="
+    )
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/generate-report",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "report_type": "individual_profile",
+            "individuals": ["gamma"],
+            "snapshots": [
+                {
+                    "snapshot_key": "individual_profile::gamma",
+                    "caption": "gamma whole track",
+                    "data_url": "data:image/png;base64,"
+                    + base64.b64encode(png_bytes).decode("ascii"),
+                }
+            ],
+            "user": "tester",
+        },
+    )
+
+    assert response.status_code == 200
+    analysis = response.json()["analysis"]
+    assert analysis["parameters"]["snapshots"] == [
+        {
+            "artifact_name": "movement_snapshot_01.png",
+            "attachment_name": "movement_snapshot_01.png",
+            "caption": "gamma whole track",
+            "snapshot_key": "individual_profile::gamma",
+        }
+    ]
+    assert "data_url" not in json.dumps(analysis["parameters"])
+    assert len(analysis["input_attachments"]) == 1
+    attachment = analysis["input_attachments"][0]
+    assert attachment["logical_name"] == "movement_snapshot_01.png"
+    assert attachment["size"] == len(png_bytes)
+    assert len(attachment["sha256"]) == 64
+
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+    assert (study_dir / attachment["path"]).read_bytes() == png_bytes
+    spec = json.loads((study_dir / analysis["spec_path"]).read_text(encoding="utf-8"))
+    assert spec["input_attachments"][0]["sha256"] == attachment["sha256"]
+    assert "data_url" not in json.dumps(spec)
+
+    snapshot_response = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/"
+        f"analysis/{analysis['analysis_id']}/artifact/movement_snapshot_01.png"
+    )
+    assert snapshot_response.status_code == 200
+    assert snapshot_response.content == png_bytes
 
 
 def test_movement_generate_report_route_supports_combined_multi_individual_profile(tmp_path):

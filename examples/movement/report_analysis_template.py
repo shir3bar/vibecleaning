@@ -1,10 +1,17 @@
 import base64
 import csv
+import hashlib
 import html
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+
+from examples.movement.review_annotations import (
+    fix_key_row_number,
+    normalize_row_ranges,
+    row_number_in_ranges,
+)
 
 
 QUALITY_KEYWORDS = (
@@ -378,32 +385,24 @@ def recompute_analytical_movement_context(valid_records):
     return valid_records
 
 
-def selected_contexts(valid_records, selected_fix_keys=None, selected_issue_ids=None):
-    fix_keys = set(selected_fix_keys or [])
+def selected_contexts(valid_records, selected_fix_row_ranges=None, selected_issue_ids=None):
+    fix_row_ranges = normalize_row_ranges(selected_fix_row_ranges or [])
     issue_ids = set(selected_issue_ids or [])
     result = []
     for record in valid_records:
         if issue_ids and set(issue_ids_for(record)).intersection(issue_ids):
             result.append(record)
             continue
-        if fix_keys and record["fix_key"] in fix_keys:
+        if (
+            fix_row_ranges
+            and row_number_in_ranges(fix_key_row_number(record["fix_key"]), fix_row_ranges)
+        ):
             result.append(record)
     return result
 
 
 def write_json(path, payload):
     Path(path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def decode_data_url(data_url):
-    raw = str(data_url or "").strip()
-    if not raw:
-        raise ValueError("Missing snapshot data")
-    if "," in raw:
-        _, encoded = raw.split(",", 1)
-    else:
-        encoded = raw
-    return base64.b64decode(encoded)
 
 
 def html_escape(value):
@@ -921,7 +920,6 @@ def fallback_examples_from_records(records, quality_fields):
 
 def build_issue_sections(matched_records, snapshot_windows, fieldnames, columns):
     quality_fields = extract_quality_fields(fieldnames, columns)
-    record_by_fix_key = {record["fix_key"]: record for record in matched_records}
     records_by_issue_type = {}
     for record in matched_records:
         for issue_type in issue_types_for(record):
@@ -931,9 +929,12 @@ def build_issue_sections(matched_records, snapshot_windows, fieldnames, columns)
     for window in snapshot_windows:
         target_issue_type = str(window.get("issue_type") or "").strip() or "Unspecified issue"
         records = [
-            record_by_fix_key[fix_key]
-            for fix_key in window.get("report_fix_keys", [])
-            if fix_key in record_by_fix_key
+            record
+            for record in matched_records
+            if row_number_in_ranges(
+                fix_key_row_number(record["fix_key"]),
+                window.get("report_row_ranges", []),
+            )
         ]
         if not records:
             continue
@@ -1650,77 +1651,6 @@ def build_individual_profile_index_html(sections, artifact_plan):
     ).rstrip() + "\n"
 
 
-def normalize_report_records(items):
-    normalized = []
-    for item in items or []:
-        if not isinstance(item, dict):
-            continue
-        review_in = dict(item.get("review") or {})
-        attributes_in = dict(item.get("attributes") or {})
-        time_ms = try_float(item.get("time_ms"))
-        lon = try_float(item.get("lon"))
-        lat = try_float(item.get("lat"))
-        if time_ms is None or lon is None or lat is None:
-            continue
-        issue_items = [
-            clean_issue_payload(item, review_in.get("status"))
-            for item in (review_in.get("issues") or [])
-            if isinstance(item, dict)
-        ]
-        issue_items = [item for item in issue_items if item]
-        review_status = normalize_review_status(review_in.get("status"))
-        if not review_status and issue_items:
-            issue_statuses = {item.get("status", "") for item in issue_items}
-            if "suspected" in issue_statuses:
-                review_status = "suspected"
-            elif "confirmed" in issue_statuses:
-                review_status = "confirmed"
-        has_active_review = bool(review_status or issue_items)
-        review = {
-            "status": review_status,
-            "issue_id": str(review_in.get("issue_id", "")).strip() if has_active_review else "",
-            "issue_type": str(review_in.get("issue_type", "")).strip() if has_active_review else "",
-            "issue_field": str(review_in.get("issue_field", "")).strip() if has_active_review else "",
-            "issues": issue_items,
-            "issue_note": str(review_in.get("issue_note", "")).strip() if has_active_review else "",
-            "owner_question": str(review_in.get("owner_question", "")).strip() if has_active_review else "",
-            "review_user": str(review_in.get("review_user", "")).strip() if has_active_review else "",
-            "reviewed_at": str(review_in.get("reviewed_at", "")).strip() if has_active_review else "",
-        }
-        review["issues"] = [item for item in review["issues"] if item]
-        segments = [
-            clean_segment_payload(item)
-            for item in (item.get("segments") or [])
-            if isinstance(item, dict)
-        ]
-        segments = [item for item in segments if item]
-        raw = {}
-        for key, value in attributes_in.items():
-            name = str(key).strip()
-            if not name:
-                continue
-            raw[name] = "" if value is None else str(value)
-        raw.update(review)
-        normalized.append(
-            {
-                "fix_key": str(item.get("fix_key", "")).strip(),
-                "individual": str(item.get("individual", "")).strip(),
-                "set_name": str(item.get("set_name", "")).strip() or "train",
-                "time_ms": int(time_ms),
-                "time_text": str(item.get("time_text") or format_timestamp(time_ms)).strip(),
-                "lon": float(lon),
-                "lat": float(lat),
-                "step_length_m": try_float(item.get("step_length_m")),
-                "speed_mps": try_float(item.get("speed_mps")),
-                "time_delta_s": try_float(item.get("time_delta_s")),
-                "review": review,
-                "segments": segments,
-                "raw": raw,
-            }
-        )
-    return normalized
-
-
 def normalize_snapshot_windows(items):
     normalized = []
     for item in items or []:
@@ -1737,8 +1667,8 @@ def normalize_snapshot_windows(items):
                 "set_name": str(item.get("set_name", "")).strip() or "train",
                 "issue_type": str(item.get("issue_type", "")).strip() or "Unspecified issue",
                 "issue_types": sorted({str(value).strip() for value in item.get("issue_types", []) if str(value).strip()}),
-                "anchor_fix_keys": sorted({str(value).strip() for value in item.get("anchor_fix_keys", []) if str(value).strip()}),
-                "report_fix_keys": sorted({str(value).strip() for value in item.get("report_fix_keys", []) if str(value).strip()}),
+                "anchor_row_ranges": normalize_row_ranges(item.get("anchor_row_ranges") or []),
+                "report_row_ranges": normalize_row_ranges(item.get("report_row_ranges") or []),
                 "start_fix_key": str(item.get("start_fix_key", "")).strip(),
                 "end_fix_key": str(item.get("end_fix_key", "")).strip(),
                 "start_time_ms": int(try_float(item.get("start_time_ms")) or 0),
@@ -1759,10 +1689,9 @@ def main():
         target_artifact = str(params.get("target_artifact") or "").strip()
         report_type = str(params.get("report_type") or "issue_first").strip().lower()
         output_mode = str(params.get("output_mode") or "combined").strip().lower()
-        selected_fix_keys = sorted({str(item).strip() for item in params.get("fix_keys", []) if str(item).strip()})
+        selected_fix_row_ranges = normalize_row_ranges(params.get("fix_row_ranges") or [])
         selected_issue_ids = sorted({str(item).strip() for item in params.get("issue_ids", []) if str(item).strip()})
         selected_individuals = sorted({str(item).strip() for item in params.get("individuals", []) if str(item).strip()})
-        report_fixes = normalize_report_records(params.get("report_fixes") or [])
         snapshot_windows = normalize_snapshot_windows(params.get("snapshot_windows") or [])
         screenshot_mode = str(params.get("screenshot_mode") or "manual").strip().lower()
         snapshots = list(params.get("snapshots") or [])
@@ -1784,12 +1713,16 @@ def main():
             raise SystemExit("Invalid output mode")
         if not target_artifact:
             raise SystemExit("Missing target artifact")
-        if report_type == "issue_first" and not selected_fix_keys and not selected_issue_ids and not report_fixes:
+        if report_type == "issue_first" and not selected_fix_row_ranges and not selected_issue_ids:
             raise SystemExit("Select at least one issue or fix before generating a report")
         if report_type == "individual_profile" and not selected_individuals:
             raise SystemExit("Select at least one individual before generating a report")
 
         output_by_name = {artifact["logical_name"]: artifact for artifact in spec.get("output_artifacts", [])}
+        attachment_by_name = {
+            attachment["logical_name"]: attachment
+            for attachment in spec.get("input_attachments", [])
+        }
         source = None
         sidecar = None
         for artifact in spec.get("input_artifacts", []):
@@ -1806,7 +1739,13 @@ def main():
             artifact_name = str(snapshot.get("artifact_name") or "").strip()
             if not artifact_name or artifact_name not in output_by_name:
                 continue
-            raw_bytes = decode_data_url(snapshot.get("data_url"))
+            attachment_name = str(snapshot.get("attachment_name") or "").strip()
+            attachment = attachment_by_name.get(attachment_name)
+            if attachment is None:
+                raise SystemExit(f"Snapshot input was not provided: {attachment_name}")
+            raw_bytes = Path(attachment["path"]).read_bytes()
+            if hashlib.sha256(raw_bytes).hexdigest() != attachment.get("sha256"):
+                raise SystemExit(f"Snapshot input checksum mismatch: {attachment_name}")
             output_path = Path(output_by_name[artifact_name]["path"])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(raw_bytes)
@@ -1823,28 +1762,23 @@ def main():
             if any(name not in output_by_name for name in required_outputs):
                 raise SystemExit("Report outputs were not declared")
 
-            if report_fixes:
-                matched_records = report_fixes
-                fieldnames = sorted({key for record in matched_records for key in record["raw"].keys()})
-                columns = detect_columns(fieldnames) if fieldnames else {}
-            else:
-                fieldnames, columns, _, valid_records = load_rows_with_context(source["path"])
-                if sidecar is not None:
-                    from examples.movement.review_annotations import (
-                        apply_annotations_to_report_records,
-                        load_review_annotations,
-                    )
-                    apply_annotations_to_report_records(
-                        valid_records,
-                        load_review_annotations(Path(sidecar["path"])),
-                        source_artifact=target_artifact,
-                    )
-                recompute_analytical_movement_context(valid_records)
-                matched_records = selected_contexts(
-                    valid_records,
-                    selected_fix_keys=selected_fix_keys,
-                    selected_issue_ids=selected_issue_ids,
+            fieldnames, columns, _, valid_records = load_rows_with_context(source["path"])
+            if sidecar is not None:
+                from examples.movement.review_annotations import (
+                    apply_annotations_to_report_records,
+                    load_review_annotations,
                 )
+                apply_annotations_to_report_records(
+                    valid_records,
+                    load_review_annotations(Path(sidecar["path"])),
+                    source_artifact=target_artifact,
+                )
+            recompute_analytical_movement_context(valid_records)
+            matched_records = selected_contexts(
+                valid_records,
+                selected_fix_row_ranges=selected_fix_row_ranges,
+                selected_issue_ids=selected_issue_ids,
+            )
             if not matched_records:
                 raise SystemExit("None of the selected fixes or issues were found")
             matched_records.sort(key=lambda record: (record["individual"], record["time_ms"], record["fix_key"]))
@@ -1858,8 +1792,14 @@ def main():
                         "set_name": record.get("set_name", "train"),
                         "issue_type": issue_types_for(record)[0],
                         "issue_types": issue_types_for(record),
-                        "anchor_fix_keys": [record["fix_key"]],
-                        "report_fix_keys": [record["fix_key"]],
+                        "anchor_row_ranges": [[
+                            fix_key_row_number(record["fix_key"]),
+                            fix_key_row_number(record["fix_key"]),
+                        ]],
+                        "report_row_ranges": [[
+                            fix_key_row_number(record["fix_key"]),
+                            fix_key_row_number(record["fix_key"]),
+                        ]],
                         "start_fix_key": record["fix_key"],
                         "end_fix_key": record["fix_key"],
                         "start_time_ms": record["time_ms"],
@@ -1957,9 +1897,8 @@ def main():
                 "action": "generate_report",
                 "report_type": report_type,
                 "target_artifact": target_artifact,
-                "selected_fix_keys": selected_fix_keys,
+                "selected_fix_row_ranges": selected_fix_row_ranges,
                 "selected_issue_ids": selected_issue_ids,
-                "selected_report_fix_count": len(report_fixes),
                 "matched_fix_count": len(matched_records),
                 "matched_issue_types": [section["issue_type"] for section in ordered_issue_sections],
                 "screenshot_mode": screenshot_mode,

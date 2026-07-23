@@ -8393,61 +8393,6 @@ class MovementExampleApp {
     this.renderReportSelection();
   }
 
-  serializeFixForReport(fix) {
-    return {
-      fix_key: fix.fixKey,
-      individual: fix.individual,
-      set_name: fix.setName,
-      time_ms: fix.timeMs,
-      time_text: formatTimestamp(fix.timeMs),
-      lon: fix.position[0],
-      lat: fix.position[1],
-      step_length_m: fix.attributes.step_length_m ?? null,
-      speed_mps: fix.attributes.speed_mps ?? null,
-      time_delta_s: fix.attributes.time_delta_s ?? null,
-      attributes: { ...(fix.attributes || {}) },
-      review: {
-        status: fix.review.status || "",
-        issue_id: fix.review.issueId || "",
-        issue_type: fix.review.issueType || "",
-        issue_field: fix.review.issueField || "",
-        issue_threshold: fix.review.issueThreshold || "",
-        issues: (fix.review.issues || []).map(issue => ({
-          status: issue.status || "",
-          issue_id: issue.issueId || "",
-          issue_type: issue.issueType || "",
-          issue_field: issue.issueField || "",
-          issue_threshold: issue.issueThreshold || "",
-          issue_note: issue.issueNote || "",
-          owner_question: issue.ownerQuestion || "",
-          review_user: issue.reviewUser || "",
-          reviewed_at: issue.reviewedAt || "",
-          origin: issue.origin || "",
-          step_id: issue.stepId || "",
-          source_analysis_id: issue.sourceAnalysisId || "",
-          scope_kind: issue.scopeKind || "",
-          parent_annotation_id: issue.parentAnnotationId || "",
-          annotation_kind: issue.annotationKind || "issue",
-        })),
-        issue_note: fix.review.issueNote || "",
-        owner_question: fix.review.ownerQuestion || "",
-        review_user: fix.review.reviewUser || "",
-      reviewed_at: fix.review.reviewedAt || "",
-      },
-      segments: (fix.segments || []).map(segment => ({
-        status: segment.status || "",
-        segment_id: segment.segmentId || "",
-        issue_type: segment.issueType || "",
-        start_fix_key: segment.startFixKey || "",
-        end_fix_key: segment.endFixKey || "",
-        issue_note: segment.issueNote || "",
-        owner_question: segment.ownerQuestion || "",
-        review_user: segment.reviewUser || "",
-        reviewed_at: segment.reviewedAt || "",
-      })),
-    };
-  }
-
   serializeSnapshotWindowForReport(window) {
     return {
       snapshot_key: window.snapshotKey,
@@ -9332,7 +9277,6 @@ class MovementExampleApp {
             fix_keys: selectedFixes.map(fix => fix.fixKey),
             issue_ids: issueIds,
             individuals: reportIndividuals,
-            report_fixes: reportType === "issue_first" ? selectedFixes.map(fix => this.serializeFixForReport(fix)) : [],
             snapshot_windows: reportType === "issue_first" ? snapshotWindows.map(window => this.serializeSnapshotWindowForReport(window)) : [],
             screenshot_mode: screenshotMode,
             snapshots,

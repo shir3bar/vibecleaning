@@ -1,3 +1,5 @@
+import base64
+import binascii
 from collections.abc import Callable
 import json
 from math import isfinite
@@ -45,6 +47,8 @@ from .summary import (
 
 
 ArtifactFilter = Callable[[dict], bool]
+MAX_REPORT_SNAPSHOTS = 100
+MAX_REPORT_SNAPSHOT_BYTES = 20 * 1024 * 1024
 
 
 def _build_initial_study_payload(
@@ -391,6 +395,8 @@ def _validate_snapshots(value: object) -> list[dict]:
         return []
     if not isinstance(value, list):
         raise ValueError("Invalid snapshots payload")
+    if len(value) > MAX_REPORT_SNAPSHOTS:
+        raise ValueError(f"Reports support at most {MAX_REPORT_SNAPSHOTS} snapshots")
     snapshots = []
     for index, item in enumerate(value, start=1):
         if not isinstance(item, dict):
@@ -398,17 +404,52 @@ def _validate_snapshots(value: object) -> list[dict]:
         data_url = item.get("data_url")
         if not isinstance(data_url, str) or not data_url.strip():
             raise ValueError("Each snapshot must include image data")
+        header, separator, encoded = data_url.strip().partition(",")
+        if separator != "," or header.lower() != "data:image/png;base64":
+            raise ValueError("Snapshots must be base64-encoded PNG images")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("Snapshot image data is invalid") from exc
+        if not content.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("Snapshot image data is not a PNG")
+        if len(content) > MAX_REPORT_SNAPSHOT_BYTES:
+            raise ValueError("Snapshot image is too large")
         caption = _validate_optional_text(item.get("caption"), label="Snapshot caption", max_length=240)
         snapshot_key = _validate_required_text(item.get("snapshot_key"), label="Snapshot key", max_length=120)
         snapshots.append(
             {
                 "artifact_name": f"movement_snapshot_{index:02d}.png",
                 "caption": caption,
-                "data_url": data_url.strip(),
+                "content": content,
+                "content_type": "image/png",
                 "snapshot_key": snapshot_key,
             }
         )
     return snapshots
+
+
+def _report_snapshot_inputs(snapshots: list[dict]) -> tuple[list[dict], list[dict]]:
+    parameters = []
+    attachments = []
+    for snapshot in snapshots:
+        artifact_name = snapshot["artifact_name"]
+        parameters.append(
+            {
+                "artifact_name": artifact_name,
+                "attachment_name": artifact_name,
+                "caption": snapshot["caption"],
+                "snapshot_key": snapshot["snapshot_key"],
+            }
+        )
+        attachments.append(
+            {
+                "logical_name": artifact_name,
+                "content": snapshot["content"],
+                "content_type": snapshot["content_type"],
+            }
+        )
+    return parameters, attachments
 
 
 def _validate_snapshot_windows(value: object) -> list[dict]:
@@ -428,8 +469,12 @@ def _validate_snapshot_windows(value: object) -> list[dict]:
                 "set_name": _validate_optional_text(item.get("set_name"), label="Track", max_length=40),
                 "issue_type": _validate_optional_text(item.get("issue_type"), label="Issue type", max_length=120),
                 "issue_types": _validate_issue_ids(item.get("issue_types")),
-                "anchor_fix_keys": _validate_fix_keys(item.get("anchor_fix_keys"), allow_empty=True),
-                "report_fix_keys": _validate_fix_keys(item.get("report_fix_keys"), allow_empty=True),
+                "anchor_row_ranges": compress_fix_keys(
+                    _validate_fix_keys(item.get("anchor_fix_keys"), allow_empty=True)
+                ),
+                "report_row_ranges": compress_fix_keys(
+                    _validate_fix_keys(item.get("report_fix_keys"), allow_empty=True)
+                ),
                 "start_fix_key": _validate_optional_text(item.get("start_fix_key"), label="Start fix key", max_length=240),
                 "end_fix_key": _validate_optional_text(item.get("end_fix_key"), label="End fix key", max_length=240),
                 "start_time_ms": item.get("start_time_ms"),
@@ -437,77 +482,6 @@ def _validate_snapshot_windows(value: object) -> list[dict]:
                 "start_time_text": _validate_optional_text(item.get("start_time_text"), label="Start time", max_length=120),
                 "end_time_text": _validate_optional_text(item.get("end_time_text"), label="End time", max_length=120),
                 "window_fix_count": item.get("window_fix_count"),
-            }
-        )
-    return cleaned
-
-
-def _validate_report_fixes(value: object) -> list[dict]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError("Invalid report fixes payload")
-    cleaned = []
-    for item in value:
-        if not isinstance(item, dict):
-            raise ValueError("Invalid report fixes payload")
-        review = item.get("review") or {}
-        attributes = item.get("attributes") or {}
-        if not isinstance(review, dict) or not isinstance(attributes, dict):
-            raise ValueError("Invalid report fixes payload")
-        raw_issues = review.get("issues") or []
-        if raw_issues is None:
-            raw_issues = []
-        if not isinstance(raw_issues, list):
-            raise ValueError("Invalid report fixes payload")
-        cleaned_attributes = {}
-        for key, raw_value in attributes.items():
-            name = _validate_optional_text(key, label="Attribute name", max_length=120)
-            if not name:
-                continue
-            if raw_value is None or isinstance(raw_value, (str, int, float, bool)):
-                cleaned_attributes[name] = raw_value
-            else:
-                raise ValueError("Invalid report fixes payload")
-        cleaned.append(
-            {
-                "fix_key": _validate_optional_text(item.get("fix_key"), label="Fix key", max_length=240),
-                "individual": _validate_optional_text(item.get("individual"), label="Individual", max_length=200),
-                "set_name": _validate_optional_text(item.get("set_name"), label="Track", max_length=40),
-                "time_ms": item.get("time_ms"),
-                "time_text": _validate_optional_text(item.get("time_text"), label="Timestamp", max_length=120),
-                "lon": item.get("lon"),
-                "lat": item.get("lat"),
-                "step_length_m": item.get("step_length_m"),
-                "speed_mps": item.get("speed_mps"),
-                "time_delta_s": item.get("time_delta_s"),
-                "attributes": cleaned_attributes,
-                "review": {
-                    "status": _validate_optional_text(review.get("status"), label="Status", max_length=40),
-                    "issue_id": _validate_optional_text(review.get("issue_id"), label="Issue id", max_length=120),
-                    "issue_type": _validate_optional_text(review.get("issue_type"), label="Issue type", max_length=120),
-                    "issue_field": _validate_optional_text(review.get("issue_field"), label="Issue field", max_length=120),
-                    "issue_threshold": _validate_optional_text(review.get("issue_threshold"), label="Issue threshold", max_length=120),
-                    "issues": [
-                        {
-                            "status": _validate_optional_text(issue.get("status"), label="Status", max_length=40),
-                            "issue_id": _validate_optional_text(issue.get("issue_id"), label="Issue id", max_length=120),
-                            "issue_type": _validate_optional_text(issue.get("issue_type"), label="Issue type", max_length=120),
-                            "issue_field": _validate_optional_text(issue.get("issue_field"), label="Issue field", max_length=120),
-                            "issue_threshold": _validate_optional_text(issue.get("issue_threshold"), label="Issue threshold", max_length=120),
-                            "issue_note": _validate_optional_text(issue.get("issue_note"), label="Issue note", max_length=1200),
-                            "owner_question": _validate_optional_text(issue.get("owner_question"), label="Owner question", max_length=600),
-                            "review_user": _validate_optional_text(issue.get("review_user"), label="Review user", max_length=120),
-                            "reviewed_at": _validate_optional_text(issue.get("reviewed_at"), label="Reviewed at", max_length=120),
-                        }
-                        for issue in raw_issues
-                        if isinstance(issue, dict)
-                    ],
-                    "issue_note": _validate_optional_text(review.get("issue_note"), label="Issue note", max_length=1200),
-                    "owner_question": _validate_optional_text(review.get("owner_question"), label="Owner question", max_length=600),
-                    "review_user": _validate_optional_text(review.get("review_user"), label="Review user", max_length=120),
-                    "reviewed_at": _validate_optional_text(review.get("reviewed_at"), label="Reviewed at", max_length=120),
-                },
             }
         )
     return cleaned
@@ -1316,18 +1290,19 @@ def register_movement_routes(
             ):
                 report_input_artifacts.append("movement_review_annotations.json")
             fix_keys = _validate_fix_keys(body.get("fix_keys"), allow_empty=True)
+            fix_row_ranges = compress_fix_keys(fix_keys)
             issue_ids = _validate_issue_ids(body.get("issue_ids"))
-            report_fixes = _validate_report_fixes(body.get("report_fixes"))
             report_type = _validate_report_type(body.get("report_type"))
             individuals = _validate_report_individuals(body.get("individuals"))
             output_mode = _validate_output_mode(body.get("output_mode"))
             snapshot_windows = _validate_snapshot_windows(body.get("snapshot_windows"))
-            if report_type == "issue_first" and not fix_keys and not issue_ids and not report_fixes:
+            if report_type == "issue_first" and not fix_keys and not issue_ids:
                 raise ValueError("Select at least one issue or fix")
             if report_type == "individual_profile" and not individuals:
                 raise ValueError("Select at least one individual")
             screenshot_mode = _validate_screenshot_mode(body.get("screenshot_mode"))
             snapshots = _validate_snapshots(body.get("snapshots"))
+            snapshot_parameters, snapshot_attachments = _report_snapshot_inputs(snapshots)
             user = body.get("user")
             individual_report_artifacts = _build_individual_report_artifacts(individuals)
             effective_output_mode = output_mode if len(individuals) > 1 else "combined"
@@ -1362,6 +1337,7 @@ def register_movement_routes(
                 "script": GENERATE_REPORT_SCRIPT,
                 "dataset_id": dataset_id,
                 "input_artifacts": report_input_artifacts,
+                "input_attachments": snapshot_attachments,
                 "output_artifacts": output_artifacts,
                 "parameters": {
                     "app": "movement",
@@ -1369,13 +1345,12 @@ def register_movement_routes(
                     "report_type": report_type,
                     "output_mode": effective_output_mode,
                     "target_artifact": logical_name,
-                    "fix_keys": fix_keys,
+                    "fix_row_ranges": fix_row_ranges,
                     "issue_ids": issue_ids,
                     "individuals": individuals,
-                    "report_fixes": report_fixes,
                     "snapshot_windows": snapshot_windows,
                     "screenshot_mode": screenshot_mode,
-                    "snapshots": snapshots,
+                    "snapshots": snapshot_parameters,
                     "individual_report_artifacts": individual_report_artifacts,
                     "user": user,
                 },
@@ -1450,18 +1425,19 @@ def register_movement_routes(
             ):
                 report_input_artifacts.append("movement_review_annotations.json")
             fix_keys = _validate_fix_keys(body.get("fix_keys"), allow_empty=True)
+            fix_row_ranges = compress_fix_keys(fix_keys)
             issue_ids = _validate_issue_ids(body.get("issue_ids"))
-            report_fixes = _validate_report_fixes(body.get("report_fixes"))
             report_type = _validate_report_type(body.get("report_type"))
             individuals = _validate_report_individuals(body.get("individuals"))
             output_mode = _validate_output_mode(body.get("output_mode"))
             snapshot_windows = _validate_snapshot_windows(body.get("snapshot_windows"))
-            if report_type == "issue_first" and not fix_keys and not issue_ids and not report_fixes:
+            if report_type == "issue_first" and not fix_keys and not issue_ids:
                 raise ValueError("Select at least one issue or fix")
             if report_type == "individual_profile" and not individuals:
                 raise ValueError("Select at least one individual")
             screenshot_mode = _validate_screenshot_mode(body.get("screenshot_mode"))
             snapshots = _validate_snapshots(body.get("snapshots"))
+            snapshot_parameters, snapshot_attachments = _report_snapshot_inputs(snapshots)
             user = body.get("user")
             individual_report_artifacts = _build_individual_report_artifacts(individuals)
             effective_output_mode = output_mode if len(individuals) > 1 else "combined"
@@ -1496,6 +1472,7 @@ def register_movement_routes(
                 "script": GENERATE_REPORT_SCRIPT,
                 "dataset_id": dataset_id,
                 "input_artifacts": report_input_artifacts,
+                "input_attachments": snapshot_attachments,
                 "output_artifacts": output_artifacts,
                 "parameters": {
                     "app": "movement",
@@ -1503,13 +1480,12 @@ def register_movement_routes(
                     "report_type": report_type,
                     "output_mode": effective_output_mode,
                     "target_artifact": logical_name,
-                    "fix_keys": fix_keys,
+                    "fix_row_ranges": fix_row_ranges,
                     "issue_ids": issue_ids,
                     "individuals": individuals,
-                    "report_fixes": report_fixes,
                     "snapshot_windows": snapshot_windows,
                     "screenshot_mode": screenshot_mode,
-                    "snapshots": snapshots,
+                    "snapshots": snapshot_parameters,
                     "individual_report_artifacts": individual_report_artifacts,
                     "user": user,
                 },

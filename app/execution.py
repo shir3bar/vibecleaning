@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -126,6 +127,46 @@ def _analysis_output_entries(analysis_dir: Path, output_artifacts: list[str]) ->
     return entries
 
 
+def _analysis_input_attachment_entries(analysis_dir: Path, raw_attachments: object) -> list[dict]:
+    if raw_attachments is None:
+        return []
+    if not isinstance(raw_attachments, list):
+        raise ProjectStateError("Invalid analysis input attachments")
+
+    validated = []
+    for item in raw_attachments:
+        if not isinstance(item, dict):
+            raise ProjectStateError("Invalid analysis input attachments")
+        logical_name = validate_artifact_names([item.get("logical_name")])[0]
+        content = item.get("content")
+        if not isinstance(content, bytes):
+            raise ProjectStateError("Analysis input attachment content must be bytes")
+        content_type = item.get("content_type")
+        if content_type is not None and not isinstance(content_type, str):
+            raise ProjectStateError("Invalid analysis input attachment content type")
+        validated.append((logical_name, content, (content_type or "").strip() or None))
+    names = [logical_name for logical_name, _, _ in validated]
+    if len(set(names)) != len(names):
+        raise ProjectStateError("Analysis input attachment names must be unique")
+
+    inputs_dir = analysis_dir / "inputs"
+    entries = []
+    for logical_name, content, content_type in validated:
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+        input_path = inputs_dir / logical_name
+        input_path.write_bytes(content)
+        entries.append(
+            {
+                "logical_name": logical_name,
+                "path": str(input_path.resolve()),
+                "content_type": content_type,
+                "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+    return entries
+
+
 def create_analysis(project_dir: Path, payload: dict) -> dict:
     project_dir = project_dir.resolve()
     user = normalize_user(payload.get("user"))
@@ -148,6 +189,10 @@ def create_analysis(project_dir: Path, payload: dict) -> dict:
     spec_path = analysis_dir / "spec.json"
     summary_path = analysis_dir / "summary.json"
     output_entries = _analysis_output_entries(analysis_dir, requested_outputs)
+    input_attachment_entries = _analysis_input_attachment_entries(
+        analysis_dir,
+        payload.get("input_attachments"),
+    )
 
     script_path.write_text(script)
     spec = {
@@ -164,6 +209,7 @@ def create_analysis(project_dir: Path, payload: dict) -> dict:
             }
             for artifact in selected_artifacts
         ],
+        "input_attachments": input_attachment_entries,
         "output_artifacts": output_entries,
         "analysis": {
             "analysis_id": analysis_id,
@@ -199,6 +245,13 @@ def create_analysis(project_dir: Path, payload: dict) -> dict:
         "summary_path": summary_path.relative_to(project_dir).as_posix(),
         "parameters": parameters,
         "input_artifacts": [artifact["logical_name"] for artifact in selected_artifacts],
+        "input_attachments": [
+            {
+                **{key: value for key, value in attachment.items() if key != "path"},
+                "path": Path(attachment["path"]).relative_to(project_dir).as_posix(),
+            }
+            for attachment in input_attachment_entries
+        ],
         "output_artifacts": requested_outputs,
         "realized_output_artifacts": realized_outputs,
     }
