@@ -10,13 +10,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.execution import create_analysis, create_step, undo_to_parent
-from app.query_library import get_query
 from app.state import (
     ProjectStateError,
-    dataset_summary,
     get_dataset_artifact,
     graph_payload,
-    list_history,
     load_dataset,
     load_json,
     media_type_for_path,
@@ -159,43 +156,6 @@ def _movement_analysis_input_names(dataset: dict, logical_name: str) -> list[str
     return names
 
 
-def _reusable_osm_enrichment_response(
-    study_dir: Path,
-    *,
-    parent_dataset_id: str,
-    logical_name: str,
-    search_radius_m: float,
-) -> dict | None:
-    history = list_history(study_dir)
-    for step in reversed(history["steps"]):
-        parameters = dict(step.get("parameters") or {})
-        summary = dict(step.get("summary") or {})
-        if step.get("parent_dataset_id") != parent_dataset_id:
-            continue
-        if parameters.get("action") != "enrich_osm_context":
-            continue
-        if parameters.get("target_artifact") != logical_name:
-            continue
-        if parameters.get("search_radius_m") != search_radius_m:
-            continue
-        if summary.get("run_status") != "completed" or summary.get("source_type") != "local_extract":
-            continue
-        if "movement_osm_context.csv" not in step.get("output_artifacts", []):
-            continue
-        try:
-            output_dataset = load_dataset(study_dir, step["output_dataset_id"])
-            get_dataset_artifact(study_dir, output_dataset["dataset_id"], "movement_osm_context.csv")
-        except (KeyError, ProjectStateError):
-            continue
-        return {
-            "step": step,
-            "dataset": dataset_summary(output_dataset),
-            "history": history,
-            "reused": True,
-        }
-    return None
-
-
 MOVEMENT_SUMMARY_MODULES = (
     "examples.movement.bursts",
     "examples.movement.movement_features",
@@ -205,62 +165,21 @@ MOVEMENT_REVIEW_MODULES = (
     *MOVEMENT_SUMMARY_MODULES,
     "examples.movement.review_annotations",
 )
-MOVEMENT_CANDIDATE_QUERY_MODULES = (
-    *MOVEMENT_REVIEW_MODULES,
-    "app.osm",
-    "examples.movement.candidate_segments",
-    "examples.movement.osm_context",
-    "examples.movement.candidate_queries",
-)
 MOVEMENT_ANOMALY_MODULES = (
     *MOVEMENT_REVIEW_MODULES,
     "examples.movement.burst_features",
     "examples.movement.burst_feature_matrix",
     "examples.movement.anomaly_ranking",
 )
-MOVEMENT_FEATURE_SPACE_MODULES = (
-    *MOVEMENT_REVIEW_MODULES,
-    "examples.movement.burst_features",
-    "examples.movement.burst_feature_matrix",
-    "examples.movement.burst_feature_space",
-)
-MOVEMENT_OSM_ENRICHMENT_MODULES = (
-    *MOVEMENT_SUMMARY_MODULES,
-    "app.osm",
-    "examples.movement.osm_context",
-    "examples.movement.osm_extracts",
-    "examples.movement.osm_enrichment",
-)
-
 REPORT_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("report_analysis_template.py")
 GENERATE_REPORT_SCRIPT = build_self_contained_script(
     REPORT_ANALYSIS_TEMPLATE_PATH,
     MOVEMENT_REVIEW_MODULES,
 )
-CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("candidate_query_analysis_template.py")
-CANDIDATE_QUERY_ANALYSIS_SCRIPT = build_self_contained_script(
-    CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH,
-    MOVEMENT_CANDIDATE_QUERY_MODULES,
-)
-
 ANOMALY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("anomaly_analysis_template.py")
 BURST_ANOMALY_ANALYSIS_SCRIPT = build_self_contained_script(
     ANOMALY_ANALYSIS_TEMPLATE_PATH,
     MOVEMENT_ANOMALY_MODULES,
-)
-
-BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name(
-    "burst_feature_space_analysis_template.py"
-)
-BURST_FEATURE_SPACE_ANALYSIS_SCRIPT = build_self_contained_script(
-    BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH,
-    MOVEMENT_FEATURE_SPACE_MODULES,
-)
-
-OSM_ENRICHMENT_TEMPLATE_PATH = Path(__file__).with_name("osm_enrichment_template.py")
-OSM_ENRICHMENT_SCRIPT = build_self_contained_script(
-    OSM_ENRICHMENT_TEMPLATE_PATH,
-    MOVEMENT_OSM_ENRICHMENT_MODULES,
 )
 
 EXPORT_REVIEWED_CSV_TEMPLATE_PATH = Path(__file__).with_name("export_reviewed_csv_analysis_template.py")
@@ -487,26 +406,6 @@ def _validate_snapshot_windows(value: object) -> list[dict]:
     return cleaned
 
 
-def _validate_query_definition(value: object) -> dict:
-    if not isinstance(value, dict):
-        raise ValueError("Query definition is required")
-    evaluator = value.get("evaluator")
-    definition = value.get("definition")
-    if not isinstance(evaluator, dict) or not isinstance(definition, dict):
-        raise ValueError("Query definition must include evaluator and definition")
-    if evaluator.get("type") not in {"fix_numeric_comparison", "fix_osm_proximity", "fix_string_comparison"}:
-        raise ValueError("Unsupported candidate query evaluator")
-    return dict(value)
-
-
-def _validate_query_parameters(value: object) -> dict:
-    if value in (None, ""):
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError("Invalid query parameters")
-    return dict(value)
-
-
 def _validate_report_type(value: object) -> str:
     if value is None:
         return "issue_first"
@@ -600,6 +499,7 @@ def register_movement_routes(
     data_root: Path,
     allowed_families: set[str] | None = None,
     artifact_filter: ArtifactFilter | None = None,
+    include_dev_routes: bool = True,
 ):
     data_root = data_root.resolve()
     configured_families = set(allowed_families or [])
@@ -668,22 +568,11 @@ def register_movement_routes(
 
     def parse_anomaly_feature_set(raw_value: object) -> str:
         value = str(raw_value or "movement_only").strip()
-        if value in {"movement_only", "movement_plus_context"}:
+        if value == "movement_only":
+            return value
+        if value == "movement_plus_context" and include_dev_routes:
             return value
         raise ValueError("Invalid feature_set")
-
-    def parse_osm_search_radius_m(raw_value: object) -> float:
-        if raw_value in (None, ""):
-            raise ValueError("search_radius_m is required")
-        if isinstance(raw_value, bool):
-            raise ValueError("Invalid search_radius_m")
-        try:
-            value = float(raw_value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Invalid search_radius_m") from exc
-        if not isfinite(value) or value <= 0.0:
-            raise ValueError("Invalid search_radius_m")
-        return value
 
     def parse_optional_individual(raw_value: object) -> str:
         if raw_value in (None, ""):
@@ -928,59 +817,6 @@ def register_movement_routes(
             return json_error(str(exc), 404)
         return FileResponse(artifact_path, media_type=media_type_for_path(artifact_path))
 
-    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-candidate-query")
-    async def post_movement_run_candidate_query(family_name: str, study_name: str, request: Request):
-        body = await parse_json_body(request)
-        if body is None:
-            return json_error("Invalid JSON body", 400)
-        try:
-            study_dir = configured_study_dir(family_name, study_name)
-            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
-            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
-            dataset = load_dataset(study_dir, dataset_id)
-            user = body.get("user")
-            query_parameters = _validate_query_parameters(body.get("query_parameters", body.get("parameters")))
-            execution_scope = body.get("execution_scope")
-            preview_limit = parse_optional_limit(body.get("preview_limit"))
-
-            query_id = str(body.get("query_id") or "").strip()
-            if query_id:
-                query_version = parse_optional_int(body.get("query_version", body.get("version")), label="query_version")
-                query_definition = _validate_query_definition(get_query(data_root, query_id, version=query_version))
-            else:
-                query_definition = _validate_query_definition(body.get("query_definition"))
-
-            query_label = (
-                str(query_definition.get("name") or "").strip()
-                or str(query_definition.get("query_id") or "").strip()
-                or "inline candidate query"
-            )
-            payload = {
-                "user": user,
-                "title": f"Run candidate query {query_label} on {logical_name}",
-                "kind": "python",
-                "script": CANDIDATE_QUERY_ANALYSIS_SCRIPT,
-                "dataset_id": dataset_id,
-                "input_artifacts": _movement_analysis_input_names(dataset, logical_name),
-                "output_artifacts": ["candidate_query_results.json"],
-                "parameters": {
-                    "app": "movement",
-                    "action": "run_candidate_query",
-                    "target_artifact": logical_name,
-                    "dataset_id": dataset_id,
-                    "query_id": query_definition.get("query_id", ""),
-                    "query_version": query_definition.get("version"),
-                    "query_definition": query_definition,
-                    "query_parameters": query_parameters,
-                    "execution_scope": execution_scope,
-                    "preview_limit": preview_limit,
-                    "user": user,
-                },
-            }
-            return JSONResponse(create_analysis(study_dir, payload))
-        except (ValueError, ProjectStateError) as exc:
-            return json_error(str(exc), 400)
-
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-burst-anomaly-ranking")
     async def post_movement_run_burst_anomaly_ranking(family_name: str, study_name: str, request: Request):
         body = await parse_json_body(request)
@@ -1019,96 +855,6 @@ def register_movement_routes(
                 },
             }
             return JSONResponse(create_analysis(study_dir, payload))
-        except (ValueError, ProjectStateError) as exc:
-            return json_error(str(exc), 400)
-
-    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-burst-feature-space")
-    async def post_movement_run_burst_feature_space(
-        family_name: str,
-        study_name: str,
-        request: Request,
-    ):
-        body = await parse_json_body(request)
-        if body is None:
-            return json_error("Invalid JSON body", 400)
-        try:
-            study_dir = configured_study_dir(family_name, study_name)
-            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
-            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
-            dataset = load_dataset(study_dir, dataset_id)
-            feature_set = parse_anomaly_feature_set(body.get("feature_set"))
-            feature_set_label = (
-                "movement + OSM context"
-                if feature_set == "movement_plus_context"
-                else "movement only"
-            )
-            user = body.get("user")
-            payload = {
-                "user": user,
-                "title": f"Project automatic movement bursts ({feature_set_label}) for {logical_name}",
-                "kind": "python",
-                "script": BURST_FEATURE_SPACE_ANALYSIS_SCRIPT,
-                "dataset_id": dataset_id,
-                "input_artifacts": _movement_analysis_input_names(dataset, logical_name),
-                "output_artifacts": ["burst_feature_space.json"],
-                "parameters": {
-                    "app": "movement",
-                    "action": "run_burst_feature_space",
-                    "target_artifact": logical_name,
-                    "dataset_id": dataset_id,
-                    "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),
-                    "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
-                    "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
-                    "feature_set": feature_set,
-                    "user": user,
-                },
-            }
-            return JSONResponse(create_analysis(study_dir, payload))
-        except (ValueError, ProjectStateError) as exc:
-            return json_error(str(exc), 400)
-
-    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/enrich-osm-context")
-    async def post_movement_enrich_osm_context(family_name: str, study_name: str, request: Request):
-        body = await parse_json_body(request)
-        if body is None:
-            return json_error("Invalid JSON body", 400)
-        try:
-            study_dir = configured_study_dir(family_name, study_name)
-            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
-            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
-            search_radius_m = parse_osm_search_radius_m(body.get("search_radius_m"))
-            confirmed_large_download = body.get("confirmed_large_download", False)
-            if not isinstance(confirmed_large_download, bool):
-                raise ValueError("Invalid confirmed_large_download")
-            user = body.get("user")
-            reusable = _reusable_osm_enrichment_response(
-                study_dir,
-                parent_dataset_id=dataset_id,
-                logical_name=logical_name,
-                search_radius_m=search_radius_m,
-            )
-            if reusable is not None:
-                return JSONResponse(reusable)
-            payload = {
-                "user": user,
-                "title": f"Add OSM road and railway context to {logical_name}",
-                "kind": "python",
-                "script": OSM_ENRICHMENT_SCRIPT,
-                "parameters": {
-                    "app": "movement",
-                    "action": "enrich_osm_context",
-                    "target_artifact": logical_name,
-                    "search_radius_m": search_radius_m,
-                    "confirmed_large_download": confirmed_large_download,
-                    "data_root": str(data_root.resolve()),
-                    "user": user,
-                },
-                "parent_dataset_id": dataset_id,
-                "input_artifacts": [logical_name],
-                "output_artifacts": ["movement_osm_context.csv"],
-                "set_as_head": True,
-            }
-            return JSONResponse(create_step(study_dir, payload))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1493,3 +1239,15 @@ def register_movement_routes(
             return JSONResponse(create_analysis(project_dir, payload))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
+
+    if include_dev_routes:
+        from .dev_routes import register_movement_dev_routes
+
+        register_movement_dev_routes(
+            app,
+            data_root=data_root,
+            configured_study_dir=configured_study_dir,
+            default_burst_gap_mode=DEFAULT_BURST_GAP_MODE,
+            default_burst_gap_seconds=DEFAULT_BURST_GAP_SECONDS,
+            default_burst_gap_quantile=DEFAULT_BURST_GAP_QUANTILE,
+        )

@@ -1,11 +1,3 @@
-import {
-  buildOsmDeckLayers,
-  fetchOsmContext,
-  scopeFromMapBounds,
-  scopeFromPoint,
-  scopeFromSegmentBounds,
-} from "/static/osm_layer.js";
-
 const MOVEMENT_APP_MODE = document
   .querySelector('meta[name="vibecleaning-movement-mode"]')
   ?.getAttribute("content") === "slim_movement"
@@ -21,6 +13,9 @@ const MOVEMENT_APP_CONFIG = Object.freeze({
   featureSpace: MOVEMENT_APP_MODE !== "slim_movement",
   osmDerivedFeatures: MOVEMENT_APP_MODE !== "slim_movement",
 });
+const OSM_INTERACTION = MOVEMENT_APP_MODE === "movement"
+  ? await import("/static/osm_layer.js")
+  : null;
 
 const LOCAL_BLANK_STYLE = {
   version: 8,
@@ -2983,25 +2978,28 @@ class MovementExampleApp {
   }
 
   osmScopeFromPoint(fixOrLonLat, radiusM) {
-    return scopeFromPoint(fixOrLonLat, radiusM);
+    return OSM_INTERACTION?.scopeFromPoint(fixOrLonLat, radiusM) || null;
   }
 
   osmScopeFromMapBounds() {
-    return scopeFromMapBounds(this.map);
+    return OSM_INTERACTION?.scopeFromMapBounds(this.map) || null;
   }
 
   osmScopeFromSegmentBounds(fixes, paddingM) {
-    return scopeFromSegmentBounds(fixes, paddingM);
+    return OSM_INTERACTION?.scopeFromSegmentBounds(fixes, paddingM) || null;
   }
 
   async queryOsmContext(query, options = {}) {
+    if (!OSM_INTERACTION) {
+      throw new Error("OSM context tools are not available in this application.");
+    }
     const controller = this.beginRequest("osm");
     this.osmContextStatus = "loading";
     this.osmContextError = "";
     this.setStatus("Loading OSM context...");
     this.updateActionButtons();
     try {
-      const payload = await fetchOsmContext(query, {
+      const payload = await OSM_INTERACTION.fetchOsmContext(query, {
         ...options,
         signal: controller.signal,
       });
@@ -3050,7 +3048,10 @@ class MovementExampleApp {
   }
 
   getOsmDeckLayers() {
-    return buildOsmDeckLayers(this.osmContext, {
+    if (!OSM_INTERACTION) {
+      return [];
+    }
+    return OSM_INTERACTION.buildOsmDeckLayers(this.osmContext, {
       deckInstance: window.deck,
       idPrefix: "movement-osm-context",
     });

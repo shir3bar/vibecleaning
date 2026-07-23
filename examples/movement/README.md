@@ -3,7 +3,9 @@
 This example app is the full movement-ecology development playground layered on
 top of Vibecleaning's generic DAG engine. The user-facing restricted profile is
 [`examples/slim_movement/`](../slim_movement/README.md); both applications reuse
-the routes and viewer implemented here.
+the review routes and viewer core implemented here. Development-only candidate
+queries, burst feature-space projection, and OSM enrichment live in
+`dev_routes.py` and are registered only by this playground.
 
 It adds:
 

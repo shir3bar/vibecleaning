@@ -685,11 +685,13 @@ def test_movement_frontend_map_click_does_not_force_table_reveal():
     assert 'this.refs?.sideSheetTabs?.dataset.activeSheet === "table"' in source
 
 
-def test_movement_frontend_includes_ephemeral_osm_context_helpers():
+def test_movement_frontend_loads_ephemeral_osm_helpers_only_in_dev_mode():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     helper = OSM_LAYER_JS.read_text(encoding="utf-8")
 
-    assert 'from "/static/osm_layer.js"' in source
+    assert 'MOVEMENT_APP_MODE === "movement"' in source
+    assert '? await import("/static/osm_layer.js")' in source
+    assert 'from "/static/osm_layer.js"' not in source
     assert "this.osmContext = null" in source
     assert 'this.osmContextStatus = "idle"' in source
     assert "queryOsmContext(query" in source

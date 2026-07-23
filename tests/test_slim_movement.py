@@ -44,6 +44,7 @@ def create_slim_test_client(tmp_path: Path) -> TestClient:
         data_root=data_root,
         allowed_families={"movement_raw"},
         artifact_filter=is_slim_movement_artifact,
+        include_dev_routes=False,
     )
     return TestClient(app)
 
@@ -85,6 +86,10 @@ def test_slim_movement_load_selects_raw_csv_and_keeps_review_routes(tmp_path):
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/annotate-scope" in paths
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/export-reviewed-csv" in paths
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/generate-report" in paths
+    assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-burst-anomaly-ranking" in paths
+    assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-candidate-query" not in paths
+    assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-burst-feature-space" not in paths
+    assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/enrich-osm-context" not in paths
 
 
 def test_slim_movement_can_flag_export_and_generate_report(tmp_path):
@@ -136,17 +141,35 @@ def test_slim_movement_can_flag_export_and_generate_report(tmp_path):
     assert "movement_individual_reports.html" in realized
 
 
-def test_slim_profile_hides_dev_tools_but_keeps_required_capabilities():
+def test_slim_anomaly_ranking_accepts_only_movement_features(tmp_path):
+    client = create_slim_test_client(tmp_path)
+    loaded = client.get(
+        "/api/apps/movement/family/movement_raw/study/raw_study/load"
+    ).json()
+
+    response = client.post(
+        "/api/apps/movement/family/movement_raw/study/raw_study/"
+        "actions/run-burst-anomaly-ranking",
+        json={
+            "dataset_id": loaded["dataset_id"],
+            "logical_name": loaded["logical_name"],
+            "feature_set": "movement_plus_context",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "Invalid feature_set"
+
+
+def test_slim_profile_does_not_load_osm_interaction_module():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
     assert 'mode: MOVEMENT_APP_MODE' in source
     assert 'defaultFamily: MOVEMENT_APP_MODE === "slim_movement" ? "movement_raw"' in source
-    assert 'this.refs.candidateQueryControl' in source
-    assert 'this.refs.artifactControl' in source
-    assert 'this.refs.showTrainControl' in source
-    assert 'this.refs.showTestControl' in source
-    assert 'this.refs.runBurstFeatureSpace' in source
-    assert 'this.refs.anomalyFeatureSetControl' in source
+    assert 'MOVEMENT_APP_MODE === "movement"' in source
+    assert '? await import("/static/osm_layer.js")' in source
+    assert 'from "/static/osm_layer.js"' not in source
     assert 'this.refs.removeConfirmed' not in source
     assert '!lowerName.endsWith("_osm_context.csv")' in source
     assert '!String(field?.key || "").toLowerCase().startsWith("osm:")' in source

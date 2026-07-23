@@ -26,6 +26,7 @@ register_movement_routes(
     data_root=ROOT / "data",
     allowed_families={"movement_raw"},
     artifact_filter=is_slim_movement_artifact,
+    include_dev_routes=False,
 )
 
 

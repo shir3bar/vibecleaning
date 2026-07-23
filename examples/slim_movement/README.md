@@ -15,6 +15,9 @@ movement example's backend and frontend components with a restricted profile:
 - automatic restoration of the latest compatible burst ranking
 - no artifact, train/test, candidate-query, ranking-feature, OSM-derived
   feature, or burst feature-space controls
+- no candidate-query, burst feature-space, or OSM-enrichment backend routes;
+  the OSM interaction module is not loaded in the browser (OSM raster basemaps
+  remain available as ordinary base layers)
 - a draggable divider for resizing the Individuals and Checked fixes lists
 
 The full `examples/movement/` application remains the development playground.

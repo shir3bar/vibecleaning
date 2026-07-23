@@ -12,9 +12,11 @@ if str(REPO_ROOT) not in sys.path:
 from app.state import load_project_state, project_paths
 from app.web import create_app
 from examples.movement.burst_feature_space import build_burst_feature_space
-from examples.movement.routes import (
+from examples.movement.dev_routes import (
     BURST_FEATURE_SPACE_ANALYSIS_SCRIPT,
     BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH,
+)
+from examples.movement.routes import (
     register_movement_routes,
 )
 

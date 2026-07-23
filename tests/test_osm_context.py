@@ -18,9 +18,11 @@ MOVEMENT_APP_JS = REPO_ROOT / "examples" / "movement" / "static" / "app.js"
 from app.osm import normalize_osm_request
 from app.state import get_dataset_artifact, list_history, load_dataset, load_project_state
 from app.web import create_app
-from examples.movement.routes import (
+from examples.movement.dev_routes import (
     OSM_ENRICHMENT_SCRIPT,
     OSM_ENRICHMENT_TEMPLATE_PATH,
+)
+from examples.movement.routes import (
     register_movement_routes,
 )
 from examples.movement.osm_extracts import MAX_UNCONFIRMED_DOWNLOAD_BYTES
