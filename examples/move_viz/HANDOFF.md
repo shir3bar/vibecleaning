@@ -20,6 +20,10 @@ Read these files before changing code:
    [`tests/test_move_viz.py`](../../tests/test_move_viz.py) for the actual
    contract.
 
+Use `uv sync --locked` for the canonical agent environment. If dependencies
+change, commit `pyproject.toml` and `uv.lock` together and keep the legacy
+`requirements.txt` list aligned.
+
 The other movement applications have different roles:
 
 - `examples/movement/` is the development playground.
@@ -258,15 +262,16 @@ lineage or execution behavior used beyond `move_viz`.
 Run at minimum:
 
 ```bash
-python -m compileall -q examples/move_viz tests/test_move_viz.py
-pytest -q tests/test_move_viz.py
+uv sync --locked
+uv run python -m compileall -q examples/move_viz tests/test_move_viz.py
+uv run pytest -q tests/test_move_viz.py
 git diff --check
 ```
 
 For changes touching shared movement or graph behavior, run:
 
 ```bash
-pytest -q \
+uv run pytest -q \
   tests/test_move_viz.py \
   tests/test_slim_movement.py \
   tests/test_movement_fixes.py \

@@ -12,14 +12,12 @@ The default workflow is:
 Environment installation:
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install uv
+uv sync --locked
 ```
 
-See [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) for Conda, minimal `move_viz`,
-verification, and configuration instructions.
+See [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) for uv commands, standard venv,
+Conda, minimal `move_viz`, verification, and configuration instructions.
 
 Key rules:
 

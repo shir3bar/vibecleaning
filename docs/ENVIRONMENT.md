@@ -6,7 +6,49 @@ library and frontend assets used by the examples are served from the repository.
 Python 3.11 is the reference version in `environment.yml`. Newer Python
 versions may work, but use 3.11 when diagnosing environment-specific failures.
 
-## Option 1: Python virtual environment
+## Option 1: uv (recommended)
+
+Install `uv` once if it is not already available:
+
+```bash
+python -m pip install uv
+```
+
+From the repository root, create the locked environment:
+
+```bash
+uv sync --locked
+```
+
+`uv` reads `.python-version`, creates `.venv/`, and installs the application
+dependencies plus the default `dev` dependency group from `pyproject.toml`.
+Run commands without manually activating the environment:
+
+```bash
+uv run python examples/move_viz/server.py
+uv run pytest -q tests/test_move_viz.py
+```
+
+Use these commands when changing dependencies:
+
+```bash
+uv add package-name
+uv add --dev package-name
+uv lock
+uv sync --locked
+```
+
+Commit `pyproject.toml` and `uv.lock` together. CI and handoff verification
+should use `uv sync --locked`; do not regenerate the lockfile incidentally.
+`pyproject.toml` is the dependency source of truth for uv. When maintaining the
+legacy pip workflow, mirror direct dependency additions or removals in
+`requirements.txt` as well.
+
+The uv lock covers Python dependencies used by this repository. It does not
+replace Conda when work specifically requires system-level GDAL or HDF4
+libraries.
+
+## Option 2: Python virtual environment
 
 From the repository root:
 
@@ -27,7 +69,7 @@ This installs the application, testing, movement-analysis, and OSM dependencies.
 The packages are not currently lock-file pinned, so record the resolved
 environment with `python -m pip freeze` when exact reproduction is required.
 
-## Option 2: Conda geospatial environment
+## Option 3: Conda geospatial environment
 
 The tracked Conda environment provides Python and the heavier geospatial base.
 The Python application requirements are installed as a second explicit step:
@@ -70,6 +112,15 @@ SQLite review and data graph remain local.
 ## Verify the installation
 
 For `move_viz`:
+
+```bash
+uv sync --locked
+uv run python -c "import sqlite3, fastapi, uvicorn; print(sqlite3.sqlite_version)"
+uv run python -m compileall -q examples/move_viz tests/test_move_viz.py
+uv run pytest -q tests/test_move_viz.py
+```
+
+Or, inside an activated venv/Conda environment:
 
 ```bash
 python -c "import sqlite3, fastapi, uvicorn; print(sqlite3.sqlite_version)"
