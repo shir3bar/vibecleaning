@@ -163,8 +163,10 @@ data/move_viz_<first-16-sha256>/
   .vibecleaning/
 ```
 
-`source.sqlite` is the immutable raw artifact. The temporary upload session is
-not lineage; the fingerprinted project is. Reopening byte-identical SQLite data
+`source.sqlite` is the immutable raw artifact. Upload bytes are staged on the
+data filesystem and atomically adopted as that artifact; the session stores
+only a small JSON reference to the graph. Do not reintroduce a second retained
+SQLite copy under the session directory. Reopening byte-identical SQLite data
 must resume the same graph head and annotations.
 
 Flag and unflag operations are persistent changes and therefore call

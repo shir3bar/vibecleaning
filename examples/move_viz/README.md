@@ -23,6 +23,8 @@ It provides:
 
 The uploaded database is fingerprinted and imported as the immutable
 `source.sqlite` artifact of an internal `data/move_viz_<fingerprint>/` project.
+The upload staging file is atomically adopted into that project, and the
+session retains only a small graph reference rather than a second SQLite copy.
 Flag and unflag operations create new datasets whose versioned
 `move_viz_review_annotations.json` sidecar records the affected rows, scope,
 reviewer, comment, timestamp, and step ID. The SQLite artifact is reused by

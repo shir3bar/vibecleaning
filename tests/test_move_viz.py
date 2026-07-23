@@ -105,6 +105,8 @@ def test_move_viz_upload_detects_movement_table_and_columns(tmp_path):
     assert opened["flags"] == {}
     project_dir = tmp_path / "data" / opened["project_name"]
     assert (project_dir / "source.sqlite").read_bytes() == database.read_bytes()
+    assert list((tmp_path / "sessions").glob("*.sqlite")) == []
+    assert list((tmp_path / "data").glob(".move_viz-upload-*.sqlite")) == []
     root_dataset = load_dataset(project_dir, opened["dataset_id"])
     assert [item["logical_name"] for item in root_dataset["artifacts"]] == ["source.sqlite"]
     assert root_dataset["artifacts"][0]["storage_type"] == "raw"
@@ -119,6 +121,10 @@ def test_move_viz_upload_detects_movement_table_and_columns(tmp_path):
         "event_id": "event-id",
     }
     assert notes["compatible"] is False
+
+    deleted = client.delete(f"/api/apps/move-viz/sessions/{opened['session_id']}")
+    assert deleted.status_code == 200
+    assert (project_dir / "source.sqlite").is_file()
 
 
 def test_move_viz_loads_overview_then_selected_individuals_without_writes(tmp_path):

@@ -461,7 +461,12 @@ def register_move_viz_routes(
             raise ValueError("Unknown move_viz graph")
         return project_dir
 
-    def ensure_graph_project(source_path: Path, fingerprint: str) -> tuple[str, Path]:
+    def ensure_graph_project(
+        source_path: Path,
+        fingerprint: str,
+        *,
+        adopt_source: bool,
+    ) -> tuple[str, Path, Path]:
         project_name = f"move_viz_{fingerprint[:16]}"
         project_dir = data_root / project_name
         project_dir.mkdir(parents=True, exist_ok=True)
@@ -469,21 +474,19 @@ def register_move_viz_routes(
         if graph_source.exists():
             if _file_sha256(graph_source) != fingerprint:
                 raise ValueError("The existing move_viz graph has a different source fingerprint")
+            if adopt_source:
+                source_path.unlink(missing_ok=True)
         else:
-            shutil.copyfile(source_path, graph_source)
+            if adopt_source:
+                source_path.replace(graph_source)
+            else:
+                shutil.copyfile(source_path, graph_source)
         project_state_payload(project_dir)
-        return project_name, project_dir
-
-    def session_path(session_id: str) -> Path:
-        if not re.fullmatch(r"[a-f0-9]{32}", session_id):
-            raise ValueError("Unknown SQLite session")
-        path = session_root / f"{session_id}.sqlite"
-        if not path.exists():
-            raise ValueError("Unknown SQLite session")
-        return path
+        return project_name, project_dir, graph_source
 
     def session_record(session_id: str) -> dict:
-        session_path(session_id)
+        if not re.fullmatch(r"[a-f0-9]{32}", session_id):
+            raise ValueError("Unknown SQLite session")
         record_path = session_root / f"{session_id}.json"
         if not record_path.is_file():
             raise ValueError("Unknown SQLite session")
@@ -491,8 +494,15 @@ def register_move_viz_routes(
             record = load_json(record_path)
         except ProjectStateError as exc:
             raise ValueError("Unknown SQLite session") from exc
-        project_dir_for_name(str(record.get("project_name") or ""))
+        project_dir = project_dir_for_name(str(record.get("project_name") or ""))
+        if not (project_dir / SOURCE_ARTIFACT).is_file():
+            raise ValueError("Unknown SQLite session")
         return record
+
+    def session_path(session_id: str) -> Path:
+        record = session_record(session_id)
+        project_dir = project_dir_for_name(str(record["project_name"]))
+        return project_dir / SOURCE_ARTIFACT
 
     def flags_for_dataset(project_dir: Path, dataset_id: str, table_name: str) -> dict:
         dataset = load_dataset(project_dir, dataset_id)
@@ -523,11 +533,22 @@ def register_move_viz_routes(
             "analyses": state["history"]["analyses"],
         }
 
-    def session_payload(destination: Path, session_id: str, filename: str, fingerprint: str) -> dict:
-        tables = inspect_sqlite(destination)
+    def session_payload(
+        source_path: Path,
+        session_id: str,
+        filename: str,
+        fingerprint: str,
+        *,
+        adopt_source: bool,
+    ) -> dict:
+        project_name, project_dir, graph_source = ensure_graph_project(
+            source_path,
+            fingerprint,
+            adopt_source=adopt_source,
+        )
+        tables = inspect_sqlite(graph_source)
         compatible = [table for table in tables if table["compatible"]]
         default_table = compatible[0]["name"] if compatible else ""
-        project_name, project_dir = ensure_graph_project(destination, fingerprint)
         current_review = review_state(project_dir, default_table)
         record = {
             "session_id": session_id,
@@ -543,7 +564,7 @@ def register_move_viz_routes(
         payload = {
             "session_id": session_id,
             "filename": filename,
-            "size": destination.stat().st_size,
+            "size": graph_source.stat().st_size,
             "fingerprint": fingerprint,
             "tables": tables,
             "default_table": default_table,
@@ -568,7 +589,7 @@ def register_move_viz_routes(
     async def create_session(request: Request, filename: str = "movement.sqlite"):
         safe_filename = Path(filename).name.strip() or "movement.sqlite"
         session_id = uuid.uuid4().hex
-        destination = session_root / f"{session_id}.sqlite"
+        destination = data_root / f".move_viz-upload-{session_id}.sqlite"
         digest = hashlib.sha256()
         size = 0
         try:
@@ -589,6 +610,7 @@ def register_move_viz_routes(
                 session_id,
                 safe_filename,
                 digest.hexdigest(),
+                adopt_source=True,
             )
         except OverflowError:
             destination.unlink(missing_ok=True)
@@ -603,20 +625,18 @@ def register_move_viz_routes(
         if not resolved_sample_database or not resolved_sample_database.is_file():
             return _json_error("The bundled SQLite example is not available", 404)
         session_id = uuid.uuid4().hex
-        destination = session_root / f"{session_id}.sqlite"
         try:
-            await run_in_threadpool(shutil.copyfile, resolved_sample_database, destination)
-            fingerprint = await run_in_threadpool(_file_sha256, destination)
+            fingerprint = await run_in_threadpool(_file_sha256, resolved_sample_database)
             payload = await run_in_threadpool(
                 session_payload,
-                destination,
+                resolved_sample_database,
                 session_id,
                 resolved_sample_database.name,
                 fingerprint,
+                adopt_source=False,
             )
             return JSONResponse(payload)
         except (OSError, sqlite3.DatabaseError, ValueError, ProjectStateError) as exc:
-            destination.unlink(missing_ok=True)
             return _json_error(str(exc), 400)
 
     @app.post("/api/apps/move-viz/sessions/{session_id}/load")
@@ -850,9 +870,8 @@ def register_move_viz_routes(
     @app.delete("/api/apps/move-viz/sessions/{session_id}")
     async def delete_session(session_id: str):
         try:
-            path = session_path(session_id)
+            session_record(session_id)
         except ValueError as exc:
             return _json_error(str(exc), 404)
-        path.unlink(missing_ok=True)
         (session_root / f"{session_id}.json").unlink(missing_ok=True)
         return JSONResponse({"deleted": True})
