@@ -45,22 +45,22 @@ from examples.movement.movement_features import STEP_FEATURE_FIELDS, compute_tra
 import examples.movement.summary as movement_summary
 from examples.movement.summary import build_movement_fixes, build_movement_overview, diagnose_track_topology
 
-CSV_CONTENT = """eventid,individual,timestamp,longitude,latitude,set,vc_outlier_status,vc_issue_id,vc_issue_type,vc_issue_field,vc_issue_note,vc_owner_question,vc_review_user,vc_reviewed_at
-fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,suspected,issue_1,drift,speed_mps,first alpha issue,question 1,reviewer,2024-01-02T00:00:00Z
-fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train,,,,,,,
-fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test,confirmed,issue_2,spike,step_length_m,beta confirmed issue,question 2,reviewer,2024-01-02T00:30:00Z
-fix_b_2,beta,2024-01-01T01:30:00Z,-71.1,41.1,test,suspected,issue_3,loop,hdop,beta suspected issue,question 3,reviewer,2024-01-02T01:30:00Z
-fix_c_1,gamma,2024-01-01T00:45:00Z,-72.0,42.0,train,,,,,,,
+CSV_CONTENT = """eventid,individual,timestamp,longitude,latitude,set,outlier_status,outlier_issue_type,outlier_comments,visible,manually-marked-outlier,algorithm-marked-outlier
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,suspected,drift,first alpha issue,true,false,true
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train,,,,true,false,false
+fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test,confirmed,spike,beta confirmed issue,false,false,true
+fix_b_2,beta,2024-01-01T01:30:00Z,-71.1,41.1,test,suspected,loop,beta suspected issue,true,true,false
+fix_c_1,gamma,2024-01-01T00:45:00Z,-72.0,42.0,train,,,,true,false,false
 """
 
-PROFILE_CSV_CONTENT = """eventid,individual-local-identifier,timestamp,longitude,latitude,study-name,study-id,individual-taxon-canonical-name,source,burst-id,vc_outlier_status,vc_issue_id,vc_issue_type,vc_issue_note,vc_owner_question
-fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,Study A,study_001,Cervus elaphus,movebank.mar2025,burst_a,suspected,issue_a,drift,Alpha issue,Question alpha
-fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,Study A,study_001,Cervus elaphus,movebank.mar2025,burst_a,,,,,
-fix_a_3,alpha,2024-01-01T02:00:00Z,-70.2,40.2,Study A,study_001,Cervus elaphus,movebank.mar2025,burst_b,,,,,
-fix_b_1,beta,2024-01-02T00:00:00Z,-71.0,41.0,Study A,study_001,Cervus elaphus,movebank.mar2025,,confirmed,issue_b,loop,Beta issue,Question beta
-fix_b_2,beta,2024-01-02T01:00:00Z,-71.1,41.1,Study A,study_001,Cervus elaphus,movebank.mar2025,,,,,,
-fix_c_1,gamma,2024-01-03T00:00:00Z,-72.0,42.0,Study A,study_001,Cervus elaphus,movebank.mar2025,,,,,,
-fix_c_2,gamma,2024-01-03T01:00:00Z,-72.1,42.1,Study A,study_001,Cervus elaphus,movebank.mar2025,,,,,,
+PROFILE_CSV_CONTENT = """eventid,individual-local-identifier,timestamp,longitude,latitude,study-name,study-id,individual-taxon-canonical-name,source,burst-id,outlier_status,outlier_issue_type,outlier_comments
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,Study A,study_001,Cervus elaphus,movebank.mar2025,burst_a,suspected,drift,Alpha issue
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,Study A,study_001,Cervus elaphus,movebank.mar2025,burst_a,,,
+fix_a_3,alpha,2024-01-01T02:00:00Z,-70.2,40.2,Study A,study_001,Cervus elaphus,movebank.mar2025,burst_b,,,
+fix_b_1,beta,2024-01-02T00:00:00Z,-71.0,41.0,Study A,study_001,Cervus elaphus,movebank.mar2025,,confirmed,loop,Beta issue
+fix_b_2,beta,2024-01-02T01:00:00Z,-71.1,41.1,Study A,study_001,Cervus elaphus,movebank.mar2025,,,,
+fix_c_1,gamma,2024-01-03T00:00:00Z,-72.0,42.0,Study A,study_001,Cervus elaphus,movebank.mar2025,,,,
+fix_c_2,gamma,2024-01-03T01:00:00Z,-72.1,42.1,Study A,study_001,Cervus elaphus,movebank.mar2025,,,,
 """
 
 
@@ -210,10 +210,9 @@ def test_build_movement_fixes_filters_multiple_individuals(tmp_path):
     assert payload["returned_fix_count"] == 4
     assert {fix["individual"] for fix in payload["fixes"]} == {"alpha", "beta"}
     review_by_key = {fix["fix_key"]: fix["review"] for fix in payload["fixes"] if "review" in fix}
-    assert review_by_key["id:fix_a_1#row:1"]["issue_field"] == "speed_mps"
-    assert review_by_key["id:fix_b_2#row:4"]["issue_field"] == "hdop"
-    assert review_by_key["id:fix_a_1#row:1"]["issues"][0]["issue_field"] == "speed_mps"
-    assert review_by_key["id:fix_b_2#row:4"]["issues"][0]["issue_type"] == "loop"
+    assert review_by_key["id:fix_a_1#row:1"]["issue_type"] == "drift"
+    assert review_by_key["id:fix_a_1#row:1"]["comments"] == "first alpha issue"
+    assert review_by_key["id:fix_b_2#row:4"]["issue_type"] == "loop"
 
 
 def test_build_movement_fixes_supports_single_individual_and_truncation(tmp_path):
@@ -540,15 +539,32 @@ def test_build_movement_overview_suppresses_initial_payload_without_dropping_ind
 def test_manual_segments_and_auto_bursts_are_separate(tmp_path):
     csv_path = tmp_path / "movement.csv"
     csv_path.write_text(
-        """eventid,individual,timestamp,longitude,latitude,set,vc_segment_status,vc_segment_id,vc_segment_type
-fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,suspected,manual_segment,collar
-fix_a_2,alpha,2024-01-01T00:30:00Z,-70.1,40.1,train,suspected,manual_segment,collar
-fix_a_3,alpha,2024-01-01T02:00:01Z,-70.2,40.2,train,,,
+        """eventid,individual,timestamp,longitude,latitude,set
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_a_2,alpha,2024-01-01T00:30:00Z,-70.1,40.1,train
+fix_a_3,alpha,2024-01-01T02:00:01Z,-70.2,40.2,train
 """,
         encoding="utf-8",
     )
 
-    payload = build_movement_overview(csv_path)
+    payload = apply_review_annotations(
+        build_movement_overview(csv_path),
+        [
+            normalize_annotation(
+                {
+                    "annotation_id": "manual_segment",
+                    "source_artifact": "movement.csv",
+                    "status": "suspected",
+                    "issue_type": "collar",
+                    "scope": {
+                        "kind": "segment",
+                        "fix_keys": ["id:fix_a_1#row:1", "id:fix_a_2#row:2"],
+                    },
+                }
+            )
+        ],
+        source_artifact="movement.csv",
+    )
 
     assert payload["segments"][0]["segment_id"] == "manual_segment"
     assert [burst["burst_idx"] for burst in payload["auto_bursts"]] == [0, 1]
@@ -679,8 +695,8 @@ def test_movement_frontend_includes_ephemeral_osm_context_helpers():
 def test_build_movement_fixes_ignores_cleared_issue_metadata(tmp_path):
     csv_path = tmp_path / "movement.csv"
     csv_path.write_text(
-        """eventid,individual,timestamp,longitude,latitude,set,vc_outlier_status,vc_issue_id,vc_issue_type,vc_issue_refs
-fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,,issue_old,drift,"[{""issue_id"": ""issue_old"", ""issue_type"": ""drift""}]"
+        """eventid,individual,timestamp,longitude,latitude,set,outlier_status,outlier_issue_type,outlier_comments
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,,drift,stale metadata
 """,
         encoding="utf-8",
     )
@@ -1104,13 +1120,13 @@ def test_movement_frontend_loads_suspicious_fixes_on_demand():
     assert "...(data.suspiciousFixes || [])" in source
 
 
-def test_export_reviewed_csv_combines_legacy_and_sidecar_annotations(tmp_path):
+def test_export_reviewed_csv_combines_portable_and_sidecar_annotations(tmp_path):
     source_path = tmp_path / "movement.csv"
     source_path.write_text(
-        """eventid,individual,timestamp,longitude,latitude,set,visible,vc_outlier_status,vc_issue_id,vc_issue_type,vc_issue_note,manually-marked-outlier,algorithm-marked-outlier,outlier_comments
-fix_1,alpha,2024-01-01T00:00:00Z,-70,40,train,true,suspected,legacy_1,drift,manual note,false,false,
-fix_2,beta,2024-01-01T01:00:00Z,-71,41,test,true,,,,,true,false,existing source note
-fix_3,gamma,2024-01-01T02:00:00Z,-72,42,train,false,,,,,false,true,
+        """eventid,individual,timestamp,longitude,latitude,set,visible,outlier_status,outlier_issue_type,manually-marked-outlier,algorithm-marked-outlier,outlier_comments
+fix_1,alpha,2024-01-01T00:00:00Z,-70,40,train,true,suspected,drift,false,false,manual note
+fix_2,beta,2024-01-01T01:00:00Z,-71,41,test,true,,,true,false,existing source note
+fix_3,gamma,2024-01-01T02:00:00Z,-72,42,train,false,,,false,true,
 """,
         encoding="utf-8",
     )
@@ -1154,13 +1170,16 @@ fix_3,gamma,2024-01-01T02:00:00Z,-72,42,train,false,,,,,false,true,
     assert rows[0]["manually-marked-outlier"] == "true"
     assert rows[0]["algorithm-marked-outlier"] == "false"
     assert rows[0]["outlier_issue_type"] == "drift"
-    assert rows[0]["outlier_comments"] == ""
+    assert rows[0]["outlier_comments"] == "manual note"
     assert rows[1]["visible"] == "false"
     assert rows[1]["manually-marked-outlier"] == "true"
     assert rows[1]["algorithm-marked-outlier"] == "true"
     assert rows[1]["outlier_status"] == "confirmed"
     assert rows[1]["outlier_issue_type"] == "burst anomaly"
-    assert rows[1]["outlier_comments"] == "Already flagged in source: manually-marked-outlier=true"
+    assert rows[1]["outlier_comments"] == (
+        "existing source note; "
+        "Already flagged in source: manually-marked-outlier=true"
+    )
     assert rows[1]["outlier_flag_step_ids"] == "step_historical"
     assert rows[2]["visible"] == "false"
     assert rows[2]["algorithm-marked-outlier"] == "true"
@@ -1176,7 +1195,7 @@ def test_reviewed_csv_artifact_name_is_based_on_source_name():
     )
 
 
-def test_export_migrates_deprecated_flag_names_and_is_idempotent(tmp_path):
+def test_export_drops_deprecated_flag_names_without_importing_them(tmp_path):
     source_path = tmp_path / "raw.csv"
     source_path.write_text(
         "eventid,individual,timestamp,longitude,latitude,manually_marked_outliers,algorithm_marked_outliers\n"
@@ -1194,8 +1213,8 @@ def test_export_migrates_deprecated_flag_names_and_is_idempotent(tmp_path):
     assert "manually_marked_outliers" not in row
     assert "algorithm_marked_outliers" not in row
     assert row["manually-marked-outlier"] == "false"
-    assert row["algorithm-marked-outlier"] == "true"
-    assert row["outlier_comments"].count("Already flagged in source") == 1
+    assert row["algorithm-marked-outlier"] == "false"
+    assert row["outlier_comments"] == ""
 
 
 def test_movement_export_reviewed_csv_route_creates_downloadable_analysis(tmp_path):
@@ -1496,11 +1515,11 @@ def test_build_issue_sections_keeps_all_issue_types_when_snapshots_are_sampled()
             "speed_mps": 2.0,
             "time_delta_s": 50.0,
             "review": {
-                "vc_outlier_status": "suspected",
-                "vc_issue_id": "issue_1",
-                "vc_issue_type": "spike",
-                "vc_issue_note": "Spike issue",
-                "vc_owner_question": "Is this a spike?",
+                "status": "suspected",
+                "issue_id": "issue_1",
+                "issue_type": "spike",
+                "issue_note": "Spike issue",
+                "owner_question": "Is this a spike?",
             },
             "raw": {"hdop": "1.2"},
         },
@@ -1516,11 +1535,11 @@ def test_build_issue_sections_keeps_all_issue_types_when_snapshots_are_sampled()
             "speed_mps": 3.0,
             "time_delta_s": 50.0,
             "review": {
-                "vc_outlier_status": "suspected",
-                "vc_issue_id": "issue_2",
-                "vc_issue_type": "drift",
-                "vc_issue_note": "Drift issue",
-                "vc_owner_question": "Is this drift?",
+                "status": "suspected",
+                "issue_id": "issue_2",
+                "issue_type": "drift",
+                "issue_note": "Drift issue",
+                "owner_question": "Is this drift?",
             },
             "raw": {"hdop": "3.8"},
         },
@@ -1548,13 +1567,7 @@ def test_build_issue_sections_keeps_all_issue_types_when_snapshots_are_sampled()
     sections = build_issue_sections(
         matched_records,
         snapshot_windows,
-        fieldnames=["hdop", *[
-            "vc_outlier_status",
-            "vc_issue_id",
-            "vc_issue_type",
-            "vc_issue_note",
-            "vc_owner_question",
-        ]],
+        fieldnames=["hdop"],
         columns={},
     )
 
@@ -1577,12 +1590,12 @@ def test_build_issue_sections_adds_issue_field_summary_per_individual():
             "speed_mps": 2.0,
             "time_delta_s": 50.0,
             "review": {
-                "vc_outlier_status": "suspected",
-                "vc_issue_id": "issue_1",
-                "vc_issue_type": "speed",
-                "vc_issue_field": "speed_mps",
-                "vc_issue_note": "Speed issue",
-                "vc_owner_question": "Is this speed plausible?",
+                "status": "suspected",
+                "issue_id": "issue_1",
+                "issue_type": "speed",
+                "issue_field": "speed_mps",
+                "issue_note": "Speed issue",
+                "owner_question": "Is this speed plausible?",
             },
             "raw": {"hdop": "1.2"},
         },
@@ -1598,12 +1611,12 @@ def test_build_issue_sections_adds_issue_field_summary_per_individual():
             "speed_mps": 8.0,
             "time_delta_s": 50.0,
             "review": {
-                "vc_outlier_status": "suspected",
-                "vc_issue_id": "issue_1",
-                "vc_issue_type": "speed",
-                "vc_issue_field": "speed_mps",
-                "vc_issue_note": "Speed issue",
-                "vc_owner_question": "Is this speed plausible?",
+                "status": "suspected",
+                "issue_id": "issue_1",
+                "issue_type": "speed",
+                "issue_field": "speed_mps",
+                "issue_note": "Speed issue",
+                "owner_question": "Is this speed plausible?",
             },
             "raw": {"hdop": "1.8"},
         },
@@ -1612,7 +1625,7 @@ def test_build_issue_sections_adds_issue_field_summary_per_individual():
     sections = build_issue_sections(
         matched_records,
         snapshot_windows=[],
-        fieldnames=["hdop", "vc_issue_field"],
+        fieldnames=["hdop"],
         columns={},
     )
 
@@ -1634,15 +1647,15 @@ def test_build_issue_sections_keeps_window_examples_with_their_captured_issue_ty
             "speed_mps": 2.0,
             "time_delta_s": 50.0,
             "review": {
-                "vc_outlier_status": "suspected",
-                "vc_issue_id": "issue_1",
-                "vc_issue_type": "gps",
+                "status": "suspected",
+                "issue_id": "issue_1",
+                "issue_type": "gps",
                 "issues": [
                     {"status": "suspected", "issue_id": "issue_1", "issue_type": "gps"},
                     {"status": "suspected", "issue_id": "issue_2", "issue_type": "speed"},
                 ],
-                "vc_issue_note": "Issue note",
-                "vc_owner_question": "Owner question",
+                "issue_note": "Issue note",
+                "owner_question": "Owner question",
             },
             "raw": {"hdop": "9.9"},
         }
@@ -1670,7 +1683,7 @@ def test_build_issue_sections_keeps_window_examples_with_their_captured_issue_ty
     sections = build_issue_sections(
         matched_records,
         snapshot_windows,
-        fieldnames=["hdop", "vc_issue_type"],
+        fieldnames=["hdop"],
         columns={},
     )
 
@@ -1707,9 +1720,9 @@ def test_normalize_report_records_ignores_cleared_issue_metadata():
     )
 
     assert len(records) == 1
-    assert records[0]["review"]["vc_outlier_status"] == ""
-    assert records[0]["review"]["vc_issue_id"] == ""
-    assert records[0]["review"]["vc_issue_type"] == ""
+    assert records[0]["review"]["status"] == ""
+    assert records[0]["review"]["issue_id"] == ""
+    assert records[0]["review"]["issue_type"] == ""
     assert records[0]["review"]["issues"] == []
 
 
@@ -1727,7 +1740,7 @@ def test_html_report_generates_svg_fallback_when_auto_snapshot_is_missing():
                     "lat": 40.0,
                     "step_length_m": 100.0,
                     "speed_mps": 2.0,
-                    "review": {"vc_outlier_status": "suspected"},
+                    "review": {"status": "suspected"},
                 },
                 {
                     "fix_key": "fix_b",
@@ -1738,7 +1751,7 @@ def test_html_report_generates_svg_fallback_when_auto_snapshot_is_missing():
                     "lat": 40.2,
                     "step_length_m": 150.0,
                     "speed_mps": 3.0,
-                    "review": {"vc_outlier_status": "suspected"},
+                    "review": {"status": "suspected"},
                 },
             ],
             "issue_ids": ["issue_1"],

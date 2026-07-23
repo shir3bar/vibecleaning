@@ -22,32 +22,6 @@ from .bursts import (
 from .movement_features import compute_track_movement
 
 
-REVIEW_COLUMNS = [
-    "vc_outlier_status",
-    "vc_issue_id",
-    "vc_issue_type",
-    "vc_issue_field",
-    "vc_issue_threshold",
-    "vc_issue_refs",
-    "vc_issue_note",
-    "vc_owner_question",
-    "vc_review_user",
-    "vc_reviewed_at",
-]
-
-SEGMENT_REVIEW_COLUMNS = [
-    "vc_segment_status",
-    "vc_segment_id",
-    "vc_segment_type",
-    "vc_segment_note",
-    "vc_segment_owner_question",
-    "vc_segment_review_user",
-    "vc_segment_reviewed_at",
-    "vc_segment_refs",
-]
-
-ALL_REVIEW_COLUMNS = REVIEW_COLUMNS + SEGMENT_REVIEW_COLUMNS
-
 DERIVED_FIELDS = [
     {"key": "step_length_m", "label": "Step length (m)", "kind": "numeric", "source": "derived"},
     {"key": "speed_mps", "label": "Speed (m/s)", "kind": "numeric", "source": "derived"},
@@ -149,7 +123,6 @@ def detect_columns(fieldnames: list[str]) -> dict[str, str | None]:
             "taxon",
         ]),
         "set": find_column(normalized, ["set", "split", "partition"]),
-        **{name: normalized.get(normalize_header(name)) for name in ALL_REVIEW_COLUMNS},
     }
 
 
@@ -360,8 +333,6 @@ def _attribute_field_kind(fieldname: str, stats: dict) -> str | None:
 
 def _should_include_quality_field(fieldname: str, stats: dict) -> bool:
     normalized = normalize_header(fieldname)
-    if fieldname in ALL_REVIEW_COLUMNS:
-        return True
     if str(fieldname).lower().startswith("osm:"):
         return True
     if any(keyword in normalized for keyword in QUALITY_KEYWORDS):
@@ -378,52 +349,6 @@ def _make_fix_key(row_index: int, fix_id: str, individual: str, time_ms: int) ->
 def _normalize_review_status(raw_value: object) -> str:
     value = str(raw_value or "").strip().lower()
     return value if value in {"suspected", "confirmed"} else ""
-
-
-def _normalize_segment_status(raw_value: object) -> str:
-    return _normalize_review_status(raw_value)
-
-
-def _normalize_issue_payload(item: dict, *, fallback_status: str = "") -> dict:
-    status = _normalize_review_status(item.get("status")) or _normalize_review_status(fallback_status)
-    if not status:
-        return {}
-    issue = {
-        "status": status,
-        "issue_id": str(item.get("issue_id", "")).strip(),
-        "issue_type": str(item.get("issue_type", "")).strip(),
-        "issue_field": str(item.get("issue_field", "")).strip(),
-        "issue_threshold": str(item.get("issue_threshold", "")).strip(),
-        "issue_note": str(item.get("issue_note", "")).strip(),
-        "owner_question": str(item.get("owner_question", "")).strip(),
-        "review_user": str(item.get("review_user", "")).strip(),
-        "reviewed_at": str(item.get("reviewed_at", "")).strip(),
-    }
-    cleaned = {key: value for key, value in issue.items() if _is_present(value)}
-    if not cleaned.get("issue_id") and not cleaned.get("issue_type"):
-        return {}
-    return cleaned
-
-
-def _normalize_segment_payload(item: dict, *, fallback_status: str = "") -> dict:
-    status = _normalize_segment_status(item.get("status")) or _normalize_segment_status(fallback_status)
-    if not status:
-        return {}
-    segment = {
-        "status": status,
-        "segment_id": str(item.get("segment_id", "")).strip(),
-        "issue_type": str(item.get("issue_type", "")).strip(),
-        "start_fix_key": str(item.get("start_fix_key", "")).strip(),
-        "end_fix_key": str(item.get("end_fix_key", "")).strip(),
-        "issue_note": str(item.get("issue_note", "")).strip(),
-        "owner_question": str(item.get("owner_question", "")).strip(),
-        "review_user": str(item.get("review_user", "")).strip(),
-        "reviewed_at": str(item.get("reviewed_at", "")).strip(),
-    }
-    cleaned = {key: value for key, value in segment.items() if _is_present(value)}
-    if not cleaned.get("segment_id"):
-        return {}
-    return cleaned
 
 
 def _prepare_scan_context(path: Path) -> tuple[list[str], dict[str, str | None], dict[str, dict]]:
@@ -468,24 +393,13 @@ def _prepare_scan_context_cached(path_str: str, _mtime_ns: int, _size: int):
 def _build_color_fields(fieldnames: list[str], columns: dict[str, str | None], field_stats: dict[str, dict]) -> list[dict]:
     excluded_fields = {
         value
-        for key, value in columns.items()
-        if value and key not in ALL_REVIEW_COLUMNS
+        for value in columns.values()
+        if value
     }
     color_fields = list(DERIVED_FIELDS)
-    for review_field in REVIEW_COLUMNS:
-        if columns.get(review_field):
-            color_fields.append(
-                {
-                    "key": review_field,
-                    "label": review_field,
-                    "kind": "categorical",
-                    "source": "review",
-                    "column_name": review_field,
-                }
-            )
 
     for fieldname in fieldnames:
-        if fieldname in excluded_fields or fieldname in ALL_REVIEW_COLUMNS:
+        if fieldname in excluded_fields:
             continue
         stats = field_stats[fieldname]
         if not _should_include_quality_field(fieldname, stats):
@@ -506,27 +420,14 @@ def _build_color_fields(fieldnames: list[str], columns: dict[str, str | None], f
 
 
 def _compact_review(raw: dict) -> dict:
-    issues = _review_issues(raw)
-    status = (
-        _normalize_review_status(raw.get("vc_outlier_status"))
-        or _normalize_review_status(raw.get("outlier_status"))
-    )
-    has_active_review = bool(status or issues)
+    status = _normalize_review_status(raw.get("outlier_status"))
+    if not status:
+        return {}
     review = {
         "status": status,
-        "issue_id": str(raw.get("vc_issue_id", "")).strip() if has_active_review else "",
-        "issue_type": str(
-            raw.get("vc_issue_type", "") or raw.get("outlier_issue_type", "")
-        ).strip() if has_active_review else "",
-        "issue_field": str(raw.get("vc_issue_field", "")).strip() if has_active_review else "",
-        "issue_threshold": str(raw.get("vc_issue_threshold", "")).strip() if has_active_review else "",
-        "issue_note": str(raw.get("vc_issue_note", "")).strip() if has_active_review else "",
-        "owner_question": str(raw.get("vc_owner_question", "")).strip() if has_active_review else "",
-        "review_user": str(raw.get("vc_review_user", "")).strip() if has_active_review else "",
-        "reviewed_at": str(raw.get("vc_reviewed_at", "")).strip() if has_active_review else "",
+        "issue_type": str(raw.get("outlier_issue_type", "")).strip(),
+        "comments": str(raw.get("outlier_comments", "")).strip(),
     }
-    if issues:
-        review["issues"] = issues
     return {key: value for key, value in review.items() if _is_present(value)}
 
 
@@ -544,10 +445,7 @@ def _row_is_analytically_excluded(
     confirmed_fix_keys: set[str],
     confirmed_individual_tracks: set[tuple[str, str]],
 ) -> bool:
-    review_status = (
-        _normalize_review_status(raw.get("outlier_status"))
-        or _normalize_review_status(raw.get("vc_outlier_status"))
-    )
+    review_status = _normalize_review_status(raw.get("outlier_status"))
     if review_status == "confirmed":
         return True
     if fix_key in confirmed_fix_keys:
@@ -560,74 +458,6 @@ def _row_is_analytically_excluded(
     if review_status == "suspected":
         return False
     return not _portable_row_is_visible(raw)
-
-
-def _review_issues(raw: dict) -> list[dict]:
-    row_status = _normalize_review_status(raw.get("vc_outlier_status"))
-    raw_refs = str(raw.get("vc_issue_refs", "")).strip()
-    if raw_refs:
-        try:
-            parsed = json.loads(raw_refs)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, list):
-            issues = []
-            for item in parsed:
-                if not isinstance(item, dict):
-                    continue
-                cleaned = _normalize_issue_payload(item, fallback_status=row_status)
-                if cleaned:
-                    issues.append(cleaned)
-            if issues:
-                return issues
-    legacy_issue = _normalize_issue_payload(
-        {
-            "status": row_status,
-            "issue_id": str(raw.get("vc_issue_id", "")).strip(),
-            "issue_type": str(raw.get("vc_issue_type", "")).strip(),
-            "issue_field": str(raw.get("vc_issue_field", "")).strip(),
-            "issue_threshold": str(raw.get("vc_issue_threshold", "")).strip(),
-            "issue_note": str(raw.get("vc_issue_note", "")).strip(),
-            "owner_question": str(raw.get("vc_owner_question", "")).strip(),
-            "review_user": str(raw.get("vc_review_user", "")).strip(),
-            "reviewed_at": str(raw.get("vc_reviewed_at", "")).strip(),
-        },
-        fallback_status=row_status,
-    )
-    return [legacy_issue] if legacy_issue else []
-
-
-def _segment_memberships(raw: dict) -> list[dict]:
-    row_status = _normalize_segment_status(raw.get("vc_segment_status"))
-    raw_refs = str(raw.get("vc_segment_refs", "")).strip()
-    if raw_refs:
-        try:
-            parsed = json.loads(raw_refs)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, list):
-            segments = []
-            for item in parsed:
-                if not isinstance(item, dict):
-                    continue
-                cleaned = _normalize_segment_payload(item, fallback_status=row_status)
-                if cleaned:
-                    segments.append(cleaned)
-            if segments:
-                return segments
-    legacy_segment = _normalize_segment_payload(
-        {
-            "status": row_status,
-            "segment_id": str(raw.get("vc_segment_id", "")).strip(),
-            "issue_type": str(raw.get("vc_segment_type", "")).strip(),
-            "issue_note": str(raw.get("vc_segment_note", "")).strip(),
-            "owner_question": str(raw.get("vc_segment_owner_question", "")).strip(),
-            "review_user": str(raw.get("vc_segment_review_user", "")).strip(),
-            "reviewed_at": str(raw.get("vc_segment_reviewed_at", "")).strip(),
-        },
-        fallback_status=row_status,
-    )
-    return [legacy_segment] if legacy_segment else []
 
 
 def _build_attributes(raw: dict, *, color_fields: list[dict], step_length_m, speed_mps, time_delta_s) -> dict:
@@ -1000,14 +830,13 @@ def _build_movement_overview_cached(
 
     excluded_fields = {
         value
-        for key, value in columns.items()
-        if value and key not in ALL_REVIEW_COLUMNS
+        for value in columns.values()
+        if value
     }
     overview_quality_fields = [
         fieldname
         for fieldname in fieldnames
         if fieldname not in excluded_fields
-        and fieldname not in REVIEW_COLUMNS
         and (
             str(fieldname).lower().startswith("osm:")
             or any(keyword in normalize_header(fieldname) for keyword in QUALITY_KEYWORDS)
@@ -1079,7 +908,7 @@ def _build_movement_overview_cached(
                     stats["bool_count"] += 1
 
             review = _compact_review(raw)
-            segment_memberships = _segment_memberships(raw)
+            segment_memberships = []
             fix_key = _make_fix_key(row_index, valid["fix_id"], individual, time_ms)
             overview_record = {
                 "row_index": row_index,
@@ -1152,17 +981,6 @@ def _build_movement_overview_cached(
     movement_by_fix_key, stat_samples = compute_track_movement(eligible_track_records_by_group)
 
     color_fields = list(DERIVED_FIELDS)
-    for review_field in REVIEW_COLUMNS:
-        if columns.get(review_field):
-            color_fields.append(
-                {
-                    "key": review_field,
-                    "label": review_field,
-                    "kind": "categorical",
-                    "source": "review",
-                    "column_name": review_field,
-                }
-            )
     for fieldname in overview_quality_fields:
         kind = _attribute_field_kind(fieldname, overview_field_stats[fieldname])
         if not kind:
@@ -1454,7 +1272,7 @@ def _build_movement_fixes_cached(
                     "position": [float(lon), float(lat)],
                     "raw": raw,
                     "review": _compact_review(raw),
-                    "segment_memberships": _segment_memberships(raw),
+                    "segment_memberships": [],
                     "analytically_excluded": analytically_excluded,
                 }
             )

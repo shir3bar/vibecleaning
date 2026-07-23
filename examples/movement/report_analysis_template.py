@@ -8,32 +8,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-REVIEW_COLUMNS = [
-    "vc_outlier_status",
-    "vc_issue_id",
-    "vc_issue_type",
-    "vc_issue_field",
-    "vc_issue_threshold",
-    "vc_issue_refs",
-    "vc_issue_note",
-    "vc_owner_question",
-    "vc_review_user",
-    "vc_reviewed_at",
-]
-
-SEGMENT_REVIEW_COLUMNS = [
-    "vc_segment_status",
-    "vc_segment_id",
-    "vc_segment_type",
-    "vc_segment_note",
-    "vc_segment_owner_question",
-    "vc_segment_review_user",
-    "vc_segment_reviewed_at",
-    "vc_segment_refs",
-]
-
-ALL_REVIEW_COLUMNS = REVIEW_COLUMNS + SEGMENT_REVIEW_COLUMNS
-
 QUALITY_KEYWORDS = (
     "gps",
     "quality",
@@ -149,8 +123,6 @@ def detect_columns(fieldnames):
         ]),
         "set": find_column(normalized, ["set", "split", "partition"]),
     }
-    for name in ALL_REVIEW_COLUMNS:
-        columns[name] = normalized.get(normalize_header(name))
     return columns
 
 
@@ -232,30 +204,18 @@ def clean_issue_payload(item, fallback_status=""):
 
 
 def parse_issue_refs(raw):
-    row_status = normalize_review_status(raw.get("vc_outlier_status"))
-    raw_refs = str(raw.get("vc_issue_refs", "")).strip()
-    if raw_refs:
-        try:
-            parsed = json.loads(raw_refs)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, list):
-            issues = [clean_issue_payload(item, row_status) for item in parsed if isinstance(item, dict)]
-            issues = [item for item in issues if item]
-            if issues:
-                return issues
-    legacy = clean_issue_payload({
-        "status": raw.get("vc_outlier_status"),
-        "issue_id": raw.get("vc_issue_id"),
-        "issue_type": raw.get("vc_issue_type"),
-        "issue_field": raw.get("vc_issue_field"),
-        "issue_threshold": raw.get("vc_issue_threshold"),
-        "issue_note": raw.get("vc_issue_note"),
-        "owner_question": raw.get("vc_owner_question"),
-        "review_user": raw.get("vc_review_user"),
-        "reviewed_at": raw.get("vc_reviewed_at"),
-    }, row_status)
-    return [legacy] if legacy else []
+    status = normalize_review_status(raw.get("outlier_status"))
+    if not status:
+        return []
+    issue = clean_issue_payload(
+        {
+            "status": status,
+            "issue_type": raw.get("outlier_issue_type"),
+            "issue_note": raw.get("outlier_comments"),
+        },
+        status,
+    )
+    return [issue] if issue else []
 
 
 def clean_segment_payload(item, fallback_status=""):
@@ -279,40 +239,15 @@ def clean_segment_payload(item, fallback_status=""):
     return cleaned
 
 
-def parse_segment_refs(raw):
-    row_status = normalize_segment_status(raw.get("vc_segment_status"))
-    raw_refs = str(raw.get("vc_segment_refs", "")).strip()
-    if raw_refs:
-        try:
-            parsed = json.loads(raw_refs)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, list):
-            segments = [clean_segment_payload(item, row_status) for item in parsed if isinstance(item, dict)]
-            segments = [item for item in segments if item]
-            if segments:
-                return segments
-    legacy = clean_segment_payload({
-        "status": raw.get("vc_segment_status"),
-        "segment_id": raw.get("vc_segment_id"),
-        "issue_type": raw.get("vc_segment_type"),
-        "issue_note": raw.get("vc_segment_note"),
-        "owner_question": raw.get("vc_segment_owner_question"),
-        "review_user": raw.get("vc_segment_review_user"),
-        "reviewed_at": raw.get("vc_segment_reviewed_at"),
-    }, row_status)
-    return [legacy] if legacy else []
-
-
 def extract_quality_fields(fieldnames, columns):
     excluded = {
         value
-        for key, value in columns.items()
-        if value and key not in ALL_REVIEW_COLUMNS
+        for value in columns.values()
+        if value
     }
     result = []
     for name in fieldnames:
-        if name in excluded or name in ALL_REVIEW_COLUMNS:
+        if name in excluded:
             continue
         normalized = normalize_header(name)
         if any(keyword in normalized for keyword in QUALITY_KEYWORDS):
@@ -379,15 +314,14 @@ def load_rows_with_context(source_path):
 
         fix_id = str(raw.get(columns["fix_id"], "")).strip() if columns["fix_id"] else ""
         fix_key = make_fix_key(row_index, fix_id, bool(fix_id) and fix_id_counts.get(fix_id, 0) == 1, individual, time_ms)
-        review = {}
-        for name in REVIEW_COLUMNS:
-            review[name] = str(raw.get(name, "")).strip()
-        if not review.get("vc_outlier_status"):
-            review["vc_outlier_status"] = str(raw.get("outlier_status", "")).strip()
-        if not review.get("vc_issue_type"):
-            review["vc_issue_type"] = str(raw.get("outlier_issue_type", "")).strip()
+        review = {
+            "status": normalize_review_status(raw.get("outlier_status")),
+            "issue_type": str(raw.get("outlier_issue_type", "")).strip(),
+            "issue_note": str(raw.get("outlier_comments", "")).strip(),
+        }
+        review = {key: value for key, value in review.items() if value}
         review["issues"] = parse_issue_refs(raw)
-        segments = parse_segment_refs(raw)
+        segments = []
         valid_records.append(
             {
                 "row_index": row_index,
@@ -418,7 +352,7 @@ def recompute_analytical_movement_context(valid_records):
         record["time_delta_s"] = None
         record["step_length_m"] = None
         record["speed_mps"] = None
-        status = normalize_review_status((record.get("review") or {}).get("vc_outlier_status"))
+        status = normalize_review_status((record.get("review") or {}).get("status"))
         visible = str((record.get("raw") or {}).get("visible", "")).strip().lower()
         if (
             status == "confirmed"
@@ -479,9 +413,9 @@ MAX_EXAMPLES_PER_ISSUE = 6
 
 
 def issue_type_for(record):
-    if not normalize_review_status(record["review"].get("vc_outlier_status")):
+    if not normalize_review_status(record["review"].get("status")):
         return "Unspecified issue"
-    return record["review"].get("vc_issue_type", "").strip() or "Unspecified issue"
+    return record["review"].get("issue_type", "").strip() or "Unspecified issue"
 
 
 def issue_types_for(record):
@@ -494,7 +428,7 @@ def issue_types_for(record):
 
 
 def issue_id_for(record):
-    return record["review"].get("vc_issue_id", "").strip()
+    return record["review"].get("issue_id", "").strip()
 
 
 def issue_ids_for(record):
@@ -506,15 +440,15 @@ def issue_ids_for(record):
     })
     if issue_ids:
         return issue_ids
-    if not normalize_review_status(record["review"].get("vc_outlier_status")):
+    if not normalize_review_status(record["review"].get("status")):
         return []
     return [issue_id_for(record)] if issue_id_for(record) else []
 
 
 def issue_field_for(record):
-    if not normalize_review_status(record["review"].get("vc_outlier_status")):
+    if not normalize_review_status(record["review"].get("status")):
         return ""
-    return record["review"].get("vc_issue_field", "").strip()
+    return record["review"].get("issue_field", "").strip()
 
 
 def issue_threshold_for_type(record, issue_type):
@@ -522,9 +456,9 @@ def issue_threshold_for_type(record, issue_type):
         item_issue_type = str(item.get("issue_type", "")).strip() or "Unspecified issue"
         if item_issue_type == issue_type:
             return str(item.get("issue_threshold", "")).strip()
-    if not normalize_review_status(record["review"].get("vc_outlier_status")):
+    if not normalize_review_status(record["review"].get("status")):
         return ""
-    return str(record["review"].get("vc_issue_threshold", "")).strip()
+    return str(record["review"].get("issue_threshold", "")).strip()
 
 
 def issue_field_for_type(record, issue_type):
@@ -547,17 +481,17 @@ def issue_detail_values_for_type(record, issue_type, key):
     if values:
         return values
     fallback_key = {
-        "issue_note": "vc_issue_note",
-        "owner_question": "vc_owner_question",
+        "issue_note": "issue_note",
+        "owner_question": "owner_question",
     }.get(key, "")
-    if not normalize_review_status(record["review"].get("vc_outlier_status")):
+    if not normalize_review_status(record["review"].get("status")):
         return []
     fallback_value = str(record["review"].get(fallback_key, "")).strip() if fallback_key else ""
     return [fallback_value] if fallback_value else []
 
 
 def status_for(record):
-    return record["review"].get("vc_outlier_status", "").strip().lower() or "unreviewed"
+    return record["review"].get("status", "").strip().lower() or "unreviewed"
 
 
 def format_metric(value, digits):
@@ -1418,7 +1352,7 @@ def build_individual_profile_sections(valid_records, fieldnames, columns, select
         if record["speed_mps"] is not None:
             item["speed_values_mps"].append(float(record["speed_mps"]))
             item["speed_values_excluding_suspected_mps"].append(float(record["speed_mps"]))
-        if normalize_review_status(record["review"].get("vc_outlier_status")):
+        if normalize_review_status(record["review"].get("status")):
             item["reviewed_records"].append(record)
         if record["time_ms"] < item["start_ms"]:
             item["start_ms"] = record["time_ms"]
@@ -1744,21 +1678,17 @@ def normalize_report_records(items):
                 review_status = "confirmed"
         has_active_review = bool(review_status or issue_items)
         review = {
-            "vc_outlier_status": review_status,
-            "vc_issue_id": str(review_in.get("issue_id", "")).strip() if has_active_review else "",
-            "vc_issue_type": str(review_in.get("issue_type", "")).strip() if has_active_review else "",
-            "vc_issue_field": str(review_in.get("issue_field", "")).strip() if has_active_review else "",
+            "status": review_status,
+            "issue_id": str(review_in.get("issue_id", "")).strip() if has_active_review else "",
+            "issue_type": str(review_in.get("issue_type", "")).strip() if has_active_review else "",
+            "issue_field": str(review_in.get("issue_field", "")).strip() if has_active_review else "",
             "issues": issue_items,
-            "vc_issue_note": str(review_in.get("issue_note", "")).strip() if has_active_review else "",
-            "vc_owner_question": str(review_in.get("owner_question", "")).strip() if has_active_review else "",
-            "vc_review_user": str(review_in.get("review_user", "")).strip() if has_active_review else "",
-            "vc_reviewed_at": str(review_in.get("reviewed_at", "")).strip() if has_active_review else "",
+            "issue_note": str(review_in.get("issue_note", "")).strip() if has_active_review else "",
+            "owner_question": str(review_in.get("owner_question", "")).strip() if has_active_review else "",
+            "review_user": str(review_in.get("review_user", "")).strip() if has_active_review else "",
+            "reviewed_at": str(review_in.get("reviewed_at", "")).strip() if has_active_review else "",
         }
-        review["issues"] = [
-            item
-            for item in review["issues"]
-            if item
-        ] or parse_issue_refs(review)
+        review["issues"] = [item for item in review["issues"] if item]
         segments = [
             clean_segment_payload(item)
             for item in (item.get("segments") or [])
@@ -1772,18 +1702,6 @@ def normalize_report_records(items):
                 continue
             raw[name] = "" if value is None else str(value)
         raw.update(review)
-        if segments:
-            primary_segment = segments[0]
-            raw.update({
-                "vc_segment_status": primary_segment.get("status", ""),
-                "vc_segment_id": primary_segment.get("segment_id", ""),
-                "vc_segment_type": primary_segment.get("issue_type", ""),
-                "vc_segment_note": primary_segment.get("issue_note", ""),
-                "vc_segment_owner_question": primary_segment.get("owner_question", ""),
-                "vc_segment_review_user": primary_segment.get("review_user", ""),
-                "vc_segment_reviewed_at": primary_segment.get("reviewed_at", ""),
-                "vc_segment_refs": json.dumps(segments, sort_keys=True),
-            })
         normalized.append(
             {
                 "fix_key": str(item.get("fix_key", "")).strip(),
@@ -2013,8 +1931,8 @@ def main():
                 for record in matched_records:
                     primary_segment = record.get("segments", [None])[0] if record.get("segments") else None
                     row = {
-                        "issue_id": record["review"].get("vc_issue_id", "").strip(),
-                        "issue_type": record["review"].get("vc_issue_type", "").strip(),
+                        "issue_id": record["review"].get("issue_id", "").strip(),
+                        "issue_type": record["review"].get("issue_type", "").strip(),
                         "segment_id": str((primary_segment or {}).get("segment_id", "")).strip(),
                         "segment_status": str((primary_segment or {}).get("status", "")).strip(),
                         "segment_issue_type": str((primary_segment or {}).get("issue_type", "")).strip(),
@@ -2030,9 +1948,9 @@ def main():
                         "step_length_m": "" if record["step_length_m"] is None else f"{record['step_length_m']:.6f}",
                         "speed_mps": "" if record["speed_mps"] is None else f"{record['speed_mps']:.6f}",
                         "time_delta_s": "" if record["time_delta_s"] is None else f"{record['time_delta_s']:.6f}",
-                        "status": record["review"].get("vc_outlier_status", "").strip(),
-                        "owner_question": record["review"].get("vc_owner_question", "").strip(),
-                        "issue_note": record["review"].get("vc_issue_note", "").strip(),
+                        "status": record["review"].get("status", "").strip(),
+                        "owner_question": record["review"].get("owner_question", "").strip(),
+                        "issue_note": record["review"].get("issue_note", "").strip(),
                     }
                     for name in quality_fields:
                         row[name] = str(record["raw"].get(name, "")).strip()

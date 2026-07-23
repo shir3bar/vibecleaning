@@ -620,7 +620,7 @@ def _run_raw_csv_attribute_candidate_query(
             if row is None:
                 continue
             visible_value = str(raw.get("visible") or "").strip().lower()
-            status_value = str(raw.get("outlier_status") or raw.get("vc_outlier_status") or "").strip().lower()
+            status_value = str(raw.get("outlier_status") or "").strip().lower()
             if (
                 status_value == "confirmed"
                 or (

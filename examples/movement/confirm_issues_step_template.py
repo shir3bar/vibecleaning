@@ -20,9 +20,9 @@ def main():
         sys.path.insert(0, repo_root)
 
     from examples.movement.review_annotations import (
-        _legacy_annotations,
         annotation_applies,
         load_review_annotations,
+        source_row_annotation,
     )
     from examples.movement.summary import (
         _make_fix_key,
@@ -60,7 +60,7 @@ def main():
 
     source_path = Path(source["path"])
     row_context_by_fix_key = {}
-    legacy_by_id = {}
+    source_annotations_by_id = {}
     with source_path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         source_fieldnames = list(reader.fieldnames or [])
@@ -86,9 +86,13 @@ def main():
                 "individual": individual,
                 "set_name": set_name,
             }
-            for annotation in _legacy_annotations(raw, fix_key=fix_key, source_artifact=target_artifact):
-                if annotation["annotation_id"] in requested_parent_ids:
-                    legacy_by_id[annotation["annotation_id"]] = annotation
+            annotation = source_row_annotation(
+                raw,
+                fix_key=fix_key,
+                source_artifact=target_artifact,
+            )
+            if annotation and annotation["annotation_id"] in requested_parent_ids:
+                source_annotations_by_id[annotation["annotation_id"]] = annotation
 
     parent_by_id = {
         item["annotation_id"]: item
@@ -98,7 +102,7 @@ def main():
     }
     parent_by_id.update({
         key: item
-        for key, item in legacy_by_id.items()
+        for key, item in source_annotations_by_id.items()
         if item["status"] == "suspected"
     })
 

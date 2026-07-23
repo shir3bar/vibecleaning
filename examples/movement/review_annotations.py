@@ -3,10 +3,8 @@ import json
 from pathlib import Path
 
 from .summary import (
-    ALL_REVIEW_COLUMNS,
     _make_fix_key,
     _normalize_review_status,
-    _review_issues,
     detect_columns,
     is_valid_coordinate,
     parse_time_ms,
@@ -85,31 +83,25 @@ def normalize_annotation(raw: dict) -> dict:
     }
 
 
-def _legacy_annotations(raw: dict, *, fix_key: str, source_artifact: str) -> list[dict]:
-    annotations = []
-    for index, issue in enumerate(_review_issues(raw), start=1):
-        status = _normalize_review_status(issue.get("status"))
-        if not status:
-            continue
-        issue_field = str(issue.get("issue_field") or "").strip()
-        issue_threshold = str(issue.get("issue_threshold") or "").strip()
-        annotations.append(
-            normalize_annotation(
-                {
-                    "annotation_id": str(issue.get("issue_id") or f"legacy:{fix_key}:{index}"),
-                    "source_artifact": source_artifact,
-                    "status": status,
-                    "origin": "threshold" if issue_field or issue_threshold else "manual",
-                    "issue_type": issue.get("issue_type"),
-                    "comment": issue.get("issue_note"),
-                    "owner_question": issue.get("owner_question"),
-                    "user": issue.get("review_user"),
-                    "created_at": issue.get("reviewed_at"),
-                    "scope": {"kind": "fix", "fix_keys": [fix_key]},
-                }
-            )
-        )
-    return annotations
+def source_row_annotation(raw: dict, *, fix_key: str, source_artifact: str) -> dict | None:
+    """Return an explicit portable review annotation embedded in a source CSV row."""
+    status = _normalize_review_status(raw.get("outlier_status"))
+    if not status:
+        return None
+    manual = _flag_is_true(raw.get("manually-marked-outlier"))
+    algorithm = _flag_is_true(raw.get("algorithm-marked-outlier"))
+    origin = "algorithm" if algorithm and not manual else "manual"
+    return normalize_annotation(
+        {
+            "annotation_id": f"source:{fix_key}",
+            "source_artifact": source_artifact,
+            "status": status,
+            "origin": origin,
+            "issue_type": raw.get("outlier_issue_type"),
+            "comment": raw.get("outlier_comments"),
+            "scope": {"kind": "fix", "fix_keys": [fix_key]},
+        }
+    )
 
 
 def annotation_applies(annotation: dict, *, fix_key: str, individual: str, set_name: str) -> bool:
@@ -313,15 +305,15 @@ def apply_annotations_to_report_records(
         latest = matches[-1]
         review.update(
             {
-                "vc_outlier_status": "confirmed"
+                "status": "confirmed"
                 if any(item.get("status") == "confirmed" for item in issues)
                 else "suspected",
-                "vc_issue_id": latest["annotation_id"],
-                "vc_issue_type": latest["issue_type"],
-                "vc_issue_note": latest["comment"],
-                "vc_owner_question": latest["owner_question"],
-                "vc_review_user": latest["user"],
-                "vc_reviewed_at": latest["created_at"],
+                "issue_id": latest["annotation_id"],
+                "issue_type": latest["issue_type"],
+                "issue_note": latest["comment"],
+                "owner_question": latest["owner_question"],
+                "review_user": latest["user"],
+                "reviewed_at": latest["created_at"],
                 "issues": issues,
             }
         )
@@ -359,8 +351,7 @@ def export_reviewed_csv(
         output_fields = [
             name
             for name in fieldnames
-            if name not in ALL_REVIEW_COLUMNS
-            and not str(name).startswith("vc_")
+            if not str(name).startswith("vc_")
             and name not in EXPORT_COLUMNS
             and name not in DEPRECATED_EXPORT_COLUMNS
         ] + EXPORT_COLUMNS
@@ -387,7 +378,13 @@ def export_reviewed_csv(
             fix_key = _make_fix_key(row_index, fix_id, individual, time_ms) if valid else ""
             active = []
             if valid:
-                active.extend(_legacy_annotations(raw, fix_key=fix_key, source_artifact=source_artifact))
+                source_annotation = source_row_annotation(
+                    raw,
+                    fix_key=fix_key,
+                    source_artifact=source_artifact,
+                )
+                if source_annotation:
+                    active.append(source_annotation)
                 active.extend(
                     item
                     for item in annotations
@@ -397,10 +394,6 @@ def export_reviewed_csv(
                 )
             source_manual = _flag_is_true(raw.get("manually-marked-outlier"))
             source_algorithm = _flag_is_true(raw.get("algorithm-marked-outlier"))
-            deprecated_manual = _flag_is_true(raw.get("manually_marked_outliers"))
-            deprecated_algorithm = _flag_is_true(raw.get("algorithm_marked_outliers"))
-            source_manual = source_manual or deprecated_manual
-            source_algorithm = source_algorithm or deprecated_algorithm
             manual = source_manual or any(item["origin"] == "manual" for item in active)
             algorithm = source_algorithm or any(item["origin"] in {"threshold", "algorithm"} for item in active)
             source_status = _normalize_review_status(raw.get("outlier_status"))
@@ -421,7 +414,7 @@ def export_reviewed_csv(
             existing_comment = str(raw.get("outlier_comments") or "").strip()
             for comment in existing_comment.split(";"):
                 comment = comment.strip()
-                if comment.startswith("Already flagged in source:") and comment not in comments:
+                if comment and comment not in comments:
                     comments.append(comment)
             if source_manual:
                 marker = "Already flagged in source: manually-marked-outlier=true"
