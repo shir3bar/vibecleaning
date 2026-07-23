@@ -13,7 +13,13 @@ def main():
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     params = dict(spec["step"].get("parameters") or {})
     step_id = str(spec["step"].get("step_id") or "").strip()
-    from examples.movement.review_annotations import load_review_annotations
+    from examples.movement.review_annotations import (
+        compress_fix_keys,
+        fix_key_row_number,
+        load_review_annotations,
+        normalize_row_ranges,
+        row_number_in_ranges,
+    )
     from examples.movement.summary import build_movement_fixes
 
     target_artifact = str(params.get("target_artifact") or "").strip()
@@ -32,18 +38,21 @@ def main():
         burst_gap_quantile=params.get("burst_gap_quantile"),
     )
     fixes = movement["fixes"]
-    fix_by_key = {item["fix_key"]: item for item in fixes}
     raw_scope = dict(params.get("scope") or {})
     kind = str(raw_scope.get("kind") or "fix")
     resolved_fix_keys = []
     scope = {"kind": kind}
     if kind in {"fix", "segment"}:
-        requested = sorted({str(item).strip() for item in raw_scope.get("fix_keys", []) if str(item).strip()})
-        missing = sorted(set(requested) - set(fix_by_key))
-        if missing:
+        row_ranges = normalize_row_ranges(raw_scope.get("row_ranges") or [])
+        resolved_fix_keys = [
+            item["fix_key"]
+            for item in fixes
+            if row_number_in_ranges(fix_key_row_number(item["fix_key"]), row_ranges)
+        ]
+        expected_count = int(raw_scope.get("fix_count") or 0)
+        if expected_count and len(resolved_fix_keys) != expected_count:
             raise SystemExit("Some selected fixes were not found in the current dataset")
-        resolved_fix_keys = requested
-        scope["fix_keys"] = requested
+        scope["row_ranges"] = row_ranges
         if kind == "segment":
             scope["start_fix_key"] = str(raw_scope.get("start_fix_key") or "").strip()
             scope["end_fix_key"] = str(raw_scope.get("end_fix_key") or "").strip()
@@ -69,7 +78,7 @@ def main():
                 "set_name": str(burst.get("set_name") or ""),
                 "start_fix_key": str(burst.get("start_fix_key") or ""),
                 "end_fix_key": str(burst.get("end_fix_key") or ""),
-                "fix_keys": resolved_fix_keys,
+                "row_ranges": compress_fix_keys(resolved_fix_keys),
                 "burst_gap": movement.get("burst_gap") or {},
             }
         )
@@ -100,7 +109,7 @@ def main():
     output_path = Path(output["path"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        json.dumps({"schema_version": 1, "annotations": annotations}, indent=2, sort_keys=True) + "\n",
+        json.dumps({"schema_version": 3, "annotations": annotations}, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     summary_path.write_text(

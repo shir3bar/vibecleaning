@@ -30,6 +30,72 @@ DEPRECATED_EXPORT_COLUMNS = {
 VALID_ORIGINS = {"manual", "threshold", "algorithm"}
 
 
+def fix_key_row_number(fix_key: object) -> int:
+    value = str(fix_key or "").strip()
+    if "#row:" in value:
+        raw_number = value.rsplit("#row:", 1)[1]
+    elif value.startswith("row:"):
+        raw_number = value[4:].split("|", 1)[0]
+    else:
+        raise ValueError("Invalid movement fix key")
+    try:
+        row_number = int(raw_number)
+    except ValueError as exc:
+        raise ValueError("Invalid movement fix key") from exc
+    if row_number < 1:
+        raise ValueError("Invalid movement fix key")
+    return row_number
+
+
+def normalize_row_ranges(raw_ranges: object) -> list[list[int]]:
+    if not isinstance(raw_ranges, list):
+        return []
+    ranges = []
+    for item in raw_ranges:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ValueError("Invalid movement row ranges")
+        try:
+            start, end = int(item[0]), int(item[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid movement row ranges") from exc
+        if start < 1 or end < start:
+            raise ValueError("Invalid movement row ranges")
+        ranges.append((start, end))
+    merged: list[list[int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return merged
+
+
+def compress_fix_keys(fix_keys: list[str] | tuple[str, ...] | set[str]) -> list[list[int]]:
+    return normalize_row_ranges([[fix_key_row_number(key), fix_key_row_number(key)] for key in fix_keys])
+
+
+def row_number_in_ranges(row_number: int, row_ranges: list[list[int]]) -> bool:
+    low = 0
+    high = len(row_ranges)
+    while low < high:
+        middle = (low + high) // 2
+        start, end = row_ranges[middle]
+        if row_number < start:
+            high = middle
+        elif row_number > end:
+            low = middle + 1
+        else:
+            return True
+    return False
+
+
+def row_tokens_for_scope(scope: dict) -> set[str]:
+    tokens = set()
+    for start, end in normalize_row_ranges(scope.get("row_ranges") or []):
+        tokens.update(f"row:{row_number}" for row_number in range(start, end + 1))
+    return tokens
+
+
 def load_review_annotations(path: Path | None) -> list[dict]:
     if path is None or not path.is_file():
         return []
@@ -50,10 +116,19 @@ def normalize_annotation(raw: dict) -> dict:
         origin = "manual"
     status = _normalize_review_status(raw.get("status"))
     fix_keys = sorted({str(item).strip() for item in scope.get("fix_keys", []) if str(item).strip()})
+    row_ranges = normalize_row_ranges(scope.get("row_ranges") or [])
+    if not row_ranges and fix_keys:
+        row_ranges = compress_fix_keys(fix_keys)
     try:
-        resolved_fix_count = max(0, int(raw.get("resolved_fix_count") or len(fix_keys)))
+        resolved_fix_count = max(
+            0,
+            int(
+                raw.get("resolved_fix_count")
+                or sum(end - start + 1 for start, end in row_ranges)
+            ),
+        )
     except (TypeError, ValueError):
-        resolved_fix_count = len(fix_keys)
+        resolved_fix_count = sum(end - start + 1 for start, end in row_ranges)
     return {
         "annotation_id": str(raw.get("annotation_id") or "").strip(),
         "step_id": str(raw.get("step_id") or "").strip(),
@@ -72,7 +147,7 @@ def normalize_annotation(raw: dict) -> dict:
         "resolved_fix_count": resolved_fix_count,
         "scope": {
             "kind": str(scope.get("kind") or "fix").strip().lower(),
-            "fix_keys": fix_keys,
+            "row_ranges": row_ranges,
             "burst_id": str(scope.get("burst_id") or "").strip(),
             "individual": str(scope.get("individual") or "").strip(),
             "set_name": str(scope.get("set_name") or "").strip(),
@@ -99,7 +174,7 @@ def source_row_annotation(raw: dict, *, fix_key: str, source_artifact: str) -> d
             "origin": origin,
             "issue_type": raw.get("outlier_issue_type"),
             "comment": raw.get("outlier_comments"),
-            "scope": {"kind": "fix", "fix_keys": [fix_key]},
+            "scope": {"kind": "fix", "row_ranges": compress_fix_keys([fix_key])},
         }
     )
 
@@ -112,6 +187,9 @@ def annotation_applies(annotation: dict, *, fix_key: str, individual: str, set_n
             return False
         scoped_set = str(scope.get("set_name") or "")
         return not scoped_set or scoped_set == set_name
+    row_ranges = scope.get("row_ranges") or []
+    if row_ranges:
+        return row_number_in_ranges(fix_key_row_number(fix_key), row_ranges)
     return fix_key in set(scope.get("fix_keys") or [])
 
 
@@ -129,6 +207,7 @@ def confirmed_exclusion_scopes(
             continue
         scope = annotation.get("scope") or {}
         fix_keys.update(str(item) for item in scope.get("fix_keys") or [] if str(item))
+        fix_keys.update(row_tokens_for_scope(scope))
         if str(scope.get("kind") or "") == "individual":
             individual = str(scope.get("individual") or "").strip()
             if individual:
@@ -205,7 +284,16 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
         scope = item.get("scope") or {}
         if scope.get("kind") != "segment" or item["annotation_id"] in existing_segment_ids:
             continue
-        segment_fixes = [fix_by_key[key] for key in scope.get("fix_keys") or [] if key in fix_by_key]
+        segment_fixes = [
+            fix
+            for fix in fixes
+            if annotation_applies(
+                item,
+                fix_key=str(fix.get("fix_key") or ""),
+                individual=str(fix.get("individual") or ""),
+                set_name=str(fix.get("set") or "train"),
+            )
+        ]
         segment_fixes.sort(key=lambda fix: (int(fix.get("time_ms") or 0), str(fix.get("fix_key") or "")))
         if not segment_fixes:
             continue

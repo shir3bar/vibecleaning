@@ -1297,6 +1297,7 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     assert payload["step"]["output_artifacts"] == ["movement_review_annotations.json"]
     assert payload["step"]["summary"]["scope_kind"] == "burst"
     assert payload["step"]["summary"]["resolved_fix_count"] == 2
+    assert "fix_keys" not in payload["step"]["parameters"]["scope"]
     assert (study_dir / "movement.csv").read_text(encoding="utf-8") == source_before
     _, sidecar_path = get_dataset_artifact(study_dir, next_dataset_id, "movement_review_annotations.json")
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
@@ -1305,7 +1306,9 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     assert annotation["step_id"] == payload["step"]["step_id"]
     assert annotation["origin"] == "algorithm"
     assert annotation["source_analysis_id"] == "analysis_saved"
-    assert annotation["scope"]["fix_keys"] == ["id:fix_a_1#row:1", "id:fix_a_2#row:2"]
+    assert sidecar["schema_version"] == 3
+    assert annotation["scope"]["row_ranges"] == [[1, 2]]
+    assert "fix_keys" not in annotation["scope"]
 
     fixes_response = client.get(
         f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{next_dataset_id}/fixes",
@@ -1434,6 +1437,8 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     assert confirmed_payload["step"]["summary"]["confirmed_fix_count"] == 1
     assert confirmed_payload["step"]["summary"]["algorithm_marked_fix_count"] == 1
     assert confirmed_payload["step"]["summary"]["materialized_csv"] is False
+    assert confirmed_payload["step"]["parameters"]["confirmations"][0]["row_ranges"] == [[2, 2]]
+    assert "fix_keys" not in confirmed_payload["step"]["parameters"]["confirmations"][0]
     assert (study_dir / "movement.csv").read_text(encoding="utf-8") == source_before
 
     _, suspected_csv_path = get_dataset_artifact(
@@ -1459,11 +1464,12 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     )
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     confirmation = sidecar["annotations"][-1]
-    assert sidecar["schema_version"] == 2
+    assert sidecar["schema_version"] == 3
     assert confirmation["annotation_kind"] == "confirmation"
     assert confirmation["parent_annotation_id"] == suspected_annotation_id
     assert confirmation["origin"] == "threshold"
-    assert confirmation["scope"]["fix_keys"] == ["id:fix_a_2#row:2"]
+    assert confirmation["scope"]["row_ranges"] == [[2, 2]]
+    assert "fix_keys" not in confirmation["scope"]
 
     confirmed_fixes_response = client.get(
         f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{confirmed_dataset_id}/fixes",

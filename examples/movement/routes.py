@@ -27,8 +27,10 @@ from .analysis_history import build_movement_analysis_history
 from .catalog import get_study_dir, list_families, list_studies
 from .review_annotations import (
     apply_review_annotations,
+    compress_fix_keys,
     confirmed_exclusion_scopes,
     load_review_annotations,
+    row_tokens_for_scope,
 )
 from .script_bundle import build_self_contained_script
 from .summary import (
@@ -110,6 +112,7 @@ def _review_annotation_candidates(
             continue
         scope = annotation.get("scope") or {}
         fix_keys.update(str(item) for item in scope.get("fix_keys") or [] if str(item))
+        fix_keys.update(row_tokens_for_scope(scope))
         if str(scope.get("kind") or "") == "individual":
             individual = str(scope.get("individual") or "").strip()
             if individual:
@@ -308,13 +311,15 @@ def _validate_confirmations(value: object) -> list[dict]:
             max_length=240,
         )
         fix_keys = _validate_fix_keys(item.get("fix_keys"))
-        key = (parent_annotation_id, tuple(fix_keys))
+        row_ranges = compress_fix_keys(fix_keys)
+        key = (parent_annotation_id, tuple(tuple(item) for item in row_ranges))
         if key in seen:
             continue
         seen.add(key)
         confirmations.append({
             "parent_annotation_id": parent_annotation_id,
-            "fix_keys": fix_keys,
+            "row_ranges": row_ranges,
+            "fix_count": len(fix_keys),
         })
     return confirmations
 
@@ -1160,7 +1165,9 @@ def register_movement_routes(
                 raise ValueError("Invalid review scope")
             scope: dict[str, object] = {"kind": scope_kind}
             if scope_kind in {"fix", "segment"}:
-                scope["fix_keys"] = _validate_fix_keys(raw_scope.get("fix_keys"))
+                selected_fix_keys = _validate_fix_keys(raw_scope.get("fix_keys"))
+                scope["row_ranges"] = compress_fix_keys(selected_fix_keys)
+                scope["fix_count"] = len(selected_fix_keys)
                 if scope_kind == "segment":
                     scope["start_fix_key"] = _validate_fix_key(
                         raw_scope.get("start_fix_key"),
@@ -1271,7 +1278,7 @@ def register_movement_routes(
                 input_artifacts.append("movement_review_annotations.json")
             payload = {
                 "user": body.get("user"),
-                "title": f"Confirm {sum(len(item['fix_keys']) for item in confirmations)} suspected fix(es) in {logical_name}",
+                "title": f"Confirm {sum(item['fix_count'] for item in confirmations)} suspected fix(es) in {logical_name}",
                 "kind": "python",
                 "script": CONFIRM_ISSUES_SCRIPT,
                 "parameters": {

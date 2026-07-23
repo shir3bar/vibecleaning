@@ -92,18 +92,19 @@ user-approved derived artifact.
 
 ## Row identity and pagination
 
-Review annotations depend on stable row keys. For ordinary SQLite tables,
-`move_viz` builds keys from the immutable `rowid`, optionally prefixed by the
-event ID:
+The API and browser use stable row keys. For ordinary SQLite tables, `move_viz`
+builds keys from the immutable `rowid`, optionally prefixed by the event ID:
 
 ```text
 event:<event-id>#row:<rowid>
 row:<rowid>
 ```
 
-`event-id` alone is not assumed unique. Do not change key construction in only
-one location. Loading, validation, review sidecars, and export must reconstruct
-the same key.
+`event-id` alone is not assumed unique. Persisted step parameters and review
+sidecars compress the row-number portion into inclusive ranges; they do not
+repeat every full key. Loading and export reconstruct display keys
+programmatically from the immutable SQLite source. Do not change this identity
+or range logic in only one location.
 
 Tables declared `WITHOUT ROWID` use their stable ordered position as a
 fallback. If a new target database uses `WITHOUT ROWID`, add explicit tests for
@@ -178,9 +179,9 @@ Flag and unflag operations are persistent changes and therefore call
 - records user, script, spec, parameters, summary, and step ID; and
 - reuses `source.sqlite` by reference instead of rewriting it.
 
-The sidecar schema is owned by [`review_step.py`](review_step.py). Each flag
-currently records row key, comment, scope, user, creation time, and the step
-that wrote the annotation. Keep issue categories and free-form comments
+The sidecar schema is owned by [`review_step.py`](review_step.py). It stores
+disjoint inclusive `flag_runs`, with comment, scope, user, creation time, and
+the step that wrote each run. Keep issue categories and free-form comments
 separate if the schema grows.
 
 CSV export is read-only exploratory output, so it calls `create_analysis()` via

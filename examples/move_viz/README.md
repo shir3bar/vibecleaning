@@ -26,10 +26,10 @@ The uploaded database is fingerprinted and imported as the immutable
 The upload staging file is atomically adopted into that project, and the
 session retains only a small graph reference rather than a second SQLite copy.
 Flag and unflag operations create new datasets whose versioned
-`move_viz_review_annotations.json` sidecar records the affected rows, scope,
-reviewer, comment, timestamp, and step ID. The SQLite artifact is reused by
-reference and is never modified. Reopening the same database resumes its graph
-without presenting a project selector.
+`move_viz_review_annotations.json` sidecar records affected source row numbers
+as compact ranges along with scope, reviewer, comment, timestamp, and step ID.
+The SQLite artifact is reused by reference and is never modified. Reopening the
+same database resumes its graph without presenting a project selector.
 
 CSV export runs against the selected dataset and is saved as a graph analysis,
 including its user, script, specification, summary, and output artifact. Export
@@ -57,7 +57,7 @@ examples/move_viz/sample_data/synthetic_demo_cp2.sqlite
 
 You can also click **Load bundled example** to open the same database directly
 from the running server without a browser file upload. The header displays
-`client protocol 6`; if it does not, restart the server and hard-refresh the
+`client protocol 7`; if it does not, restart the server and hard-refresh the
 page.
 
 The example contains the 4,800 rows from

@@ -272,6 +272,12 @@ def _make_fix_key(row_index: int, fix_id: str, individual: str, time_ms: int) ->
     return f"row:{row_index}|{individual}|{time_ms}"
 
 
+def _row_token_from_fix_key(fix_key: str) -> str:
+    if "#row:" in fix_key:
+        return f"row:{fix_key.rsplit('#row:', 1)[1]}"
+    return f"row:{fix_key.removeprefix('row:').split('|', 1)[0]}"
+
+
 def _normalize_review_status(raw_value: object) -> str:
     value = str(raw_value or "").strip().lower()
     return value if value in {"suspected", "confirmed"} else ""
@@ -374,7 +380,7 @@ def _row_is_analytically_excluded(
     review_status = _normalize_review_status(raw.get("outlier_status"))
     if review_status == "confirmed":
         return True
-    if fix_key in confirmed_fix_keys:
+    if fix_key in confirmed_fix_keys or _row_token_from_fix_key(fix_key) in confirmed_fix_keys:
         return True
     if (
         (individual, "") in confirmed_individual_tracks
@@ -1207,6 +1213,7 @@ def _build_movement_fixes(
             status = str(review.get("status", "")).strip().lower()
             is_additional_review_candidate = (
                 record["fix_key"] in additional_review_fix_key_set
+                or _row_token_from_fix_key(record["fix_key"]) in additional_review_fix_key_set
                 or record["individual"] in additional_review_individual_set
             )
             if review_status == "reviewed" and not review and not is_additional_review_candidate:

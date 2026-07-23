@@ -33,7 +33,7 @@ DEFAULT_MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 DEFAULT_MAX_ROWS = 100_000
 DEFAULT_MAX_REVIEW_ROWS = 250_000
 NUMERIC_DECLARATIONS = ("INT", "REAL", "FLOA", "DOUB", "NUM", "DEC")
-MOVE_VIZ_PROTOCOL = 6
+MOVE_VIZ_PROTOCOL = 7
 SOURCE_ARTIFACT = "source.sqlite"
 REVIEW_ARTIFACT = "move_viz_review_annotations.json"
 REVIEW_STEP_SCRIPT = Path(__file__).with_name("review_step.py").read_text(encoding="utf-8")
@@ -186,6 +186,118 @@ def _row_number_from_key(row_key: str) -> int:
     if value < 1:
         raise ValueError("Invalid selected fix key")
     return value
+
+
+def _normalize_row_ranges(raw_ranges: object) -> list[list[int]]:
+    if not isinstance(raw_ranges, list):
+        raise ValueError("Invalid selected fix ranges")
+    ranges = []
+    for item in raw_ranges:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ValueError("Invalid selected fix ranges")
+        try:
+            start, end = int(item[0]), int(item[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid selected fix ranges") from exc
+        if start < 1 or end < start:
+            raise ValueError("Invalid selected fix ranges")
+        ranges.append((start, end))
+    merged: list[list[int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return merged
+
+
+def _compress_row_keys(row_keys: list[str]) -> list[list[int]]:
+    return _normalize_row_ranges(
+        [[_row_number_from_key(key), _row_number_from_key(key)] for key in row_keys]
+    )
+
+
+def _run_for_row_number(flag_runs: list[dict], row_number: int) -> dict | None:
+    low = 0
+    high = len(flag_runs)
+    while low < high:
+        middle = (low + high) // 2
+        run = flag_runs[middle]
+        start = int(run["start_row"])
+        end = int(run["end_row"])
+        if row_number < start:
+            high = middle
+        elif row_number > end:
+            low = middle + 1
+        else:
+            return run
+    return None
+
+
+def _keys_for_flag_runs(path: Path, table_name: str, flag_runs: list[dict]) -> dict[str, dict]:
+    if not flag_runs:
+        return {}
+    table, mapping = _movement_table_context(path, {"table": table_name})
+    table_identifier = _quoted_identifier(str(table["name"]))
+    event_expression = (
+        _quoted_identifier(str(mapping["event_id"]))
+        if mapping["event_id"]
+        else "NULL"
+    )
+    ranges = _normalize_row_ranges(
+        [[int(run["start_row"]), int(run["end_row"])] for run in flag_runs]
+    )
+    selected_rows = []
+    with closing(_readonly_connection(path)) as connection:
+        for chunk_start in range(0, len(ranges), 100):
+            chunk = ranges[chunk_start : chunk_start + 100]
+            conditions = " OR ".join("(rowid BETWEEN ? AND ?)" for _ in chunk)
+            parameters = [value for row_range in chunk for value in row_range]
+            try:
+                selected_rows.extend(
+                    connection.execute(
+                        f'SELECT rowid AS "__move_viz_rowid__", '
+                        f'{event_expression} AS "__move_viz_event__" '
+                        f"FROM {table_identifier} WHERE {conditions} ORDER BY rowid",
+                        parameters,
+                    ).fetchall()
+                )
+            except sqlite3.OperationalError:
+                selected_rows = []
+                maximum = max(end for _start, end in ranges)
+                timestamp_column = mapping["timestamp"]
+                order_clause = (
+                    f" ORDER BY {_quoted_identifier(str(timestamp_column))}"
+                    if timestamp_column
+                    else ""
+                )
+                records = connection.execute(
+                    f'SELECT {event_expression} AS "__move_viz_event__" '
+                    f"FROM {table_identifier}{order_clause} LIMIT ?",
+                    (maximum,),
+                )
+                for row_number, record in enumerate(records, start=1):
+                    if _run_for_row_number(flag_runs, row_number):
+                        selected_rows.append(
+                            {
+                                "__move_viz_rowid__": row_number,
+                                "__move_viz_event__": record["__move_viz_event__"],
+                            }
+                        )
+                break
+    flags = {}
+    for row in selected_rows:
+        row_number = int(row["__move_viz_rowid__"])
+        run = _run_for_row_number(flag_runs, row_number)
+        if run is None:
+            continue
+        row_key = _movement_row_key(row["__move_viz_event__"], row_number)
+        flags[row_key] = {
+            key: value
+            for key, value in run.items()
+            if key not in {"start_row", "end_row"}
+        } | {"row_key": row_key}
+    return flags
 
 
 def _validated_mapping(table: dict, requested: dict) -> dict[str, str | None]:
@@ -515,12 +627,17 @@ def register_move_viz_routes(
             raise ValueError("move_viz review annotations are invalid") from exc
         tables = payload.get("tables") if isinstance(payload, dict) else None
         table = tables.get(table_name) if isinstance(tables, dict) else None
-        flags = table.get("flags") if isinstance(table, dict) else None
-        return {
-            str(key): dict(value)
-            for key, value in (flags.items() if isinstance(flags, dict) else [])
-            if isinstance(value, dict)
-        }
+        raw_runs = table.get("flag_runs") if isinstance(table, dict) else None
+        flag_runs = sorted(
+            (
+                dict(item)
+                for item in (raw_runs if isinstance(raw_runs, list) else [])
+                if isinstance(item, dict)
+            ),
+            key=lambda item: (int(item["start_row"]), int(item["end_row"])),
+        )
+        _, source_path = get_dataset_artifact(project_dir, dataset_id, SOURCE_ARTIFACT)
+        return _keys_for_flag_runs(source_path, table_name, flag_runs)
 
     def review_state(project_dir: Path, table_name: str) -> dict:
         state = project_state_payload(project_dir)
@@ -715,6 +832,7 @@ def register_move_viz_routes(
                 {"table": table_name},
                 row_keys,
             )
+            row_ranges = _compress_row_keys(row_keys)
             scope = str(body.get("scope") or "fix").strip().lower()
             if scope not in {"fix", "segment", "individual"}:
                 raise ValueError("Invalid review scope")
@@ -742,7 +860,8 @@ def register_move_viz_routes(
                     "action": operation,
                     "operation": operation,
                     "table": table_name,
-                    "row_keys": row_keys,
+                    "row_ranges": row_ranges,
+                    "row_count": len(row_keys),
                     "scope": scope,
                     "comment": comment,
                     "source_filename": str(record.get("filename") or ""),

@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 from pathlib import Path
 import re
 import sqlite3
@@ -266,7 +267,7 @@ def test_move_viz_health_and_bundled_example_bypass_browser_upload(tmp_path):
     opened = client.post("/api/apps/move-viz/sessions/example")
 
     assert health.status_code == 200
-    assert health.json()["protocol"] == 6
+    assert health.json()["protocol"] == 7
     assert health.json()["max_rows"] == 100_000
     assert health.json()["max_review_rows"] == 250_000
     assert health.json()["sample_available"] is True
@@ -313,12 +314,32 @@ def test_move_viz_flags_are_graph_steps_and_history_is_loadable(tmp_path):
     assert step["parameters"]["app"] == "move_viz"
     assert step["parameters"]["action"] == "flag"
     assert step["parameters"]["scope"] == "segment"
+    assert step["parameters"]["row_ranges"] == [[1, 2]]
+    assert "row_keys" not in step["parameters"]
 
     project_dir = tmp_path / "data" / opened["project_name"]
     dataset = load_dataset(project_dir, flagged_dataset_id)
     artifacts = {item["logical_name"]: item for item in dataset["artifacts"]}
     assert artifacts["source.sqlite"]["storage_type"] == "raw"
     assert artifacts["move_viz_review_annotations.json"]["storage_type"] == "output"
+    _, review_path = get_dataset_artifact(
+        project_dir,
+        flagged_dataset_id,
+        "move_viz_review_annotations.json",
+    )
+    review_payload = json.loads(review_path.read_text(encoding="utf-8"))
+    assert review_payload["schema_version"] == 2
+    assert review_payload["tables"]["movement"]["flag_runs"] == [
+        {
+            "comment": "Review this segment",
+            "created_at": review_payload["tables"]["movement"]["flag_runs"][0]["created_at"],
+            "end_row": 2,
+            "scope": "segment",
+            "start_row": 1,
+            "step_id": step["step_id"],
+            "user": "reviewer",
+        }
+    ]
     for record_path in (step["script_path"], step["spec_path"], step["summary_path"]):
         assert (project_dir / record_path).is_file()
     _, graph_source = get_dataset_artifact(project_dir, flagged_dataset_id, "source.sqlite")

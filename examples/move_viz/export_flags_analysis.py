@@ -18,25 +18,36 @@ def truthy(value):
     return str(value or "").strip().lower() in {"true", "1", "yes", "y"}
 
 
-def flagged_rowids(flags):
-    rowids = []
-    for row_key in flags:
-        suffix = str(row_key).rsplit("#row:", 1)[-1] if "#row:" in str(row_key) else str(row_key).removeprefix("row:")
-        try:
-            rowids.append(int(suffix))
-        except ValueError:
-            continue
-    return sorted(set(rowids))
+def flag_for_row(flag_runs, row_number):
+    low = 0
+    high = len(flag_runs)
+    while low < high:
+        middle = (low + high) // 2
+        run = flag_runs[middle]
+        start = int(run["start_row"])
+        end = int(run["end_row"])
+        if row_number < start:
+            high = middle
+        elif row_number > end:
+            low = middle + 1
+        else:
+            return run
+    return None
 
 
-def rows_for_rowids(connection, table, rowids):
-    for offset in range(0, len(rowids), 500):
-        chunk = rowids[offset : offset + 500]
-        placeholders = ", ".join("?" for _ in chunk)
+def rows_for_ranges(connection, table, flag_runs):
+    for offset in range(0, len(flag_runs), 100):
+        chunk = flag_runs[offset : offset + 100]
+        conditions = " OR ".join("(rowid BETWEEN ? AND ?)" for _ in chunk)
+        parameters = [
+            value
+            for run in chunk
+            for value in (int(run["start_row"]), int(run["end_row"]))
+        ]
         yield from connection.execute(
             f'SELECT rowid AS "__move_viz_rowid__", * FROM {table} '
-            f"WHERE rowid IN ({placeholders}) ORDER BY rowid",
-            chunk,
+            f"WHERE {conditions} ORDER BY rowid",
+            parameters,
         )
 
 
@@ -55,10 +66,14 @@ def main():
 
     review_payload = json.loads(Path(review["path"]).read_text(encoding="utf-8"))
     table_name = str(params.get("table") or "")
-    flags = (
+    flag_runs = (
         review_payload.get("tables", {})
         .get(table_name, {})
-        .get("flags", {})
+        .get("flag_runs", [])
+    )
+    flag_runs = sorted(
+        (dict(item) for item in flag_runs if isinstance(item, dict)),
+        key=lambda item: (int(item["start_row"]), int(item["end_row"])),
     )
     mapping = dict(params.get("mapping") or {})
     uri = f"file:{quote(str(Path(source['path']).resolve()))}?mode=ro"
@@ -74,7 +89,7 @@ def main():
     except sqlite3.OperationalError:
         has_rowid = False
     rows = (
-        rows_for_rowids(connection, table, flagged_rowids(flags))
+        rows_for_ranges(connection, table, flag_runs)
         if has_rowid
         else connection.execute(f"SELECT * FROM {table}{order_clause}")
     )
@@ -107,7 +122,7 @@ def main():
             event_id = row[event_column] if event_column else None
             rowid = row["__move_viz_rowid__"] if has_rowid else index + 1
             row_key = f"event:{event_id}#row:{rowid}" if event_id not in (None, "") else f"row:{rowid}"
-            flag = flags.get(row_key)
+            flag = flag_for_row(flag_runs, int(rowid))
             if not isinstance(flag, dict):
                 continue
             comments = [str(flag.get("comment") or "").strip()]

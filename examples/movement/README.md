@@ -60,7 +60,9 @@ The starter app and trajectory example do not use this nested study catalog. The
 5. Mark the selection as `suspected`, recording its issue type and provenance.
 6. Confirm selected fixes against one or more of their originating suspected issues.
 7. Continue analysis on the remaining fixes. Confirmation writes only the small
-   review sidecar; the new dataset manifest reuses the original CSV artifact.
+   review sidecar; selected source row numbers are stored as compact ranges
+   instead of repeated full fix keys, and the new dataset manifest reuses the
+   original CSV artifact.
    Confirmed fixes retain their review lineage and remain available in the
    confirmed-exclusions map layer.
 8. Generate an owner-facing report or explicitly export a reviewed CSV. Export is

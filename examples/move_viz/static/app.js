@@ -1,5 +1,5 @@
 const PALETTE = ["#60a5fa", "#2dd4bf", "#fde047", "#fb923c", "#f472b6", "#a78bfa", "#34d399", "#f87171"];
-const MOVE_VIZ_PROTOCOL = 6;
+const MOVE_VIZ_PROTOCOL = 7;
 const SQLITE_UPLOAD_TIMEOUT_MS = 120_000;
 const SQLITE_READ_TIMEOUT_MS = 30_000;
 const SERVER_CHECK_TIMEOUT_MS = 5_000;
