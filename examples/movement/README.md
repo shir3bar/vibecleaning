@@ -35,9 +35,7 @@ python examples/movement/server.py
 - `POST /api/apps/movement/family/{family}/study/{study}/actions/annotate-scope`
 - `POST /api/apps/movement/family/{family}/study/{study}/actions/confirm-issues`
 - `POST /api/apps/movement/family/{family}/study/{study}/actions/export-reviewed-csv`
-- `POST /api/apps/movement/family/{family}/study/{study}/actions/annotate-fixes`
 - `POST /api/apps/movement/family/{family}/study/{study}/actions/generate-report`
-- `POST /api/apps/movement/family/{family}/study/{study}/actions/remove-confirmed-fixes`
 - `POST /api/apps/movement/family/{family}/study/{study}/undo`
 
 ## Data layout

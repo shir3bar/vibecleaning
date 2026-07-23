@@ -147,7 +147,7 @@ def test_slim_profile_hides_dev_tools_but_keeps_required_capabilities():
     assert 'this.refs.showTestControl' in source
     assert 'this.refs.runBurstFeatureSpace' in source
     assert 'this.refs.anomalyFeatureSetControl' in source
-    assert 'this.refs.removeConfirmed' in source
+    assert 'this.refs.removeConfirmed' not in source
     assert '!lowerName.endsWith("_osm_context.csv")' in source
     assert '!String(field?.key || "").toLowerCase().startsWith("osm:")' in source
     assert 'this.refs.sideTabRanking.textContent = "Ranking"' in source

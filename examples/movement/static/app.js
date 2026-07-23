@@ -20,7 +20,6 @@ const MOVEMENT_APP_CONFIG = Object.freeze({
   candidateQueries: MOVEMENT_APP_MODE !== "slim_movement",
   featureSpace: MOVEMENT_APP_MODE !== "slim_movement",
   osmDerivedFeatures: MOVEMENT_APP_MODE !== "slim_movement",
-  removeConfirmed: MOVEMENT_APP_MODE !== "slim_movement",
 });
 
 const LOCAL_BLANK_STYLE = {
@@ -884,7 +883,6 @@ class MovementExampleApp {
       this.refs.runBurstFeatureSpace,
       this.refs.sideTabFeatureSpace,
       this.refs.sideSheetFeatureSpace,
-      this.refs.removeConfirmed,
     ]) {
       if (element) {
         element.hidden = true;
@@ -2244,7 +2242,6 @@ class MovementExampleApp {
           <button type="button" data-role="run-burst-feature-space">Feature space</button>
           <button type="button" data-role="generate-report">Generate report</button>
           <button type="button" data-role="export-reviewed-csv">Export reviewed CSV</button>
-          <button type="button" class="movement-danger" data-role="remove-confirmed">Remove confirmed</button>
           <button type="button" data-role="undo">Undo</button>
         </div>
         <div class="movement-status" data-role="status"></div>
@@ -2468,29 +2465,6 @@ class MovementExampleApp {
         </div>
       </div>
 
-      <div class="movement-modal hidden" data-role="remove-modal">
-        <div class="movement-modal-card">
-          <div class="movement-modal-head">
-            <h3>Remove confirmed fixes</h3>
-            <button type="button" data-role="remove-close">Close</button>
-          </div>
-          <div class="movement-modal-body">
-            <div data-role="remove-meta"></div>
-            <div class="movement-selection-list" data-role="remove-selection"></div>
-            <label>User
-              <input type="text" data-role="remove-user" placeholder="Name used for attribution">
-            </label>
-            <label>Reason
-              <textarea data-role="remove-reason" placeholder="Why is it appropriate to remove these confirmed outliers now?"></textarea>
-            </label>
-            <div class="movement-modal-status" data-role="remove-status"></div>
-          </div>
-          <div class="movement-modal-foot">
-            <span></span>
-            <button type="button" class="movement-danger" data-role="remove-submit">Create step</button>
-          </div>
-        </div>
-      </div>
     `;
 
     this.refs = {
@@ -2536,7 +2510,6 @@ class MovementExampleApp {
       runBurstFeatureSpace: this.mountEl.querySelector('[data-role="run-burst-feature-space"]'),
       generateReport: this.mountEl.querySelector('[data-role="generate-report"]'),
       exportReviewedCsv: this.mountEl.querySelector('[data-role="export-reviewed-csv"]'),
-      removeConfirmed: this.mountEl.querySelector('[data-role="remove-confirmed"]'),
       undo: this.mountEl.querySelector('[data-role="undo"]'),
       status: this.mountEl.querySelector('[data-role="status"]'),
       outputLinks: this.mountEl.querySelector('[data-role="output-links"]'),
@@ -2614,14 +2587,6 @@ class MovementExampleApp {
       reportStatus: this.mountEl.querySelector('[data-role="report-status"]'),
       reportClose: this.mountEl.querySelector('[data-role="report-close"]'),
       reportSubmit: this.mountEl.querySelector('[data-role="report-submit"]'),
-      removeModal: this.mountEl.querySelector('[data-role="remove-modal"]'),
-      removeMeta: this.mountEl.querySelector('[data-role="remove-meta"]'),
-      removeSelection: this.mountEl.querySelector('[data-role="remove-selection"]'),
-      removeUser: this.mountEl.querySelector('[data-role="remove-user"]'),
-      removeReason: this.mountEl.querySelector('[data-role="remove-reason"]'),
-      removeStatus: this.mountEl.querySelector('[data-role="remove-status"]'),
-      removeClose: this.mountEl.querySelector('[data-role="remove-close"]'),
-      removeSubmit: this.mountEl.querySelector('[data-role="remove-submit"]'),
     };
 
     this.applyAppProfile();
@@ -2838,7 +2803,6 @@ class MovementExampleApp {
     this.refs.exportReviewedCsv.addEventListener("click", () => {
       void this.exportReviewedCsv();
     });
-    this.refs.removeConfirmed.addEventListener("click", () => this.openRemoveModal());
     this.refs.undo.addEventListener("click", async () => {
       await this.undoCurrentHead();
     });
@@ -2902,19 +2866,15 @@ class MovementExampleApp {
     this.refs.reportSnapshotLimit.addEventListener("input", () => this.renderReportSelection());
     this.refs.reportSpreadIndividuals.addEventListener("change", () => this.renderReportSelection());
     this.refs.reportSubmit.addEventListener("click", async () => this.submitGenerateReport());
-    this.refs.removeClose.addEventListener("click", () => this.closeModal(this.refs.removeModal, this.refs.removeSubmit));
-    this.refs.removeSubmit.addEventListener("click", async () => this.submitRemoveConfirmed());
 
-    for (const modal of [this.refs.issueModal, this.refs.confirmModal, this.refs.reportModal, this.refs.removeModal]) {
+    for (const modal of [this.refs.issueModal, this.refs.confirmModal, this.refs.reportModal]) {
       modal.addEventListener("click", (event) => {
         if (event.target === modal) {
           const submitButton = modal === this.refs.issueModal
             ? this.refs.issueSubmit
             : modal === this.refs.confirmModal
               ? this.refs.confirmSubmit
-            : modal === this.refs.reportModal
-              ? this.refs.reportSubmit
-              : this.refs.removeSubmit;
+              : this.refs.reportSubmit;
           this.closeModal(modal, submitButton);
         }
       });
@@ -8770,7 +8730,6 @@ class MovementExampleApp {
       this.refs.runBurstFeatureSpace,
       this.refs.generateReport,
       this.refs.exportReviewedCsv,
-      this.refs.removeConfirmed,
     ]) {
       button.hidden = !hasData;
     }
@@ -8784,7 +8743,6 @@ class MovementExampleApp {
         this.refs.clearCandidates,
         this.refs.anomalyFeatureSetControl,
         this.refs.runBurstFeatureSpace,
-        this.refs.removeConfirmed,
       ]) {
         element?.classList.add("movement-profile-hidden");
       }
@@ -8796,7 +8754,6 @@ class MovementExampleApp {
     );
     this.refs.generateReport.disabled = !hasData || !(this.data?.individuals || []).length;
     this.refs.exportReviewedCsv.disabled = !hasData;
-    this.refs.removeConfirmed.disabled = !hasData || !hasSelectedIndividuals || !canEditSelectedFixes || selectedCount === 0;
     this.refs.selectSuspicious.disabled = !hasData || !this.currentArtifact || suspiciousLoading;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
     this.refs.runCandidateQuery.disabled = !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
@@ -9167,32 +9124,6 @@ class MovementExampleApp {
     this.refs.reportModal.classList.remove("hidden");
   }
 
-  openRemoveModal() {
-    const selectedFixes = this.getSelectedFixes();
-    if (!selectedFixes.length || !this.currentArtifact) {
-      return;
-    }
-    this.refs.removeMeta.innerHTML = `
-      <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
-      <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
-      <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
-      <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
-      <div><strong>Checked fixes:</strong> ${escapeHtml(formatCount(selectedFixes.length))}</div>
-    `;
-    this.refs.removeSelection.textContent = selectedFixes
-      .slice(0, 25)
-      .map(fix => `${fix.individual} • ${formatTimestamp(fix.timeMs)} • ${fix.review.status || "unreviewed"}`)
-      .join("\n");
-    this.refs.removeUser.value = this.getUser();
-    this.refs.removeReason.value = "";
-    this.refs.removeStatus.textContent = "";
-    this.refs.removeStatus.classList.remove("error");
-    this.refs.removeSubmit.disabled = false;
-    this.refs.removeClose.disabled = false;
-    this.refs.removeModal.classList.remove("hidden");
-    this.refs.removeReason.focus();
-  }
-
   closeModal(modal, submitButton) {
     if (submitButton.disabled) {
       return;
@@ -9429,52 +9360,6 @@ class MovementExampleApp {
       this.refs.reportStatus.classList.add("error");
       this.refs.reportSubmit.disabled = false;
       this.refs.reportClose.disabled = false;
-      this.setStatus(error.message, true);
-    }
-  }
-
-  async submitRemoveConfirmed() {
-    const selectedFixes = this.getSelectedFixes();
-    const user = this.refs.removeUser.value.trim();
-    const reason = this.refs.removeReason.value.trim();
-    if (!selectedFixes.length) {
-      return;
-    }
-    if (!user || !reason) {
-      this.refs.removeStatus.textContent = "User and reason are required.";
-      this.refs.removeStatus.classList.add("error");
-      return;
-    }
-
-    this.refs.removeSubmit.disabled = true;
-    this.refs.removeClose.disabled = true;
-    this.refs.removeStatus.textContent = `Removing ${formatCount(selectedFixes.length)} checked fixes...`;
-    this.refs.removeStatus.classList.remove("error");
-    this.setStatus(this.refs.removeStatus.textContent);
-
-    try {
-      const result = await this.requestJSON(
-        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/remove-confirmed-fixes`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            dataset_id: this.currentDatasetId,
-            logical_name: this.currentArtifact,
-            fix_keys: selectedFixes.map(fix => fix.fixKey),
-            reason,
-            user,
-          }),
-        },
-      );
-      this.setUser(user);
-      this.refs.removeModal.classList.add("hidden");
-      await this.loadStudyAtDataset(result.dataset.dataset_id);
-      this.setStatus(`Created ${result.step.title} in ${result.dataset.dataset_id}.`);
-    } catch (error) {
-      this.refs.removeStatus.textContent = error.message;
-      this.refs.removeStatus.classList.add("error");
-      this.refs.removeSubmit.disabled = false;
-      this.refs.removeClose.disabled = false;
       this.setStatus(error.message, true);
     }
   }
