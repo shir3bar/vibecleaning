@@ -30,6 +30,7 @@ from .review_annotations import (
     confirmed_exclusion_scopes,
     load_review_annotations,
 )
+from .script_bundle import build_self_contained_script
 from .summary import (
     DEFAULT_BURST_GAP_MODE,
     DEFAULT_BURST_GAP_QUANTILE,
@@ -188,45 +189,90 @@ def _reusable_osm_enrichment_response(
     return None
 
 
-REPORT_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("report_analysis_template.py")
-GENERATE_REPORT_SCRIPT = REPORT_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
-compile(GENERATE_REPORT_SCRIPT, str(REPORT_ANALYSIS_TEMPLATE_PATH), "exec")
+MOVEMENT_SUMMARY_MODULES = (
+    "examples.movement.bursts",
+    "examples.movement.movement_features",
+    "examples.movement.summary",
+)
+MOVEMENT_REVIEW_MODULES = (
+    *MOVEMENT_SUMMARY_MODULES,
+    "examples.movement.review_annotations",
+)
+MOVEMENT_CANDIDATE_QUERY_MODULES = (
+    *MOVEMENT_REVIEW_MODULES,
+    "app.osm",
+    "examples.movement.candidate_segments",
+    "examples.movement.osm_context",
+    "examples.movement.candidate_queries",
+)
+MOVEMENT_ANOMALY_MODULES = (
+    *MOVEMENT_REVIEW_MODULES,
+    "examples.movement.burst_features",
+    "examples.movement.burst_feature_matrix",
+    "examples.movement.anomaly_ranking",
+)
+MOVEMENT_FEATURE_SPACE_MODULES = (
+    *MOVEMENT_REVIEW_MODULES,
+    "examples.movement.burst_features",
+    "examples.movement.burst_feature_matrix",
+    "examples.movement.burst_feature_space",
+)
+MOVEMENT_OSM_ENRICHMENT_MODULES = (
+    *MOVEMENT_SUMMARY_MODULES,
+    "app.osm",
+    "examples.movement.osm_context",
+    "examples.movement.osm_extracts",
+    "examples.movement.osm_enrichment",
+)
 
+REPORT_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("report_analysis_template.py")
+GENERATE_REPORT_SCRIPT = build_self_contained_script(
+    REPORT_ANALYSIS_TEMPLATE_PATH,
+    MOVEMENT_REVIEW_MODULES,
+)
 CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("candidate_query_analysis_template.py")
-CANDIDATE_QUERY_ANALYSIS_SCRIPT = CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
-compile(CANDIDATE_QUERY_ANALYSIS_SCRIPT, str(CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH), "exec")
+CANDIDATE_QUERY_ANALYSIS_SCRIPT = build_self_contained_script(
+    CANDIDATE_QUERY_ANALYSIS_TEMPLATE_PATH,
+    MOVEMENT_CANDIDATE_QUERY_MODULES,
+)
 
 ANOMALY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name("anomaly_analysis_template.py")
-BURST_ANOMALY_ANALYSIS_SCRIPT = ANOMALY_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
-compile(BURST_ANOMALY_ANALYSIS_SCRIPT, str(ANOMALY_ANALYSIS_TEMPLATE_PATH), "exec")
+BURST_ANOMALY_ANALYSIS_SCRIPT = build_self_contained_script(
+    ANOMALY_ANALYSIS_TEMPLATE_PATH,
+    MOVEMENT_ANOMALY_MODULES,
+)
 
 BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name(
     "burst_feature_space_analysis_template.py"
 )
-BURST_FEATURE_SPACE_ANALYSIS_SCRIPT = (
-    BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
-)
-compile(
-    BURST_FEATURE_SPACE_ANALYSIS_SCRIPT,
-    str(BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH),
-    "exec",
+BURST_FEATURE_SPACE_ANALYSIS_SCRIPT = build_self_contained_script(
+    BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH,
+    MOVEMENT_FEATURE_SPACE_MODULES,
 )
 
 OSM_ENRICHMENT_TEMPLATE_PATH = Path(__file__).with_name("osm_enrichment_template.py")
-OSM_ENRICHMENT_SCRIPT = OSM_ENRICHMENT_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
-compile(OSM_ENRICHMENT_SCRIPT, str(OSM_ENRICHMENT_TEMPLATE_PATH), "exec")
+OSM_ENRICHMENT_SCRIPT = build_self_contained_script(
+    OSM_ENRICHMENT_TEMPLATE_PATH,
+    MOVEMENT_OSM_ENRICHMENT_MODULES,
+)
 
 EXPORT_REVIEWED_CSV_TEMPLATE_PATH = Path(__file__).with_name("export_reviewed_csv_analysis_template.py")
-EXPORT_REVIEWED_CSV_SCRIPT = EXPORT_REVIEWED_CSV_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
-compile(EXPORT_REVIEWED_CSV_SCRIPT, str(EXPORT_REVIEWED_CSV_TEMPLATE_PATH), "exec")
+EXPORT_REVIEWED_CSV_SCRIPT = build_self_contained_script(
+    EXPORT_REVIEWED_CSV_TEMPLATE_PATH,
+    MOVEMENT_REVIEW_MODULES,
+)
 
 ANNOTATE_SCOPE_TEMPLATE_PATH = Path(__file__).with_name("annotate_scope_step_template.py")
-ANNOTATE_SCOPE_SCRIPT = ANNOTATE_SCOPE_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
-compile(ANNOTATE_SCOPE_SCRIPT, str(ANNOTATE_SCOPE_TEMPLATE_PATH), "exec")
+ANNOTATE_SCOPE_SCRIPT = build_self_contained_script(
+    ANNOTATE_SCOPE_TEMPLATE_PATH,
+    MOVEMENT_REVIEW_MODULES,
+)
 
 CONFIRM_ISSUES_TEMPLATE_PATH = Path(__file__).with_name("confirm_issues_step_template.py")
-CONFIRM_ISSUES_SCRIPT = CONFIRM_ISSUES_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
-compile(CONFIRM_ISSUES_SCRIPT, str(CONFIRM_ISSUES_TEMPLATE_PATH), "exec")
+CONFIRM_ISSUES_SCRIPT = build_self_contained_script(
+    CONFIRM_ISSUES_TEMPLATE_PATH,
+    MOVEMENT_REVIEW_MODULES,
+)
 
 
 def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]:
@@ -949,7 +995,6 @@ def register_movement_routes(
                     "query_parameters": query_parameters,
                     "execution_scope": execution_scope,
                     "preview_limit": preview_limit,
-                    "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
             }
@@ -991,7 +1036,6 @@ def register_movement_routes(
                     "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
                     "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
                     "feature_set": feature_set,
-                    "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
             }
@@ -1037,7 +1081,6 @@ def register_movement_routes(
                     "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
                     "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
                     "feature_set": feature_set,
-                    "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
             }
@@ -1079,7 +1122,6 @@ def register_movement_routes(
                     "search_radius_m": search_radius_m,
                     "confirmed_large_download": confirmed_large_download,
                     "data_root": str(data_root.resolve()),
-                    "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
                 "parent_dataset_id": dataset_id,
@@ -1193,7 +1235,6 @@ def register_movement_routes(
                     "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),
                     "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
                     "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
-                    "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
                 "parent_dataset_id": dataset_id,
@@ -1240,7 +1281,6 @@ def register_movement_routes(
                     "dataset_id": dataset_id,
                     "confirmations": confirmations,
                     "note": note,
-                    "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": body.get("user"),
                 },
                 "parent_dataset_id": dataset_id,
@@ -1330,7 +1370,6 @@ def register_movement_routes(
                     "screenshot_mode": screenshot_mode,
                     "snapshots": snapshots,
                     "individual_report_artifacts": individual_report_artifacts,
-                    "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
             }
@@ -1371,7 +1410,6 @@ def register_movement_routes(
                     "target_artifact": logical_name,
                     "output_artifact": output_artifact,
                     "dataset_id": dataset_id,
-                    "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
             }
@@ -1466,7 +1504,6 @@ def register_movement_routes(
                     "screenshot_mode": screenshot_mode,
                     "snapshots": snapshots,
                     "individual_report_artifacts": individual_report_artifacts,
-                    "repo_root": str(Path(__file__).resolve().parents[2]),
                     "user": user,
                 },
             }

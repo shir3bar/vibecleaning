@@ -1,18 +1,10 @@
 import json
 import os
-import sys
 from pathlib import Path
 
 
 OUTPUT_ARTIFACT_NAME = "burst_anomaly_ranking.json"
 SUMMARY_BURST_REF_LIMIT = 3
-
-
-def add_repo_root(project_dir: Path):
-    for candidate in [project_dir, *project_dir.parents]:
-        if (candidate / "examples" / "movement" / "anomaly_ranking.py").exists():
-            sys.path.insert(0, str(candidate))
-            return
 
 
 def _declared_artifact(spec: dict, artifact_list: str, logical_name: str) -> dict | None:
@@ -27,12 +19,6 @@ def main():
     summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     params = dict(spec["analysis"].get("parameters") or {})
-    repo_root = str(params.get("repo_root") or "").strip()
-    if repo_root:
-        sys.path.insert(0, repo_root)
-    else:
-        add_repo_root(Path(spec["project_dir"]))
-
     from examples.movement.anomaly_ranking import rank_individuals, score_bursts
     from examples.movement.burst_features import build_burst_feature_rows
     from examples.movement.review_annotations import confirmed_exclusion_scopes, load_review_annotations

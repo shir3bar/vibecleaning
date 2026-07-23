@@ -667,7 +667,9 @@ def test_rank_individuals_handles_empty_or_unresolved_scored_bursts():
 def test_burst_anomaly_analysis_uses_compilable_template_file():
     template_text = ANOMALY_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
 
-    assert BURST_ANOMALY_ANALYSIS_SCRIPT == template_text
+    assert BURST_ANOMALY_ANALYSIS_SCRIPT.endswith(template_text)
+    assert "_VIBECLEANING_BUNDLED_SOURCES" in BURST_ANOMALY_ANALYSIS_SCRIPT
+    assert "repo_root" not in BURST_ANOMALY_ANALYSIS_SCRIPT
     compile(BURST_ANOMALY_ANALYSIS_SCRIPT, str(ANOMALY_ANALYSIS_TEMPLATE_PATH), "exec")
 
 

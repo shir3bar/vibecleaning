@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,10 +13,6 @@ def main():
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     params = dict(spec["step"].get("parameters") or {})
     step_id = str(spec["step"].get("step_id") or "").strip()
-    repo_root = str(params.get("repo_root") or "").strip()
-    if repo_root:
-        sys.path.insert(0, repo_root)
-
     from examples.movement.review_annotations import load_review_annotations
     from examples.movement.summary import build_movement_fixes
 

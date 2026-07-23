@@ -421,7 +421,9 @@ def test_maximum_enrichment_radius_produces_valid_broad_exists_fetch_scope():
 def test_osm_enrichment_template_is_compilable():
     template_text = OSM_ENRICHMENT_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
 
-    assert OSM_ENRICHMENT_SCRIPT == template_text
+    assert OSM_ENRICHMENT_SCRIPT.endswith(template_text)
+    assert "_VIBECLEANING_BUNDLED_SOURCES" in OSM_ENRICHMENT_SCRIPT
+    assert "repo_root" not in OSM_ENRICHMENT_SCRIPT
     compile(OSM_ENRICHMENT_SCRIPT, str(OSM_ENRICHMENT_TEMPLATE_PATH), "exec")
     assert "fetch_osm_features" not in template_text
 

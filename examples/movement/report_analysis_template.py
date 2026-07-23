@@ -3,7 +3,6 @@ import csv
 import html
 import json
 import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1757,9 +1756,6 @@ def main():
         summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
         spec = json.loads(spec_path.read_text())
         params = dict(spec["analysis"].get("parameters") or {})
-        repo_root = str(params.get("repo_root") or "").strip()
-        if repo_root:
-            sys.path.insert(0, repo_root)
         target_artifact = str(params.get("target_artifact") or "").strip()
         report_type = str(params.get("report_type") or "issue_first").strip().lower()
         output_mode = str(params.get("output_mode") or "combined").strip().lower()

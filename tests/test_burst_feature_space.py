@@ -223,7 +223,9 @@ def test_burst_feature_space_template_matches_route_constant():
         encoding="utf-8"
     ).strip() + "\n"
 
-    assert BURST_FEATURE_SPACE_ANALYSIS_SCRIPT == template_text
+    assert BURST_FEATURE_SPACE_ANALYSIS_SCRIPT.endswith(template_text)
+    assert "_VIBECLEANING_BUNDLED_SOURCES" in BURST_FEATURE_SPACE_ANALYSIS_SCRIPT
+    assert "repo_root" not in BURST_FEATURE_SPACE_ANALYSIS_SCRIPT
     compile(
         BURST_FEATURE_SPACE_ANALYSIS_SCRIPT,
         str(BURST_FEATURE_SPACE_ANALYSIS_TEMPLATE_PATH),

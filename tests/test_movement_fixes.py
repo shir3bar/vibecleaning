@@ -1514,7 +1514,9 @@ def test_movement_fixes_route_rejects_invalid_repeated_individual(tmp_path):
 def test_movement_report_generator_uses_compilable_template_file():
     template_text = REPORT_ANALYSIS_TEMPLATE_PATH.read_text(encoding="utf-8").strip() + "\n"
 
-    assert GENERATE_REPORT_SCRIPT == template_text
+    assert GENERATE_REPORT_SCRIPT.endswith(template_text)
+    assert "_VIBECLEANING_BUNDLED_SOURCES" in GENERATE_REPORT_SCRIPT
+    assert "repo_root" not in GENERATE_REPORT_SCRIPT
     compile(GENERATE_REPORT_SCRIPT, str(REPORT_ANALYSIS_TEMPLATE_PATH), "exec")
 
 
