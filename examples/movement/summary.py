@@ -1,8 +1,4 @@
 import csv
-import gzip
-import hashlib
-import json
-import uuid
 from datetime import datetime
 from functools import lru_cache
 from math import isfinite
@@ -52,7 +48,6 @@ QUALITY_KEYWORDS = (
 MAX_SERIES_POINTS = 1500
 DEFAULT_OVERVIEW_FIX_LIMIT = 25000
 DEFAULT_FIX_LIMIT = 1000000
-SUMMARY_CACHE_VERSION = 15
 
 
 def normalize_header(header: str | None) -> str:
@@ -233,75 +228,6 @@ def _cache_metadata(path: Path) -> tuple[str, int, int]:
     return str(path.resolve()), stat.st_mtime_ns, stat.st_size
 
 
-def _project_root_for_path(path: Path) -> Path | None:
-    resolved = path.resolve()
-    for candidate in [resolved.parent, *resolved.parents]:
-        if (candidate / ".vibecleaning").is_dir():
-            return candidate
-    return None
-
-
-def _cache_key(kind: str, params: dict | None = None) -> str:
-    payload = {"kind": kind, "params": params or {}, "version": SUMMARY_CACHE_VERSION}
-    return hashlib.sha1(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-
-
-def _summary_disk_cache_path(path: Path, kind: str, params: dict | None = None) -> Path | None:
-    project_root = _project_root_for_path(path)
-    if project_root is None:
-        return None
-    digest = _cache_key(kind, params)
-    return project_root / ".vibecleaning" / "cache" / "movement_summary" / f"{digest}.json.gz"
-
-
-def _load_cached_response(path: Path, *, kind: str, params: dict | None, mtime_ns: int, size: int) -> dict | None:
-    cache_path = _summary_disk_cache_path(path, kind, params)
-    if cache_path is None or not cache_path.exists():
-        return None
-    try:
-        with gzip.open(cache_path, "rt", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return None
-    if (
-        payload.get("version") != SUMMARY_CACHE_VERSION
-        or payload.get("path") != str(path.resolve())
-        or payload.get("mtime_ns") != mtime_ns
-        or payload.get("size") != size
-        or payload.get("kind") != kind
-        or payload.get("params") != (params or {})
-    ):
-        return None
-    summary = payload.get("summary")
-    return summary if isinstance(summary, dict) else None
-
-
-def _save_cached_response(path: Path, *, kind: str, params: dict | None, mtime_ns: int, size: int, summary: dict):
-    cache_path = _summary_disk_cache_path(path, kind, params)
-    if cache_path is None:
-        return
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "version": SUMMARY_CACHE_VERSION,
-        "path": str(path.resolve()),
-        "mtime_ns": mtime_ns,
-        "size": size,
-        "kind": kind,
-        "params": params or {},
-        "summary": summary,
-    }
-    temp_path = cache_path.parent / f"{cache_path.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        with gzip.open(temp_path, "wt", encoding="utf-8") as handle:
-            json.dump(payload, handle, separators=(",", ":"))
-        temp_path.replace(cache_path)
-    finally:
-        try:
-            temp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
 def _categorical_value(raw_value: str) -> str:
     value = raw_value.strip()
     return value if value else "Missing"
@@ -385,7 +311,7 @@ def _prepare_scan_context(path: Path) -> tuple[list[str], dict[str, str | None],
     return fieldnames, columns, field_stats
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=4)
 def _prepare_scan_context_cached(path_str: str, _mtime_ns: int, _size: int):
     return _prepare_scan_context(Path(path_str))
 
@@ -782,18 +708,7 @@ def build_movement_overview(
     }))
     overview_fix_limit = max(0, int(DEFAULT_OVERVIEW_FIX_LIMIT))
     path_str, mtime_ns, size = _cache_metadata(path)
-    params = {
-        "burst_gap_mode": normalized_burst_gap_mode,
-        "burst_gap_seconds": normalized_burst_gap_seconds,
-        "burst_gap_quantile": normalized_burst_gap_quantile,
-        "overview_fix_limit": overview_fix_limit,
-        "confirmed_fix_keys": normalized_confirmed_fix_keys,
-        "confirmed_individual_tracks": normalized_confirmed_individual_tracks,
-    }
-    cached = _load_cached_response(path, kind="overview", params=params, mtime_ns=mtime_ns, size=size)
-    if cached is not None:
-        return cached
-    overview = _build_movement_overview_cached(
+    return _build_movement_overview_cached(
         path_str,
         mtime_ns,
         size,
@@ -804,11 +719,9 @@ def build_movement_overview(
         normalized_burst_gap_quantile,
         overview_fix_limit,
     )
-    _save_cached_response(path, kind="overview", params=params, mtime_ns=mtime_ns, size=size, summary=overview)
-    return overview
 
 
-@lru_cache(maxsize=16)
+@lru_cache(maxsize=1)
 def _build_movement_overview_cached(
     path_str: str,
     mtime_ns: int,
@@ -1152,26 +1065,8 @@ def build_movement_fixes(
         for item in (confirmed_individual_tracks or [])
         if isinstance(item, (list, tuple)) and len(item) == 2 and str(item[0]).strip()
     }))
-    params = {
-        "individual": normalized_individuals[0] if len(normalized_individuals) == 1 else "",
-        "individuals": normalized_individuals,
-        "additional_review_fix_keys": normalized_review_fix_keys,
-        "additional_review_individuals": normalized_review_individuals,
-        "confirmed_fix_keys": normalized_confirmed_fix_keys,
-        "confirmed_individual_tracks": normalized_confirmed_individual_tracks,
-        "start_ms": start_ms,
-        "end_ms": end_ms,
-        "review_status": normalized_status,
-        "limit": limit_value,
-        "burst_gap_mode": normalized_burst_gap_mode,
-        "burst_gap_seconds": normalized_burst_gap_seconds,
-        "burst_gap_quantile": normalized_burst_gap_quantile,
-    }
     path_str, mtime_ns, size = _cache_metadata(path)
-    cached = _load_cached_response(path, kind="fixes", params=params, mtime_ns=mtime_ns, size=size)
-    if cached is not None:
-        return cached
-    payload = _build_movement_fixes_cached(
+    return _build_movement_fixes(
         path_str,
         mtime_ns,
         size,
@@ -1188,12 +1083,9 @@ def build_movement_fixes(
         normalized_burst_gap_seconds,
         normalized_burst_gap_quantile,
     )
-    _save_cached_response(path, kind="fixes", params=params, mtime_ns=mtime_ns, size=size, summary=payload)
-    return payload
 
 
-@lru_cache(maxsize=64)
-def _build_movement_fixes_cached(
+def _build_movement_fixes(
     path_str: str,
     mtime_ns: int,
     size: int,

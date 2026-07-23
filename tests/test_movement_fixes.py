@@ -228,6 +228,23 @@ def test_build_movement_fixes_supports_single_individual_and_truncation(tmp_path
     assert {fix["individual"] for fix in payload["fixes"]} == {"beta"}
 
 
+def test_movement_summary_does_not_write_full_response_disk_caches(tmp_path):
+    project_dir = tmp_path / "study"
+    (project_dir / ".vibecleaning").mkdir(parents=True)
+    csv_path = write_movement_csv(project_dir / "movement.csv")
+
+    build_movement_overview(csv_path)
+    build_movement_fixes(csv_path, individual="alpha")
+
+    assert not (project_dir / ".vibecleaning" / "cache" / "movement_summary").exists()
+
+
+def test_movement_summary_memory_caches_are_strictly_bounded():
+    assert movement_summary._prepare_scan_context_cached.cache_info().maxsize == 4
+    assert movement_summary._build_movement_overview_cached.cache_info().maxsize == 1
+    assert not hasattr(movement_summary._build_movement_fixes, "cache_info")
+
+
 def test_build_movement_fixes_loads_all_individuals_without_filter(tmp_path):
     csv_path = write_movement_csv(tmp_path / "movement.csv")
 
