@@ -1,5 +1,4 @@
 import csv
-from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -153,8 +152,9 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
     ]
     if not relevant:
         return summary
-    summary = deepcopy(summary)
-    for fix in summary.get("fixes") or []:
+    result = dict(summary)
+    fixes = list(summary.get("fixes") or [])
+    for fix_index, fix in enumerate(fixes):
         fix_key = str(fix.get("fix_key") or "")
         individual = str(fix.get("individual") or "")
         set_name = str(fix.get("set") or "train")
@@ -165,6 +165,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
         ]
         if not matches:
             continue
+        fix = dict(fix)
         review = dict(fix.get("review") or {})
         issues = list(review.get("issues") or [])
         for item in matches:
@@ -199,12 +200,14 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
             }
         )
         fix["review"] = review
+        fixes[fix_index] = fix
+    result["fixes"] = fixes
     fix_by_key = {
         str(fix.get("fix_key") or ""): fix
-        for fix in summary.get("fixes") or []
+        for fix in fixes
         if str(fix.get("fix_key") or "")
     }
-    segments = list(summary.get("segments") or [])
+    segments = list(result.get("segments") or [])
     existing_segment_ids = {str(item.get("segment_id") or "") for item in segments}
     for item in relevant:
         scope = item.get("scope") or {}
@@ -237,12 +240,12 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
                 ],
             }
         )
-    summary["segments"] = segments
-    summary["review_annotations"] = relevant
-    if not summary.get("overview_truncated") and not summary.get("truncated"):
+    result["segments"] = segments
+    result["review_annotations"] = relevant
+    if not result.get("overview_truncated") and not result.get("truncated"):
         counts = {"suspected": 0, "confirmed": 0}
         counts_by_individual: dict[str, dict[str, int]] = {}
-        for fix in summary.get("fixes") or []:
+        for fix in fixes:
             status = str((fix.get("review") or {}).get("status") or "")
             if status not in counts:
                 continue
@@ -252,12 +255,17 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
                 {"suspected": 0, "confirmed": 0},
             )
             individual_counts[status] += 1
-        summary["review_counts"] = counts
-        for individual, stats in (summary.get("stats") or {}).items():
+        result["review_counts"] = counts
+        stats_by_individual = {
+            individual: dict(stats)
+            for individual, stats in (result.get("stats") or {}).items()
+        }
+        for individual, stats in stats_by_individual.items():
             individual_counts = counts_by_individual.get(individual, {})
             stats["suspected_count"] = int(individual_counts.get("suspected", 0))
             stats["confirmed_count"] = int(individual_counts.get("confirmed", 0))
-    return summary
+        result["stats"] = stats_by_individual
+    return result
 
 
 def apply_annotations_to_report_records(

@@ -7,30 +7,6 @@ from pathlib import Path
 
 
 REVIEW_SIDECAR_NAME = "movement_review_annotations.json"
-PORTABLE_REVIEW_COLUMNS = [
-    "visible",
-    "manually-marked-outlier",
-    "algorithm-marked-outlier",
-    "outlier_status",
-    "outlier_issue_type",
-    "outlier_comments",
-    "outlier_flag_step_ids",
-]
-DEPRECATED_REVIEW_COLUMNS = {
-    "manually_marked_outliers",
-    "algorithm_marked_outliers",
-    "outlier_annotation_ids",
-}
-
-
-def _split_values(value, separator=";"):
-    return [item.strip() for item in str(value or "").split(separator) if item.strip()]
-
-
-def _append_unique(items, value):
-    normalized = str(value or "").strip()
-    if normalized and normalized not in items:
-        items.append(normalized)
 
 
 def main():
@@ -44,14 +20,11 @@ def main():
         sys.path.insert(0, repo_root)
 
     from examples.movement.review_annotations import (
-        _flag_is_true,
         _legacy_annotations,
-        _original_visible,
         annotation_applies,
         load_review_annotations,
     )
     from examples.movement.summary import (
-        ALL_REVIEW_COLUMNS,
         _make_fix_key,
         detect_columns,
         is_valid_coordinate,
@@ -64,47 +37,59 @@ def main():
     inputs = {item["logical_name"]: item for item in spec.get("input_artifacts", [])}
     outputs = {item["logical_name"]: item for item in spec.get("output_artifacts", [])}
     source = inputs.get(target_artifact)
-    csv_output = outputs.get(target_artifact)
     sidecar_output = outputs.get(REVIEW_SIDECAR_NAME)
-    if source is None or csv_output is None or sidecar_output is None:
-        raise SystemExit("Movement CSV and review sidecar inputs/outputs must be declared")
+    if source is None or sidecar_output is None:
+        raise SystemExit("Movement CSV input and review sidecar output must be declared")
     if not requested_confirmations:
         raise SystemExit("At least one suspected issue must be selected for confirmation")
 
+    requested_parent_ids = {
+        str(item.get("parent_annotation_id") or "").strip()
+        for item in requested_confirmations
+        if isinstance(item, dict)
+    }
+    requested_fix_keys = {
+        str(fix_key).strip()
+        for item in requested_confirmations
+        if isinstance(item, dict)
+        for fix_key in (item.get("fix_keys") or [])
+        if str(fix_key).strip()
+    }
+    existing_sidecar = inputs.get(REVIEW_SIDECAR_NAME)
+    annotations = load_review_annotations(Path(existing_sidecar["path"]) if existing_sidecar else None)
+
     source_path = Path(source["path"])
+    row_context_by_fix_key = {}
+    legacy_by_id = {}
     with source_path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         source_fieldnames = list(reader.fieldnames or [])
-        rows = list(reader)
-    columns = detect_columns(source_fieldnames)
-    if not columns["individual"] or not columns["time"] or not columns["lon"] or not columns["lat"]:
-        raise SystemExit("CSV is missing required movement columns")
+        columns = detect_columns(source_fieldnames)
+        if not columns["individual"] or not columns["time"] or not columns["lon"] or not columns["lat"]:
+            raise SystemExit("CSV is missing required movement columns")
+        for row_index, raw in enumerate(reader, start=1):
+            individual = str(raw.get(columns["individual"], "")).strip()
+            time_ms = parse_time_ms(raw.get(columns["time"]))
+            lon = try_float(raw.get(columns["lon"]))
+            lat = try_float(raw.get(columns["lat"]))
+            if not individual or time_ms is None or not is_valid_coordinate(lon, lat):
+                continue
+            fix_id = str(raw.get(columns["fix_id"], "")).strip() if columns["fix_id"] else ""
+            fix_key = _make_fix_key(row_index, fix_id, individual, time_ms)
+            if fix_key not in requested_fix_keys:
+                continue
+            set_name = str(raw.get(columns["set"], "")).strip().lower() if columns["set"] else "train"
+            if set_name != "test":
+                set_name = "train"
+            row_context_by_fix_key[fix_key] = {
+                "row_index": row_index,
+                "individual": individual,
+                "set_name": set_name,
+            }
+            for annotation in _legacy_annotations(raw, fix_key=fix_key, source_artifact=target_artifact):
+                if annotation["annotation_id"] in requested_parent_ids:
+                    legacy_by_id[annotation["annotation_id"]] = annotation
 
-    row_context_by_fix_key = {}
-    legacy_by_id = {}
-    for row_index, raw in enumerate(rows, start=1):
-        individual = str(raw.get(columns["individual"], "")).strip()
-        time_ms = parse_time_ms(raw.get(columns["time"]))
-        lon = try_float(raw.get(columns["lon"]))
-        lat = try_float(raw.get(columns["lat"]))
-        if not individual or time_ms is None or not is_valid_coordinate(lon, lat):
-            continue
-        fix_id = str(raw.get(columns["fix_id"], "")).strip() if columns["fix_id"] else ""
-        set_name = str(raw.get(columns["set"], "")).strip().lower() if columns["set"] else "train"
-        if set_name != "test":
-            set_name = "train"
-        fix_key = _make_fix_key(row_index, fix_id, individual, time_ms)
-        row_context_by_fix_key[fix_key] = {
-            "row_index": row_index,
-            "raw": raw,
-            "individual": individual,
-            "set_name": set_name,
-        }
-        for annotation in _legacy_annotations(raw, fix_key=fix_key, source_artifact=target_artifact):
-            legacy_by_id[annotation["annotation_id"]] = annotation
-
-    existing_sidecar = inputs.get(REVIEW_SIDECAR_NAME)
-    annotations = load_review_annotations(Path(existing_sidecar["path"]) if existing_sidecar else None)
     parent_by_id = {
         item["annotation_id"]: item
         for item in annotations
@@ -184,56 +169,6 @@ def main():
             "resolved_fix_count": len(fix_keys),
         })
 
-    output_fieldnames = [
-        name
-        for name in source_fieldnames
-        if name not in ALL_REVIEW_COLUMNS
-        and not str(name).startswith("vc_")
-        and name not in PORTABLE_REVIEW_COLUMNS
-        and name not in DEPRECATED_REVIEW_COLUMNS
-    ] + PORTABLE_REVIEW_COLUMNS
-    csv_output_path = Path(csv_output["path"])
-    csv_output_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_output_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=output_fieldnames)
-        writer.writeheader()
-        for row_index, raw in enumerate(rows, start=1):
-            output_row = {name: raw.get(name, "") for name in output_fieldnames}
-            individual = str(raw.get(columns["individual"], "")).strip()
-            time_ms = parse_time_ms(raw.get(columns["time"]))
-            fix_id = str(raw.get(columns["fix_id"], "")).strip() if columns["fix_id"] else ""
-            fix_key = _make_fix_key(row_index, fix_id, individual, time_ms) if individual and time_ms is not None else ""
-            parents = row_updates.get(fix_key, [])
-            output_row["visible"] = "true" if _original_visible(raw.get("visible")) else "false"
-            output_row["manually-marked-outlier"] = "true" if (
-                _flag_is_true(raw.get("manually-marked-outlier"))
-                or _flag_is_true(raw.get("manually_marked_outliers"))
-            ) else "false"
-            output_row["algorithm-marked-outlier"] = "true" if (
-                _flag_is_true(raw.get("algorithm-marked-outlier"))
-                or _flag_is_true(raw.get("algorithm_marked_outliers"))
-            ) else "false"
-            output_row["outlier_status"] = str(raw.get("outlier_status") or "").strip()
-            output_row["outlier_issue_type"] = str(raw.get("outlier_issue_type") or "").strip()
-            output_row["outlier_comments"] = str(raw.get("outlier_comments") or "").strip()
-            output_row["outlier_flag_step_ids"] = str(raw.get("outlier_flag_step_ids") or "").strip()
-            if parents:
-                output_row["visible"] = "false"
-                output_row["outlier_status"] = "confirmed"
-                issue_types = _split_values(output_row["outlier_issue_type"])
-                step_ids = _split_values(output_row["outlier_flag_step_ids"])
-                for parent in parents:
-                    if parent["origin"] == "manual":
-                        output_row["manually-marked-outlier"] = "true"
-                    else:
-                        output_row["algorithm-marked-outlier"] = "true"
-                    _append_unique(issue_types, parent["issue_type"])
-                    _append_unique(step_ids, parent["step_id"] or parent["annotation_id"])
-                _append_unique(step_ids, step_id)
-                output_row["outlier_issue_type"] = "; ".join(issue_types)
-                output_row["outlier_flag_step_ids"] = ";".join(step_ids)
-            writer.writerow(output_row)
-
     annotations.extend(confirmation_records)
     sidecar_output_path = Path(sidecar_output["path"])
     sidecar_output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -247,6 +182,7 @@ def main():
                 "app": "movement",
                 "action": "confirm_issues",
                 "source_artifact": target_artifact,
+                "materialized_csv": False,
                 "confirmation_count": len(confirmation_records),
                 "confirmed_fix_count": len(row_updates),
                 "parent_annotation_ids": sorted(item["parent_annotation_id"] for item in confirmation_records),

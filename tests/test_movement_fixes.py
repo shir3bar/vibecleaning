@@ -636,8 +636,7 @@ def test_movement_frontend_uses_on_demand_individual_loading_for_truncated_overv
     assert "overviewTruncated" in source
     assert "Select individuals to load fixes on demand." in source
     assert "initialMovementVisibleIndividuals(data)" in source
-    assert "movementVisibleIndividualsForReload(" in source
-    assert "return initialMovementVisibleIndividuals(data);" in source
+    assert "initialMovementVisibleIndividuals(this.data)" in source
     assert "if (data.overviewTruncated) {" in source
     assert "getActiveThresholdMatchKeys()" in source
     assert "showPoints ? this.getActiveThresholdMatchKeys() : new Set()" in source
@@ -834,6 +833,21 @@ def test_movement_analysis_history_finds_latest_compatible_saved_run(tmp_path):
     client, dataset_id = create_movement_test_client(tmp_path)
     first = create_saved_movement_analysis(tmp_path, dataset_id=dataset_id)
     second = create_saved_movement_analysis(tmp_path, dataset_id=dataset_id)
+    ignored = create_saved_movement_analysis(
+        tmp_path,
+        dataset_id=dataset_id,
+        action="generate_report",
+        output_name="movement_report.json",
+    )
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+    second_summary_path = study_dir / second["analysis"]["summary_path"]
+    second_summary_path.write_text(
+        json.dumps({
+            "run_status": "completed",
+            "ranked_individuals": [{"payload": "large"}] * 100,
+        }),
+        encoding="utf-8",
+    )
 
     response = client.get(
         "/api/apps/movement/family/movement_clean/study/test_study/analyses",
@@ -855,7 +869,10 @@ def test_movement_analysis_history_finds_latest_compatible_saved_run(tmp_path):
     ]
     assert all(item["compatible"] for item in payload["items"])
     assert payload["latest_compatible_by_action"]["run_burst_anomaly_ranking"] == second["analysis"]["analysis_id"]
-    assert payload["items"][0]["summary"]["run_status"] == "completed"
+    assert payload["items"][0]["summary"] == {"run_status": "completed"}
+    assert ignored["analysis"]["analysis_id"] not in {
+        item["analysis_id"] for item in payload["items"]
+    }
 
 
 def test_movement_analysis_history_explains_parameter_mismatches(tmp_path):
@@ -1073,8 +1090,6 @@ def test_movement_frontend_restores_saved_burst_analyses():
     assert "getFillColor: [92, 101, 110, 24]" in source
     assert "|| !visibleIndividuals.has(fix.individual)" in source
     assert "getUnresolvedSuspectedIssueGroups" in source
-    assert "movementVisibleIndividualsForReload" in source
-    assert "loadStudy({ preservedIndividuals })" in source
 
 
 def test_movement_frontend_loads_suspicious_fixes_on_demand():
@@ -1331,7 +1346,7 @@ def test_annotate_scope_rejects_direct_confirmation(tmp_path):
     assert "confirm-issues" in response.json()["error"]
 
 
-def test_confirm_issues_updates_derived_csv_and_links_original_suspicion(tmp_path):
+def test_confirm_issues_persists_sidecar_without_copying_csv(tmp_path):
     clean_csv = """eventid,individual,timestamp,longitude,latitude,set
 fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
 fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
@@ -1379,30 +1394,27 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     assert confirm_response.status_code == 200
     confirmed_payload = confirm_response.json()
     confirmed_dataset_id = confirmed_payload["dataset"]["dataset_id"]
-    assert confirmed_payload["step"]["output_artifacts"] == [
-        "movement.csv",
-        "movement_review_annotations.json",
-    ]
+    assert confirmed_payload["step"]["output_artifacts"] == ["movement_review_annotations.json"]
     assert confirmed_payload["step"]["summary"]["confirmed_fix_count"] == 1
     assert confirmed_payload["step"]["summary"]["algorithm_marked_fix_count"] == 1
+    assert confirmed_payload["step"]["summary"]["materialized_csv"] is False
     assert (study_dir / "movement.csv").read_text(encoding="utf-8") == source_before
 
+    _, suspected_csv_path = get_dataset_artifact(
+        study_dir,
+        suspected_dataset_id,
+        "movement.csv",
+    )
     _, confirmed_csv_path = get_dataset_artifact(
         study_dir,
         confirmed_dataset_id,
         "movement.csv",
     )
+    assert confirmed_csv_path == suspected_csv_path
+    assert confirmed_csv_path.read_text(encoding="utf-8") == clean_csv
     rows = list(csv.DictReader(confirmed_csv_path.open(encoding="utf-8")))
-    assert rows[0]["visible"] == "true"
-    assert rows[0]["algorithm-marked-outlier"] == "false"
-    assert rows[1]["visible"] == "false"
-    assert rows[1]["manually-marked-outlier"] == "false"
-    assert rows[1]["algorithm-marked-outlier"] == "true"
-    assert rows[1]["outlier_status"] == "confirmed"
-    assert rows[1]["outlier_issue_type"] == "speed threshold"
-    assert suspected_annotation_id in rows[1]["outlier_flag_step_ids"]
-    assert confirmed_payload["step"]["step_id"] in rows[1]["outlier_flag_step_ids"]
-    assert not any(name.startswith("vc_") for name in rows[1])
+    assert "visible" not in rows[0]
+    assert "algorithm-marked-outlier" not in rows[0]
 
     _, sidecar_path = get_dataset_artifact(
         study_dir,
@@ -1425,6 +1437,30 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     confirmed_fixes = confirmed_fixes_response.json()["fixes"]
     assert [fix["fix_key"] for fix in confirmed_fixes] == ["id:fix_a_2#row:2"]
     assert confirmed_fixes[0]["review"]["issues"][-1]["parent_annotation_id"] == suspected_annotation_id
+    assert confirmed_fixes[0]["analytically_excluded"] is True
+
+    export_response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/export-reviewed-csv",
+        json={
+            "dataset_id": confirmed_dataset_id,
+            "logical_name": "movement.csv",
+            "user": "reviewer",
+        },
+    )
+    assert export_response.status_code == 200
+    export_analysis_id = export_response.json()["analysis"]["analysis_id"]
+    download = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/analysis/{export_analysis_id}/artifact/movement_reviewed.csv"
+    )
+    exported = list(csv.DictReader(io.StringIO(download.text)))
+    assert exported[1]["visible"] == "false"
+    assert exported[1]["manually-marked-outlier"] == "false"
+    assert exported[1]["algorithm-marked-outlier"] == "true"
+    assert exported[1]["outlier_status"] == "confirmed"
+    assert exported[1]["outlier_issue_type"] == "speed threshold"
+    assert suspected_annotation_id in exported[1]["outlier_flag_step_ids"]
+    assert confirmed_payload["step"]["step_id"] in exported[1]["outlier_flag_step_ids"]
+    assert not any(name.startswith("vc_") for name in exported[1])
 
 
 def test_movement_fixes_route_rejects_invalid_repeated_individual(tmp_path):

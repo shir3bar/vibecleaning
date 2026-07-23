@@ -61,10 +61,13 @@ The starter app and trajectory example do not use this nested study catalog. The
 4. Click fixes to build a review selection.
 5. Mark the selection as `suspected`, recording its issue type and provenance.
 6. Confirm selected fixes against one or more of their originating suspected issues.
-7. Continue analysis on the remaining fixes. Confirmed rows stay in the derived CSV
-   with `visible=false`, retain their review lineage, and remain available in the
+7. Continue analysis on the remaining fixes. Confirmation writes only the small
+   review sidecar; the new dataset manifest reuses the original CSV artifact.
+   Confirmed fixes retain their review lineage and remain available in the
    confirmed-exclusions map layer.
-8. Generate an owner-facing report or export the reviewed CSV.
+8. Generate an owner-facing report or explicitly export a reviewed CSV. Export is
+   the only operation that materializes the sidecar state into CSV columns such
+   as `visible=false` and the manual/algorithm outlier flags.
 
 Confirmation does not start a new burst by itself. Movement features are
 recomputed across the remaining fixes, and statistical burst assignment is

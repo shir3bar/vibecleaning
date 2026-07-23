@@ -1,5 +1,4 @@
 from collections.abc import Callable
-from copy import deepcopy
 import json
 import textwrap
 import uuid
@@ -120,7 +119,7 @@ def _review_annotation_candidates(
 
 
 def _filter_review_status_payload(payload: dict, *, review_status: str, limit: int | None) -> dict:
-    payload = deepcopy(payload)
+    payload = dict(payload)
     fixes = list(payload.get("fixes") or [])
     if review_status == "reviewed":
         matches = [fix for fix in fixes if bool(fix.get("review"))]
@@ -2522,7 +2521,7 @@ def register_movement_routes(
                 },
                 "parent_dataset_id": dataset_id,
                 "input_artifacts": input_artifacts,
-                "output_artifacts": [logical_name, "movement_review_annotations.json"],
+                "output_artifacts": ["movement_review_annotations.json"],
                 "set_as_head": True,
             }
             return JSONResponse(create_step(study_dir, payload))
