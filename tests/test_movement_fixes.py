@@ -375,6 +375,34 @@ fix_c,alpha,2024-01-01T02:00:00Z,-70.2,40.2,true,
     ]
 
 
+def test_legacy_invisible_suspected_fix_remains_in_track_analysis(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,visible,outlier_status
+fix_a,alpha,2024-01-01T00:00:00Z,-70.0,40.0,true,
+fix_b,alpha,2024-01-01T01:00:00Z,-70.1,40.1,false,suspected
+fix_c,alpha,2024-01-01T02:00:00Z,-70.2,40.2,true,
+""",
+        encoding="utf-8",
+    )
+
+    payload = build_movement_fixes(
+        csv_path,
+        burst_gap_mode="manual",
+        burst_gap_seconds=10_800,
+    )
+    by_key = {fix["fix_key"]: fix for fix in payload["fixes"]}
+
+    assert "analytically_excluded" not in by_key["id:fix_b#row:2"]
+    assert by_key["id:fix_b#row:2"]["attributes"]["time_delta_s"] == 3600.0
+    assert by_key["id:fix_c#row:3"]["attributes"]["time_delta_s"] == 3600.0
+    assert payload["auto_bursts"][0]["fix_keys"] == [
+        "id:fix_a#row:1",
+        "id:fix_b#row:2",
+        "id:fix_c#row:3",
+    ]
+
+
 def test_build_movement_overview_auto_bursts_use_sorted_track_order(tmp_path):
     csv_path = tmp_path / "movement.csv"
     csv_path.write_text(
@@ -942,6 +970,9 @@ def test_movement_frontend_restores_saved_burst_analyses():
     assert 'data-role="confirm-modal"' in source
     assert "/actions/confirm-issues" in source
     assert 'id: "movement-confirmed-exclusions"' in source
+    assert 'id: "movement-suspected-outline"' in source
+    assert "getFillColor: [92, 101, 110, 24]" in source
+    assert "|| !visibleIndividuals.has(fix.individual)" in source
     assert "getUnresolvedSuspectedIssueGroups" in source
 
 

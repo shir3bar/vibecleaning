@@ -544,18 +544,22 @@ def _row_is_analytically_excluded(
     confirmed_fix_keys: set[str],
     confirmed_individual_tracks: set[tuple[str, str]],
 ) -> bool:
-    if not _portable_row_is_visible(raw):
-        return True
-    if _normalize_review_status(raw.get("outlier_status")) == "confirmed":
-        return True
-    if _normalize_review_status(raw.get("vc_outlier_status")) == "confirmed":
+    review_status = (
+        _normalize_review_status(raw.get("outlier_status"))
+        or _normalize_review_status(raw.get("vc_outlier_status"))
+    )
+    if review_status == "confirmed":
         return True
     if fix_key in confirmed_fix_keys:
         return True
-    return (
+    if (
         (individual, "") in confirmed_individual_tracks
         or (individual, set_name) in confirmed_individual_tracks
-    )
+    ):
+        return True
+    if review_status == "suspected":
+        return False
+    return not _portable_row_is_visible(raw)
 
 
 def _review_issues(raw: dict) -> list[dict]:

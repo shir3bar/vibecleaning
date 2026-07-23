@@ -6213,6 +6213,7 @@ class MovementExampleApp {
     const candidatePointData = [];
     const selectedCandidatePointData = [];
     const selectedPointData = [];
+    const suspectedPointData = [];
     const confirmedPointData = [];
     const cursorData = [];
     const showPoints = this.refs.showPoints.checked;
@@ -6220,8 +6221,9 @@ class MovementExampleApp {
       const seenConfirmed = new Set();
       for (const fix of this.data.fixes || []) {
         if (
-          !fix.analyticallyExcluded
-          && fix.review?.status !== "confirmed"
+          fix.review?.status !== "confirmed"
+          || !visibleIndividuals.has(fix.individual)
+          || !visibleSetNames.has(fix.setName)
         ) {
           continue;
         }
@@ -6343,6 +6345,12 @@ class MovementExampleApp {
           position: fix.position,
           color: this.colorForFix(fix),
         };
+        if (fix.review?.status === "suspected") {
+          suspectedPointData.push({
+            fixKey: fix.fixKey,
+            position: fix.position,
+          });
+        }
         if (this.data.selectedFixKeys.has(fix.fixKey)) {
           selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
           if (thresholdMatchKeys.has(fix.fixKey)) {
@@ -6375,7 +6383,26 @@ class MovementExampleApp {
       }
     }
 
-    const layers = [
+    const layers = [];
+    if (confirmedPointData.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-confirmed-exclusions",
+          data: confirmedPointData,
+          getPosition: item => item.position,
+          getFillColor: [92, 101, 110, 24],
+          getLineColor: [92, 101, 110, 105],
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 1,
+          getRadius: 52,
+          radiusMinPixels: 3,
+          radiusMaxPixels: 6,
+          pickable: true,
+        }),
+      );
+    }
+    layers.push(
       new deck.PathLayer({
         id: "movement-paths",
         data: pathData,
@@ -6387,7 +6414,7 @@ class MovementExampleApp {
         widthMinPixels: 2,
         pickable: false,
       }),
-    ];
+    );
 
     if (visibleAutoBurstPaths.length) {
       layers.push(
@@ -6434,9 +6461,11 @@ class MovementExampleApp {
           id: "movement-segment-outline",
           data: visibleSegments,
           getPath: segment => segment.path,
-          getColor: [255, 255, 255, 120],
-          getWidth: segment => segment.status === "confirmed" ? 8 : 7,
-          widthMinPixels: 4,
+          getColor: segment => segment.status === "confirmed"
+            ? [255, 255, 255, 30]
+            : [255, 255, 255, 120],
+          getWidth: segment => segment.status === "confirmed" ? 3.5 : 7,
+          widthMinPixels: 2,
           pickable: false,
         }),
       );
@@ -6446,10 +6475,10 @@ class MovementExampleApp {
           data: visibleSegments,
           getPath: segment => segment.path,
           getColor: segment => segment.status === "confirmed"
-            ? [241, 106, 124, 210]
+            ? [92, 101, 110, 90]
             : [245, 181, 54, 210],
-          getWidth: segment => segment.status === "confirmed" ? 5.5 : 4.5,
-          widthMinPixels: 3,
+          getWidth: segment => segment.status === "confirmed" ? 2 : 4.5,
+          widthMinPixels: 1,
           pickable: false,
         }),
       );
@@ -6482,6 +6511,21 @@ class MovementExampleApp {
           radiusMinPixels: 4,
           radiusMaxPixels: 10,
           pickable: true,
+        }),
+      );
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-suspected-outline",
+          data: suspectedPointData,
+          getPosition: item => item.position,
+          getLineColor: [245, 181, 54, 235],
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 2,
+          getRadius: 102,
+          radiusMinPixels: 6,
+          radiusMaxPixels: 12,
+          pickable: false,
         }),
       );
       layers.push(
@@ -6560,25 +6604,6 @@ class MovementExampleApp {
           getRadius: 130,
           radiusMinPixels: 7,
           radiusMaxPixels: 14,
-          pickable: true,
-        }),
-      );
-    }
-
-    if (confirmedPointData.length) {
-      layers.push(
-        new deck.ScatterplotLayer({
-          id: "movement-confirmed-exclusions",
-          data: confirmedPointData,
-          getPosition: item => item.position,
-          getFillColor: [63, 20, 29, 115],
-          getLineColor: [248, 113, 113, 245],
-          filled: true,
-          stroked: true,
-          lineWidthMinPixels: 3,
-          getRadius: 142,
-          radiusMinPixels: 8,
-          radiusMaxPixels: 17,
           pickable: true,
         }),
       );
