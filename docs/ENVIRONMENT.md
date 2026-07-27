@@ -145,7 +145,18 @@ was skipped or failed.
 
 ## Configuration
 
-The example servers accept `HOST` and `PORT`. `move_viz` also recognizes:
+The example servers accept `HOST` and `PORT`. `slim_movement` refuses to start
+unless both of these are set:
+
+```text
+SLIM_MOVEMENT_USERNAME
+SLIM_MOVEMENT_PASSWORD  minimum 12 characters
+```
+
+Basic authentication must be placed behind HTTPS when the app is shared beyond
+localhost. See `examples/slim_movement/README.md`.
+
+`move_viz` also recognizes:
 
 ```text
 MOVE_VIZ_MAX_UPLOAD_BYTES  default 512 MiB

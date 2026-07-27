@@ -24,8 +24,42 @@ The full `examples/movement/` application remains the development playground.
 
 ## Run
 
+Set one deployment-wide username and a strong password. The server refuses to
+start without both values, and passwords shorter than 12 characters are
+rejected.
+
 ```bash
-python examples/slim_movement/server.py
+export SLIM_MOVEMENT_USERNAME=reviewer
+read -r -s -p "Slim movement password: " SLIM_MOVEMENT_PASSWORD
+echo
+export SLIM_MOVEMENT_PASSWORD
+uv run python examples/slim_movement/server.py
 ```
 
 The default address is `http://127.0.0.1:8421`.
+
+The browser will show its standard username/password prompt. This temporary
+gate protects the page, static assets, and all API routes with the same shared
+credential. It does not yet provide reviewer/editor accounts, dataset
+assignments, or editing locks.
+
+To generate a strong password without placing it in shell history:
+
+```bash
+uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+## Sharing securely
+
+HTTP Basic authentication does not encrypt credentials. For internet or
+institution-wide sharing, put the app behind an HTTPS reverse proxy or the
+institution's authenticated TLS ingress. Prefer keeping the application bound
+to `127.0.0.1` and letting that proxy connect to port 8421.
+
+Do not expose `http://<host>:8421` directly to the public internet. If the local
+deployment requires `HOST=0.0.0.0`, firewall the port so only the HTTPS proxy
+can reach it.
+
+Credentials are read only when the process starts. To rotate them, stop the
+server, export new values, and restart it. Do not commit passwords or store them
+in repository files.

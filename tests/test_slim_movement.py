@@ -1,7 +1,9 @@
+import base64
 from pathlib import Path
 import sys
 
 from fastapi.testclient import TestClient
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -12,9 +14,12 @@ MOVEMENT_STATIC_ROOT = REPO_ROOT / "examples" / "movement" / "static"
 SLIM_INDEX = REPO_ROOT / "examples" / "slim_movement" / "static" / "index.html"
 MOVEMENT_APP_JS = MOVEMENT_STATIC_ROOT / "app.js"
 
-from app.web import create_app
-from examples.movement.routes import register_movement_routes
-from examples.slim_movement import is_slim_movement_artifact
+from examples.slim_movement.app import create_slim_movement_app
+from examples.slim_movement.auth import (
+    PASSWORD_ENV,
+    USERNAME_ENV,
+    credentials_from_environment,
+)
 
 
 MOVEMENT_CSV = """eventid,individual,timestamp,longitude,latitude
@@ -23,7 +28,12 @@ fix_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1
 """
 
 
-def create_slim_test_client(tmp_path: Path) -> TestClient:
+def create_slim_test_client(
+    tmp_path: Path,
+    *,
+    credentials: tuple[str, str] | None = None,
+    authenticated: bool = True,
+) -> TestClient:
     data_root = tmp_path / "data"
     raw_study = data_root / "movement_raw" / "raw_study"
     raw_study.mkdir(parents=True)
@@ -34,19 +44,21 @@ def create_slim_test_client(tmp_path: Path) -> TestClient:
     clean_study.mkdir(parents=True)
     (clean_study / "clean.csv").write_text(MOVEMENT_CSV, encoding="utf-8")
 
-    app = create_app(
+    username, password = credentials or ("test-reviewer", "test-password-long")
+    app = create_slim_movement_app(
         data_root=data_root,
         static_root=MOVEMENT_STATIC_ROOT,
         index_path=SLIM_INDEX,
+        username=username,
+        password=password,
     )
-    register_movement_routes(
-        app,
-        data_root=data_root,
-        allowed_families={"movement_raw"},
-        artifact_filter=is_slim_movement_artifact,
-        include_dev_routes=False,
-    )
-    return TestClient(app)
+    client = TestClient(app)
+    if authenticated:
+        encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode(
+            "ascii"
+        )
+        client.headers["Authorization"] = f"Basic {encoded}"
+    return client
 
 
 def test_slim_movement_serves_shared_viewer_with_slim_profile(tmp_path):
@@ -60,6 +72,64 @@ def test_slim_movement_serves_shared_viewer_with_slim_profile(tmp_path):
     assert "slim movement review" in response.text
     assert app_js.status_code == 200
     assert "MOVEMENT_APP_CONFIG" in app_js.text
+
+
+def test_slim_auth_protects_page_static_assets_and_api(tmp_path):
+    password = "a-long-random-password"
+    client = create_slim_test_client(
+        tmp_path,
+        credentials=("reviewer", password),
+        authenticated=False,
+    )
+
+    for path in (
+        "/",
+        "/static/app.js",
+        "/api/apps/movement/families",
+    ):
+        response = client.get(path)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == (
+            'Basic realm="slim_movement", charset="UTF-8"'
+        )
+        assert response.headers["cache-control"] == "no-store"
+
+    assert client.get("/", auth=("reviewer", "wrong-password")).status_code == 401
+    assert client.get("/", auth=("wrong-user", password)).status_code == 401
+    assert client.get("/", auth=("reviewer", password)).status_code == 200
+    assert (
+        client.get(
+            "/api/apps/movement/families",
+            auth=("reviewer", password),
+        ).status_code
+        == 200
+    )
+
+
+def test_slim_auth_credentials_fail_closed():
+    with pytest.raises(RuntimeError, match=f"{USERNAME_ENV} and {PASSWORD_ENV}"):
+        credentials_from_environment({})
+    with pytest.raises(RuntimeError, match="at least 12 characters"):
+        credentials_from_environment(
+            {
+                USERNAME_ENV: "reviewer",
+                PASSWORD_ENV: "too-short",
+            }
+        )
+    with pytest.raises(RuntimeError, match="colons or whitespace"):
+        credentials_from_environment(
+            {
+                USERNAME_ENV: "review user",
+                PASSWORD_ENV: "a-long-random-password",
+            }
+        )
+
+    assert credentials_from_environment(
+        {
+            USERNAME_ENV: "reviewer",
+            PASSWORD_ENV: "a-long-random-password",
+        }
+    ) == ("reviewer", "a-long-random-password")
 
 
 def test_slim_movement_catalog_exposes_only_movement_raw(tmp_path):
