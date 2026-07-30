@@ -430,6 +430,42 @@ def test_osm_enrichment_template_is_compilable():
     assert "fetch_osm_features" not in template_text
 
 
+def test_osm_enrichment_rejects_historical_dataset_before_fetching(tmp_path):
+    client, _, root_id = _create_enrichment_client(tmp_path)
+    base_url = "/api/apps/movement/family/movement_clean/study/test_study"
+    annotation = client.post(
+        f"{base_url}/actions/annotate-scope",
+        json={
+            "dataset_id": root_id,
+            "expected_current_dataset_id": root_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "fix", "fix_keys": ["id:fix_1#row:1"]},
+            "status": "suspected",
+            "origin": "manual",
+            "issue_type": "location review",
+            "comment": "Create a later dataset version",
+            "owner_question": "Is this fix valid?",
+            "user": "reviewer",
+        },
+    )
+    assert annotation.status_code == 200
+    current_id = annotation.json()["dataset"]["dataset_id"]
+
+    response = client.post(
+        f"{base_url}/actions/enrich-osm-context",
+        json={
+            "dataset_id": root_id,
+            "expected_current_dataset_id": current_id,
+            "logical_name": "movement.csv",
+            "search_radius_m": 1000,
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 423
+    assert response.json()["edit_profile"]["blockers"][0]["code"] == "historical_version"
+
+
 def test_frontend_does_not_expose_temporary_preprocessing_osm_enrichment_control():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 

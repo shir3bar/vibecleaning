@@ -219,6 +219,50 @@ def test_slim_movement_load_selects_raw_csv_and_keeps_review_routes(tmp_path):
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/enrich-osm-context" not in paths
 
 
+def test_slim_movement_applies_shared_history_edit_locks(tmp_path):
+    client = create_slim_test_client(tmp_path)
+    base_url = "/api/apps/movement/family/movement_raw/study/raw_study"
+    loaded = client.get(f"{base_url}/load").json()
+    root_id = loaded["dataset_id"]
+    initial_profile = client.get(
+        f"{base_url}/edit-profile",
+        params={"dataset_id": root_id},
+    )
+    assert initial_profile.status_code == 200
+    assert initial_profile.json()["editable"] is True
+
+    annotation = client.post(
+        f"{base_url}/actions/annotate-scope",
+        json={
+            "dataset_id": root_id,
+            "expected_current_dataset_id": root_id,
+            "logical_name": "zebra_raw.csv",
+            "scope": {"kind": "fix", "fix_keys": ["id:fix_1#row:1"]},
+            "status": "suspected",
+            "origin": "manual",
+            "issue_type": "location review",
+            "comment": "Check this location",
+            "owner_question": "Is this fix valid?",
+            "user": "reviewer",
+        },
+    )
+    assert annotation.status_code == 200
+    current_id = annotation.json()["dataset"]["dataset_id"]
+
+    blocked = client.post(
+        f"{base_url}/actions/review-individuals",
+        json={
+            "dataset_id": root_id,
+            "expected_current_dataset_id": current_id,
+            "logical_name": "zebra_raw.csv",
+            "decisions": [{"individual": "alpha", "review_ok": True}],
+            "user": "reviewer",
+        },
+    )
+    assert blocked.status_code == 423
+    assert blocked.json()["edit_profile"]["blockers"][0]["code"] == "historical_version"
+
+
 def test_slim_movement_uses_compact_overviews(tmp_path):
     client = create_slim_test_client(tmp_path)
     loaded = client.get(

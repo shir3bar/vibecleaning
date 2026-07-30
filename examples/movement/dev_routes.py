@@ -11,6 +11,7 @@ from app.edit_locks import (
     EditConflictError,
     EditLockedError,
     create_guarded_step,
+    require_editable_dataset,
 )
 from app.execution import create_analysis
 from app.query_library import get_query
@@ -411,6 +412,7 @@ def register_movement_dev_routes(
             )
             if reusable is not None:
                 return JSONResponse(reusable)
+            require_editable_dataset(study_dir, dataset_id)
             user = body.get("user")
             return JSONResponse(
                 create_guarded_step(
