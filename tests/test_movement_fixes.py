@@ -696,7 +696,7 @@ def test_movement_frontend_includes_auto_burst_controls():
     assert "formatBurstGapMetadata" in source
     assert '<option value="auto_bursts">Automatic bursts</option>' in source
     assert "movement-auto-bursts" in source
-    assert "movement-auto-burst-points" in source
+    assert "movement-auto-burst-points" not in source
     assert "autoBurstColor" in source
     assert "renderBurstCountIndicator" in source
     assert "getVisibleAutoBursts({ requireOverlay: false })" in source

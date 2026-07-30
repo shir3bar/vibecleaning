@@ -6398,10 +6398,6 @@ class MovementExampleApp {
       .filter(burst => burst.path.length >= 2)
       .map(burst => this.data.autoBurstRenderCache.get(burst.burstId)?.pathItem)
       .filter(Boolean);
-    const visibleAutoBurstPoints = visibleAutoBursts
-      .filter(burst => burst.path.length >= 1)
-      .map(burst => this.data.autoBurstRenderCache.get(burst.burstId)?.pointItem)
-      .filter(Boolean);
     const visibleTableSelection = this.getVisibleTableSelectionFixes();
     const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
     const tableSelectedPointData = visibleTableSelection.map(fix => ({
@@ -6597,34 +6593,6 @@ class MovementExampleApp {
               : item.color,
           getWidth: item => item.sourceFlagged ? 2 : 5,
           widthMinPixels: 1,
-          pickable: Boolean(this.burstFeatureSpace?.points?.length),
-        }),
-      );
-    }
-
-    if (visibleAutoBurstPoints.length) {
-      layers.push(
-        new deck.ScatterplotLayer({
-          id: "movement-auto-burst-points",
-          data: visibleAutoBurstPoints,
-          dataComparator: sameArrayItems,
-          getPosition: item => item.position,
-          getFillColor: item => hasFocusedRankingBurst
-            ? this.mutedRankingContextColor(item.fillColor, 18)
-            : item.sourceFlagged
-              ? this.mutedRankingContextColor(item.fillColor, 20)
-              : item.fillColor,
-          getLineColor: item => hasFocusedRankingBurst
-            ? this.mutedRankingContextColor(item.color, 42)
-            : item.sourceFlagged
-              ? this.mutedRankingContextColor(item.color, 70)
-              : item.color,
-          filled: true,
-          stroked: true,
-          lineWidthMinPixels: 2,
-          getRadius: 124,
-          radiusMinPixels: 6,
-          radiusMaxPixels: 15,
           pickable: Boolean(this.burstFeatureSpace?.points?.length),
         }),
       );
@@ -10056,13 +10024,6 @@ function refreshMovementFixCollections(data) {
           burst,
           path: burst.path,
           color: autoBurstColor(burst, 185),
-          sourceFlagged,
-        },
-        pointItem: {
-          burst,
-          position: burst.path[0],
-          color: autoBurstColor(burst, 220),
-          fillColor: autoBurstColor(burst, 48),
           sourceFlagged,
         },
       },
