@@ -1417,8 +1417,15 @@ def test_movement_frontend_restores_saved_burst_analyses():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
     assert "restoreSavedAnalyses" in source
+    assert "loadSavedAnomalyRanking" in source
     assert "latest_compatible_by_action" in source
     assert "burst_anomaly_ranking.json" in source
+    assert 'status: "checking"' in source
+    assert 'status: "available"' in source
+    assert 'status: "restoring"' in source
+    assert "Checking for a compatible saved burst ranking" in source
+    assert "Loading saved burst ranking" in source
+    assert 'data-action="load-saved-ranking"' in source
     assert "burst_feature_space.json" in source
     assert 'result.loadedFromHistory ? "Restored" : "Created"' in source
     assert "exportReviewedCsv" in source
@@ -1508,6 +1515,9 @@ def test_movement_individual_queue_explains_burst_ranking_availability():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
     assert "No compatible burst ranking is available for this dataset version and burst definition." in source
+    assert "Compatible saved ranking available" in source
+    assert 'data-queue-action="load-ranking"' in source
+    assert "hasAvailableIndividualQueueRanking()" in source
     assert "Burst ranking in progress. Dataset order will remain in use." in source
     assert "Apply completed ranking" in source
     assert 'data-queue-action="run-ranking"' in source

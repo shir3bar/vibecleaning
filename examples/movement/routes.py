@@ -933,7 +933,8 @@ def register_movement_routes(
             normalized_logical_name = validate_path_part(logical_name, label="artifact")
             get_dataset_artifact(study_dir, normalized_dataset_id, normalized_logical_name)
             return JSONResponse(
-                build_movement_analysis_history(
+                await run_in_threadpool(
+                    build_movement_analysis_history,
                     study_dir,
                     dataset_id=normalized_dataset_id,
                     logical_name=normalized_logical_name,

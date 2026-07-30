@@ -973,6 +973,11 @@ class MovementExampleApp {
     }
     if (nextSheet === "table") {
       this.renderTableSheet();
+    } else if (
+      nextSheet === "ranking"
+      && this.anomalyRanking?.status === "available"
+    ) {
+      void this.loadSavedAnomalyRanking();
     } else if (nextSheet === "feature_space") {
       this.renderBurstFeatureSpace();
     } else if (nextSheet === "individuals" && this.currentIndividualListHeight() !== null) {
@@ -3125,6 +3130,10 @@ class MovementExampleApp {
       const queueAction = event.target.closest("button[data-queue-action]");
       if (queueAction?.dataset.queueAction === "run-ranking") {
         void this.runBurstAnomalyRanking({ openRankingSheet: false });
+      } else if (queueAction?.dataset.queueAction === "load-ranking") {
+        void this.loadSavedAnomalyRanking();
+      } else if (queueAction?.dataset.queueAction === "check-ranking") {
+        void this.restoreSavedAnalyses();
       } else if (queueAction?.dataset.queueAction === "apply-ranking") {
         void this.applyCompletedIndividualQueueRanking();
       }
@@ -4027,6 +4036,7 @@ class MovementExampleApp {
       createdAt: "",
       user: "",
       loadedFromHistory: false,
+      restoreError: "",
     };
   }
 
@@ -4084,6 +4094,12 @@ class MovementExampleApp {
     const datasetId = this.currentDatasetId;
     const artifactName = this.currentArtifact;
     const controller = this.beginRequest("analysisHistory");
+    this.anomalyRanking = {
+      ...this.makeEmptyAnomalyRanking(),
+      status: "checking",
+    };
+    this.renderAnomalyRanking();
+    this.renderIndividuals();
     const params = new URLSearchParams({
       dataset_id: datasetId,
       logical_name: artifactName,
@@ -4114,9 +4130,19 @@ class MovementExampleApp {
       const restored = [];
       const tasks = [];
       if (ranking) {
-        tasks.push(this.restoreSavedAnomalyRanking(ranking, controller.signal).then(() => {
-          restored.push(`burst ranking from ${formatDateTime(ranking.created_at)}`);
-        }));
+        this.anomalyRanking = {
+          ...this.makeEmptyAnomalyRanking(),
+          analysisId: String(ranking.analysis_id || ""),
+          status: "available",
+          createdAt: String(ranking.created_at || ""),
+          user: String(ranking.user || ""),
+          loadedFromHistory: true,
+        };
+      } else {
+        this.anomalyRanking = {
+          ...this.makeEmptyAnomalyRanking(),
+          status: "unavailable",
+        };
       }
       if (featureSpace && MOVEMENT_APP_CONFIG.featureSpace) {
         tasks.push(this.restoreSavedBurstFeatureSpace(featureSpace, controller.signal).then(() => {
@@ -4140,9 +4166,23 @@ class MovementExampleApp {
       if (restored.length) {
         this.setStatus(`Restored saved ${restored.join(" and ")}.`);
       }
+      if (
+        ranking
+        && this.individualReviewQueue.mode === "browse"
+        && this.refs.sideSheetTabs?.dataset.activeSheet === "ranking"
+      ) {
+        void this.loadSavedAnomalyRanking();
+      }
     } catch (error) {
       if (!this.isAbortError(error)) {
         console.warn("Could not load saved movement analyses", error);
+        this.anomalyRanking = {
+          ...this.makeEmptyAnomalyRanking(),
+          status: "history_error",
+          restoreError: error.message,
+        };
+        this.renderAnomalyRanking();
+        this.renderIndividuals();
       }
     } finally {
       if (this.requestControllers.analysisHistory === controller) {
@@ -4151,23 +4191,84 @@ class MovementExampleApp {
     }
   }
 
-  async restoreSavedAnomalyRanking(item, signal) {
-    const analysisId = String(item?.analysis_id || "");
-    const artifact = await this.fetchJSON(
-      `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis/${encodeURIComponent(analysisId)}/artifact/burst_anomaly_ranking.json`,
-      { signal },
-    );
+  async loadSavedAnomalyRanking() {
+    if (!["available", "restore_error"].includes(this.anomalyRanking?.status)) {
+      return;
+    }
+    const metadata = { ...this.anomalyRanking };
+    const analysisId = String(metadata.analysisId || "");
+    if (!analysisId) {
+      return;
+    }
+    const familyName = this.currentFamily;
+    const studyName = this.currentStudy;
+    const datasetId = this.currentDatasetId;
+    const artifactName = this.currentArtifact;
+    const controller = this.beginRequest("anomalyRanking");
     this.anomalyRanking = {
-      analysisId,
-      status: String(artifact?.run_status || item?.summary?.run_status || "completed"),
-      rankedIndividuals: Array.isArray(artifact?.ranked_individuals) ? artifact.ranked_individuals : [],
-      warnings: Array.isArray(artifact?.warnings) ? artifact.warnings : [],
-      burstGap: artifact?.burst_gap || null,
-      modelFit: artifact?.model_fit || artifact?.scorer || null,
-      createdAt: String(item?.created_at || ""),
-      user: String(item?.user || ""),
-      loadedFromHistory: true,
+      ...metadata,
+      status: "restoring",
+      restoreError: "",
     };
+    this.renderAnomalyRanking();
+    this.renderIndividuals();
+    this.updateActionButtons();
+    try {
+      const artifact = await this.fetchJSON(
+        `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/analysis/${encodeURIComponent(analysisId)}/artifact/burst_anomaly_ranking.json`,
+        { signal: controller.signal },
+      );
+      if (
+        this.requestControllers.anomalyRanking !== controller
+        || familyName !== this.currentFamily
+        || studyName !== this.currentStudy
+        || datasetId !== this.currentDatasetId
+        || artifactName !== this.currentArtifact
+      ) {
+        return;
+      }
+      this.anomalyRanking = {
+        analysisId,
+        status: String(artifact?.run_status || "completed"),
+        rankedIndividuals: Array.isArray(artifact?.ranked_individuals) ? artifact.ranked_individuals : [],
+        warnings: Array.isArray(artifact?.warnings) ? artifact.warnings : [],
+        burstGap: artifact?.burst_gap || null,
+        modelFit: artifact?.model_fit || artifact?.scorer || null,
+        createdAt: String(metadata.createdAt || ""),
+        user: String(metadata.user || ""),
+        loadedFromHistory: true,
+        restoreError: "",
+      };
+      this.noteCompletedIndividualQueueRanking();
+      this.renderAnomalyRanking();
+      this.renderIndividuals();
+      this.updateActionButtons();
+      this.setStatus(
+        metadata.createdAt
+          ? `Loaded saved burst ranking from ${formatDateTime(metadata.createdAt)}.`
+          : "Loaded saved burst ranking.",
+      );
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return;
+      }
+      if (this.requestControllers.anomalyRanking === controller) {
+        this.anomalyRanking = {
+          ...metadata,
+          status: "restore_error",
+          restoreError: error.message,
+        };
+        this.renderAnomalyRanking();
+        this.renderIndividuals();
+        this.updateActionButtons();
+        this.setStatus(`Could not load the saved burst ranking: ${error.message}`, true);
+      }
+    } finally {
+      if (this.requestControllers.anomalyRanking === controller) {
+        this.requestControllers.anomalyRanking = null;
+        this.updateActionButtons();
+      }
+    }
   }
 
   async restoreSavedBurstFeatureSpace(item, signal) {
@@ -5041,7 +5142,11 @@ class MovementExampleApp {
       return;
     }
     const action = actionButton.dataset.action || "";
-    if (action === "zoom-ranking-burst") {
+    if (action === "load-saved-ranking") {
+      await this.loadSavedAnomalyRanking();
+    } else if (action === "check-saved-ranking") {
+      await this.restoreSavedAnalyses();
+    } else if (action === "zoom-ranking-burst") {
       await this.inspectRankingBurst(actionButton.dataset.burstId || "", { checkFixes: false });
     } else if (action === "check-ranking-burst") {
       await this.inspectRankingBurst(actionButton.dataset.burstId || "", { checkFixes: true });
@@ -5061,7 +5166,39 @@ class MovementExampleApp {
       return;
     }
     const result = this.anomalyRanking || this.makeEmptyAnomalyRanking();
-    if (result.status === "idle") {
+    if (result.status === "checking") {
+      this.refs.anomalyRanking.innerHTML = '<div class="movement-table-empty">Checking for a compatible saved burst ranking…</div>';
+      return;
+    }
+    if (result.status === "available") {
+      const created = result.createdAt
+        ? ` from ${formatDateTime(result.createdAt)}`
+        : "";
+      this.refs.anomalyRanking.innerHTML = (
+        `<div class="movement-table-empty">A compatible saved burst ranking${escapeHtml(created)} is available. `
+        + '<button type="button" data-action="load-saved-ranking">Load saved ranking</button></div>'
+      );
+      return;
+    }
+    if (result.status === "restoring") {
+      this.refs.anomalyRanking.innerHTML = '<div class="movement-table-empty">Loading saved burst ranking…</div>';
+      return;
+    }
+    if (result.status === "restore_error") {
+      this.refs.anomalyRanking.innerHTML = (
+        `<div class="movement-table-empty">The saved burst ranking could not be loaded: ${escapeHtml(result.restoreError || "unknown error")} `
+        + '<button type="button" data-action="load-saved-ranking">Retry loading</button></div>'
+      );
+      return;
+    }
+    if (result.status === "history_error") {
+      this.refs.anomalyRanking.innerHTML = (
+        `<div class="movement-table-empty">Could not check saved burst rankings: ${escapeHtml(result.restoreError || "unknown error")} `
+        + '<button type="button" data-action="check-saved-ranking">Try again</button></div>'
+      );
+      return;
+    }
+    if (result.status === "idle" || result.status === "unavailable") {
       this.refs.anomalyRanking.innerHTML = '<div class="movement-table-empty">Run burst ranking to prioritize individual review.</div>';
       return;
     }
@@ -5753,12 +5890,17 @@ class MovementExampleApp {
       this.initializeIndividualQueueDatasetSelection();
       const selectedIndividuals = this.getSelectedIndividuals();
       this.populateColorByOptions();
+      this.anomalyRanking = {
+        ...this.makeEmptyAnomalyRanking(),
+        status: "checking",
+      };
       this.renderIndividuals();
       this.renderSelectedFixes();
       this.renderLegend();
       this.renderThresholdPane();
       this.updateTimeLabel();
       this.hideOverlay();
+      void this.restoreSavedAnalyses();
       await this.rebuildMap(false);
       this.restoreDatasetMapView(viewContext);
       this.updateActionButtons();
@@ -5771,7 +5913,6 @@ class MovementExampleApp {
       if (this.refs.showConfirmed.checked) {
         void this.loadConfirmedFixes();
       }
-      void this.restoreSavedAnalyses();
     } catch (error) {
       if (this.isAbortError(error)) {
         return;
@@ -5925,12 +6066,17 @@ class MovementExampleApp {
       this.initializeIndividualQueueDatasetSelection();
       const selectedIndividuals = this.getSelectedIndividuals();
       this.populateColorByOptions();
+      this.anomalyRanking = {
+        ...this.makeEmptyAnomalyRanking(),
+        status: "checking",
+      };
       this.renderIndividuals();
       this.renderSelectedFixes();
       this.renderLegend();
       this.renderThresholdPane();
       this.updateTimeLabel();
       this.hideOverlay();
+      void this.restoreSavedAnalyses();
       await this.rebuildMap(false);
       this.restoreDatasetMapView(viewContext);
       this.updateActionButtons();
@@ -5943,7 +6089,6 @@ class MovementExampleApp {
       if (this.refs.showConfirmed.checked) {
         void this.loadConfirmedFixes();
       }
-      void this.restoreSavedAnalyses();
     } catch (error) {
       if (this.isAbortError(error) || requestId !== this.loadRequestId) {
         return;
@@ -6028,6 +6173,16 @@ class MovementExampleApp {
       && Boolean(this.anomalyRanking.analysisId)
       && Array.isArray(this.anomalyRanking.rankedIndividuals)
       && this.anomalyRanking.rankedIndividuals.length > 0
+    );
+  }
+
+  hasAvailableIndividualQueueRanking() {
+    return (
+      this.hasCompatibleIndividualQueueRanking()
+      || (
+        Boolean(this.anomalyRanking?.analysisId)
+        && ["available", "restoring", "restore_error"].includes(this.anomalyRanking?.status)
+      )
     );
   }
 
@@ -6459,10 +6614,15 @@ class MovementExampleApp {
 
   async changeIndividualQueueOrder(orderMode) {
     if (orderMode === "ranking" && !this.hasCompatibleIndividualQueueRanking()) {
-      this.individualReviewQueue.orderMode = "dataset";
-      this.refs.individualQueueOrder.value = "dataset";
-      this.renderIndividuals();
-      return;
+      if (["available", "restore_error"].includes(this.anomalyRanking?.status)) {
+        await this.loadSavedAnomalyRanking();
+      }
+      if (!this.hasCompatibleIndividualQueueRanking()) {
+        this.individualReviewQueue.orderMode = "dataset";
+        this.refs.individualQueueOrder.value = "dataset";
+        this.renderIndividuals();
+        return;
+      }
     }
     this.individualReviewQueue.orderMode = orderMode === "ranking" ? "ranking" : "dataset";
     if (this.individualReviewQueue.orderMode === "ranking") {
@@ -6509,10 +6669,45 @@ class MovementExampleApp {
       return;
     }
     target.classList.remove("error");
+    if (this.anomalyRanking?.status === "checking") {
+      target.innerHTML = (
+        '<span class="movement-queue-ranking-copy">Checking for a compatible saved burst ranking…</span>'
+        + '<button type="button" disabled>Checking…</button>'
+      );
+      return;
+    }
+    if (this.anomalyRanking?.status === "restoring") {
+      target.innerHTML = (
+        '<span class="movement-queue-ranking-copy">Loading the saved burst ranking. Dataset order will remain in use.</span>'
+        + '<button type="button" disabled>Loading…</button>'
+      );
+      return;
+    }
     if (this.anomalyRanking?.status === "loading") {
       target.innerHTML = (
         '<span class="movement-queue-ranking-copy">Burst ranking in progress. Dataset order will remain in use.</span>'
         + '<button type="button" disabled>Running…</button>'
+      );
+      return;
+    }
+    if (this.anomalyRanking?.status === "history_error") {
+      target.classList.add("error");
+      target.innerHTML = (
+        `<span class="movement-queue-ranking-copy" title="${escapeHtml(this.anomalyRanking.restoreError || "")}">Could not check saved burst rankings.</span>`
+        + '<button type="button" data-queue-action="check-ranking">Try again</button>'
+      );
+      return;
+    }
+    if (["available", "restore_error"].includes(this.anomalyRanking?.status)) {
+      const metadata = [
+        this.anomalyRanking.createdAt
+          ? `Saved ranking ${formatDateTime(this.anomalyRanking.createdAt)}`
+          : "Compatible saved ranking available",
+        this.burstGapLabel(),
+      ].filter(Boolean).join(" • ");
+      target.innerHTML = (
+        `<span class="movement-queue-ranking-copy" title="${escapeHtml(metadata)}">${escapeHtml(metadata)}</span>`
+        + `<button type="button" data-queue-action="load-ranking">${this.anomalyRanking.status === "restore_error" ? "Retry loading" : "Load ranking"}</button>`
       );
       return;
     }
@@ -6678,15 +6873,19 @@ class MovementExampleApp {
   renderIndividualReviewQueue() {
     const position = this.getIndividualQueuePosition();
     const queue = this.individualReviewQueue;
-    const rankingAvailable = this.hasCompatibleIndividualQueueRanking();
-    if (queue.orderMode === "ranking" && !rankingAvailable) {
+    const rankingLoaded = this.hasCompatibleIndividualQueueRanking();
+    const rankingAvailable = this.hasAvailableIndividualQueueRanking();
+    if (queue.orderMode === "ranking" && !rankingLoaded) {
       queue.orderMode = "dataset";
       queue.appliedRankingAnalysisId = "";
     }
     this.refs.individualQueueOrder.value = queue.orderMode;
     const rankingOption = this.refs.individualQueueOrder.querySelector('option[value="ranking"]');
     if (rankingOption) {
-      rankingOption.disabled = !rankingAvailable;
+      rankingOption.disabled = (
+        !rankingAvailable
+        || ["checking", "restoring", "loading"].includes(this.anomalyRanking?.status)
+      );
     }
     this.refs.individualHead.textContent = (
       `Individual review queue (${formatCount(position.ordered.length)})`
@@ -10352,7 +10551,9 @@ class MovementExampleApp {
     const canConfirmSelectedFixes = this.canConfirmFixes(selectedFixes);
     const suspiciousLoading = this.data?.suspiciousState === "loading";
     const candidatePreviewLoading = this.candidateQueryPreview?.status === "loading";
-    const anomalyRankingLoading = this.anomalyRanking?.status === "loading";
+    const anomalyRankingLoading = ["checking", "restoring", "loading"].includes(
+      this.anomalyRanking?.status,
+    );
     const burstFeatureSpaceLoading = this.burstFeatureSpace?.status === "loading";
     const returnedCandidateCount = this.getCandidateQueryReturnedMatchKeys().size;
     const selectedCandidateQuery = this.getSelectedCandidateQuery();
