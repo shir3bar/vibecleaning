@@ -181,6 +181,8 @@ const BASEMAP_PRESETS = {
 const PATH_ALPHA = 110;
 const POINT_ALPHA = 215;
 const STORAGE_VERSION = 5;
+const INDIVIDUAL_QUEUE_PAGE_SIZE = 25;
+const INDIVIDUAL_QUEUE_GROUP_SIZE = 5;
 const DEFAULT_BURST_GAP_MODE = "quantile";
 const DEFAULT_BURST_GAP_SECONDS = 3600;
 const DEFAULT_BURST_GAP_QUANTILE = 0.999;
@@ -371,6 +373,21 @@ class MovementExampleApp {
       active: false,
       pointerId: null,
     };
+    this.individualReviewQueue = {
+      mode: this.uiState.individualViewMode === "queue" ? "queue" : "browse",
+      orderMode: this.uiState.individualQueueOrder === "ranking" ? "ranking" : "dataset",
+      pageIndex: Math.max(0, Number(this.uiState.individualQueuePage) || 0),
+      groupIndex: 0,
+      activeIndividual: "",
+      mapScope: "group",
+      browseContext: null,
+      queueMapView: null,
+      stagedDecisions: new Map(),
+      skippedIndividuals: new Set(),
+      saving: false,
+      appliedRankingAnalysisId: "",
+      pendingRankingAnalysisId: "",
+    };
     this.handleWindowResize = () => this.handleLayoutResize();
     this.handleSidePanePointerMove = event => this.onSidePanePointerMove(event);
     this.handleSidePanePointerUp = event => this.onSidePanePointerUp(event);
@@ -435,6 +452,9 @@ class MovementExampleApp {
         tableFilter: "",
         sidePaneWidthPx: DEFAULT_SIDE_PANE_WIDTH_PX,
         individualListHeightPx: null,
+        individualViewMode: "browse",
+        individualQueueOrder: "dataset",
+        individualQueuePage: 0,
       };
     }
   }
@@ -462,6 +482,9 @@ class MovementExampleApp {
       tableFilter: this.refs.tableFilter?.value || "",
       sidePaneWidthPx: this.sidePaneWidthPx,
       individualListHeightPx: this.individualListHeightPx,
+      individualViewMode: this.individualReviewQueue?.mode || "browse",
+      individualQueueOrder: this.individualReviewQueue?.orderMode || "dataset",
+      individualQueuePage: this.individualReviewQueue?.pageIndex || 0,
     };
     localStorage.setItem(MOVEMENT_APP_CONFIG.storageKey, JSON.stringify(this.uiState));
   }
@@ -1857,6 +1880,97 @@ class MovementExampleApp {
           color: #e5edf7;
           font: inherit;
         }
+        .movement-individual-view-tabs,
+        .movement-queue-nav,
+        .movement-queue-map-controls,
+        .movement-queue-review-actions {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 6px;
+        }
+        .movement-individual-view-tabs button,
+        .movement-queue-controls button,
+        .movement-queue-controls select,
+        .movement-queue-review-actions button,
+        .movement-queue-review-comment {
+          min-width: 0;
+          padding: 6px 8px;
+          border: 1px solid rgba(255, 255, 255, 0.09);
+          border-radius: 8px;
+          background: rgba(15, 23, 42, 0.82);
+          color: #dbe7f3;
+          font: inherit;
+          font-size: 11px;
+        }
+        .movement-individual-view-tabs button,
+        .movement-queue-controls button,
+        .movement-queue-review-actions button {
+          cursor: pointer;
+        }
+        .movement-individual-view-tabs button.is-active,
+        .movement-queue-map-controls button.is-active {
+          border-color: rgba(67, 206, 162, 0.46);
+          background: rgba(67, 206, 162, 0.2);
+          color: #d8fff3;
+        }
+        .movement-queue-controls {
+          display: grid;
+          gap: 7px;
+        }
+        .movement-queue-order {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr);
+          align-items: center;
+          gap: 7px;
+          color: #9bb0c6;
+          font-size: 11px;
+        }
+        .movement-queue-ranking-state,
+        .movement-queue-progress {
+          color: #9bb0c6;
+          font-size: 11px;
+          line-height: 1.4;
+        }
+        .movement-queue-ranking-state.error {
+          color: #f9c98b;
+        }
+        .movement-queue-review-comment {
+          width: 100%;
+        }
+        .movement-queue-review-actions button[data-review-ok="true"] {
+          background: rgba(67, 206, 162, 0.2);
+          color: #d8fff3;
+        }
+        .movement-queue-review-actions button[data-review-ok="false"] {
+          background: rgba(245, 181, 54, 0.16);
+          color: #ffe7a6;
+        }
+        .movement-queue-review-actions button:disabled,
+        .movement-queue-controls button:disabled {
+          cursor: not-allowed;
+          opacity: 0.45;
+        }
+        .movement-card.queue-active {
+          border-color: rgba(125, 211, 252, 0.74);
+          box-shadow: inset 3px 0 0 #7dd3fc;
+        }
+        .movement-review-state {
+          padding: 3px 6px;
+          border-radius: 999px;
+          background: rgba(148, 163, 184, 0.12);
+          color: #b7c6d6;
+          font-size: 10px;
+          white-space: nowrap;
+        }
+        .movement-review-state.ok {
+          background: rgba(67, 206, 162, 0.14);
+          color: #b9f6e4;
+        }
+        .movement-review-state.issues {
+          background: rgba(245, 181, 54, 0.14);
+          color: #ffe2a1;
+        }
         .movement-table-toolbar {
           display: grid;
           gap: 10px;
@@ -2311,9 +2425,43 @@ class MovementExampleApp {
               <div class="movement-side-sheet individuals" data-role="side-sheet-individuals">
                 <div class="movement-side-head" data-role="individual-head">Individuals and coverage</div>
                 <div class="movement-side-search">
+                  <div class="movement-individual-view-tabs">
+                    <button type="button" data-role="individual-view-browse">Browse all</button>
+                    <button type="button" data-role="individual-view-queue">Review queue</button>
+                  </div>
                   <label>Search by individual ID
                     <input type="search" data-role="individual-search" placeholder="Find an individual ID">
                   </label>
+                  <div class="movement-queue-controls hidden" data-role="individual-queue-controls">
+                    <label class="movement-queue-order">Review order
+                      <select data-role="individual-queue-order">
+                        <option value="dataset">Dataset order</option>
+                        <option value="ranking">Burst ranking</option>
+                      </select>
+                    </label>
+                    <div class="movement-queue-ranking-state" data-role="individual-queue-ranking-state"></div>
+                    <div class="movement-queue-nav">
+                      <button type="button" data-queue-nav="previous-page">Previous 25</button>
+                      <button type="button" data-queue-nav="previous-group">Previous 5</button>
+                      <button type="button" data-queue-nav="previous-individual">Previous</button>
+                      <button type="button" data-queue-nav="next-individual">Next</button>
+                      <button type="button" data-queue-nav="next-group">Next 5</button>
+                      <button type="button" data-queue-nav="next-page">Next 25</button>
+                    </div>
+                    <div class="movement-queue-map-controls">
+                      <button type="button" data-queue-scope="solo">Solo current</button>
+                      <button type="button" data-queue-scope="group">Show group of five</button>
+                      <button type="button" data-queue-scope="all">All individuals</button>
+                    </div>
+                    <div class="movement-queue-progress" data-role="individual-queue-progress"></div>
+                    <input class="movement-queue-review-comment" data-role="individual-queue-comment" placeholder="Optional review comment">
+                    <div class="movement-queue-review-actions">
+                      <button type="button" data-review-ok="true">Reviewed—OK</button>
+                      <button type="button" data-review-ok="false">Reviewed—issues found</button>
+                      <button type="button" data-role="individual-queue-skip">Skip</button>
+                      <button type="button" data-role="individual-queue-save">Save page</button>
+                    </div>
+                  </div>
                 </div>
                 <div class="movement-individuals" data-role="individuals"></div>
                 <div
@@ -2557,6 +2705,15 @@ class MovementExampleApp {
       sideSheetFeatureSpace: this.mountEl.querySelector('[data-role="side-sheet-feature-space"]'),
       sideResize: this.mountEl.querySelector('[data-role="side-resize"]'),
       individualSearch: this.mountEl.querySelector('[data-role="individual-search"]'),
+      individualViewBrowse: this.mountEl.querySelector('[data-role="individual-view-browse"]'),
+      individualViewQueue: this.mountEl.querySelector('[data-role="individual-view-queue"]'),
+      individualQueueControls: this.mountEl.querySelector('[data-role="individual-queue-controls"]'),
+      individualQueueOrder: this.mountEl.querySelector('[data-role="individual-queue-order"]'),
+      individualQueueRankingState: this.mountEl.querySelector('[data-role="individual-queue-ranking-state"]'),
+      individualQueueProgress: this.mountEl.querySelector('[data-role="individual-queue-progress"]'),
+      individualQueueComment: this.mountEl.querySelector('[data-role="individual-queue-comment"]'),
+      individualQueueSkip: this.mountEl.querySelector('[data-role="individual-queue-skip"]'),
+      individualQueueSave: this.mountEl.querySelector('[data-role="individual-queue-save"]'),
       individuals: this.mountEl.querySelector('[data-role="individuals"]'),
       individualResize: this.mountEl.querySelector('[data-role="individual-resize"]'),
       individualHead: this.mountEl.querySelector('[data-role="individual-head"]'),
@@ -2669,6 +2826,7 @@ class MovementExampleApp {
     this.refs.tableSortDirection.dataset.direction = this.uiState.tableDescending ? "desc" : "asc";
     this.refs.tableSortDirection.textContent = this.uiState.tableDescending ? "Descending" : "Ascending";
     this.refs.individualSearch.value = this.individualSearchQuery;
+    this.refs.individualQueueOrder.value = this.individualReviewQueue.orderMode;
     this.applySidePaneWidth(this.sidePaneWidthPx, { save: false, resizeMap: false });
     if (this.individualListHeightPx !== null) {
       this.applyIndividualListHeight(this.individualListHeightPx, { save: false });
@@ -2687,14 +2845,63 @@ class MovementExampleApp {
     this.refs.sideTabFeatureSpace.addEventListener("click", () => this.setSideSheet("feature_space"));
     this.refs.individualSearch.addEventListener("input", () => {
       this.individualSearchQuery = this.refs.individualSearch.value || "";
+      this.individualReviewQueue.pageIndex = 0;
+      this.individualReviewQueue.groupIndex = 0;
+      this.individualReviewQueue.activeIndividual = "";
       this.renderIndividuals();
+      if (this.individualReviewQueue.mode === "queue") {
+        void this.applyIndividualQueueMapScope({ zoom: false });
+      }
+    });
+    this.refs.individualViewBrowse.addEventListener("click", () => {
+      void this.setIndividualViewMode("browse");
+    });
+    this.refs.individualViewQueue.addEventListener("click", () => {
+      void this.setIndividualViewMode("queue");
+    });
+    this.refs.individualQueueOrder.addEventListener("change", () => {
+      void this.changeIndividualQueueOrder(this.refs.individualQueueOrder.value);
+    });
+    this.refs.individualQueueControls.addEventListener("click", event => {
+      const navButton = event.target.closest("button[data-queue-nav]");
+      if (navButton) {
+        void this.navigateIndividualQueue(navButton.dataset.queueNav || "");
+        return;
+      }
+      const scopeButton = event.target.closest("button[data-queue-scope]");
+      if (scopeButton) {
+        void this.setIndividualQueueMapScope(scopeButton.dataset.queueScope || "group");
+        return;
+      }
+      const reviewButton = event.target.closest("button[data-review-ok]");
+      if (reviewButton) {
+        void this.stageIndividualReviewDecision(reviewButton.dataset.reviewOk === "true");
+        return;
+      }
+      const queueAction = event.target.closest("button[data-queue-action]");
+      if (queueAction?.dataset.queueAction === "run-ranking") {
+        void this.runBurstAnomalyRanking({ openRankingSheet: false });
+      } else if (queueAction?.dataset.queueAction === "apply-ranking") {
+        void this.applyCompletedIndividualQueueRanking();
+      }
+    });
+    this.refs.individualQueueSkip.addEventListener("click", () => {
+      void this.skipIndividualQueueItem();
+    });
+    this.refs.individualQueueSave.addEventListener("click", () => {
+      void this.flushIndividualReviewDecisions();
     });
     this.refs.sideResize.addEventListener("pointerdown", event => this.beginSidePaneResize(event));
     this.refs.individualResize.addEventListener("pointerdown", event => this.beginIndividualPaneResize(event));
     this.refs.individualResize.addEventListener("keydown", event => this.resizeIndividualPaneFromKeyboard(event));
     this.refs.family.addEventListener("change", async () => {
+      const nextFamily = this.refs.family.value;
       try {
-        await this.switchFamily(this.refs.family.value);
+        if (!(await this.flushIndividualReviewDecisions())) {
+          this.refs.family.value = this.currentFamily;
+          return;
+        }
+        await this.switchFamily(nextFamily);
       } catch (error) {
         console.error("Failed to switch movement family", error);
         this.setStatus(`Could not switch family: ${error.message}`, true);
@@ -2702,8 +2909,13 @@ class MovementExampleApp {
       }
     });
     this.refs.study.addEventListener("change", async () => {
+      const nextStudy = this.refs.study.value;
       try {
-        this.currentStudy = this.refs.study.value;
+        if (!(await this.flushIndividualReviewDecisions())) {
+          this.refs.study.value = this.currentStudy;
+          return;
+        }
+        this.currentStudy = nextStudy;
         this.currentDatasetId = "";
         this.currentArtifact = "";
         this.currentDataset = null;
@@ -2716,12 +2928,22 @@ class MovementExampleApp {
       }
     });
     this.refs.dataset.addEventListener("change", async () => {
-      this.currentDatasetId = this.refs.dataset.value;
+      const nextDatasetId = this.refs.dataset.value;
+      if (!(await this.flushIndividualReviewDecisions())) {
+        this.refs.dataset.value = this.currentDatasetId;
+        return;
+      }
+      this.currentDatasetId = nextDatasetId;
       await this.loadDataset();
     });
     this.refs.artifact.addEventListener("change", async () => {
+      const nextArtifact = this.refs.artifact.value;
+      if (!(await this.flushIndividualReviewDecisions())) {
+        this.refs.artifact.value = this.currentArtifact;
+        return;
+      }
       const viewContext = this.captureDatasetViewContext();
-      this.currentArtifact = this.refs.artifact.value;
+      this.currentArtifact = nextArtifact;
       this.saveUiState();
       if (!this.currentArtifact) {
         this.clearLoadedStudyState();
@@ -3518,8 +3740,16 @@ class MovementExampleApp {
     this.cancelRequest("anomalyRanking");
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
     this.focusedRankingBurst = null;
+    if (this.individualReviewQueue) {
+      this.individualReviewQueue.appliedRankingAnalysisId = "";
+      this.individualReviewQueue.pendingRankingAnalysisId = "";
+      if (this.individualReviewQueue.orderMode === "ranking") {
+        this.individualReviewQueue.orderMode = "dataset";
+      }
+    }
     if (render && this.refs) {
       this.renderAnomalyRanking();
+      this.renderIndividuals();
       this.renderLayers();
       this.updateActionButtons();
     }
@@ -3610,6 +3840,8 @@ class MovementExampleApp {
       }
       this.renderAnomalyRanking();
       this.renderBurstFeatureSpace();
+      this.noteCompletedIndividualQueueRanking();
+      this.renderIndividuals();
       this.updateActionButtons();
       if (restored.length) {
         this.setStatus(`Restored saved ${restored.join(" and ")}.`);
@@ -3667,7 +3899,7 @@ class MovementExampleApp {
     };
   }
 
-  async runBurstAnomalyRanking() {
+  async runBurstAnomalyRanking({ openRankingSheet = true } = {}) {
     if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
       return;
     }
@@ -3679,6 +3911,7 @@ class MovementExampleApp {
     const featureSet = this.getAnomalyFeatureSet();
     const featureSetLabel = this.anomalyFeatureSetLabel(featureSet);
     this.renderAnomalyRanking();
+    this.renderIndividuals();
     this.updateActionButtons();
     this.setStatus(`Running burst anomaly ranking analysis (${featureSetLabel})...`);
     try {
@@ -3700,7 +3933,9 @@ class MovementExampleApp {
       );
       const jobId = String(result?.job_id || "");
       if (jobId) {
-        this.setSideSheet("ranking");
+        if (openRankingSheet) {
+          this.setSideSheet("ranking");
+        }
         this.setStatus(
           `Burst anomaly ranking started in the background (${featureSetLabel}). You can keep using the map while it runs.`,
         );
@@ -3721,8 +3956,12 @@ class MovementExampleApp {
         user: String(result?.analysis?.user || ""),
         loadedFromHistory: false,
       };
-      this.setSideSheet("ranking");
+      if (openRankingSheet) {
+        this.setSideSheet("ranking");
+      }
+      this.noteCompletedIndividualQueueRanking();
       this.renderAnomalyRanking();
+      this.renderIndividuals();
       this.updateActionButtons();
       const count = formatCount(this.anomalyRanking.rankedIndividuals.length);
       if (this.anomalyRanking.status === "unresolved") {
@@ -3742,6 +3981,7 @@ class MovementExampleApp {
           warnings: [error.message],
         };
         this.renderAnomalyRanking();
+        this.renderIndividuals();
         this.updateActionButtons();
         this.setStatus(`Burst anomaly ranking failed: ${error.message}`, true);
       }
@@ -5066,6 +5306,7 @@ class MovementExampleApp {
       this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
       this.syncAnomalyFeatureSetOptions({ save: false });
       const preservedFixKeys = this.initializeDatasetView(viewContext);
+      this.initializeIndividualQueueDatasetSelection();
       const selectedIndividuals = this.getSelectedIndividuals();
       this.populateColorByOptions();
       this.renderIndividuals();
@@ -5236,6 +5477,7 @@ class MovementExampleApp {
       this.syncAnomalyFeatureSetOptions({ save: false });
       this.renderBurstCountIndicator();
       const preservedFixKeys = this.initializeDatasetView(viewContext);
+      this.initializeIndividualQueueDatasetSelection();
       const selectedIndividuals = this.getSelectedIndividuals();
       this.populateColorByOptions();
       this.renderIndividuals();
@@ -5288,9 +5530,499 @@ class MovementExampleApp {
     this.saveUiState();
   }
 
+  initializeIndividualQueueDatasetSelection() {
+    if (!this.data || this.individualReviewQueue.mode !== "queue") {
+      return;
+    }
+    const available = new Set(this.data.individuals);
+    if (!available.has(this.individualReviewQueue.activeIndividual)) {
+      this.individualReviewQueue.activeIndividual = "";
+    }
+    this.data.selectedIndividuals = new Set(this.getIndividualQueueMapIndividuals());
+  }
+
+  captureCurrentMapView() {
+    if (!this.map) {
+      return null;
+    }
+    try {
+      const center = this.map.getCenter();
+      return {
+        center: [center.lng, center.lat],
+        zoom: this.map.getZoom(),
+        bearing: this.map.getBearing(),
+        pitch: this.map.getPitch(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  getIndividualReviewState(individual) {
+    const staged = this.individualReviewQueue.stagedDecisions.get(individual);
+    if (staged) {
+      return {
+        reviewed: true,
+        reviewOk: staged.review_ok,
+        comment: staged.comment || "",
+        staged: true,
+      };
+    }
+    const stats = this.data?.stats?.[individual] || {};
+    return {
+      reviewed: stats.reviewed === true,
+      reviewOk: stats.reviewOk === true,
+      comment: stats.reviewComment || "",
+      staged: false,
+    };
+  }
+
+  hasCompatibleIndividualQueueRanking() {
+    return (
+      this.anomalyRanking?.status === "completed"
+      && Boolean(this.anomalyRanking.analysisId)
+      && Array.isArray(this.anomalyRanking.rankedIndividuals)
+      && this.anomalyRanking.rankedIndividuals.length > 0
+    );
+  }
+
+  getIndividualQueueOrder() {
+    const individuals = this.getFilteredIndividuals();
+    const datasetIndex = new Map(this.data?.individuals?.map((individual, index) => [individual, index]) || []);
+    const rankingIndex = new Map(
+      (this.anomalyRanking?.rankedIndividuals || [])
+        .map((row, index) => [String(row?.individual || ""), Number(row?.rank) || index + 1]),
+    );
+    const useRanking = (
+      this.individualReviewQueue.orderMode === "ranking"
+      && this.hasCompatibleIndividualQueueRanking()
+      && this.individualReviewQueue.appliedRankingAnalysisId === this.anomalyRanking.analysisId
+    );
+    return [...individuals].sort((left, right) => {
+      const leftReviewGroup = this.data?.stats?.[left]?.reviewed === true ? 1 : 0;
+      const rightReviewGroup = this.data?.stats?.[right]?.reviewed === true ? 1 : 0;
+      if (leftReviewGroup !== rightReviewGroup) {
+        return leftReviewGroup - rightReviewGroup;
+      }
+      if (useRanking) {
+        const leftRank = rankingIndex.get(left) ?? Number.MAX_SAFE_INTEGER;
+        const rightRank = rankingIndex.get(right) ?? Number.MAX_SAFE_INTEGER;
+        if (leftRank !== rightRank) {
+          return leftRank - rightRank;
+        }
+      }
+      return (datasetIndex.get(left) ?? Number.MAX_SAFE_INTEGER)
+        - (datasetIndex.get(right) ?? Number.MAX_SAFE_INTEGER)
+        || left.localeCompare(right);
+    });
+  }
+
+  getIndividualQueuePosition() {
+    const ordered = this.getIndividualQueueOrder();
+    const pageCount = Math.max(1, Math.ceil(ordered.length / INDIVIDUAL_QUEUE_PAGE_SIZE));
+    this.individualReviewQueue.pageIndex = clamp(
+      this.individualReviewQueue.pageIndex,
+      0,
+      pageCount - 1,
+    );
+    const pageStart = this.individualReviewQueue.pageIndex * INDIVIDUAL_QUEUE_PAGE_SIZE;
+    const page = ordered.slice(pageStart, pageStart + INDIVIDUAL_QUEUE_PAGE_SIZE);
+    const groupCount = Math.max(1, Math.ceil(page.length / INDIVIDUAL_QUEUE_GROUP_SIZE));
+    this.individualReviewQueue.groupIndex = clamp(
+      this.individualReviewQueue.groupIndex,
+      0,
+      groupCount - 1,
+    );
+    const groupStart = this.individualReviewQueue.groupIndex * INDIVIDUAL_QUEUE_GROUP_SIZE;
+    const group = page.slice(groupStart, groupStart + INDIVIDUAL_QUEUE_GROUP_SIZE);
+    if (!page.includes(this.individualReviewQueue.activeIndividual)) {
+      this.individualReviewQueue.activeIndividual = group[0] || page[0] || "";
+    } else {
+      const activePageIndex = page.indexOf(this.individualReviewQueue.activeIndividual);
+      this.individualReviewQueue.groupIndex = Math.floor(
+        activePageIndex / INDIVIDUAL_QUEUE_GROUP_SIZE,
+      );
+    }
+    const activeIndex = ordered.indexOf(this.individualReviewQueue.activeIndividual);
+    return {
+      ordered,
+      page,
+      group: page.slice(
+        this.individualReviewQueue.groupIndex * INDIVIDUAL_QUEUE_GROUP_SIZE,
+        (this.individualReviewQueue.groupIndex + 1) * INDIVIDUAL_QUEUE_GROUP_SIZE,
+      ),
+      pageCount,
+      groupCount,
+      activeIndex,
+    };
+  }
+
+  async setIndividualViewMode(mode) {
+    const nextMode = mode === "queue" ? "queue" : "browse";
+    const queue = this.individualReviewQueue;
+    if (queue.mode === nextMode || !this.data) {
+      return;
+    }
+    if (nextMode === "queue") {
+      queue.browseContext = this.captureDatasetViewContext();
+      queue.mode = "queue";
+      queue.activeIndividual = "";
+      queue.mapScope = "group";
+      this.renderIndividuals();
+      await this.applyIndividualQueueMapScope({ zoom: !queue.queueMapView });
+      if (queue.queueMapView && this.map) {
+        this.map.jumpTo(queue.queueMapView);
+      }
+    } else {
+      queue.queueMapView = this.captureCurrentMapView();
+      queue.mode = "browse";
+      const context = queue.browseContext;
+      if (context) {
+        const available = new Set(this.data.individuals);
+        this.data.selectedIndividuals = new Set(
+          (context.selectedIndividuals || []).filter(individual => available.has(individual)),
+        );
+        this.data.selectedFixKeys = new Set(context.selectedFixKeys || []);
+        this.currentTimeMs = clamp(
+          Number(context.currentTimeMs) || this.data.minTimeMs,
+          this.data.minTimeMs,
+          this.data.maxTimeMs,
+        );
+        this.refs.slider.value = String(this.currentTimeMs);
+        this.updateTimeLabel();
+      }
+      this.renderIndividuals();
+      this.renderSelectedFixes();
+      this.renderThresholdPane();
+      this.renderLayers();
+      await this.loadDetailForCurrentSelection();
+      if (context?.mapView && this.map) {
+        this.map.jumpTo(context.mapView);
+      }
+    }
+    this.saveUiState();
+  }
+
+  getIndividualQueueMapIndividuals() {
+    const position = this.getIndividualQueuePosition();
+    if (this.individualReviewQueue.mapScope === "all") {
+      return [...this.data.individuals];
+    }
+    if (this.individualReviewQueue.mapScope === "solo") {
+      return this.individualReviewQueue.activeIndividual
+        ? [this.individualReviewQueue.activeIndividual]
+        : [];
+    }
+    return position.group;
+  }
+
+  async applyIndividualQueueMapScope({ zoom = true } = {}) {
+    if (!this.data || this.individualReviewQueue.mode !== "queue") {
+      return;
+    }
+    const individuals = this.getIndividualQueueMapIndividuals();
+    this.data.selectedIndividuals = new Set(individuals);
+    this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(
+      this.data.selectedFixKeys,
+      individuals,
+    );
+    this.renderIndividuals();
+    this.renderSelectedFixes();
+    this.renderThresholdPane();
+    this.renderLayers();
+    this.updateActionButtons();
+    await this.loadDetailForCurrentSelection();
+    if (zoom) {
+      this.zoomToIndividualQueueActive();
+    }
+  }
+
+  async setIndividualQueueMapScope(scope) {
+    if (!["solo", "group", "all"].includes(scope)) {
+      return;
+    }
+    this.individualReviewQueue.mapScope = scope;
+    await this.applyIndividualQueueMapScope();
+  }
+
+  zoomToIndividualQueueActive() {
+    const individual = this.individualReviewQueue.activeIndividual;
+    if (!individual || !this.data) {
+      return;
+    }
+    const path = this.data.fixes
+      .filter(fix => fix.individual === individual)
+      .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey))
+      .map(fix => fix.position);
+    if (path.length) {
+      this.zoomToPath(path);
+      return;
+    }
+    const fallback = Object.values(this.data.seriesByIndividual[individual] || {})
+      .flatMap(series => series.positions || []);
+    this.zoomToPath(fallback);
+  }
+
+  async focusIndividualQueueItem(individual, { zoom = true } = {}) {
+    if (!this.data || !individual) {
+      return;
+    }
+    const previousGroup = this.getIndividualQueuePosition().group.join("\u0000");
+    const ordered = this.getIndividualQueueOrder();
+    const orderedIndex = ordered.indexOf(individual);
+    if (orderedIndex < 0) {
+      return;
+    }
+    this.individualReviewQueue.pageIndex = Math.floor(
+      orderedIndex / INDIVIDUAL_QUEUE_PAGE_SIZE,
+    );
+    const pageOffset = orderedIndex % INDIVIDUAL_QUEUE_PAGE_SIZE;
+    this.individualReviewQueue.groupIndex = Math.floor(
+      pageOffset / INDIVIDUAL_QUEUE_GROUP_SIZE,
+    );
+    this.individualReviewQueue.activeIndividual = individual;
+    const position = this.getIndividualQueuePosition();
+    const nextGroup = position.group.join("\u0000");
+    this.refs.individualQueueComment.value = this.getIndividualReviewState(individual).comment || "";
+    if (
+      this.individualReviewQueue.mapScope === "solo"
+      || (this.individualReviewQueue.mapScope === "group" && previousGroup !== nextGroup)
+    ) {
+      await this.applyIndividualQueueMapScope({ zoom });
+      return;
+    }
+    this.renderIndividuals();
+    this.renderLayers();
+    if (zoom) {
+      this.zoomToIndividualQueueActive();
+    }
+  }
+
+  async navigateIndividualQueue(action) {
+    if (!this.data || this.individualReviewQueue.mode !== "queue") {
+      return;
+    }
+    let position = this.getIndividualQueuePosition();
+    if (action === "previous-page" || action === "next-page") {
+      if (!(await this.flushIndividualReviewDecisions())) {
+        return;
+      }
+      position = this.getIndividualQueuePosition();
+      const direction = action === "next-page" ? 1 : -1;
+      this.individualReviewQueue.pageIndex = clamp(
+        this.individualReviewQueue.pageIndex + direction,
+        0,
+        position.pageCount - 1,
+      );
+      this.individualReviewQueue.groupIndex = 0;
+      this.individualReviewQueue.activeIndividual = "";
+      await this.applyIndividualQueueMapScope();
+      this.saveUiState();
+      return;
+    }
+    if (action === "previous-group" || action === "next-group") {
+      const direction = action === "next-group" ? 1 : -1;
+      const nextGroupIndex = clamp(
+        this.individualReviewQueue.groupIndex + direction,
+        0,
+        position.groupCount - 1,
+      );
+      const target = position.page[nextGroupIndex * INDIVIDUAL_QUEUE_GROUP_SIZE]
+        || position.page[0];
+      await this.focusIndividualQueueItem(target);
+      return;
+    }
+    const direction = action === "next-individual" ? 1 : -1;
+    const pageIndex = position.page.indexOf(this.individualReviewQueue.activeIndividual);
+    const nextPageIndex = clamp(pageIndex + direction, 0, Math.max(0, position.page.length - 1));
+    await this.focusIndividualQueueItem(position.page[nextPageIndex]);
+  }
+
+  async stageIndividualReviewDecision(reviewOk) {
+    const individual = this.individualReviewQueue.activeIndividual;
+    if (!individual) {
+      return;
+    }
+    const position = this.getIndividualQueuePosition();
+    const currentIndex = position.page.indexOf(individual);
+    const nextIndividual = position.page[currentIndex + 1] || "";
+    this.individualReviewQueue.stagedDecisions.set(individual, {
+      individual,
+      review_ok: reviewOk,
+      comment: this.refs.individualQueueComment.value.trim(),
+    });
+    this.individualReviewQueue.skippedIndividuals.delete(individual);
+    this.refs.individualQueueComment.value = "";
+    this.renderIndividuals();
+    if (nextIndividual && nextIndividual !== individual) {
+      await this.focusIndividualQueueItem(nextIndividual);
+    }
+  }
+
+  async skipIndividualQueueItem() {
+    const individual = this.individualReviewQueue.activeIndividual;
+    if (!individual) {
+      return;
+    }
+    const position = this.getIndividualQueuePosition();
+    const currentIndex = position.page.indexOf(individual);
+    const nextIndividual = position.page[currentIndex + 1] || "";
+    this.individualReviewQueue.skippedIndividuals.add(individual);
+    this.renderIndividuals();
+    if (nextIndividual && nextIndividual !== individual) {
+      await this.focusIndividualQueueItem(nextIndividual);
+    }
+  }
+
+  async flushIndividualReviewDecisions() {
+    const queue = this.individualReviewQueue;
+    if (!queue.stagedDecisions.size) {
+      return true;
+    }
+    if (queue.saving || !this.currentArtifact) {
+      return false;
+    }
+    queue.saving = true;
+    this.renderIndividuals();
+    const decisions = [...queue.stagedDecisions.values()];
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/review-individuals`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            decisions,
+            user: this.getUser() || "reviewer",
+          }),
+        },
+      );
+      queue.stagedDecisions.clear();
+      await this.loadStudyAtDataset(result.dataset.dataset_id);
+      this.setStatus(
+        `Saved ${formatCount(decisions.length)} individual review decision(s) in one annotation step.`,
+      );
+      return true;
+    } catch (error) {
+      this.setStatus(`Could not save individual reviews: ${error.message}`, true);
+      return false;
+    } finally {
+      queue.saving = false;
+      this.renderIndividuals();
+    }
+  }
+
+  async changeIndividualQueueOrder(orderMode) {
+    if (orderMode === "ranking" && !this.hasCompatibleIndividualQueueRanking()) {
+      this.individualReviewQueue.orderMode = "dataset";
+      this.refs.individualQueueOrder.value = "dataset";
+      this.renderIndividuals();
+      return;
+    }
+    this.individualReviewQueue.orderMode = orderMode === "ranking" ? "ranking" : "dataset";
+    if (this.individualReviewQueue.orderMode === "ranking") {
+      this.individualReviewQueue.appliedRankingAnalysisId = this.anomalyRanking.analysisId;
+      this.individualReviewQueue.pendingRankingAnalysisId = "";
+    }
+    this.individualReviewQueue.pageIndex = 0;
+    this.individualReviewQueue.groupIndex = 0;
+    this.individualReviewQueue.activeIndividual = "";
+    this.saveUiState();
+    await this.applyIndividualQueueMapScope();
+  }
+
+  noteCompletedIndividualQueueRanking() {
+    if (!this.hasCompatibleIndividualQueueRanking()) {
+      return;
+    }
+    const queue = this.individualReviewQueue;
+    if (queue.appliedRankingAnalysisId !== this.anomalyRanking.analysisId) {
+      queue.pendingRankingAnalysisId = this.anomalyRanking.analysisId;
+      if (queue.orderMode === "ranking") {
+        queue.orderMode = "dataset";
+      }
+    }
+  }
+
+  async applyCompletedIndividualQueueRanking() {
+    if (!this.hasCompatibleIndividualQueueRanking()) {
+      return;
+    }
+    this.individualReviewQueue.orderMode = "ranking";
+    this.individualReviewQueue.appliedRankingAnalysisId = this.anomalyRanking.analysisId;
+    this.individualReviewQueue.pendingRankingAnalysisId = "";
+    this.individualReviewQueue.pageIndex = 0;
+    this.individualReviewQueue.groupIndex = 0;
+    this.individualReviewQueue.activeIndividual = "";
+    this.saveUiState();
+    await this.applyIndividualQueueMapScope();
+  }
+
+  renderIndividualQueueRankingState() {
+    const target = this.refs.individualQueueRankingState;
+    if (!target) {
+      return;
+    }
+    target.classList.remove("error");
+    if (this.anomalyRanking?.status === "loading") {
+      target.innerHTML = (
+        "Burst ranking in progress. Dataset order will remain in use. "
+        + '<button type="button" disabled>Running…</button>'
+      );
+      return;
+    }
+    if (!this.hasCompatibleIndividualQueueRanking()) {
+      target.classList.add("error");
+      target.innerHTML = (
+        "No compatible burst ranking is available for this dataset version and burst definition. "
+        + '<button type="button" data-queue-action="run-ranking">Run burst ranking</button>'
+      );
+      return;
+    }
+    const burstSettings = this.anomalyRanking.burstGap
+      ? formatBurstGapMetadata(parseMovementBurstGap({ burst_gap: this.anomalyRanking.burstGap }))
+      : this.burstGapLabel();
+    const metadata = [
+      this.anomalyRanking.createdAt
+        ? `Created ${formatDateTime(this.anomalyRanking.createdAt)}`
+        : "Compatible ranking available",
+      burstSettings ? `bursts: ${burstSettings}` : "",
+      this.anomalyRanking.modelFit?.feature_set
+        ? `features: ${String(this.anomalyRanking.modelFit.feature_set).replaceAll("_", " ")}`
+        : "",
+    ].filter(Boolean).join(" • ");
+    const needsApply = (
+      this.individualReviewQueue.appliedRankingAnalysisId
+      !== this.anomalyRanking.analysisId
+    );
+    target.innerHTML = (
+      `${escapeHtml(metadata)} `
+      + (needsApply
+        ? '<button type="button" data-queue-action="apply-ranking">Apply completed ranking</button>'
+        : "")
+    );
+  }
+
   renderIndividuals() {
     this.refs.individuals.innerHTML = "";
+    this.refs.individualViewBrowse.classList.toggle(
+      "is-active",
+      this.individualReviewQueue.mode === "browse",
+    );
+    this.refs.individualViewQueue.classList.toggle(
+      "is-active",
+      this.individualReviewQueue.mode === "queue",
+    );
+    this.refs.individualQueueControls.classList.toggle(
+      "hidden",
+      this.individualReviewQueue.mode !== "queue",
+    );
     if (!this.data) {
+      return;
+    }
+    if (this.individualReviewQueue.mode === "queue") {
+      this.renderIndividualReviewQueue();
       return;
     }
     const filteredIndividuals = this.getFilteredIndividuals();
@@ -5382,6 +6114,103 @@ class MovementExampleApp {
         this.toggleIndividual(individual, !isSelected);
       });
       this.refs.individuals.appendChild(card);
+    }
+  }
+
+  renderIndividualReviewQueue() {
+    const position = this.getIndividualQueuePosition();
+    const queue = this.individualReviewQueue;
+    const rankingAvailable = this.hasCompatibleIndividualQueueRanking();
+    if (queue.orderMode === "ranking" && !rankingAvailable) {
+      queue.orderMode = "dataset";
+      queue.appliedRankingAnalysisId = "";
+    }
+    this.refs.individualQueueOrder.value = queue.orderMode;
+    const rankingOption = this.refs.individualQueueOrder.querySelector('option[value="ranking"]');
+    if (rankingOption) {
+      rankingOption.disabled = !rankingAvailable;
+    }
+    this.refs.individualHead.textContent = (
+      `Individual review queue (${formatCount(position.ordered.length)})`
+    );
+    this.renderIndividualQueueRankingState();
+    const activeNumber = position.activeIndex >= 0 ? position.activeIndex + 1 : 0;
+    this.refs.individualQueueProgress.textContent = position.ordered.length
+      ? (
+        `Individual ${formatCount(activeNumber)} of ${formatCount(position.ordered.length)}`
+        + ` • page ${formatCount(queue.pageIndex + 1)} of ${formatCount(position.pageCount)}`
+        + ` • ${formatCount(position.group.length)} detailed track(s) in this group`
+        + ` • ${formatCount(queue.stagedDecisions.size)} staged`
+      )
+      : "No individuals match the current search.";
+    this.refs.individualQueueSave.disabled = queue.saving || !queue.stagedDecisions.size;
+    this.refs.individualQueueComment.disabled = queue.saving || !queue.activeIndividual;
+    this.refs.individualQueueSave.textContent = queue.saving
+      ? "Saving..."
+      : `Save page (${formatCount(queue.stagedDecisions.size)})`;
+    const activePageIndex = position.page.indexOf(queue.activeIndividual);
+    const navDisabled = {
+      "previous-page": queue.pageIndex <= 0,
+      "next-page": queue.pageIndex >= position.pageCount - 1,
+      "previous-group": queue.groupIndex <= 0,
+      "next-group": queue.groupIndex >= position.groupCount - 1,
+      "previous-individual": activePageIndex <= 0,
+      "next-individual": activePageIndex < 0 || activePageIndex >= position.page.length - 1,
+    };
+    for (const button of this.refs.individualQueueControls.querySelectorAll("button[data-queue-nav]")) {
+      button.disabled = queue.saving || Boolean(navDisabled[button.dataset.queueNav]);
+    }
+    for (const button of this.refs.individualQueueControls.querySelectorAll("button[data-review-ok]")) {
+      button.disabled = queue.saving || !queue.activeIndividual;
+    }
+    this.refs.individualQueueSkip.disabled = queue.saving || !queue.activeIndividual;
+    for (const button of this.refs.individualQueueControls.querySelectorAll("button[data-queue-scope]")) {
+      button.classList.toggle("is-active", button.dataset.queueScope === queue.mapScope);
+      button.disabled = queue.saving || !position.ordered.length;
+    }
+    if (!position.page.length) {
+      this.refs.individuals.innerHTML = '<div class="movement-empty">No individual IDs match the current search.</div>';
+      return;
+    }
+    for (const individual of position.page) {
+      const stats = this.data.stats[individual] || {};
+      const reviewState = this.getIndividualReviewState(individual);
+      const isActive = individual === queue.activeIndividual;
+      const card = document.createElement("div");
+      card.className = `movement-card interactive${isActive ? " queue-active" : ""}`;
+      const stateLabel = reviewState.reviewed
+        ? reviewState.reviewOk
+          ? "Reviewed—OK"
+          : "Reviewed—issues"
+        : queue.skippedIndividuals.has(individual)
+          ? "Skipped"
+          : "Unreviewed";
+      const stateClass = reviewState.reviewed
+        ? reviewState.reviewOk ? " ok" : " issues"
+        : "";
+      card.innerHTML = `
+        <div class="movement-row">
+          <div class="movement-row-left">
+            <div class="movement-title">${escapeHtml(individual)}</div>
+            ${this.data.speciesByIndividual[individual] ? `<span class="movement-subtle">• ${escapeHtml(this.data.speciesByIndividual[individual])}</span>` : ""}
+          </div>
+          <span class="movement-review-state${stateClass}">${escapeHtml(stateLabel)}${reviewState.staged ? " • staged" : ""}</span>
+        </div>
+        <div class="movement-stats">
+          ${statChipHtml(`${formatCount(stats.rowCount)} fixes`)}
+          ${statChipHtml(`median speed ${formatMaybeNumber(stats.medianSpeedMps, "m/s")}`)}
+          ${statChipHtml(`suspected ${formatCount(stats.suspectedCount)}`)}
+          ${statChipHtml(`confirmed ${formatCount(stats.confirmedCount)}`)}
+        </div>
+      `;
+      card.addEventListener("click", () => {
+        void this.focusIndividualQueueItem(individual);
+      });
+      this.refs.individuals.appendChild(card);
+    }
+    const activeState = this.getIndividualReviewState(queue.activeIndividual);
+    if (document.activeElement !== this.refs.individualQueueComment) {
+      this.refs.individualQueueComment.value = activeState.comment || "";
     }
   }
 
@@ -6378,6 +7207,25 @@ class MovementExampleApp {
     const cursorData = [];
     const showPoints = this.refs.showPoints.checked;
     const showSuspectedOutlines = this.data.suspiciousState === "loaded";
+    const activeQueuePathData = [];
+    if (
+      this.individualReviewQueue.mode === "queue"
+      && this.individualReviewQueue.activeIndividual
+      && visibleIndividuals.has(this.individualReviewQueue.activeIndividual)
+    ) {
+      for (const setName of visibleSetNames) {
+        const fixes = this.getExactVisibleTrackFixes(
+          this.individualReviewQueue.activeIndividual,
+          setName,
+        );
+        const path = [...fixes]
+          .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey))
+          .map(fix => fix.position);
+        if (path.length >= 2) {
+          activeQueuePathData.push({ path });
+        }
+      }
+    }
     if (this.refs.showConfirmed.checked) {
       const seenConfirmed = new Set();
       for (const fix of this.data.fixes || []) {
@@ -6565,6 +7413,17 @@ class MovementExampleApp {
         }),
       );
     }
+    layers.push(
+      new deck.PathLayer({
+        id: "movement-active-individual-outline",
+        data: activeQueuePathData,
+        getPath: item => item.path,
+        getColor: [125, 211, 252, 150],
+        getWidth: 7,
+        widthMinPixels: 5,
+        pickable: false,
+      }),
+    );
     layers.push(
       new deck.PathLayer({
         id: "movement-source-flagged-paths",
@@ -9064,6 +9923,11 @@ class MovementExampleApp {
       this.refs.confirmStatus.classList.add("error");
       return;
     }
+    if (!(await this.flushIndividualReviewDecisions())) {
+      this.refs.confirmStatus.textContent = "Save the staged individual reviews before confirming issues.";
+      this.refs.confirmStatus.classList.add("error");
+      return;
+    }
     this.refs.confirmSubmit.disabled = true;
     this.refs.confirmClose.disabled = true;
     this.refs.confirmStatus.textContent = `Confirming ${formatCount(selectedGroups.length)} issue group(s)...`;
@@ -9334,6 +10198,11 @@ class MovementExampleApp {
       this.refs.issueStatus.classList.add("error");
       return;
     }
+    if (!(await this.flushIndividualReviewDecisions())) {
+      this.refs.issueStatus.textContent = "Save the staged individual reviews before flagging issues.";
+      this.refs.issueStatus.classList.add("error");
+      return;
+    }
 
     this.refs.issueSubmit.disabled = true;
     this.refs.issueClose.disabled = true;
@@ -9414,6 +10283,9 @@ class MovementExampleApp {
 
   async exportReviewedCsv() {
     if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
+      return;
+    }
+    if (!(await this.flushIndividualReviewDecisions())) {
       return;
     }
     this.refs.exportReviewedCsv.disabled = true;
@@ -9585,6 +10457,9 @@ class MovementExampleApp {
     if (this.refs.undo.disabled) {
       return;
     }
+    if (!(await this.flushIndividualReviewDecisions())) {
+      return;
+    }
     this.refs.undo.disabled = true;
     this.setStatus(`Undoing ${this.currentDatasetId}...`);
     try {
@@ -9650,6 +10525,11 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
       p95SpeedMps: finiteOrNull(item?.p95_speed_mps),
       suspectedCount: Number(item?.suspected_count) || 0,
       confirmedCount: Number(item?.confirmed_count) || 0,
+      reviewed: item?.reviewed === true,
+      reviewOk: item?.review_ok === true,
+      reviewUser: String(item?.review_user || ""),
+      reviewedAt: String(item?.reviewed_at || ""),
+      reviewComment: String(item?.review_comment || ""),
     };
   });
 
@@ -9675,6 +10555,11 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
         p95SpeedMps: null,
         suspectedCount: 0,
         confirmedCount: 0,
+        reviewed: false,
+        reviewOk: false,
+        reviewUser: "",
+        reviewedAt: "",
+        reviewComment: "",
       };
     }
   });
@@ -11317,6 +12202,10 @@ function statChip(text) {
   const element = document.createElement("span");
   element.textContent = text;
   return element;
+}
+
+function statChipHtml(text) {
+  return `<span>${escapeHtml(text)}</span>`;
 }
 
 function rangeToPercent(min, max, start, end) {

@@ -1257,6 +1257,35 @@ def test_movement_frontend_preserves_view_context_across_dataset_nodes():
     assert "await this.loadStudy({ preferredDatasetId: datasetId, viewContext })" in source
 
 
+def test_movement_frontend_exposes_lightweight_individual_review_queue():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "const INDIVIDUAL_QUEUE_PAGE_SIZE = 25" in source
+    assert "const INDIVIDUAL_QUEUE_GROUP_SIZE = 5" in source
+    assert 'data-role="individual-view-browse">Browse all</button>' in source
+    assert 'data-role="individual-view-queue">Review queue</button>' in source
+    assert 'data-queue-scope="solo">Solo current</button>' in source
+    assert 'data-queue-scope="group">Show group of five</button>' in source
+    assert 'data-queue-scope="all">All individuals</button>' in source
+    assert "getIndividualQueueMapIndividuals()" in source
+    assert "return position.group;" in source
+    assert "/actions/review-individuals" in source
+    assert "flushIndividualReviewDecisions()" in source
+    assert 'id: "movement-active-individual-outline"' in source
+    assert "getColor: [125, 211, 252, 150]" in source
+
+
+def test_movement_individual_queue_explains_burst_ranking_availability():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "No compatible burst ranking is available for this dataset version and burst definition." in source
+    assert "Burst ranking in progress. Dataset order will remain in use." in source
+    assert "Apply completed ranking" in source
+    assert 'data-queue-action="run-ranking"' in source
+    assert "noteCompletedIndividualQueueRanking()" in source
+    assert "queue.pendingRankingAnalysisId = this.anomalyRanking.analysisId" in source
+
+
 def test_export_reviewed_csv_combines_portable_and_sidecar_annotations(tmp_path):
     source_path = tmp_path / "movement.csv"
     source_path.write_text(
@@ -1413,6 +1442,27 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0
     assert reviewed_stats["beta"]["reviewed"] is True
     assert reviewed_stats["beta"]["review_ok"] is False
     assert reviewed_stats["beta"]["review_comment"] == "Issues were marked separately"
+
+    export_response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/export-reviewed-csv",
+        json={
+            "dataset_id": reviewed_dataset_id,
+            "logical_name": "movement.csv",
+            "user": "reviewer",
+        },
+    )
+    assert export_response.status_code == 200
+    export_payload = export_response.json()
+    analysis_id = export_payload["analysis"]["analysis_id"]
+    output_name = export_payload["analysis"]["parameters"]["output_artifact"]
+    download = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/analysis/{analysis_id}/artifact/{output_name}"
+    )
+    rows = list(csv.DictReader(io.StringIO(download.text)))
+    assert [row["individual-reviewed"] for row in rows] == ["true", "true", "true"]
+    assert [row["individual-review-ok"] for row in rows] == ["true", "true", "false"]
+    assert all(row["manually-marked-outlier"] == "false" for row in rows)
+    assert all(row["algorithm-marked-outlier"] == "false" for row in rows)
 
 
 def test_review_individuals_rejects_more_than_one_queue_page(tmp_path):

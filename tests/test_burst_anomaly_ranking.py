@@ -684,7 +684,7 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
         source.index('<div class="movement-slider-row">')
     ]
     handler = source[
-        source.index("async runBurstAnomalyRanking()"):
+        source.index("async runBurstAnomalyRanking({ openRankingSheet = true } = {})"):
         source.index("  renderAnomalyRanking() {")
     ]
     renderer = source[
