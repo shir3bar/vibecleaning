@@ -419,3 +419,20 @@ def test_slim_ranking_layout_keeps_map_full_height_and_resizes_canvas():
     assert "this.map.resize();" in source[
         source.index("  setSideSheet("):source.index("  applyAppProfile(")
     ]
+
+
+def test_large_movement_views_bound_gpu_work_without_dropping_review_data():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "const MAX_ORDINARY_MAP_POINTS = 100000;" in source
+    assert "const MAX_SOURCE_FLAGGED_MAP_POINTS = 25000;" in source
+    assert "sampleItemsEvenly(\n        ordinaryPointFixes,\n        MAX_ORDINARY_MAP_POINTS," in source
+    assert "sampleItemsEvenly(\n      visibleSourceFlaggedFixes,\n      MAX_SOURCE_FLAGGED_MAP_POINTS," in source
+    assert 'fix.review?.status === "suspected"' in source
+    assert "this.data.selectedFixKeys.has(fix.fixKey)" in source
+    assert "thresholdMatchKeys.has(fix.fixKey)" in source
+    assert "candidateMatchKeys.has(fix.fixKey)" in source
+    assert "all loaded fixes remain available for review and analysis" in source
+    assert "useDevicePixels:" in source
+    assert "dataComparator: sameArrayItems" in source
+    assert "buildMovementFixTrackIndex" in source

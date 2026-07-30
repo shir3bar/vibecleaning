@@ -192,6 +192,9 @@ const STACKED_SIDE_LAYOUT_BREAKPOINT_PX = 1080;
 const MIN_INDIVIDUAL_LIST_HEIGHT_PX = 80;
 const MIN_CHECKED_FIXES_HEIGHT_PX = 120;
 const MAX_SELECTED_FIXES_SHOWN = 150;
+const MAX_ORDINARY_MAP_POINTS = 100000;
+const MAX_SOURCE_FLAGGED_MAP_POINTS = 25000;
+const LARGE_MAP_POINT_THRESHOLD = 50000;
 const DEFAULT_FAMILY = MOVEMENT_APP_CONFIG.defaultFamily;
 const NUMERIC_COLOR_MIN_QUANTILE = 0.01;
 const NUMERIC_COLOR_MAX_QUANTILE = 0.99;
@@ -6199,11 +6202,15 @@ class MovementExampleApp {
       }
     }
 
+    const pointRenderStats = this.data.mapPointRenderStats || {};
+    const pointSamplingNote = pointRenderStats.truncated
+      ? `<div class="movement-legend-note">Showing ${escapeHtml(formatCount(pointRenderStats.rendered))} of ${escapeHtml(formatCount(pointRenderStats.eligible))} loaded fixes as colored map points for responsive navigation. Checked, suspected, and active threshold/query fixes remain visible; all loaded fixes remain available for review and analysis.</div>`
+      : "";
     const sourceFlaggedCount = (this.data.fixes || []).filter(isSourceOnlyFlaggedFix).length;
     const sourceFlagNote = sourceFlaggedCount
       ? `<div class="movement-legend-note">Thin faded sections were flagged in the source data (${escapeHtml(formatCount(sourceFlaggedCount))} loaded fixes); they remain analytically included until confirmed in Vibecleaning.</div>`
       : "";
-    legendEl.innerHTML = `${header}${body}${sourceFlagNote}`;
+    legendEl.innerHTML = `${header}${body}${pointSamplingNote}${sourceFlagNote}`;
     legendEl.classList.remove("hidden");
   }
 
@@ -6352,6 +6359,7 @@ class MovementExampleApp {
       return;
     }
 
+    const previousPointRenderStats = this.data.mapPointRenderStats || null;
     const visibleIndividuals = new Set(this.data.selectedIndividuals);
     const visibleSetNames = this.getVisibleSetNames();
     const pathData = [];
@@ -6396,21 +6404,12 @@ class MovementExampleApp {
     );
     const visibleAutoBurstPaths = visibleAutoBursts
       .filter(burst => burst.path.length >= 2)
-      .map(burst => ({
-        burst,
-        path: burst.path,
-        color: autoBurstColor(burst, 185),
-        sourceFlagged: this.isSourceOnlyFlaggedBurst(burst),
-      }));
+      .map(burst => this.data.autoBurstRenderCache.get(burst.burstId)?.pathItem)
+      .filter(Boolean);
     const visibleAutoBurstPoints = visibleAutoBursts
       .filter(burst => burst.path.length >= 1)
-      .map(burst => ({
-        burst,
-        position: burst.path[0],
-        color: autoBurstColor(burst, 220),
-        fillColor: autoBurstColor(burst, 48),
-        sourceFlagged: this.isSourceOnlyFlaggedBurst(burst),
-      }));
+      .map(burst => this.data.autoBurstRenderCache.get(burst.burstId)?.pointItem)
+      .filter(Boolean);
     const visibleTableSelection = this.getVisibleTableSelectionFixes();
     const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
     const tableSelectedPointData = visibleTableSelection.map(fix => ({
@@ -6467,22 +6466,21 @@ class MovementExampleApp {
           continue;
         }
         if (!suppressBaseTrack && series.positions.length >= 2) {
-          const trackColor = splitColor(this.data.individualPalette[individual], setName, PATH_ALPHA);
-          if (exactFixes.length >= 2) {
-            for (const path of buildSourceAwareTrackPaths(exactFixes, trackColor)) {
-              (path.sourceFlagged ? sourceFlaggedPathData : pathData).push({
-                individual,
-                setName,
-                ...path,
-              });
-            }
-          } else {
-            pathData.push({
-              individual,
-              setName,
-              path: series.positions,
-              color: trackColor,
-            });
+          const trackKey = movementTrackKey(individual, setName);
+          let cachedPaths = this.data.baseTrackPathCache.get(trackKey);
+          if (!cachedPaths) {
+            const trackColor = splitColor(this.data.individualPalette[individual], setName, PATH_ALPHA);
+            cachedPaths = exactFixes.length >= 2
+              ? buildSourceAwareTrackPaths(exactFixes, trackColor)
+              : [{
+                path: series.positions,
+                color: trackColor,
+                sourceFlagged: false,
+              }];
+            this.data.baseTrackPathCache.set(trackKey, cachedPaths);
+          }
+          for (const path of cachedPaths) {
+            (path.sourceFlagged ? sourceFlaggedPathData : pathData).push(path);
           }
         }
         const cursorPosition = interpolateSeriesPosition(series, this.currentTimeMs);
@@ -6492,14 +6490,15 @@ class MovementExampleApp {
       }
     }
 
-    for (const fix of this.data.fixes) {
-      if (
-        !isSourceOnlyFlaggedFix(fix)
-        || !visibleIndividuals.has(fix.individual)
-        || !visibleSetNames.has(fix.setName)
-      ) {
-        continue;
-      }
+    const visibleSourceFlaggedFixes = this.data.fixes.filter(fix => (
+      isSourceOnlyFlaggedFix(fix)
+      && visibleIndividuals.has(fix.individual)
+      && visibleSetNames.has(fix.setName)
+    ));
+    for (const fix of sampleItemsEvenly(
+      visibleSourceFlaggedFixes,
+      MAX_SOURCE_FLAGGED_MAP_POINTS,
+    )) {
       const trackColor = splitColor(
         this.data.individualPalette[fix.individual],
         fix.setName,
@@ -6513,6 +6512,8 @@ class MovementExampleApp {
     }
 
     if (showPoints) {
+      const priorityPointFixes = [];
+      const ordinaryPointFixes = [];
       for (const fix of this.data.fixes) {
         if (
           fix.analyticallyExcluded
@@ -6522,6 +6523,27 @@ class MovementExampleApp {
         ) {
           continue;
         }
+        if (
+          fix.review?.status === "suspected"
+          || this.data.selectedFixKeys.has(fix.fixKey)
+          || thresholdMatchKeys.has(fix.fixKey)
+          || candidateMatchKeys.has(fix.fixKey)
+        ) {
+          priorityPointFixes.push(fix);
+        } else {
+          ordinaryPointFixes.push(fix);
+        }
+      }
+      const sampledOrdinaryFixes = sampleItemsEvenly(
+        ordinaryPointFixes,
+        MAX_ORDINARY_MAP_POINTS,
+      );
+      this.data.mapPointRenderStats = {
+        eligible: priorityPointFixes.length + ordinaryPointFixes.length,
+        rendered: priorityPointFixes.length + sampledOrdinaryFixes.length,
+        truncated: sampledOrdinaryFixes.length < ordinaryPointFixes.length,
+      };
+      for (const fix of [...sampledOrdinaryFixes, ...priorityPointFixes]) {
         const point = {
           fixKey: fix.fixKey,
           individual: fix.individual,
@@ -6565,6 +6587,12 @@ class MovementExampleApp {
           }
         }
       }
+    } else {
+      this.data.mapPointRenderStats = {
+        eligible: 0,
+        rendered: 0,
+        truncated: false,
+      };
     }
 
     const layers = [];
@@ -6590,6 +6618,7 @@ class MovementExampleApp {
       new deck.PathLayer({
         id: "movement-source-flagged-paths",
         data: sourceFlaggedPathData,
+        dataComparator: sameArrayItems,
         getPath: item => item.path,
         getColor: item => item.color,
         getWidth: 1.5,
@@ -6601,6 +6630,7 @@ class MovementExampleApp {
       new deck.PathLayer({
         id: "movement-paths",
         data: pathData,
+        dataComparator: sameArrayItems,
         getPath: item => item.path,
         getColor: item => hasFocusedRankingBurst
           ? this.mutedRankingContextColor(item.color, 34)
@@ -6616,6 +6646,7 @@ class MovementExampleApp {
         new deck.PathLayer({
           id: "movement-auto-bursts",
           data: visibleAutoBurstPaths,
+          dataComparator: sameArrayItems,
           getPath: item => item.path,
           getColor: item => hasFocusedRankingBurst
             ? this.mutedRankingContextColor(item.color, 36)
@@ -6634,6 +6665,7 @@ class MovementExampleApp {
         new deck.ScatterplotLayer({
           id: "movement-auto-burst-points",
           data: visibleAutoBurstPoints,
+          dataComparator: sameArrayItems,
           getPosition: item => item.position,
           getFillColor: item => hasFocusedRankingBurst
             ? this.mutedRankingContextColor(item.fillColor, 18)
@@ -6933,9 +6965,19 @@ class MovementExampleApp {
     layers.push(...this.getOsmDeckLayers());
 
     try {
-      this.overlay.setProps({ layers });
+      this.overlay.setProps({
+        layers,
+        useDevicePixels: (this.data.mapPointRenderStats?.rendered || 0) <= LARGE_MAP_POINT_THRESHOLD,
+      });
     } catch (error) {
       this.setStatus(`Map warning: ${error.message}`, true);
+    }
+    if (
+      previousPointRenderStats?.eligible !== this.data.mapPointRenderStats?.eligible
+      || previousPointRenderStats?.rendered !== this.data.mapPointRenderStats?.rendered
+      || previousPointRenderStats?.truncated !== this.data.mapPointRenderStats?.truncated
+    ) {
+      this.renderLegend();
     }
     this.renderFixPopup();
   }
@@ -6963,26 +7005,14 @@ class MovementExampleApp {
     if (!this.data || (!this.hasLoadedDetailSelection() && !this.data.overviewHasAllFixes)) {
       return [];
     }
-    const source = this.hasLoadedDetailSelection() && (this.data.detailFixes || []).length
-      ? this.data.detailFixes
-      : (this.data.overviewFixes || []);
-    return source
-      .filter(fix => (
-        !fix.analyticallyExcluded
-        && fix.review?.status !== "confirmed"
-        && fix.individual === individual
-        && fix.setName === setName
-      ))
-      .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
+    const byTrack = this.hasLoadedDetailSelection() && (this.data.detailFixes || []).length
+      ? this.data.detailFixesByTrack
+      : this.data.overviewFixesByTrack;
+    return byTrack?.get(movementTrackKey(individual, setName)) || [];
   }
 
   isSourceOnlyFlaggedBurst(burst) {
-    const fixKeys = Array.isArray(burst?.fixKeys) ? burst.fixKeys : [];
-    if (!fixKeys.length || !this.data?.fixByKey) {
-      return false;
-    }
-    const fixes = fixKeys.map(fixKey => this.data.fixByKey.get(fixKey)).filter(Boolean);
-    return fixes.length === fixKeys.length && fixes.every(isSourceOnlyFlaggedFix);
+    return isSourceOnlyFlaggedBurstFromData(this.data, burst);
   }
 
   colorForFix(fix) {
@@ -9741,6 +9771,11 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     stats,
     fixes: [],
     fixByKey: new Map(),
+    overviewFixesByTrack: new Map(),
+    detailFixesByTrack: new Map(),
+    baseTrackPathCache: new Map(),
+    autoBurstRenderCache: new Map(),
+    mapPointRenderStats: null,
     segments: [],
     segmentById: new Map(),
     autoBursts: [],
@@ -10080,6 +10115,10 @@ function refreshMovementFixCollections(data) {
   data.fixes = Array.from(merged.values())
     .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
   data.fixByKey = new Map(data.fixes.map(fix => [fix.fixKey, fix]));
+  data.overviewFixesByTrack = buildMovementFixTrackIndex(data.overviewFixes || []);
+  data.detailFixesByTrack = buildMovementFixTrackIndex(data.detailFixes || []);
+  data.baseTrackPathCache = new Map();
+  data.mapPointRenderStats = null;
   const mergedSegments = new Map();
   for (const segment of [...(data.overviewSegments || []), ...(data.detailSegments || [])]) {
     mergedSegments.set(segment.segmentId, segment);
@@ -10094,12 +10133,59 @@ function refreshMovementFixCollections(data) {
   data.autoBursts = Array.from(mergedAutoBursts.values())
     .sort((left, right) => left.startTimeMs - right.startTimeMs || left.burstId.localeCompare(right.burstId));
   data.autoBurstById = new Map(data.autoBursts.map(burst => [burst.burstId, burst]));
+  data.autoBurstRenderCache = new Map(data.autoBursts.map(burst => {
+    const sourceFlagged = isSourceOnlyFlaggedBurstFromData(data, burst);
+    return [
+      burst.burstId,
+      {
+        pathItem: {
+          burst,
+          path: burst.path,
+          color: autoBurstColor(burst, 185),
+          sourceFlagged,
+        },
+        pointItem: {
+          burst,
+          position: burst.path[0],
+          color: autoBurstColor(burst, 220),
+          fillColor: autoBurstColor(burst, 48),
+          sourceFlagged,
+        },
+      },
+    ];
+  }));
   data.colorStyles = computeMovementColorStyles(
     data.colorFields,
     data.fixes.filter(fix => (
       !fix.analyticallyExcluded && fix.review?.status !== "confirmed"
     )),
   );
+}
+
+function buildMovementFixTrackIndex(fixes) {
+  const byTrack = new Map();
+  for (const fix of fixes) {
+    if (fix.analyticallyExcluded || fix.review?.status === "confirmed") {
+      continue;
+    }
+    const key = movementTrackKey(fix.individual, fix.setName);
+    const trackFixes = byTrack.get(key) || [];
+    trackFixes.push(fix);
+    byTrack.set(key, trackFixes);
+  }
+  for (const trackFixes of byTrack.values()) {
+    trackFixes.sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
+  }
+  return byTrack;
+}
+
+function isSourceOnlyFlaggedBurstFromData(data, burst) {
+  const fixKeys = Array.isArray(burst?.fixKeys) ? burst.fixKeys : [];
+  if (!fixKeys.length || !data?.fixByKey) {
+    return false;
+  }
+  const fixes = fixKeys.map(fixKey => data.fixByKey.get(fixKey)).filter(Boolean);
+  return fixes.length === fixKeys.length && fixes.every(isSourceOnlyFlaggedFix);
 }
 
 function buildMovementColorFields(fields) {
@@ -10518,6 +10604,21 @@ function deriveReportSampleValue(
   }
   const sorted = [...values].sort((left, right) => left - right);
   return quantile(sorted, 0.5);
+}
+
+function sameArrayItems(left, right) {
+  if (left === right) {
+    return true;
+  }
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function buildIssueSampleBuckets(indexed) {
