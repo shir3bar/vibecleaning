@@ -6367,6 +6367,7 @@ class MovementExampleApp {
     const confirmedPointData = [];
     const cursorData = [];
     const showPoints = this.refs.showPoints.checked;
+    const showSuspectedOutlines = this.data.suspiciousState === "loaded";
     if (this.refs.showConfirmed.checked) {
       const seenConfirmed = new Set();
       for (const fix of this.data.fixes || []) {
@@ -6398,6 +6399,8 @@ class MovementExampleApp {
       .filter(burst => burst.path.length >= 2)
       .map(burst => this.data.autoBurstRenderCache.get(burst.burstId)?.pathItem)
       .filter(Boolean);
+    const visibleAutoBurstMarkers = visibleAutoBursts
+      .flatMap(burst => this.data.autoBurstRenderCache.get(burst.burstId)?.markerItems || []);
     const visibleTableSelection = this.getVisibleTableSelectionFixes();
     const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
     const tableSelectedPointData = visibleTableSelection.map(fix => ({
@@ -6495,7 +6498,7 @@ class MovementExampleApp {
           position: fix.position,
           color: this.colorForFix(fix),
         };
-        if (fix.review?.status === "suspected") {
+        if (showSuspectedOutlines && fix.review?.status === "suspected") {
           suspectedPointData.push({
             fixKey: fix.fixKey,
             position: fix.position,
@@ -6594,6 +6597,30 @@ class MovementExampleApp {
           getWidth: item => item.sourceFlagged ? 2 : 5,
           widthMinPixels: 1,
           pickable: Boolean(this.burstFeatureSpace?.points?.length),
+        }),
+      );
+    }
+
+    if (visibleAutoBurstMarkers.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-auto-burst-endpoints",
+          data: visibleAutoBurstMarkers,
+          dataComparator: sameArrayItems,
+          getPosition: item => item.position,
+          getFillColor: item => hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.fillColor, 42)
+            : item.sourceFlagged
+              ? this.mutedRankingContextColor(item.fillColor, 92)
+              : item.fillColor,
+          getLineColor: [15, 23, 42, 220],
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 1.5,
+          getRadius: 76,
+          radiusMinPixels: 4,
+          radiusMaxPixels: 9,
+          pickable: false,
         }),
       );
     }
@@ -10026,6 +10053,7 @@ function refreshMovementFixCollections(data) {
           color: autoBurstColor(burst, 185),
           sourceFlagged,
         },
+        markerItems: buildAutoBurstEndpointMarkers(burst, sourceFlagged),
       },
     ];
   }));
@@ -10035,6 +10063,38 @@ function refreshMovementFixCollections(data) {
       !fix.analyticallyExcluded && fix.review?.status !== "confirmed"
     )),
   );
+}
+
+function buildAutoBurstEndpointMarkers(burst, sourceFlagged = false) {
+  const path = Array.isArray(burst?.path) ? burst.path : [];
+  if (!path.length) {
+    return [];
+  }
+  if (path.length === 1) {
+    return [{
+      burst,
+      markerRole: "start_end",
+      position: path[0],
+      fillColor: [196, 181, 253, 220],
+      sourceFlagged,
+    }];
+  }
+  return [
+    {
+      burst,
+      markerRole: "start",
+      position: path[0],
+      fillColor: [34, 211, 238, 220],
+      sourceFlagged,
+    },
+    {
+      burst,
+      markerRole: "end",
+      position: path[path.length - 1],
+      fillColor: [244, 114, 182, 220],
+      sourceFlagged,
+    },
+  ];
 }
 
 function buildMovementFixTrackIndex(fixes) {

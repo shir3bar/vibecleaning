@@ -697,6 +697,10 @@ def test_movement_frontend_includes_auto_burst_controls():
     assert '<option value="auto_bursts">Automatic bursts</option>' in source
     assert "movement-auto-bursts" in source
     assert "movement-auto-burst-points" not in source
+    assert "movement-auto-burst-endpoints" in source
+    assert "buildAutoBurstEndpointMarkers" in source
+    assert 'markerRole: "start"' in source
+    assert 'markerRole: "end"' in source
     assert "autoBurstColor" in source
     assert "renderBurstCountIndicator" in source
     assert "getVisibleAutoBursts({ requireOverlay: false })" in source
@@ -732,6 +736,8 @@ def test_movement_frontend_distinguishes_source_flags_from_review_status():
     assert 'id: "movement-source-flagged-paths"' in source
     assert 'id: "movement-source-flagged-points"' not in source
     assert 'id: "movement-suspected-outline"' in source
+    assert 'const showSuspectedOutlines = this.data.suspiciousState === "loaded";' in source
+    assert 'if (showSuspectedOutlines && fix.review?.status === "suspected")' in source
     assert "they remain analytically included until confirmed in Vibecleaning" in source
     assert '"source_flags",\n      "Source flags"' in source
 
