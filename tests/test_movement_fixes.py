@@ -1304,6 +1304,11 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert "flushIndividualReviewDecisions()" in source
     assert 'id: "movement-active-individual-outline"' in source
     assert "getColor: [125, 211, 252, 150]" in source
+    assert 'data-role="issue-scope"' in source
+    assert 'data-role="issue-burst"' in source
+    assert "setupIndividualQueueIssueScope(individual)" in source
+    assert "this.openIndividualReviewModal(individual, { queueReview: true })" in source
+    assert "await this.stageIndividualReviewDecision(queueReviewIndividual, false)" in source
 
 
 def test_movement_individual_queue_explains_burst_ranking_availability():

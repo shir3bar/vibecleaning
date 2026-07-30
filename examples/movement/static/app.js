@@ -1020,12 +1020,14 @@ class MovementExampleApp {
         .movement-toolbar select,
         .movement-toolbar input,
         .movement-toolbar button,
+        .movement-modal select,
         .movement-modal input,
         .movement-modal textarea {
           font: inherit;
         }
         .movement-toolbar select,
         .movement-toolbar input,
+        .movement-modal select,
         .movement-modal input,
         .movement-modal textarea {
           min-width: 150px;
@@ -2349,6 +2351,15 @@ class MovementExampleApp {
         .movement-modal-body label.movement-inline-check input {
           min-width: 0;
         }
+        .movement-issue-scope {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 12px;
+        }
+        .movement-issue-scope.hidden,
+        .movement-issue-scope [hidden] {
+          display: none;
+        }
         .movement-modal textarea {
           min-height: 88px;
           resize: vertical;
@@ -2598,6 +2609,17 @@ class MovementExampleApp {
           </div>
           <div class="movement-modal-body">
             <div data-role="issue-meta"></div>
+            <div class="movement-issue-scope hidden" data-role="issue-scope-control">
+              <label>Flag scope
+                <select data-role="issue-scope">
+                  <option value="individual">Entire individual</option>
+                  <option value="burst">One burst</option>
+                </select>
+              </label>
+              <label data-role="issue-burst-control">Burst
+                <select data-role="issue-burst"></select>
+              </label>
+            </div>
             <div class="movement-selection-list" data-role="issue-selection"></div>
             <label>User
               <input type="text" data-role="issue-user" placeholder="Name used for attribution">
@@ -2803,6 +2825,10 @@ class MovementExampleApp {
       issueModal: this.mountEl.querySelector('[data-role="issue-modal"]'),
       issueTitle: this.mountEl.querySelector('[data-role="issue-title"]'),
       issueMeta: this.mountEl.querySelector('[data-role="issue-meta"]'),
+      issueScopeControl: this.mountEl.querySelector('[data-role="issue-scope-control"]'),
+      issueScope: this.mountEl.querySelector('[data-role="issue-scope"]'),
+      issueBurstControl: this.mountEl.querySelector('[data-role="issue-burst-control"]'),
+      issueBurst: this.mountEl.querySelector('[data-role="issue-burst"]'),
       issueSelection: this.mountEl.querySelector('[data-role="issue-selection"]'),
       issueUser: this.mountEl.querySelector('[data-role="issue-user"]'),
       issueType: this.mountEl.querySelector('[data-role="issue-type"]'),
@@ -2951,10 +2977,12 @@ class MovementExampleApp {
     this.refs.individuals.addEventListener("click", event => {
       const reviewButton = event.target.closest("button[data-review-ok]");
       if (reviewButton) {
-        void this.stageIndividualReviewDecision(
-          reviewButton.dataset.individual || "",
-          reviewButton.dataset.reviewOk === "true",
-        );
+        const individual = reviewButton.dataset.individual || "";
+        if (reviewButton.dataset.reviewOk === "true") {
+          void this.stageIndividualReviewDecision(individual, true);
+        } else {
+          this.openIndividualReviewModal(individual, { queueReview: true });
+        }
         return;
       }
       const skipButton = event.target.closest("button[data-queue-skip]");
@@ -3208,6 +3236,8 @@ class MovementExampleApp {
 
     this.refs.issueClose.addEventListener("click", () => this.closeModal(this.refs.issueModal, this.refs.issueSubmit));
     this.refs.issueSubmit.addEventListener("click", async () => this.submitIssueAction());
+    this.refs.issueScope.addEventListener("change", () => this.updateIndividualQueueIssueScope());
+    this.refs.issueBurst.addEventListener("change", () => this.updateIndividualQueueIssueScope());
     this.refs.confirmClose.addEventListener("click", () => this.closeModal(this.refs.confirmModal, this.refs.confirmSubmit));
     this.refs.confirmSubmit.addEventListener("click", async () => this.submitConfirmIssues());
     this.refs.reportClose.addEventListener("click", () => this.closeModal(this.refs.reportModal, this.refs.reportSubmit));
@@ -10171,11 +10201,126 @@ class MovementExampleApp {
     }
   }
 
+  resetIssueScopeControls() {
+    this.refs.issueScopeControl?.classList.add("hidden");
+    if (this.refs.issueScope) {
+      this.refs.issueScope.value = "individual";
+    }
+    if (this.refs.issueBurstControl) {
+      this.refs.issueBurstControl.hidden = true;
+    }
+    if (this.refs.issueBurst) {
+      this.refs.issueBurst.innerHTML = "";
+    }
+  }
+
+  setupIndividualQueueIssueScope(individual) {
+    const context = this.pendingIssueContext;
+    if (!context || context.queueReviewIndividual !== individual) {
+      return;
+    }
+    const bursts = (this.data?.autoBursts || [])
+      .filter(burst => burst.individual === individual)
+      .sort((left, right) => (
+        left.startTimeMs - right.startTimeMs
+        || left.burstIdx - right.burstIdx
+        || left.burstId.localeCompare(right.burstId)
+      ));
+    context.queueReviewBursts = bursts;
+    this.refs.issueBurst.innerHTML = "";
+    for (const burst of bursts) {
+      const option = document.createElement("option");
+      option.value = burst.burstId;
+      option.textContent = (
+        `Burst ${formatCount(burst.burstIdx + 1)}`
+        + ` • ${formatTimestamp(burst.startTimeMs)}`
+        + ` • ${formatCount(burst.fixCount)} fixes`
+      );
+      this.refs.issueBurst.appendChild(option);
+    }
+    const burstScopeOption = this.refs.issueScope.querySelector('option[value="burst"]');
+    if (burstScopeOption) {
+      burstScopeOption.disabled = !bursts.length;
+      burstScopeOption.textContent = bursts.length
+        ? `One burst (${formatCount(bursts.length)} available)`
+        : "One burst (none available)";
+    }
+    this.refs.issueScope.value = "individual";
+    this.refs.issueScopeControl.classList.remove("hidden");
+    this.updateIndividualQueueIssueScope();
+  }
+
+  updateIndividualQueueIssueScope() {
+    const context = this.pendingIssueContext;
+    if (!context?.queueReviewIndividual) {
+      return;
+    }
+    const individual = context.queueReviewIndividual;
+    const bursts = Array.isArray(context.queueReviewBursts)
+      ? context.queueReviewBursts
+      : [];
+    const selectedBurst = bursts.find(
+      burst => burst.burstId === this.refs.issueBurst.value,
+    ) || bursts[0] || null;
+    const useBurst = this.refs.issueScope.value === "burst" && Boolean(selectedBurst);
+    this.refs.issueScope.value = useBurst ? "burst" : "individual";
+    this.refs.issueBurstControl.hidden = !useBurst;
+
+    const previousDefaultType = context.defaultIssueType || "";
+    const previousDefaultQuestion = context.defaultOwnerQuestion || "";
+    const defaultIssueType = useBurst ? "burst review" : "individual review";
+    const defaultOwnerQuestion = useBurst
+      ? "Could you confirm whether this burst should be treated as an outlier?"
+      : "Could you confirm whether this individual's track should be treated as an outlier?";
+    if (!this.refs.issueType.value.trim() || this.refs.issueType.value === previousDefaultType) {
+      this.refs.issueType.value = defaultIssueType;
+    }
+    if (
+      !this.refs.issueQuestion.value.trim()
+      || this.refs.issueQuestion.value === previousDefaultQuestion
+    ) {
+      this.refs.issueQuestion.value = defaultOwnerQuestion;
+    }
+    context.defaultIssueType = defaultIssueType;
+    context.defaultOwnerQuestion = defaultOwnerQuestion;
+    context.mode = useBurst ? "burst" : "individual";
+    context.individual = individual;
+    context.setName = useBurst ? selectedBurst.setName : "";
+    context.burstId = useBurst ? selectedBurst.burstId : "";
+
+    this.refs.issueMeta.innerHTML = `
+      <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+      <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+      <div><strong>Individual:</strong> ${escapeHtml(individual)}</div>
+      ${useBurst ? `<div><strong>Burst:</strong> ${escapeHtml(selectedBurst.burstId)}</div>` : ""}
+      <div><strong>Flag scope:</strong> ${useBurst ? "one burst" : "entire individual"}</div>
+      <div><strong>Resolved fixes:</strong> ${escapeHtml(formatCount(
+        useBurst ? selectedBurst.fixCount : this.data?.stats?.[individual]?.rowCount || 0,
+      ))}</div>
+      <div><strong>Review result:</strong> Reviewed—issues after this flag is created</div>
+    `;
+    if (useBurst) {
+      this.refs.issueSelection.textContent = (
+        `${selectedBurst.burstId}\n`
+        + `${formatTimestamp(selectedBurst.startTimeMs)} to ${formatTimestamp(selectedBurst.endTimeMs)}\n`
+        + `${formatCount(selectedBurst.fixCount)} fixes under the current burst definition.`
+      );
+    } else {
+      const burstNote = bursts.length
+        ? ` Choose “One burst” above to flag only one of the ${formatCount(bursts.length)} current bursts.`
+        : " No bursts are currently available for this individual under the current burst definition.";
+      this.refs.issueSelection.textContent = (
+        `The annotation will apply to every fix for ${individual}.${burstNote}`
+      );
+    }
+  }
+
   openIssueModal(status) {
     const selectedFixes = this.getSelectedFixes();
     if (!selectedFixes.length || !this.currentArtifact) {
       return;
     }
+    this.resetIssueScopeControls();
     const field = this.getCurrentColorField();
     const issueThreshold = this.getCurrentIssueThreshold();
     const candidateKeys = this.getCandidateQueryReturnedMatchKeys();
@@ -10223,6 +10368,7 @@ class MovementExampleApp {
     if (!selection || selection.fixes.length < 2 || !this.currentArtifact) {
       return;
     }
+    this.resetIssueScopeControls();
     this.pendingIssueStatus = status;
     this.pendingIssueContext = {
       mode: "segment",
@@ -10262,10 +10408,11 @@ class MovementExampleApp {
     this.refs.issueType.focus();
   }
 
-  openIndividualReviewModal(individual) {
+  openIndividualReviewModal(individual, { queueReview = false } = {}) {
     if (!this.data || !individual || !this.currentArtifact) {
       return;
     }
+    this.resetIssueScopeControls();
     const stats = this.data.stats[individual] || {};
     this.pendingIssueStatus = "suspected";
     this.pendingIssueContext = {
@@ -10276,8 +10423,13 @@ class MovementExampleApp {
       origin: "manual",
       issueField: "",
       issueThreshold: "",
+      queueReviewIndividual: queueReview ? individual : "",
+      defaultIssueType: "individual review",
+      defaultOwnerQuestion: "Could you confirm whether this individual's track should be treated as an outlier?",
     };
-    this.refs.issueTitle.textContent = "Flag individual for review";
+    this.refs.issueTitle.textContent = queueReview
+      ? "Flag issues found"
+      : "Flag individual for review";
     this.refs.issueMeta.innerHTML = `
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
@@ -10294,6 +10446,9 @@ class MovementExampleApp {
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
     this.refs.issueClose.disabled = false;
+    if (queueReview) {
+      this.setupIndividualQueueIssueScope(individual);
+    }
     this.refs.issueModal.classList.remove("hidden");
     this.refs.issueNote.focus();
   }
@@ -10303,6 +10458,7 @@ class MovementExampleApp {
     if (!this.data || !burstId || !this.currentArtifact) {
       return;
     }
+    this.resetIssueScopeControls();
     const individual = String(burst?.individual || "");
     const setName = String(burst?.setName || burst?.set_name || "train");
     const fixCount = Number(burst?.fixCount ?? burst?.fix_count ?? burst?.n_fixes) || 0;
@@ -10474,10 +10630,14 @@ class MovementExampleApp {
           body: JSON.stringify(body),
         },
       );
+      const queueReviewIndividual = String(context.queueReviewIndividual || "");
       this.setUser(user);
       this.pendingIssueContext = null;
       this.refs.issueModal.classList.add("hidden");
       await this.loadStudyAtDataset(result.dataset.dataset_id);
+      if (queueReviewIndividual) {
+        await this.stageIndividualReviewDecision(queueReviewIndividual, false);
+      }
       this.setStatus(`Created ${result.step.title} in ${result.dataset.dataset_id}.`);
     } catch (error) {
       this.refs.issueStatus.textContent = error.message;
