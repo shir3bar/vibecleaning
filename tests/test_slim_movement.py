@@ -392,12 +392,13 @@ def test_shared_individual_tab_has_persisted_vertical_resize_control():
     assert "individualListHeightPx: this.individualListHeightPx" in source
 
 
-def test_slim_ranking_layout_keeps_map_wide_and_resizes_canvas():
+def test_slim_ranking_layout_keeps_map_full_height_and_resizes_canvas():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
-    assert "const SLIM_STACKED_SIDE_LAYOUT_BREAKPOINT_PX = 760;" in source
+    assert 'if (MOVEMENT_APP_CONFIG.mode === "slim_movement") {\n      return false;' in source
+    assert "SLIM_STACKED_SIDE_LAYOUT_BREAKPOINT_PX" not in source
     assert ".movement-root:not(.is-slim) .movement-main" in source
-    assert ".movement-root.is-slim .movement-main" in source
+    assert ".movement-root.is-slim .movement-main" not in source
     movement_main_css = source[
         source.index("        .movement-main {"):source.index(
             "        .movement-map-wrap,",

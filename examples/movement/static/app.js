@@ -189,7 +189,6 @@ const MIN_SIDE_PANE_WIDTH_PX = 300;
 const MAX_SIDE_PANE_WIDTH_RATIO = 0.55;
 const SIDE_PANE_HANDLE_WIDTH_PX = 12;
 const STACKED_SIDE_LAYOUT_BREAKPOINT_PX = 1080;
-const SLIM_STACKED_SIDE_LAYOUT_BREAKPOINT_PX = 760;
 const MIN_INDIVIDUAL_LIST_HEIGHT_PX = 80;
 const MIN_CHECKED_FIXES_HEIGHT_PX = 120;
 const MAX_SELECTED_FIXES_SHOWN = 150;
@@ -606,10 +605,10 @@ class MovementExampleApp {
   }
 
   isStackedSideLayout() {
-    const breakpoint = MOVEMENT_APP_CONFIG.mode === "slim_movement"
-      ? SLIM_STACKED_SIDE_LAYOUT_BREAKPOINT_PX
-      : STACKED_SIDE_LAYOUT_BREAKPOINT_PX;
-    return window.matchMedia?.(`(max-width: ${breakpoint}px)`)?.matches === true;
+    if (MOVEMENT_APP_CONFIG.mode === "slim_movement") {
+      return false;
+    }
+    return window.matchMedia?.(`(max-width: ${STACKED_SIDE_LAYOUT_BREAKPOINT_PX}px)`)?.matches === true;
   }
 
   getSidePaneWidthBounds() {
@@ -2190,18 +2189,6 @@ class MovementExampleApp {
             display: none;
           }
           .movement-root:not(.is-slim) .movement-side {
-            grid-template-rows: auto minmax(320px, 1fr) auto;
-          }
-        }
-        @media (max-width: 760px) {
-          .movement-root.is-slim .movement-main {
-            grid-template-columns: 1fr;
-            grid-template-rows: minmax(320px, 1fr) minmax(320px, 1fr);
-          }
-          .movement-root.is-slim .movement-side-resize {
-            display: none;
-          }
-          .movement-root.is-slim .movement-side {
             grid-template-rows: auto minmax(320px, 1fr) auto;
           }
         }
