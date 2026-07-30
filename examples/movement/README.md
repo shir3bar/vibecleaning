@@ -53,6 +53,30 @@ If a study has multiple CSVs, keep them together in the same study folder so the
 
 The starter app and trajectory example do not use this nested study catalog. They stay on the generic top-level `data/<project>/` contract.
 
+### Retiring copied-CSV review nodes
+
+Early movement review steps materialized a complete replacement CSV for every
+annotation. Current steps reuse the source CSV and write only
+`movement_review_annotations.json`. To migrate an old leaf review dataset,
+first inspect the proposed change:
+
+```bash
+uv run python -m examples.movement.migrate_legacy_review_step \
+  data/movement_raw/<study> <dataset_id>
+```
+
+Then apply it:
+
+```bash
+uv run python -m examples.movement.migrate_legacy_review_step \
+  data/movement_raw/<study> <dataset_id> --apply
+```
+
+The migration preserves the dataset and step IDs, rewrites the historical step
+as a reproducible sidecar transformation, and removes only its redundant output
+CSV. It refuses root datasets, non-review steps, unsafe output paths, and
+datasets with descendants.
+
 ## Workflow
 
 1. Choose a family, then choose a study.
