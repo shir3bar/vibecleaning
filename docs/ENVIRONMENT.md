@@ -145,16 +145,18 @@ was skipped or failed.
 
 ## Configuration
 
-The example servers accept `HOST` and `PORT`. `slim_movement` refuses to start
-unless both of these are set:
+The example servers accept `HOST` and `PORT`. `slim_movement` generates a
+temporary password at startup and accepts these optional overrides:
 
 ```text
-SLIM_MOVEMENT_USERNAME
-SLIM_MOVEMENT_PASSWORD  minimum 12 characters
+SLIM_MOVEMENT_USERNAME  default reviewer
+SLIM_MOVEMENT_PASSWORD  optional; minimum 12 characters when set
 ```
 
-Basic authentication must be placed behind HTTPS when the app is shared beyond
-localhost. See `examples/slim_movement/README.md`.
+The generated password is printed in the server terminal. An override password
+is never printed. The login credential is sent with protected requests, so the
+app must be placed behind HTTPS when shared beyond localhost. See
+`examples/slim_movement/README.md`.
 
 `move_viz` also recognizes:
 

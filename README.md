@@ -50,15 +50,12 @@ python examples/trajectory/server.py
 Slim movement review:
 
 ```bash
-export SLIM_MOVEMENT_USERNAME=reviewer
-read -r -s -p "Slim movement password: " SLIM_MOVEMENT_PASSWORD
-echo
-export SLIM_MOVEMENT_PASSWORD
 uv run python examples/slim_movement/server.py
 ```
 
 See [examples/slim_movement/README.md](examples/slim_movement/README.md) for
-password prompting and secure HTTPS deployment guidance.
+temporary login credentials, optional overrides, and secure HTTPS deployment
+guidance.
 
 SQLite movement viewer:
 

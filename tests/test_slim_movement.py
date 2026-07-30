@@ -16,9 +16,10 @@ MOVEMENT_APP_JS = MOVEMENT_STATIC_ROOT / "app.js"
 
 from examples.slim_movement.app import create_slim_movement_app
 from examples.slim_movement.auth import (
+    DEFAULT_USERNAME,
     PASSWORD_ENV,
     USERNAME_ENV,
-    credentials_from_environment,
+    startup_credentials,
 )
 
 
@@ -64,17 +65,22 @@ def create_slim_test_client(
 def test_slim_movement_serves_shared_viewer_with_slim_profile(tmp_path):
     client = create_slim_test_client(tmp_path)
 
-    response = client.get("/")
-    app_js = client.get("/static/app.js")
+    response = client.get("/", headers={"Authorization": ""})
+    app_js = client.get("/static/app.js", headers={"Authorization": ""})
+    login_js = client.get("/slim-static/login.js", headers={"Authorization": ""})
 
     assert response.status_code == 200
     assert '<meta name="vibecleaning-movement-mode" content="slim_movement">' in response.text
     assert "slim movement review" in response.text
+    assert 'id="login-form"' in response.text
+    assert 'id="app-shell" hidden' in response.text
     assert app_js.status_code == 200
     assert "MOVEMENT_APP_CONFIG" in app_js.text
+    assert login_js.status_code == 200
+    assert 'import("/static/app.js")' in login_js.text
 
 
-def test_slim_auth_protects_page_static_assets_and_api(tmp_path):
+def test_slim_auth_keeps_login_assets_public_and_protects_data_routes(tmp_path):
     password = "a-long-random-password"
     client = create_slim_test_client(
         tmp_path,
@@ -82,21 +88,40 @@ def test_slim_auth_protects_page_static_assets_and_api(tmp_path):
         authenticated=False,
     )
 
+    for path in ("/", "/static/app.js", "/slim-static/login.js"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert "www-authenticate" not in response.headers
+        assert "set-cookie" not in response.headers
+
     for path in (
-        "/",
-        "/static/app.js",
+        "/api/auth/check",
         "/api/apps/movement/families",
+        "/api/apps/movement/family/movement_raw/study/raw_study/load",
+        "/api/projects",
     ):
         response = client.get(path)
         assert response.status_code == 401
-        assert response.headers["www-authenticate"] == (
-            'Basic realm="slim_movement", charset="UTF-8"'
-        )
+        assert response.json() == {"error": "Authentication required"}
+        assert "www-authenticate" not in response.headers
+        assert "set-cookie" not in response.headers
         assert response.headers["cache-control"] == "no-store"
 
-    assert client.get("/", auth=("reviewer", "wrong-password")).status_code == 401
-    assert client.get("/", auth=("wrong-user", password)).status_code == 401
-    assert client.get("/", auth=("reviewer", password)).status_code == 200
+    for auth in (
+        ("reviewer", "wrong-password"),
+        ("wrong-user", password),
+    ):
+        response = client.get("/api/auth/check", auth=auth)
+        assert response.status_code == 401
+        assert "www-authenticate" not in response.headers
+
+    authenticated = client.get("/api/auth/check", auth=("reviewer", password))
+    assert authenticated.status_code == 200
+    assert authenticated.json() == {
+        "authenticated": True,
+        "username": "reviewer",
+    }
+    assert authenticated.headers["cache-control"] == "no-store"
     assert (
         client.get(
             "/api/apps/movement/families",
@@ -106,30 +131,61 @@ def test_slim_auth_protects_page_static_assets_and_api(tmp_path):
     )
 
 
-def test_slim_auth_credentials_fail_closed():
-    with pytest.raises(RuntimeError, match=f"{USERNAME_ENV} and {PASSWORD_ENV}"):
-        credentials_from_environment({})
+def test_slim_login_code_keeps_credentials_in_tab_memory_only():
+    source = (
+        REPO_ROOT / "examples" / "slim_movement" / "static" / "login.js"
+    ).read_text(encoding="utf-8")
+
+    for forbidden in ("localStorage", "sessionStorage", "document.cookie"):
+        assert forbidden not in source
+    assert 'headers.set("Authorization", authorizationHeader)' in source
+    assert 'window.location.reload()' in source
+    assert 'logoutButton.addEventListener("click", returnToLogin)' in source
+
+
+def test_slim_startup_credentials_generate_or_accept_an_override():
+    generated = startup_credentials({})
+    assert generated.username == DEFAULT_USERNAME
+    assert generated.generated_password is True
+    assert len(generated.password) >= 12
+
+    username_override = startup_credentials({USERNAME_ENV: "field-reviewer"})
+    assert username_override.username == "field-reviewer"
+    assert username_override.generated_password is True
+
+    configured = startup_credentials(
+        {
+            USERNAME_ENV: "reviewer",
+            PASSWORD_ENV: "a-long-random-password",
+        }
+    )
+    assert configured.username == "reviewer"
+    assert configured.password == "a-long-random-password"
+    assert configured.generated_password is False
+
+
+def test_slim_startup_credentials_reject_invalid_overrides():
     with pytest.raises(RuntimeError, match="at least 12 characters"):
-        credentials_from_environment(
+        startup_credentials(
             {
                 USERNAME_ENV: "reviewer",
                 PASSWORD_ENV: "too-short",
             }
         )
     with pytest.raises(RuntimeError, match="colons or whitespace"):
-        credentials_from_environment(
+        startup_credentials(
             {
                 USERNAME_ENV: "review user",
                 PASSWORD_ENV: "a-long-random-password",
             }
         )
-
-    assert credentials_from_environment(
-        {
-            USERNAME_ENV: "reviewer",
-            PASSWORD_ENV: "a-long-random-password",
-        }
-    ) == ("reviewer", "a-long-random-password")
+    with pytest.raises(RuntimeError, match="cannot be empty"):
+        startup_credentials(
+            {
+                USERNAME_ENV: "",
+                PASSWORD_ENV: "a-long-random-password",
+            }
+        )
 
 
 def test_slim_movement_catalog_exposes_only_movement_raw(tmp_path):
@@ -207,8 +263,24 @@ def test_slim_movement_can_flag_export_and_generate_report(tmp_path):
         },
     )
     assert report.status_code == 200
-    realized = {item["logical_name"] for item in report.json()["analysis"]["realized_output_artifacts"]}
+    report_analysis = report.json()["analysis"]
+    realized = {item["logical_name"] for item in report_analysis["realized_output_artifacts"]}
     assert "movement_individual_reports.html" in realized
+
+    export_analysis_id = exported.json()["analysis"]["analysis_id"]
+    export_path = (
+        "/api/apps/movement/family/movement_raw/study/raw_study/"
+        f"analysis/{export_analysis_id}/artifact/zebra_raw_reviewed.csv"
+    )
+    report_path = (
+        "/api/apps/movement/family/movement_raw/study/raw_study/"
+        f"analysis/{report_analysis['analysis_id']}/artifact/"
+        "movement_individual_reports.html"
+    )
+    assert client.get(export_path).status_code == 200
+    assert client.get(report_path).status_code == 200
+    assert client.get(export_path, headers={"Authorization": ""}).status_code == 401
+    assert client.get(report_path, headers={"Authorization": ""}).status_code == 401
 
 
 def test_slim_anomaly_ranking_accepts_only_movement_features(tmp_path):

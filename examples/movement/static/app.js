@@ -2798,6 +2798,12 @@ class MovementExampleApp {
     this.refs.exportReviewedCsv.addEventListener("click", () => {
       void this.exportReviewedCsv();
     });
+    this.refs.outputLinks.addEventListener("click", event => {
+      void this.handleAuthenticatedArtifactClick(event);
+    });
+    this.refs.reportLinks.addEventListener("click", event => {
+      void this.handleAuthenticatedArtifactClick(event);
+    });
     this.refs.undo.addEventListener("click", async () => {
       await this.undoCurrentHead();
     });
@@ -2876,8 +2882,18 @@ class MovementExampleApp {
     }
   }
 
+  async fetchResponse(url, options) {
+    const slimAuth = MOVEMENT_APP_CONFIG.mode === "slim_movement"
+      ? window.vibecleaningSlimAuth
+      : null;
+    if (slimAuth?.fetch) {
+      return slimAuth.fetch(url, options);
+    }
+    return fetch(url, options);
+  }
+
   async fetchJSON(url, options) {
-    const response = await fetch(url, options);
+    const response = await this.fetchResponse(url, options);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error(payload.error || `${response.status} ${response.statusText}`);
@@ -2893,6 +2909,59 @@ class MovementExampleApp {
         ...(options?.headers || {}),
       },
     });
+  }
+
+  renderReportLinks() {
+    this.refs.reportLinks.innerHTML = this.lastReportLinks.map(link => (
+      `<a href="${link.href}" target="_blank" rel="noreferrer" data-authenticated-artifact="open" data-artifact-name="${escapeHtml(link.logicalName || "")}">${escapeHtml(link.label)}</a>`
+    )).join("");
+  }
+
+  async handleAuthenticatedArtifactClick(event) {
+    if (MOVEMENT_APP_CONFIG.mode !== "slim_movement") {
+      return;
+    }
+    const link = event.target.closest("a[data-authenticated-artifact]");
+    if (!link) {
+      return;
+    }
+    event.preventDefault();
+    const action = link.dataset.authenticatedArtifact || "open";
+    const artifactName = link.dataset.artifactName || "movement-output";
+    const popup = action === "open" ? window.open("", "_blank") : null;
+    if (popup) {
+      popup.opener = null;
+      popup.document.title = "Loading report…";
+      popup.document.body.textContent = "Loading report…";
+    }
+    try {
+      const response = await this.fetchResponse(link.href, { cache: "no-store" });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || `${response.status} ${response.statusText}`);
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      if (action === "download") {
+        const downloadLink = document.createElement("a");
+        downloadLink.href = objectUrl;
+        downloadLink.download = artifactName;
+        document.body.append(downloadLink);
+        downloadLink.click();
+        downloadLink.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      } else if (popup) {
+        popup.location.replace(objectUrl);
+      } else {
+        URL.revokeObjectURL(objectUrl);
+        throw new Error("The report window was blocked by the browser.");
+      }
+    } catch (error) {
+      if (popup) {
+        popup.close();
+      }
+      this.setStatus(`Could not retrieve ${artifactName}: ${error.message}`, true);
+    }
   }
 
   isAbortError(error) {
@@ -9057,9 +9126,7 @@ class MovementExampleApp {
     this.refs.reportScreenshotMode.value = "auto";
     this.refs.reportBasemap.value = "current";
     this.refs.reportSpreadIndividuals.checked = true;
-    this.refs.reportLinks.innerHTML = this.lastReportLinks.map(link => (
-      `<a href="${link.href}" target="_blank" rel="noreferrer">${escapeHtml(link.label)}</a>`
-    )).join("");
+    this.renderReportLinks();
     this.refs.reportStatus.textContent = "";
     this.refs.reportStatus.classList.remove("error");
     this.refs.reportSubmit.disabled = false;
@@ -9218,7 +9285,7 @@ class MovementExampleApp {
         throw new Error("Reviewed CSV export did not return an output artifact.");
       }
       const href = `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis/${encodeURIComponent(analysisId)}/artifact/${encodeURIComponent(outputName)}`;
-      this.refs.outputLinks.innerHTML = `<a href="${href}" download="${escapeHtml(outputName)}">Download ${escapeHtml(outputName)}</a>`;
+      this.refs.outputLinks.innerHTML = `<a href="${href}" download="${escapeHtml(outputName)}" data-authenticated-artifact="download" data-artifact-name="${escapeHtml(outputName)}">Download ${escapeHtml(outputName)}</a>`;
       const flaggedCount = formatCount(result?.summary?.flagged_row_count || 0);
       const rowCount = formatCount(result?.summary?.exported_row_count || 0);
       this.setStatus(`Exported ${rowCount} rows with ${flaggedCount} flagged rows. The source dataset was not changed.`);
@@ -9291,9 +9358,7 @@ class MovementExampleApp {
         family: this.currentFamily,
         study: this.currentStudy,
       });
-      this.refs.reportLinks.innerHTML = this.lastReportLinks.map(link => (
-        `<a href="${link.href}" target="_blank" rel="noreferrer">${escapeHtml(link.label)}</a>`
-      )).join("");
+      this.renderReportLinks();
       this.refs.reportStatus.textContent = this.lastReportLinks.length
         ? `Created analysis ${analysisId}.`
         : `Created analysis ${analysisId}, but no report links were returned.`;
@@ -10493,6 +10558,7 @@ function buildReportLinksFromAnalysis(analysis, { family, study } = {}) {
     .sort(compareReportArtifacts)
     .map(item => ({
       label: reportLinkLabelForArtifact(item.logical_name),
+      logicalName: item.logical_name,
       href: `/api/apps/movement/family/${encodeURIComponent(family)}/study/${encodeURIComponent(study)}/analysis/${encodeURIComponent(analysisId)}/artifact/${encodeURIComponent(item.logical_name)}`,
     }));
 }

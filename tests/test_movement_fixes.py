@@ -2120,8 +2120,18 @@ def test_movement_report_stores_snapshot_as_checksummed_analysis_input(tmp_path)
         "/api/apps/movement/family/movement_clean/study/test_study/"
         f"analysis/{analysis['analysis_id']}/artifact/movement_snapshot_01.png"
     )
+    html_response = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/"
+        f"analysis/{analysis['analysis_id']}/artifact/movement_individual_reports.html"
+    )
     assert snapshot_response.status_code == 200
     assert snapshot_response.content == png_bytes
+    assert html_response.status_code == 200
+    assert (
+        "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+        in html_response.text
+    )
+    assert 'src="movement_snapshot_01.png"' not in html_response.text
 
 
 def test_movement_generate_report_route_supports_combined_multi_individual_profile(tmp_path):

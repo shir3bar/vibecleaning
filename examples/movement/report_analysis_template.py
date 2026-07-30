@@ -1734,6 +1734,7 @@ def main():
             raise SystemExit("Target artifact was not provided as an input")
 
         snapshots_by_key = {}
+        embedded_snapshots_by_key = {}
         realized_snapshots = []
         for snapshot in snapshots:
             artifact_name = str(snapshot.get("artifact_name") or "").strip()
@@ -1751,6 +1752,12 @@ def main():
             output_path.write_bytes(raw_bytes)
             snapshot_key = str(snapshot.get("snapshot_key") or "").strip()
             snapshots_by_key[snapshot_key] = snapshot
+            embedded_snapshot = dict(snapshot)
+            embedded_snapshot["artifact_name"] = ""
+            embedded_snapshot["data_url"] = (
+                "data:image/png;base64," + base64.b64encode(raw_bytes).decode("ascii")
+            )
+            embedded_snapshots_by_key[snapshot_key] = embedded_snapshot
             realized_snapshots.append(artifact_name)
 
         if report_type == "issue_first":
@@ -1817,7 +1824,7 @@ def main():
                 user,
                 screenshot_mode,
                 ordered_issue_sections,
-                snapshots_by_key,
+                embedded_snapshots_by_key,
                 len(matched_records),
             )
             report_path = Path(output_by_name["movement_outlier_report.md"]["path"])
@@ -1938,7 +1945,12 @@ def main():
             if any(name not in output_by_name for name in required_outputs):
                 raise SystemExit("Individual profile outputs were not declared")
             combined_markdown = build_individual_profile_markdown_report(target_artifact, user, sections, snapshots_by_key)
-            combined_html = build_individual_profile_html_report(target_artifact, user, sections, snapshots_by_key)
+            combined_html = build_individual_profile_html_report(
+                target_artifact,
+                user,
+                sections,
+                embedded_snapshots_by_key,
+            )
             markdown_path = Path(output_by_name["movement_individual_reports.md"]["path"])
             html_path = Path(output_by_name["movement_individual_reports.html"]["path"])
             markdown_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1967,7 +1979,12 @@ def main():
                 if markdown_name not in output_by_name or html_name not in output_by_name:
                     raise SystemExit("Per-individual outputs were not declared")
                 markdown_text = build_individual_profile_markdown_report(target_artifact, user, [section], snapshots_by_key)
-                html_text = build_individual_profile_html_report(target_artifact, user, [section], snapshots_by_key)
+                html_text = build_individual_profile_html_report(
+                    target_artifact,
+                    user,
+                    [section],
+                    embedded_snapshots_by_key,
+                )
                 markdown_path = Path(output_by_name[markdown_name]["path"])
                 html_path = Path(output_by_name[html_name]["path"])
                 markdown_path.parent.mkdir(parents=True, exist_ok=True)

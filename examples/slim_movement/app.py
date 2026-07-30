@@ -1,12 +1,14 @@
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.web import create_app
 from examples.movement.routes import register_movement_routes
 
 from . import is_slim_movement_artifact
-from .auth import add_basic_auth
+from .auth import add_login_auth
 
 
 def create_slim_movement_app(
@@ -29,7 +31,23 @@ def create_slim_movement_app(
         artifact_filter=is_slim_movement_artifact,
         include_dev_routes=False,
     )
-    add_basic_auth(
+    app.mount(
+        "/slim-static",
+        StaticFiles(directory=index_path.parent),
+        name="slim-static",
+    )
+
+    @app.get("/api/auth/check")
+    def check_authentication(request: Request):
+        return JSONResponse(
+            {
+                "authenticated": True,
+                "username": request.state.authenticated_username,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    add_login_auth(
         app,
         username=username,
         password=password,
