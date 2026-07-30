@@ -5804,19 +5804,31 @@ class MovementExampleApp {
     }
     let position = this.getIndividualQueuePosition();
     if (action === "previous-page" || action === "next-page") {
-      if (!(await this.flushIndividualReviewDecisions())) {
-        return;
-      }
-      position = this.getIndividualQueuePosition();
       const direction = action === "next-page" ? 1 : -1;
-      this.individualReviewQueue.pageIndex = clamp(
+      const targetPageIndex = clamp(
         this.individualReviewQueue.pageIndex + direction,
         0,
         position.pageCount - 1,
       );
-      this.individualReviewQueue.groupIndex = 0;
-      this.individualReviewQueue.activeIndividual = "";
-      await this.applyIndividualQueueMapScope();
+      const targetIndividual = position.ordered[
+        targetPageIndex * INDIVIDUAL_QUEUE_PAGE_SIZE
+      ] || "";
+      if (!(await this.flushIndividualReviewDecisions())) {
+        return;
+      }
+      if (targetIndividual && this.data?.individuals.includes(targetIndividual)) {
+        await this.focusIndividualQueueItem(targetIndividual);
+      } else {
+        position = this.getIndividualQueuePosition();
+        this.individualReviewQueue.pageIndex = clamp(
+          targetPageIndex,
+          0,
+          position.pageCount - 1,
+        );
+        this.individualReviewQueue.groupIndex = 0;
+        this.individualReviewQueue.activeIndividual = "";
+        await this.applyIndividualQueueMapScope();
+      }
       this.saveUiState();
       return;
     }
@@ -5843,13 +5855,33 @@ class MovementExampleApp {
     if (!individual) {
       return;
     }
+    const comment = this.refs.individualQueueComment.value.trim();
+    const batchIsFull = (
+      !this.individualReviewQueue.stagedDecisions.has(individual)
+      && this.individualReviewQueue.stagedDecisions.size >= INDIVIDUAL_QUEUE_PAGE_SIZE
+    );
+    if (batchIsFull) {
+      if (!(await this.flushIndividualReviewDecisions())) {
+        return;
+      }
+      const orderedIndex = this.getIndividualQueueOrder().indexOf(individual);
+      if (orderedIndex >= 0) {
+        this.individualReviewQueue.pageIndex = Math.floor(
+          orderedIndex / INDIVIDUAL_QUEUE_PAGE_SIZE,
+        );
+        this.individualReviewQueue.groupIndex = Math.floor(
+          (orderedIndex % INDIVIDUAL_QUEUE_PAGE_SIZE) / INDIVIDUAL_QUEUE_GROUP_SIZE,
+        );
+        this.individualReviewQueue.activeIndividual = individual;
+      }
+    }
     const position = this.getIndividualQueuePosition();
     const currentIndex = position.page.indexOf(individual);
     const nextIndividual = position.page[currentIndex + 1] || "";
     this.individualReviewQueue.stagedDecisions.set(individual, {
       individual,
       review_ok: reviewOk,
-      comment: this.refs.individualQueueComment.value.trim(),
+      comment,
     });
     this.individualReviewQueue.skippedIndividuals.delete(individual);
     this.refs.individualQueueComment.value = "";
