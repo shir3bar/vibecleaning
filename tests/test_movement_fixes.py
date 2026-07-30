@@ -1138,6 +1138,22 @@ def test_movement_frontend_loads_suspicious_fixes_on_demand():
     assert "...(data.suspiciousFixes || [])" in source
 
 
+def test_movement_frontend_preserves_view_context_across_dataset_nodes():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "captureDatasetViewContext()" in source
+    assert "initializeDatasetView(viewContext = null)" in source
+    assert "restoreDatasetMapView(viewContext = null)" in source
+    assert "selectedIndividuals: this.getSelectedIndividuals()" in source
+    assert "selectedFixKeys: new Set(this.data.selectedFixKeys)" in source
+    assert "currentTimeMs: this.currentTimeMs" in source
+    assert "mapView," in source
+    assert "async loadDataset(viewContext = this.captureDatasetViewContext())" in source
+    assert "const preservedFixKeys = this.initializeDatasetView(viewContext)" in source
+    assert "this.restoreDatasetMapView(viewContext)" in source
+    assert "await this.loadStudy({ preferredDatasetId: datasetId, viewContext })" in source
+
+
 def test_export_reviewed_csv_combines_portable_and_sidecar_annotations(tmp_path):
     source_path = tmp_path / "movement.csv"
     source_path.write_text(
@@ -1338,6 +1354,38 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
         fix["fix_key"]
         for fix in suspicious_payload["fixes"]
     ] == ["id:fix_a_1#row:1", "id:fix_a_2#row:2"]
+
+    root_suspicious_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/fixes",
+        params={
+            "logical_name": "movement.csv",
+            "review_status": "suspected",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": "3600",
+        },
+    )
+    assert root_suspicious_response.status_code == 200
+    assert root_suspicious_response.json()["matching_fix_count"] == 0
+    assert root_suspicious_response.json()["fixes"] == []
+
+    root_fixes_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/fixes",
+        params={
+            "logical_name": "movement.csv",
+            "individual": "alpha",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": "3600",
+        },
+    )
+    assert root_fixes_response.status_code == 200
+    assert [fix["fix_key"] for fix in root_fixes_response.json()["fixes"]] == [
+        "id:fix_a_1#row:1",
+        "id:fix_a_2#row:2",
+    ]
+    assert all(
+        fix.get("review", {}).get("status", "") != "suspected"
+        for fix in root_fixes_response.json()["fixes"]
+    )
 
     export_response = client.post(
         "/api/apps/movement/family/movement_clean/study/test_study/actions/export-reviewed-csv",

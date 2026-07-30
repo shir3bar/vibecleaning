@@ -546,7 +546,7 @@ class MovementExampleApp {
     this.syncBurstGapControls();
     this.saveUiState();
     if (this.currentArtifact) {
-      void this.loadArtifact(new Set(this.data?.selectedFixKeys || []));
+      void this.loadArtifact(this.captureDatasetViewContext());
     }
   }
 
@@ -2682,6 +2682,7 @@ class MovementExampleApp {
       await this.loadDataset();
     });
     this.refs.artifact.addEventListener("change", async () => {
+      const viewContext = this.captureDatasetViewContext();
       this.currentArtifact = this.refs.artifact.value;
       this.saveUiState();
       if (!this.currentArtifact) {
@@ -2690,7 +2691,7 @@ class MovementExampleApp {
         this.setStatus("Select a study to load the map.");
         return;
       }
-      await this.loadArtifact();
+      await this.loadArtifact(viewContext);
     });
     this.refs.basemap.addEventListener("change", async () => {
       this.saveUiState();
@@ -4669,6 +4670,63 @@ class MovementExampleApp {
     this.refs.overlay.classList.add("hidden");
   }
 
+  captureDatasetViewContext() {
+    if (!this.data) {
+      return null;
+    }
+    let mapView = null;
+    if (this.map) {
+      try {
+        const center = this.map.getCenter();
+        mapView = {
+          center: [center.lng, center.lat],
+          zoom: this.map.getZoom(),
+          bearing: this.map.getBearing(),
+          pitch: this.map.getPitch(),
+        };
+      } catch {}
+    }
+    return {
+      selectedIndividuals: this.getSelectedIndividuals(),
+      selectedFixKeys: new Set(this.data.selectedFixKeys),
+      currentTimeMs: this.currentTimeMs,
+      mapView,
+    };
+  }
+
+  initializeDatasetView(viewContext = null) {
+    if (!this.data) {
+      return new Set();
+    }
+    const preservedFixKeys = viewContext?.selectedFixKeys instanceof Set
+      ? new Set(viewContext.selectedFixKeys)
+      : new Set();
+    const availableIndividuals = new Set(this.data.individuals);
+    const selectedIndividuals = viewContext
+      ? (viewContext.selectedIndividuals || []).filter(individual => availableIndividuals.has(individual))
+      : initialMovementVisibleIndividuals(this.data);
+    this.data.selectedIndividuals = new Set(selectedIndividuals);
+    this.data.selectedFixKeys = new Set(
+      [...preservedFixKeys].filter(key => this.data.fixByKey.has(key)),
+    );
+    const preservedTimeMs = Number(viewContext?.currentTimeMs);
+    this.currentTimeMs = Number.isFinite(preservedTimeMs)
+      ? clamp(preservedTimeMs, this.data.minTimeMs, this.data.maxTimeMs)
+      : this.data.minTimeMs;
+    this.refs.slider.min = String(this.data.minTimeMs);
+    this.refs.slider.max = String(this.data.maxTimeMs);
+    this.refs.slider.value = String(this.currentTimeMs);
+    return preservedFixKeys;
+  }
+
+  restoreDatasetMapView(viewContext = null) {
+    if (viewContext?.mapView && this.map) {
+      this.map.jumpTo(viewContext.mapView);
+      return;
+    }
+    this.resetView();
+  }
+
   clearLoadedStudyState() {
     this.clearThresholdState();
     this.clearOsmContext({ render: false });
@@ -4848,7 +4906,7 @@ class MovementExampleApp {
     }
   }
 
-  async loadStudy() {
+  async loadStudy({ preferredDatasetId = "", viewContext = null } = {}) {
     this.cancelRequest("study");
     this.cancelRequest("dataset");
     this.cancelRequest("overview");
@@ -4897,10 +4955,20 @@ class MovementExampleApp {
       this.stepByOutputDatasetId = new Map(
         (Array.isArray(graph.steps) ? graph.steps : []).map(step => [step.output_dataset_id, step]),
       );
-      const preferredDatasetId = datasetId || this.currentDatasetId || state?.current_dataset?.dataset_id || "";
-      this.refreshDatasetOptions(preferredDatasetId);
+      const requestedDatasetId = preferredDatasetId
+        || datasetId
+        || this.currentDatasetId
+        || state?.current_dataset?.dataset_id
+        || "";
+      this.refreshDatasetOptions(requestedDatasetId);
+      const selectedDatasetId = this.currentDatasetId;
+      if (selectedDatasetId && selectedDatasetId !== datasetId) {
+        this.currentDataset = null;
+        await this.loadDataset(viewContext);
+        return;
+      }
       this.currentDataset = dataset;
-      this.currentDatasetId = preferredDatasetId;
+      this.currentDatasetId = selectedDatasetId;
       this.currentArtifact = artifactName;
       if (this.currentDataset && Array.isArray(this.currentDataset.artifacts)) {
         const artifacts = this.selectableArtifacts(this.currentDataset);
@@ -4918,7 +4986,7 @@ class MovementExampleApp {
       }
       this.saveUiState();
       if (!this.currentDataset || !summary || !artifactName) {
-        await this.loadDataset();
+        await this.loadDataset(viewContext);
         return;
       }
       this.currentArtifactEntry = (this.currentDataset.artifacts || []).find(
@@ -4927,13 +4995,8 @@ class MovementExampleApp {
       this.clearLoadedStudyState();
       this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
       this.syncAnomalyFeatureSetOptions({ save: false });
-      this.currentTimeMs = this.data.minTimeMs;
-      this.refs.slider.min = String(this.data.minTimeMs);
-      this.refs.slider.max = String(this.data.maxTimeMs);
-      this.refs.slider.value = String(this.currentTimeMs);
-      const initiallySelectedIndividuals = initialMovementVisibleIndividuals(this.data);
-      this.data.selectedIndividuals = new Set(initiallySelectedIndividuals);
-      this.data.selectedFixKeys = new Set();
+      const preservedFixKeys = this.initializeDatasetView(viewContext);
+      const selectedIndividuals = this.getSelectedIndividuals();
       this.populateColorByOptions();
       this.renderIndividuals();
       this.renderSelectedFixes();
@@ -4942,14 +5005,14 @@ class MovementExampleApp {
       this.updateTimeLabel();
       this.hideOverlay();
       await this.rebuildMap(false);
-      this.resetView();
+      this.restoreDatasetMapView(viewContext);
       this.updateActionButtons();
-      if (initiallySelectedIndividuals.length) {
+      if (selectedIndividuals.length) {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
       } else {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
       }
-      void this.loadDetailForCurrentSelection();
+      void this.loadDetailForCurrentSelection({ preservedFixKeys });
       if (this.refs.showConfirmed.checked) {
         void this.loadConfirmedFixes();
       }
@@ -4987,14 +5050,13 @@ class MovementExampleApp {
     this.refs.dataset.disabled = false;
   }
 
-  async loadDataset() {
+  async loadDataset(viewContext = this.captureDatasetViewContext()) {
     this.cancelSelectionRequests("dataset");
     this.loadRequestId += 1;
     const familyName = this.currentFamily;
     const studyName = this.currentStudy;
     const datasetId = this.currentDatasetId;
     const datasetLoadId = ++this.datasetLoadId;
-    const preservedFixKeys = this.data ? new Set(this.data.selectedFixKeys) : new Set();
     this.clearLoadedStudyState();
     this.currentDataset = null;
     this.currentArtifactEntry = null;
@@ -5051,10 +5113,10 @@ class MovementExampleApp {
     this.refs.artifact.value = this.currentArtifact;
     this.refs.artifact.disabled = false;
     this.saveUiState();
-      await this.loadArtifact(preservedFixKeys);
-    }
+    await this.loadArtifact(viewContext);
+  }
 
-  async loadArtifact(preservedFixKeys = new Set()) {
+  async loadArtifact(viewContext = this.captureDatasetViewContext()) {
     this.cancelSelectionRequests("artifact");
     this.clearAnomalyRanking();
     this.clearBurstFeatureSpace();
@@ -5103,15 +5165,8 @@ class MovementExampleApp {
       this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
       this.syncAnomalyFeatureSetOptions({ save: false });
       this.renderBurstCountIndicator();
-      this.currentTimeMs = this.data.minTimeMs;
-      this.refs.slider.min = String(this.data.minTimeMs);
-      this.refs.slider.max = String(this.data.maxTimeMs);
-      this.refs.slider.value = String(this.currentTimeMs);
-      const initiallySelectedIndividuals = initialMovementVisibleIndividuals(this.data);
-      this.data.selectedIndividuals = new Set(initiallySelectedIndividuals);
-      this.data.selectedFixKeys = new Set(
-        [...preservedFixKeys].filter(key => this.data.fixByKey.has(key)),
-      );
+      const preservedFixKeys = this.initializeDatasetView(viewContext);
+      const selectedIndividuals = this.getSelectedIndividuals();
       this.populateColorByOptions();
       this.renderIndividuals();
       this.renderSelectedFixes();
@@ -5120,9 +5175,9 @@ class MovementExampleApp {
       this.updateTimeLabel();
       this.hideOverlay();
       await this.rebuildMap(false);
-      this.resetView();
+      this.restoreDatasetMapView(viewContext);
       this.updateActionButtons();
-      if (initiallySelectedIndividuals.length) {
+      if (selectedIndividuals.length) {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
       } else {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
@@ -9420,8 +9475,9 @@ class MovementExampleApp {
   }
 
   async loadStudyAtDataset(datasetId) {
+    const viewContext = this.captureDatasetViewContext();
     this.currentDatasetId = datasetId;
-    await this.loadStudy();
+    await this.loadStudy({ preferredDatasetId: datasetId, viewContext });
   }
 
   async undoCurrentHead() {
