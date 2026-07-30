@@ -206,6 +206,14 @@ CONFIRM_ISSUES_SCRIPT = build_self_contained_script(
     MOVEMENT_REVIEW_MODULES,
 )
 
+REVIEW_INDIVIDUALS_TEMPLATE_PATH = Path(__file__).with_name(
+    "review_individuals_step_template.py"
+)
+REVIEW_INDIVIDUALS_SCRIPT = build_self_contained_script(
+    REVIEW_INDIVIDUALS_TEMPLATE_PATH,
+    MOVEMENT_REVIEW_MODULES,
+)
+
 
 def _validate_fix_keys(value: object, *, allow_empty: bool = False) -> list[str]:
     if value is None and allow_empty:
@@ -251,6 +259,37 @@ def _validate_confirmations(value: object) -> list[dict]:
             "fix_count": len(fix_keys),
         })
     return confirmations
+
+
+def _validate_individual_review_decisions(value: object) -> list[dict]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("Review at least one individual")
+    if len(value) > 25:
+        raise ValueError("A review page supports at most 25 individual decisions")
+    decisions = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid individual review decisions")
+        individual = _normalize_individual_name(item.get("individual"))
+        if individual in seen:
+            raise ValueError(f"Duplicate review decision for {individual}")
+        seen.add(individual)
+        review_ok = item.get("review_ok")
+        if not isinstance(review_ok, bool):
+            raise ValueError("Individual review decisions require review_ok to be true or false")
+        decisions.append(
+            {
+                "individual": individual,
+                "review_ok": review_ok,
+                "comment": _validate_optional_text(
+                    item.get("comment"),
+                    label="Review comment",
+                    max_length=1200,
+                ),
+            }
+        )
+    return decisions
 
 
 def _validate_fix_key(value: object, *, label: str) -> str:
@@ -1135,6 +1174,56 @@ def register_movement_routes(
                     "confirmations": confirmations,
                     "note": note,
                     "user": body.get("user"),
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": input_artifacts,
+                "output_artifacts": ["movement_review_annotations.json"],
+                "set_as_head": True,
+            }
+            return JSONResponse(create_step(study_dir, payload))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/actions/review-individuals"
+    )
+    async def post_movement_review_individuals(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            dataset = load_dataset(study_dir, dataset_id)
+            get_dataset_artifact(study_dir, dataset_id, logical_name)
+            decisions = _validate_individual_review_decisions(body.get("decisions"))
+            user = normalize_user(body.get("user"))
+            input_artifacts = [logical_name]
+            if any(
+                artifact.get("logical_name") == "movement_review_annotations.json"
+                for artifact in dataset.get("artifacts", [])
+            ):
+                input_artifacts.append("movement_review_annotations.json")
+            payload = {
+                "user": user,
+                "title": (
+                    f"Record review decisions for {len(decisions)} individual(s) "
+                    f"in {logical_name}"
+                ),
+                "kind": "python",
+                "script": REVIEW_INDIVIDUALS_SCRIPT,
+                "parameters": {
+                    "app": "movement",
+                    "action": "review_individuals",
+                    "target_artifact": logical_name,
+                    "dataset_id": dataset_id,
+                    "decisions": decisions,
+                    "user": user,
                 },
                 "parent_dataset_id": dataset_id,
                 "input_artifacts": input_artifacts,

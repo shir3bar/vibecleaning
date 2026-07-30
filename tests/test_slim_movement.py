@@ -210,6 +210,7 @@ def test_slim_movement_load_selects_raw_csv_and_keeps_review_routes(tmp_path):
     assert loaded.json()["logical_name"] == "zebra_raw.csv"
     paths = {route.path for route in client.app.routes}
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/annotate-scope" in paths
+    assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/review-individuals" in paths
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/export-reviewed-csv" in paths
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/generate-report" in paths
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-burst-anomaly-ranking" in paths

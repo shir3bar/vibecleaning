@@ -1280,6 +1280,18 @@ fix_3,gamma,2024-01-01T02:00:00Z,-72,42,train,false,,,false,true,
                         "issue_type": "burst anomaly",
                         "comment": "algorithm note",
                         "scope": {"kind": "individual", "individual": "beta"},
+                    },
+                    {
+                        "annotation_id": "step_review:individual_review:1",
+                        "step_id": "step_review",
+                        "annotation_kind": "individual_review",
+                        "source_artifact": "movement.csv",
+                        "reviewed": True,
+                        "review_ok": True,
+                        "comment": "Track looks plausible",
+                        "user": "reviewer",
+                        "created_at": "2026-07-30T12:00:00+00:00",
+                        "scope": {"kind": "individual", "individual": "alpha"},
                     }
                 ]
             }
@@ -1308,9 +1320,13 @@ fix_3,gamma,2024-01-01T02:00:00Z,-72,42,train,false,,,false,true,
     assert rows[0]["algorithm-marked-outlier"] == "false"
     assert rows[0]["outlier_issue_type"] == "drift"
     assert rows[0]["outlier_comments"] == "manual note"
+    assert rows[0]["individual-reviewed"] == "true"
+    assert rows[0]["individual-review-ok"] == "true"
     assert rows[1]["visible"] == "false"
     assert rows[1]["manually-marked-outlier"] == "true"
     assert rows[1]["algorithm-marked-outlier"] == "true"
+    assert rows[1]["individual-reviewed"] == "false"
+    assert rows[1]["individual-review-ok"] == "false"
     assert rows[1]["outlier_status"] == "confirmed"
     assert rows[1]["outlier_issue_type"] == "burst anomaly"
     assert rows[1]["outlier_comments"] == (
@@ -1323,6 +1339,100 @@ fix_3,gamma,2024-01-01T02:00:00Z,-72,42,train,false,,,false,true,
     assert rows[2]["outlier_status"] == ""
     assert rows[2]["outlier_comments"] == "Already flagged in source: algorithm-marked-outlier=true"
     assert summary["flagged_row_count"] == 3
+
+
+def test_review_individuals_persists_one_lightweight_node_isolated_step(tmp_path):
+    clean_csv = """eventid,individual,timestamp,longitude,latitude
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1
+fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0
+"""
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=clean_csv)
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+    source_before = (study_dir / "movement.csv").read_text(encoding="utf-8")
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/review-individuals",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "user": "reviewer",
+            "decisions": [
+                {
+                    "individual": "alpha",
+                    "review_ok": True,
+                    "comment": "Track looks plausible",
+                },
+                {
+                    "individual": "beta",
+                    "review_ok": False,
+                    "comment": "Issues were marked separately",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    reviewed_dataset_id = payload["dataset"]["dataset_id"]
+    assert payload["step"]["parameters"]["action"] == "review_individuals"
+    assert payload["step"]["output_artifacts"] == ["movement_review_annotations.json"]
+    assert payload["step"]["summary"]["reviewed_individual_count"] == 2
+    assert payload["step"]["summary"]["reviewed_ok_count"] == 1
+    assert (study_dir / "movement.csv").read_text(encoding="utf-8") == source_before
+
+    _, source_path = get_dataset_artifact(study_dir, reviewed_dataset_id, "movement.csv")
+    assert source_path == study_dir / "movement.csv"
+    _, sidecar_path = get_dataset_artifact(
+        study_dir,
+        reviewed_dataset_id,
+        "movement_review_annotations.json",
+    )
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert sidecar["schema_version"] == 4
+    assert [item["scope"]["individual"] for item in sidecar["annotations"]] == [
+        "alpha",
+        "beta",
+    ]
+    assert all(item["annotation_kind"] == "individual_review" for item in sidecar["annotations"])
+
+    root_overview = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/overview",
+        params={"logical_name": "movement.csv"},
+    )
+    reviewed_overview = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{reviewed_dataset_id}/overview",
+        params={"logical_name": "movement.csv"},
+    )
+    assert root_overview.status_code == 200
+    assert reviewed_overview.status_code == 200
+    assert root_overview.json()["stats"]["alpha"].get("reviewed") is not True
+    reviewed_stats = reviewed_overview.json()["stats"]
+    assert reviewed_stats["alpha"]["reviewed"] is True
+    assert reviewed_stats["alpha"]["review_ok"] is True
+    assert reviewed_stats["beta"]["reviewed"] is True
+    assert reviewed_stats["beta"]["review_ok"] is False
+    assert reviewed_stats["beta"]["review_comment"] == "Issues were marked separately"
+
+
+def test_review_individuals_rejects_more_than_one_queue_page(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/review-individuals",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "user": "reviewer",
+            "decisions": [
+                {"individual": f"animal-{index}", "review_ok": True}
+                for index in range(26)
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "at most 25" in response.json()["error"]
 
 
 def test_reviewed_csv_artifact_name_is_based_on_source_name():

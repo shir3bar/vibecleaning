@@ -17,6 +17,8 @@ EXPORT_COLUMNS = [
     "visible",
     "manually-marked-outlier",
     "algorithm-marked-outlier",
+    "individual-reviewed",
+    "individual-review-ok",
     "outlier_status",
     "outlier_issue_type",
     "outlier_comments",
@@ -129,11 +131,22 @@ def normalize_annotation(raw: dict) -> dict:
         )
     except (TypeError, ValueError):
         resolved_fix_count = sum(end - start + 1 for start, end in row_ranges)
+    reviewed = raw.get("reviewed") is True or _flag_is_true(raw.get("reviewed"))
+    raw_review_ok = raw.get("review_ok")
+    review_ok = (
+        raw_review_ok
+        if isinstance(raw_review_ok, bool)
+        else _flag_is_true(raw_review_ok)
+        if raw_review_ok not in (None, "")
+        else None
+    )
     return {
         "annotation_id": str(raw.get("annotation_id") or "").strip(),
         "step_id": str(raw.get("step_id") or "").strip(),
         "parent_annotation_id": str(raw.get("parent_annotation_id") or "").strip(),
         "annotation_kind": str(raw.get("annotation_kind") or "issue").strip().lower(),
+        "reviewed": reviewed,
+        "review_ok": review_ok if reviewed else None,
         "source_artifact": str(raw.get("source_artifact") or "").strip(),
         "source_dataset_id": str(raw.get("source_dataset_id") or "").strip(),
         "status": status,
@@ -156,6 +169,28 @@ def normalize_annotation(raw: dict) -> dict:
             "burst_gap": dict(scope.get("burst_gap") or {}),
         },
     }
+
+
+def individual_review_decisions(
+    annotations: list[dict],
+    *,
+    source_artifact: str,
+) -> dict[str, dict]:
+    latest: dict[str, dict] = {}
+    for annotation in annotations:
+        if annotation.get("annotation_kind") != "individual_review":
+            continue
+        if not annotation.get("reviewed"):
+            continue
+        if annotation.get("source_artifact") and annotation["source_artifact"] != source_artifact:
+            continue
+        scope = annotation.get("scope") or {}
+        if scope.get("kind") != "individual":
+            continue
+        individual = str(scope.get("individual") or "").strip()
+        if individual:
+            latest[individual] = annotation
+    return latest
 
 
 def source_row_annotation(raw: dict, *, fix_key: str, source_artifact: str) -> dict | None:
@@ -216,12 +251,16 @@ def confirmed_exclusion_scopes(
 
 
 def apply_review_annotations(summary: dict, annotations: list[dict], *, source_artifact: str) -> dict:
-    relevant = [
+    relevant_issues = [
         item
         for item in annotations
         if item["status"] and (not item["source_artifact"] or item["source_artifact"] == source_artifact)
     ]
-    if not relevant:
+    review_decisions = individual_review_decisions(
+        annotations,
+        source_artifact=source_artifact,
+    )
+    if not relevant_issues and not review_decisions:
         return summary
     result = dict(summary)
     fixes = list(summary.get("fixes") or [])
@@ -231,7 +270,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
         set_name = str(fix.get("set") or "train")
         matches = [
             item
-            for item in relevant
+            for item in relevant_issues
             if annotation_applies(item, fix_key=fix_key, individual=individual, set_name=set_name)
         ]
         if not matches:
@@ -280,7 +319,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
     }
     segments = list(result.get("segments") or [])
     existing_segment_ids = {str(item.get("segment_id") or "") for item in segments}
-    for item in relevant:
+    for item in relevant_issues:
         scope = item.get("scope") or {}
         if scope.get("kind") != "segment" or item["annotation_id"] in existing_segment_ids:
             continue
@@ -321,7 +360,38 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
             }
         )
     result["segments"] = segments
-    result["review_annotations"] = relevant
+    result["review_annotations"] = [
+        item
+        for item in annotations
+        if not item.get("source_artifact") or item["source_artifact"] == source_artifact
+    ]
+    result["individual_reviews"] = {
+        individual: {
+            "reviewed": True,
+            "review_ok": bool(item.get("review_ok")),
+            "review_user": item.get("user") or "",
+            "reviewed_at": item.get("created_at") or "",
+            "review_comment": item.get("comment") or "",
+            "step_id": item.get("step_id") or "",
+        }
+        for individual, item in review_decisions.items()
+    }
+    stats_by_individual = {
+        individual: dict(stats)
+        for individual, stats in (result.get("stats") or {}).items()
+    }
+    for individual, stats in stats_by_individual.items():
+        decision = review_decisions.get(individual)
+        stats.update(
+            {
+                "reviewed": bool(decision),
+                "review_ok": bool(decision.get("review_ok")) if decision else False,
+                "review_user": str(decision.get("user") or "") if decision else "",
+                "reviewed_at": str(decision.get("created_at") or "") if decision else "",
+                "review_comment": str(decision.get("comment") or "") if decision else "",
+            }
+        )
+    result["stats"] = stats_by_individual
     if not result.get("overview_truncated") and not result.get("truncated"):
         counts = {"suspected": 0, "confirmed": 0}
         counts_by_individual: dict[str, dict[str, int]] = {}
@@ -427,6 +497,10 @@ def export_reviewed_csv(
     annotation_step_ids: dict[str, str] | None = None,
 ) -> dict:
     annotations = load_review_annotations(sidecar_path)
+    reviews_by_individual = individual_review_decisions(
+        annotations,
+        source_artifact=source_artifact,
+    )
     step_id_by_annotation = dict(annotation_step_ids or {})
     with source_path.open("r", newline="", encoding="utf-8") as input_handle:
         reader = csv.DictReader(input_handle)
@@ -528,6 +602,13 @@ def export_reviewed_csv(
             output_row["visible"] = "true" if _original_visible(raw.get("visible")) and not confirmed else "false"
             output_row["manually-marked-outlier"] = "true" if manual else "false"
             output_row["algorithm-marked-outlier"] = "true" if algorithm else "false"
+            individual_review = reviews_by_individual.get(individual)
+            output_row["individual-reviewed"] = "true" if individual_review else "false"
+            output_row["individual-review-ok"] = (
+                "true"
+                if individual_review and individual_review.get("review_ok")
+                else "false"
+            )
             output_row["outlier_status"] = status
             output_row["outlier_issue_type"] = "; ".join(issue_types)
             output_row["outlier_comments"] = "; ".join(comments)
