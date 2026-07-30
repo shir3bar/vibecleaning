@@ -440,6 +440,7 @@ def test_shared_individual_tab_has_persisted_vertical_resize_control():
     assert "beginIndividualPaneResize" in source
     assert "applyIndividualListHeight" in source
     assert "individualListHeightPx: this.individualListHeightPx" in source
+    assert "individualQueueListHeightPx: this.individualQueueListHeightPx" in source
 
 
 def test_slim_ranking_layout_keeps_map_full_height_and_resizes_canvas():

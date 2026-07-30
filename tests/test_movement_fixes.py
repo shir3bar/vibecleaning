@@ -697,7 +697,8 @@ def test_individual_fix_splitter_mirrors_working_side_pane_drag():
     assert "--movement-checked-fixes-height" in source
     assert "bounds.available - nextHeight" in source
     assert "align-content: start;" in source
-    assert 'sheet.classList.contains("queue-mode")' in source
+    assert "--movement-queue-list-height" in source
+    assert "sheetRect.bottom - event.clientY" in source
 
 
 def test_hidden_output_links_do_not_leave_an_empty_root_grid_row():
@@ -1433,7 +1434,8 @@ def test_movement_frontend_restores_saved_burst_analyses():
     assert "/actions/confirm-issues" in source
     assert 'id: "movement-confirmed-exclusions"' in source
     assert 'id: "movement-suspected-outline"' in source
-    assert "getFillColor: [92, 101, 110, 24]" in source
+    assert "[92, 101, 110, 24]" in source
+    assert "getFillColor: item => this.queueMapColor(" in source
     assert "|| !visibleIndividuals.has(fix.individual)" in source
     assert "getUnresolvedSuspectedIssueGroups" in source
 
@@ -1478,7 +1480,13 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert 'data-queue-scope="group">Group view</button>' in source
     assert 'data-queue-scope="all"' not in source
     assert '.movement-side-tabs.hidden,' in source
-    assert ".movement-side-sheet.individuals.queue-mode" in source
+    assert 'data-role="individual-search-control"' in source
+    assert "this.refs.individualSearchControl.hidden = this.individualReviewQueue.mode === \"queue\"" in source
+    assert "const individuals = this.data?.individuals || [];" in source
+    assert ".movement-side-sheet.individuals.queue-mode .movement-individual-resize" in source
+    assert '.movement-side-sheet.individuals.queue-mode [data-role="individuals"]' in source
+    assert '.movement-side-sheet.individuals.queue-mode [data-role="selected-fixes"]' in source
+    assert "display: none;" in source
     assert 'data-queue-comment data-individual=' in source
     assert 'data-queue-table data-individual=' in source
     assert 'data-role="individual-queue-comment"' not in source
@@ -1486,8 +1494,9 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert "return position.group;" in source
     assert "/actions/review-individuals" in source
     assert "flushIndividualReviewDecisions()" in source
-    assert 'id: "movement-active-individual-outline"' in source
-    assert "getColor: [125, 211, 252, 150]" in source
+    assert 'id: "movement-active-individual-outline"' not in source
+    assert "return 0.5;" in source
+    assert "this.queueMapColor(" in source
     assert 'data-role="issue-scope"' in source
     assert 'data-role="issue-burst"' in source
     assert "setupIndividualQueueIssueScope(individual)" in source

@@ -192,6 +192,7 @@ const MAX_SIDE_PANE_WIDTH_RATIO = 0.55;
 const SIDE_PANE_HANDLE_WIDTH_PX = 12;
 const STACKED_SIDE_LAYOUT_BREAKPOINT_PX = 1080;
 const MIN_INDIVIDUAL_LIST_HEIGHT_PX = 80;
+const MIN_QUEUE_CONTROLS_HEIGHT_PX = 90;
 const MIN_CHECKED_FIXES_HEIGHT_PX = 60;
 const MAX_SELECTED_FIXES_SHOWN = 150;
 const LARGE_MAP_POINT_THRESHOLD = 50000;
@@ -376,6 +377,9 @@ class MovementExampleApp {
       pointerId: null,
     };
     this.individualListHeightPx = finiteOrNull(this.uiState.individualListHeightPx);
+    this.individualQueueListHeightPx = finiteOrNull(
+      this.uiState.individualQueueListHeightPx,
+    );
     this.individualPaneResize = {
       active: false,
       pointerId: null,
@@ -462,6 +466,7 @@ class MovementExampleApp {
         tableFilter: "",
         sidePaneWidthPx: DEFAULT_SIDE_PANE_WIDTH_PX,
         individualListHeightPx: null,
+        individualQueueListHeightPx: null,
         individualViewMode: "browse",
         individualQueueOrder: "dataset",
         individualQueuePage: 0,
@@ -492,6 +497,7 @@ class MovementExampleApp {
       tableFilter: this.refs.tableFilter?.value || "",
       sidePaneWidthPx: this.sidePaneWidthPx,
       individualListHeightPx: this.individualListHeightPx,
+      individualQueueListHeightPx: this.individualQueueListHeightPx,
       individualViewMode: this.individualReviewQueue?.mode || "browse",
       individualQueueOrder: this.individualReviewQueue?.orderMode || "dataset",
       individualQueuePage: this.individualReviewQueue?.pageIndex || 0,
@@ -707,9 +713,16 @@ class MovementExampleApp {
 
   handleLayoutResize() {
     this.applySidePaneWidth(this.sidePaneWidthPx, { save: false });
-    if (this.individualListHeightPx !== null) {
-      this.applyIndividualListHeight(this.individualListHeightPx, { save: false });
+    const listHeight = this.currentIndividualListHeight();
+    if (listHeight !== null) {
+      this.applyIndividualListHeight(listHeight, { save: false });
     }
+  }
+
+  currentIndividualListHeight() {
+    return this.individualReviewQueue.mode === "queue"
+      ? this.individualQueueListHeightPx
+      : this.individualListHeightPx;
   }
 
   beginSidePaneResize(event) {
@@ -767,17 +780,36 @@ class MovementExampleApp {
     const listRect = list.getBoundingClientRect();
     if (
       sheet.classList.contains("hidden")
-      || sheet.classList.contains("queue-mode")
       || sheetRect.height <= 0
       || listRect.height <= 0
     ) {
       return null;
+    }
+    if (this.individualReviewQueue.mode === "queue") {
+      const controls = this.refs?.individualQueueControls;
+      const controlsRect = controls?.getBoundingClientRect();
+      if (!controlsRect?.height) {
+        return null;
+      }
+      const availableHeight = sheetRect.bottom
+        - controlsRect.top
+        - (resize?.offsetHeight || 0);
+      return {
+        mode: "queue",
+        min: MIN_INDIVIDUAL_LIST_HEIGHT_PX,
+        max: Math.max(
+          MIN_INDIVIDUAL_LIST_HEIGHT_PX,
+          Math.floor(availableHeight - MIN_QUEUE_CONTROLS_HEIGHT_PX),
+        ),
+        available: Math.floor(availableHeight),
+      };
     }
     const availableHeight = sheetRect.bottom
       - listRect.top
       - (resize?.offsetHeight || 0)
       - (fixHead?.offsetHeight || 0);
     return {
+      mode: "browse",
       min: MIN_INDIVIDUAL_LIST_HEIGHT_PX,
       max: Math.max(
         MIN_INDIVIDUAL_LIST_HEIGHT_PX,
@@ -799,6 +831,19 @@ class MovementExampleApp {
       return;
     }
     const nextHeight = Math.round(Math.min(bounds.max, Math.max(bounds.min, requested)));
+    if (bounds.mode === "queue") {
+      this.individualQueueListHeightPx = nextHeight;
+      this.refs.sideSheetIndividuals.style.setProperty(
+        "--movement-queue-list-height",
+        `${nextHeight}px`,
+      );
+      this.refs.individualResize?.setAttribute("aria-valuenow", String(nextHeight));
+      this.refs.individualResize?.setAttribute("aria-valuemax", String(bounds.max));
+      if (save) {
+        this.saveUiState();
+      }
+      return;
+    }
     const checkedFixesHeight = Math.max(
       MIN_CHECKED_FIXES_HEIGHT_PX,
       bounds.available - nextHeight,
@@ -835,6 +880,11 @@ class MovementExampleApp {
     ) {
       return;
     }
+    if (this.individualReviewQueue.mode === "queue") {
+      const sheetRect = this.refs.sideSheetIndividuals.getBoundingClientRect();
+      this.applyIndividualListHeight(sheetRect.bottom - event.clientY, { save: false });
+      return;
+    }
     const listRect = this.refs.individuals.getBoundingClientRect();
     this.applyIndividualListHeight(event.clientY - listRect.top, { save: false });
   }
@@ -853,7 +903,7 @@ class MovementExampleApp {
     window.removeEventListener("pointermove", this.handleIndividualPanePointerMove);
     window.removeEventListener("pointerup", this.handleIndividualPanePointerUp);
     window.removeEventListener("pointercancel", this.handleIndividualPanePointerUp);
-    this.applyIndividualListHeight(this.individualListHeightPx, { save: true });
+    this.applyIndividualListHeight(this.currentIndividualListHeight(), { save: true });
   }
 
   resizeIndividualPaneFromKeyboard(event) {
@@ -865,15 +915,21 @@ class MovementExampleApp {
     if (!bounds) {
       return;
     }
-    const current = this.individualListHeightPx
+    const queueMode = this.individualReviewQueue.mode === "queue";
+    const current = this.currentIndividualListHeight()
       ?? this.refs.individuals?.getBoundingClientRect().height
       ?? bounds.min;
     const step = event.shiftKey ? 40 : 10;
-    const nextHeight = event.key === "Home"
-      ? bounds.min
-      : event.key === "End"
-        ? bounds.max
-        : current + (event.key === "ArrowDown" ? step : -step);
+    let nextHeight = current;
+    if (event.key === "Home") {
+      nextHeight = bounds.min;
+    } else if (event.key === "End") {
+      nextHeight = bounds.max;
+    } else if (queueMode) {
+      nextHeight = current + (event.key === "ArrowUp" ? step : -step);
+    } else {
+      nextHeight = current + (event.key === "ArrowDown" ? step : -step);
+    }
     this.applyIndividualListHeight(nextHeight, { save: true });
   }
 
@@ -919,8 +975,8 @@ class MovementExampleApp {
       this.renderTableSheet();
     } else if (nextSheet === "feature_space") {
       this.renderBurstFeatureSpace();
-    } else if (nextSheet === "individuals" && this.individualListHeightPx !== null) {
-      this.applyIndividualListHeight(this.individualListHeightPx, { save: false });
+    } else if (nextSheet === "individuals" && this.currentIndividualListHeight() !== null) {
+      this.applyIndividualListHeight(this.currentIndividualListHeight(), { save: false });
     }
     if (this.map) {
       window.requestAnimationFrame(() => {
@@ -1714,9 +1770,19 @@ class MovementExampleApp {
           align-content: start;
         }
         .movement-side-sheet.individuals.queue-mode {
-          grid-template-rows: auto auto minmax(0, 1fr);
+          grid-template-rows: auto minmax(${MIN_QUEUE_CONTROLS_HEIGHT_PX}px, 1fr) 10px minmax(${MIN_INDIVIDUAL_LIST_HEIGHT_PX}px, var(--movement-queue-list-height, 1fr));
         }
-        .movement-side-sheet.individuals.queue-mode .movement-individual-resize,
+        .movement-side-sheet.individuals.queue-mode .movement-side-search {
+          grid-row: 2;
+          min-height: 0;
+          overflow-y: auto;
+        }
+        .movement-side-sheet.individuals.queue-mode .movement-individual-resize {
+          grid-row: 3;
+        }
+        .movement-side-sheet.individuals.queue-mode [data-role="individuals"] {
+          grid-row: 4;
+        }
         .movement-side-sheet.individuals.queue-mode [data-role="fix-head"],
         .movement-side-sheet.individuals.queue-mode [data-role="selected-fixes"] {
           display: none;
@@ -2031,6 +2097,25 @@ class MovementExampleApp {
           color: #9bb0c6;
           font-size: 11px;
           line-height: 1.4;
+        }
+        .movement-queue-ranking-state {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          min-width: 0;
+          font-size: 9px;
+          line-height: 1.15;
+        }
+        .movement-queue-ranking-copy {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .movement-queue-ranking-state button {
+          flex: 0 0 auto;
+          padding: 3px 6px;
+          font-size: 9px;
         }
         .movement-queue-ranking-state.error {
           color: #f9c98b;
@@ -2555,7 +2640,7 @@ class MovementExampleApp {
               <div class="movement-side-sheet individuals" data-role="side-sheet-individuals">
                 <div class="movement-side-head" data-role="individual-head">Individuals and coverage</div>
                 <div class="movement-side-search">
-                  <label>Search by individual ID
+                  <label data-role="individual-search-control">Search by individual ID
                     <input type="search" data-role="individual-search" placeholder="Find an individual ID">
                   </label>
                   <div class="movement-queue-controls hidden" data-role="individual-queue-controls">
@@ -2859,6 +2944,7 @@ class MovementExampleApp {
       sideSheetFeatureSpace: this.mountEl.querySelector('[data-role="side-sheet-feature-space"]'),
       sideResize: this.mountEl.querySelector('[data-role="side-resize"]'),
       individualSearch: this.mountEl.querySelector('[data-role="individual-search"]'),
+      individualSearchControl: this.mountEl.querySelector('[data-role="individual-search-control"]'),
       individualViewBrowse: this.mountEl.querySelector('[data-role="individual-view-browse"]'),
       individualViewQueue: this.mountEl.querySelector('[data-role="individual-view-queue"]'),
       individualQueueControls: this.mountEl.querySelector('[data-role="individual-queue-controls"]'),
@@ -2991,9 +3077,6 @@ class MovementExampleApp {
     this.refs.individualSearch.value = this.individualSearchQuery;
     this.refs.individualQueueOrder.value = this.individualReviewQueue.orderMode;
     this.applySidePaneWidth(this.sidePaneWidthPx, { save: false, resizeMap: false });
-    if (this.individualListHeightPx !== null) {
-      this.applyIndividualListHeight(this.individualListHeightPx, { save: false });
-    }
     this.setSideSheet(
       this.individualReviewQueue.mode === "queue"
         ? "individuals"
@@ -3001,6 +3084,9 @@ class MovementExampleApp {
       { save: false },
     );
     this.renderIndividuals();
+    if (this.currentIndividualListHeight() !== null) {
+      this.applyIndividualListHeight(this.currentIndividualListHeight(), { save: false });
+    }
     this.renderAnomalyRanking();
     this.renderBurstFeatureSpace();
     this.updateActionButtons();
@@ -3014,13 +3100,7 @@ class MovementExampleApp {
     this.refs.sideTabFeatureSpace.addEventListener("click", () => this.setSideSheet("feature_space"));
     this.refs.individualSearch.addEventListener("input", () => {
       this.individualSearchQuery = this.refs.individualSearch.value || "";
-      this.individualReviewQueue.pageIndex = 0;
-      this.individualReviewQueue.groupIndex = 0;
-      this.individualReviewQueue.activeIndividual = "";
       this.renderIndividuals();
-      if (this.individualReviewQueue.mode === "queue") {
-        void this.applyIndividualQueueMapScope({ zoom: false });
-      }
     });
     this.refs.individualViewBrowse.addEventListener("click", () => {
       void this.setIndividualViewMode("browse");
@@ -4858,6 +4938,33 @@ class MovementExampleApp {
     return [mutedChannel(red), mutedChannel(green), mutedChannel(blue), alpha];
   }
 
+  queueMapOpacity(individual) {
+    if (
+      this.individualReviewQueue.mode === "queue"
+      && this.individualReviewQueue.activeIndividual
+      && individual
+      && individual !== this.individualReviewQueue.activeIndividual
+    ) {
+      return 0.5;
+    }
+    return 1;
+  }
+
+  queueMapColor(color, individual) {
+    const source = Array.isArray(color) ? color : [124, 136, 153, 255];
+    const opacity = this.queueMapOpacity(individual);
+    if (opacity === 1) {
+      return source;
+    }
+    const sourceAlpha = Number(source[3]);
+    return [
+      Number(source[0]) || 0,
+      Number(source[1]) || 0,
+      Number(source[2]) || 0,
+      Math.round((Number.isFinite(sourceAlpha) ? sourceAlpha : 255) * opacity),
+    ];
+  }
+
   async inspectRankingBurst(burstId, { checkFixes = false } = {}) {
     if (!this.data) {
       return;
@@ -5925,7 +6032,7 @@ class MovementExampleApp {
   }
 
   getIndividualQueueOrder() {
-    const individuals = this.getFilteredIndividuals();
+    const individuals = this.data?.individuals || [];
     const datasetIndex = new Map(this.data?.individuals?.map((individual, index) => [individual, index]) || []);
     const rankingIndex = new Map(
       (this.anomalyRanking?.rankedIndividuals || [])
@@ -6016,6 +6123,9 @@ class MovementExampleApp {
       queue.mapScope = "group";
       this.setSideSheet("individuals", { save: false });
       this.renderIndividuals();
+      if (this.individualQueueListHeightPx !== null) {
+        this.applyIndividualListHeight(this.individualQueueListHeightPx, { save: false });
+      }
       await this.applyIndividualQueueMapScope({ zoom: !queue.queueMapView });
       if (queue.queueMapView && this.map) {
         this.map.jumpTo(queue.queueMapView);
@@ -6039,6 +6149,9 @@ class MovementExampleApp {
         this.updateTimeLabel();
       }
       this.renderIndividuals();
+      if (this.individualListHeightPx !== null) {
+        this.applyIndividualListHeight(this.individualListHeightPx, { save: false });
+      }
       this.renderSelectedFixes();
       this.renderThresholdPane();
       this.renderLayers();
@@ -6398,7 +6511,7 @@ class MovementExampleApp {
     target.classList.remove("error");
     if (this.anomalyRanking?.status === "loading") {
       target.innerHTML = (
-        "Burst ranking in progress. Dataset order will remain in use. "
+        '<span class="movement-queue-ranking-copy">Burst ranking in progress. Dataset order will remain in use.</span>'
         + '<button type="button" disabled>Running…</button>'
       );
       return;
@@ -6406,7 +6519,8 @@ class MovementExampleApp {
     if (!this.hasCompatibleIndividualQueueRanking()) {
       target.classList.add("error");
       target.innerHTML = (
-        "No compatible burst ranking is available for this dataset version and burst definition. "
+        '<span class="movement-queue-ranking-copy" title="No compatible burst ranking is available for this dataset version and burst definition.">'
+        + "No compatible burst ranking is available for this dataset version and burst definition.</span>"
         + '<button type="button" data-queue-action="run-ranking">Run burst ranking</button>'
       );
       return;
@@ -6416,19 +6530,16 @@ class MovementExampleApp {
       : this.burstGapLabel();
     const metadata = [
       this.anomalyRanking.createdAt
-        ? `Created ${formatDateTime(this.anomalyRanking.createdAt)}`
-        : "Compatible ranking available",
-      burstSettings ? `bursts: ${burstSettings}` : "",
-      this.anomalyRanking.modelFit?.feature_set
-        ? `features: ${String(this.anomalyRanking.modelFit.feature_set).replaceAll("_", " ")}`
-        : "",
+        ? `Ranking ${formatDateTime(this.anomalyRanking.createdAt)}`
+        : "Ranking available",
+      burstSettings,
     ].filter(Boolean).join(" • ");
     const needsApply = (
       this.individualReviewQueue.appliedRankingAnalysisId
       !== this.anomalyRanking.analysisId
     );
     target.innerHTML = (
-      `${escapeHtml(metadata)} `
+      `<span class="movement-queue-ranking-copy" title="${escapeHtml(metadata)}">${escapeHtml(metadata)}</span>`
       + (needsApply
         ? '<button type="button" data-queue-action="apply-ranking">Apply completed ranking</button>'
         : "")
@@ -6456,6 +6567,13 @@ class MovementExampleApp {
     this.refs.individualQueueControls.classList.toggle(
       "hidden",
       this.individualReviewQueue.mode !== "queue",
+    );
+    this.refs.individualSearchControl.hidden = this.individualReviewQueue.mode === "queue";
+    this.refs.individualResize.setAttribute(
+      "aria-label",
+      this.individualReviewQueue.mode === "queue"
+        ? "Resize review controls and individual list"
+        : "Resize individual and checked-fix lists",
     );
     if (!this.data) {
       return;
@@ -6582,7 +6700,7 @@ class MovementExampleApp {
         + ` • ${formatCount(position.group.length)} detailed track(s) in this group`
         + ` • ${formatCount(queue.stagedDecisions.size)} staged`
       )
-      : "No individuals match the current search.";
+      : "No individuals are available.";
     const editsLocked = !this.canPersistEdits();
     this.refs.individualQueueSave.disabled = (
       editsLocked
@@ -6609,7 +6727,7 @@ class MovementExampleApp {
       button.disabled = queue.saving || !position.ordered.length;
     }
     if (!position.page.length) {
-      this.refs.individuals.innerHTML = '<div class="movement-empty">No individual IDs match the current search.</div>';
+      this.refs.individuals.innerHTML = '<div class="movement-empty">No individuals are available.</div>';
       return;
     }
     for (const individual of position.page) {
@@ -7671,25 +7789,6 @@ class MovementExampleApp {
     const cursorData = [];
     const showPoints = this.refs.showPoints.checked;
     const showSuspectedOutlines = this.data.suspiciousState === "loaded";
-    const activeQueuePathData = [];
-    if (
-      this.individualReviewQueue.mode === "queue"
-      && this.individualReviewQueue.activeIndividual
-      && visibleIndividuals.has(this.individualReviewQueue.activeIndividual)
-    ) {
-      for (const setName of visibleSetNames) {
-        const fixes = this.getExactVisibleTrackFixes(
-          this.individualReviewQueue.activeIndividual,
-          setName,
-        );
-        const path = [...fixes]
-          .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey))
-          .map(fix => fix.position);
-        if (path.length >= 2) {
-          activeQueuePathData.push({ path });
-        }
-      }
-    }
     if (this.refs.showConfirmed.checked) {
       const seenConfirmed = new Set();
       for (const fix of this.data.fixes || []) {
@@ -7785,10 +7884,12 @@ class MovementExampleApp {
             const trackColor = splitColor(this.data.individualPalette[individual], setName, PATH_ALPHA);
             cachedPaths = exactFixes.length >= 2
               ? buildSourceAwareTrackPaths(exactFixes, trackColor)
+                .map(path => ({ ...path, individual }))
               : [{
                 path: series.positions,
                 color: trackColor,
                 sourceFlagged: false,
+                individual,
               }];
             this.data.baseTrackPathCache.set(trackKey, cachedPaths);
           }
@@ -7823,6 +7924,7 @@ class MovementExampleApp {
         if (showSuspectedOutlines && fix.review?.status === "suspected") {
           suspectedPointData.push({
             fixKey: fix.fixKey,
+            individual: fix.individual,
             position: fix.position,
           });
         }
@@ -7831,12 +7933,14 @@ class MovementExampleApp {
           if (thresholdMatchKeys.has(fix.fixKey)) {
             selectedThresholdPointData.push({
               fixKey: fix.fixKey,
+              individual: fix.individual,
               position: fix.position,
             });
           }
           if (candidateMatchKeys.has(fix.fixKey)) {
             selectedCandidatePointData.push({
               fixKey: fix.fixKey,
+              individual: fix.individual,
               position: fix.position,
             });
           }
@@ -7845,12 +7949,14 @@ class MovementExampleApp {
           if (thresholdMatchKeys.has(fix.fixKey)) {
             thresholdPointData.push({
               fixKey: fix.fixKey,
+              individual: fix.individual,
               position: fix.position,
             });
           }
           if (candidateMatchKeys.has(fix.fixKey)) {
             candidatePointData.push({
               fixKey: fix.fixKey,
+              individual: fix.individual,
               position: fix.position,
             });
           }
@@ -7865,8 +7971,14 @@ class MovementExampleApp {
           id: "movement-confirmed-exclusions",
           data: confirmedPointData,
           getPosition: item => item.position,
-          getFillColor: [92, 101, 110, 24],
-          getLineColor: [92, 101, 110, 105],
+          getFillColor: item => this.queueMapColor(
+            [92, 101, 110, 24],
+            item.individual,
+          ),
+          getLineColor: item => this.queueMapColor(
+            [92, 101, 110, 105],
+            item.individual,
+          ),
           filled: true,
           stroked: true,
           lineWidthMinPixels: 1,
@@ -7879,22 +7991,11 @@ class MovementExampleApp {
     }
     layers.push(
       new deck.PathLayer({
-        id: "movement-active-individual-outline",
-        data: activeQueuePathData,
-        getPath: item => item.path,
-        getColor: [125, 211, 252, 150],
-        getWidth: 7,
-        widthMinPixels: 5,
-        pickable: false,
-      }),
-    );
-    layers.push(
-      new deck.PathLayer({
         id: "movement-source-flagged-paths",
         data: sourceFlaggedPathData,
         dataComparator: sameArrayItems,
         getPath: item => item.path,
-        getColor: item => item.color,
+        getColor: item => this.queueMapColor(item.color, item.individual),
         getWidth: 1.5,
         widthMinPixels: 1,
         pickable: false,
@@ -7906,9 +8007,12 @@ class MovementExampleApp {
         data: pathData,
         dataComparator: sameArrayItems,
         getPath: item => item.path,
-        getColor: item => hasFocusedRankingBurst
-          ? this.mutedRankingContextColor(item.color, 34)
-          : item.color,
+        getColor: item => this.queueMapColor(
+          hasFocusedRankingBurst
+            ? this.mutedRankingContextColor(item.color, 34)
+            : item.color,
+          item.individual,
+        ),
         getWidth: 2.5,
         widthMinPixels: 2,
         pickable: false,
@@ -7922,11 +8026,14 @@ class MovementExampleApp {
           data: visibleAutoBurstPaths,
           dataComparator: sameArrayItems,
           getPath: item => item.path,
-          getColor: item => hasFocusedRankingBurst
-            ? this.mutedRankingContextColor(item.color, 36)
-            : item.sourceFlagged
-              ? this.mutedRankingContextColor(item.color, 58)
-              : item.color,
+          getColor: item => this.queueMapColor(
+            hasFocusedRankingBurst
+              ? this.mutedRankingContextColor(item.color, 36)
+              : item.sourceFlagged
+                ? this.mutedRankingContextColor(item.color, 58)
+                : item.color,
+            item.burst?.individual,
+          ),
           getWidth: item => item.sourceFlagged ? 2 : 5,
           widthMinPixels: 1,
           pickable: Boolean(this.burstFeatureSpace?.points?.length),
@@ -7941,12 +8048,18 @@ class MovementExampleApp {
           data: visibleAutoBurstMarkers,
           dataComparator: sameArrayItems,
           getPosition: item => item.position,
-          getFillColor: item => hasFocusedRankingBurst
-            ? this.mutedRankingContextColor(item.fillColor, 42)
-            : item.sourceFlagged
-              ? this.mutedRankingContextColor(item.fillColor, 92)
-              : item.fillColor,
-          getLineColor: [15, 23, 42, 220],
+          getFillColor: item => this.queueMapColor(
+            hasFocusedRankingBurst
+              ? this.mutedRankingContextColor(item.fillColor, 42)
+              : item.sourceFlagged
+                ? this.mutedRankingContextColor(item.fillColor, 92)
+                : item.fillColor,
+            item.burst?.individual,
+          ),
+          getLineColor: item => this.queueMapColor(
+            [15, 23, 42, 220],
+            item.burst?.individual,
+          ),
           filled: true,
           stroked: true,
           lineWidthMinPixels: 1.5,
@@ -7964,9 +8077,12 @@ class MovementExampleApp {
           id: "movement-segment-outline",
           data: visibleSegments,
           getPath: segment => segment.path,
-          getColor: segment => segment.status === "confirmed"
-            ? [255, 255, 255, 30]
-            : [255, 255, 255, 120],
+          getColor: segment => this.queueMapColor(
+            segment.status === "confirmed"
+              ? [255, 255, 255, 30]
+              : [255, 255, 255, 120],
+            segment.individual,
+          ),
           getWidth: segment => segment.status === "confirmed" ? 3.5 : 7,
           widthMinPixels: 2,
           pickable: false,
@@ -7977,9 +8093,12 @@ class MovementExampleApp {
           id: "movement-segments",
           data: visibleSegments,
           getPath: segment => segment.path,
-          getColor: segment => segment.status === "confirmed"
-            ? [92, 101, 110, 90]
-            : [245, 181, 54, 210],
+          getColor: segment => this.queueMapColor(
+            segment.status === "confirmed"
+              ? [92, 101, 110, 90]
+              : [245, 181, 54, 210],
+            segment.individual,
+          ),
           getWidth: segment => segment.status === "confirmed" ? 2 : 4.5,
           widthMinPixels: 1,
           pickable: false,
@@ -8007,9 +8126,12 @@ class MovementExampleApp {
           id: "movement-points",
           data: pointData,
           getPosition: item => item.position,
-          getFillColor: item => hasFocusedRankingBurst
-            ? this.mutedRankingContextColor(item.color, 42)
-            : item.color,
+          getFillColor: item => this.queueMapColor(
+            hasFocusedRankingBurst
+              ? this.mutedRankingContextColor(item.color, 42)
+              : item.color,
+            item.individual,
+          ),
           getRadius: 80,
           radiusMinPixels: 4,
           radiusMaxPixels: 10,
@@ -8021,7 +8143,10 @@ class MovementExampleApp {
           id: "movement-suspected-outline",
           data: suspectedPointData,
           getPosition: item => item.position,
-          getLineColor: [245, 181, 54, 235],
+          getLineColor: item => this.queueMapColor(
+            [245, 181, 54, 235],
+            item.individual,
+          ),
           filled: false,
           stroked: true,
           lineWidthMinPixels: 2,
@@ -8036,7 +8161,10 @@ class MovementExampleApp {
           id: "movement-threshold-points",
           data: thresholdPointData,
           getPosition: item => item.position,
-          getLineColor: [255, 236, 148, 255],
+          getLineColor: item => this.queueMapColor(
+            [255, 236, 148, 255],
+            item.individual,
+          ),
           filled: false,
           stroked: true,
           lineWidthMinPixels: 2.5,
@@ -8051,7 +8179,10 @@ class MovementExampleApp {
           id: "movement-selected-threshold-points",
           data: selectedThresholdPointData,
           getPosition: item => item.position,
-          getLineColor: [255, 236, 148, 255],
+          getLineColor: item => this.queueMapColor(
+            [255, 236, 148, 255],
+            item.individual,
+          ),
           filled: false,
           stroked: true,
           lineWidthMinPixels: 3,
@@ -8066,7 +8197,10 @@ class MovementExampleApp {
           id: "movement-candidate-query-points",
           data: candidatePointData,
           getPosition: item => item.position,
-          getLineColor: [72, 222, 255, 255],
+          getLineColor: item => this.queueMapColor(
+            [72, 222, 255, 255],
+            item.individual,
+          ),
           filled: false,
           stroked: true,
           lineWidthMinPixels: 2.5,
@@ -8081,7 +8215,10 @@ class MovementExampleApp {
           id: "movement-selected-candidate-query-points",
           data: selectedCandidatePointData,
           getPosition: item => item.position,
-          getLineColor: [72, 222, 255, 255],
+          getLineColor: item => this.queueMapColor(
+            [72, 222, 255, 255],
+            item.individual,
+          ),
           filled: false,
           stroked: true,
           lineWidthMinPixels: 3,
@@ -8096,12 +8233,18 @@ class MovementExampleApp {
           id: "movement-selected-points",
           data: selectedPointData,
           getPosition: item => item.position,
-          getFillColor: item => hasFocusedRankingBurst
-            ? this.mutedRankingContextColor(item.color, 54)
-            : item.color,
-          getLineColor: hasFocusedRankingBurst
-            ? [255, 255, 255, 100]
-            : [255, 255, 255, 255],
+          getFillColor: item => this.queueMapColor(
+            hasFocusedRankingBurst
+              ? this.mutedRankingContextColor(item.color, 54)
+              : item.color,
+            item.individual,
+          ),
+          getLineColor: item => this.queueMapColor(
+            hasFocusedRankingBurst
+              ? [255, 255, 255, 100]
+              : [255, 255, 255, 255],
+            item.individual,
+          ),
           stroked: true,
           lineWidthMinPixels: 1.5,
           getRadius: 130,
