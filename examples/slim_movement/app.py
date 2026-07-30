@@ -32,6 +32,7 @@ def create_slim_movement_app(
         include_dev_routes=False,
         overview_fix_limit=0,
         overview_series_points=250,
+        background_anomaly_ranking=True,
     )
     app.mount(
         "/slim-static",

@@ -4,8 +4,10 @@ from collections.abc import Callable
 import json
 from math import isfinite
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -16,7 +18,10 @@ from app.state import (
     graph_payload,
     load_dataset,
     load_json,
+    make_id,
     media_type_for_path,
+    now_iso,
+    normalize_user,
     project_paths,
     project_state_payload,
 )
@@ -46,6 +51,7 @@ from .summary import (
 ArtifactFilter = Callable[[dict], bool]
 MAX_REPORT_SNAPSHOTS = 100
 MAX_REPORT_SNAPSHOT_BYTES = 20 * 1024 * 1024
+MAX_BACKGROUND_ANALYSIS_JOBS = 100
 
 
 def _build_initial_study_payload(
@@ -502,6 +508,7 @@ def register_movement_routes(
     include_dev_routes: bool = True,
     overview_fix_limit: int | None = None,
     overview_series_points: int | None = None,
+    background_anomaly_ranking: bool = False,
 ):
     data_root = data_root.resolve()
     configured_families = set(allowed_families or [])
@@ -511,6 +518,52 @@ def register_movement_routes(
     configured_overview_series_points = (
         None if overview_series_points is None else max(1, int(overview_series_points))
     )
+    analysis_jobs: dict[str, dict] = {}
+    analysis_jobs_lock = Lock()
+
+    def prune_analysis_jobs() -> None:
+        with analysis_jobs_lock:
+            if len(analysis_jobs) < MAX_BACKGROUND_ANALYSIS_JOBS:
+                return
+            completed = sorted(
+                (
+                    job
+                    for job in analysis_jobs.values()
+                    if job.get("status") in {"completed", "failed"}
+                ),
+                key=lambda job: float(job.get("_updated_monotonic") or 0),
+            )
+            for job in completed[
+                : max(1, len(analysis_jobs) - MAX_BACKGROUND_ANALYSIS_JOBS + 1)
+            ]:
+                analysis_jobs.pop(str(job.get("job_id") or ""), None)
+
+    def run_analysis_job(job_id: str, study_dir: Path, payload: dict) -> None:
+        with analysis_jobs_lock:
+            job = analysis_jobs.get(job_id)
+            if job is None:
+                return
+            job["status"] = "running"
+            job["started_at"] = now_iso()
+            job["_updated_monotonic"] = monotonic()
+        try:
+            result = create_analysis(study_dir, payload)
+        except Exception as exc:
+            with analysis_jobs_lock:
+                job = analysis_jobs.get(job_id)
+                if job is not None:
+                    job["status"] = "failed"
+                    job["error"] = str(exc) or "Analysis failed"
+                    job["finished_at"] = now_iso()
+                    job["_updated_monotonic"] = monotonic()
+            return
+        with analysis_jobs_lock:
+            job = analysis_jobs.get(job_id)
+            if job is not None:
+                job["status"] = "completed"
+                job["result"] = result
+                job["finished_at"] = now_iso()
+                job["_updated_monotonic"] = monotonic()
 
     def require_configured_family(family_name: str) -> str:
         family = validate_path_part(family_name, label="family")
@@ -828,7 +881,12 @@ def register_movement_routes(
         return FileResponse(artifact_path, media_type=media_type_for_path(artifact_path))
 
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-burst-anomaly-ranking")
-    async def post_movement_run_burst_anomaly_ranking(family_name: str, study_name: str, request: Request):
+    async def post_movement_run_burst_anomaly_ranking(
+        family_name: str,
+        study_name: str,
+        request: Request,
+        background_tasks: BackgroundTasks,
+    ):
         body = await parse_json_body(request)
         if body is None:
             return json_error("Invalid JSON body", 400)
@@ -837,13 +895,14 @@ def register_movement_routes(
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             dataset = load_dataset(study_dir, dataset_id)
+            get_dataset_artifact(study_dir, dataset_id, logical_name)
             feature_set = parse_anomaly_feature_set(body.get("feature_set"))
             feature_set_label = (
                 "movement + OSM context"
                 if feature_set == "movement_plus_context"
                 else "movement only"
             )
-            user = body.get("user")
+            user = normalize_user(body.get("user"))
             payload = {
                 "user": user,
                 "title": f"Rank automatic movement bursts ({feature_set_label}) for {logical_name}",
@@ -864,9 +923,66 @@ def register_movement_routes(
                     "user": user,
                 },
             }
+            if background_anomaly_ranking:
+                prune_analysis_jobs()
+                job_id = make_id("analysis_job")
+                job = {
+                    "job_id": job_id,
+                    "family_name": family_name,
+                    "study_name": study_name,
+                    "status": "queued",
+                    "created_at": now_iso(),
+                    "_updated_monotonic": monotonic(),
+                }
+                with analysis_jobs_lock:
+                    analysis_jobs[job_id] = job
+                background_tasks.add_task(
+                    run_analysis_job,
+                    job_id,
+                    study_dir,
+                    payload,
+                )
+                return JSONResponse(
+                    {
+                        key: value
+                        for key, value in job.items()
+                        if not key.startswith("_")
+                    },
+                    status_code=202,
+                )
             return JSONResponse(create_analysis(study_dir, payload))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
+
+    @app.get(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/analysis-jobs/{job_id}"
+    )
+    async def get_movement_analysis_job(
+        family_name: str,
+        study_name: str,
+        job_id: str,
+    ):
+        try:
+            require_configured_family(family_name)
+            validate_path_part(study_name, label="study")
+            normalized_job_id = validate_path_part(job_id, label="analysis job")
+            with analysis_jobs_lock:
+                job = dict(analysis_jobs.get(normalized_job_id) or {})
+            if (
+                not job
+                or job.get("family_name") != family_name
+                or job.get("study_name") != study_name
+            ):
+                raise ProjectStateError("Unknown analysis job")
+            return JSONResponse(
+                {
+                    key: value
+                    for key, value in job.items()
+                    if not key.startswith("_")
+                }
+            )
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 404)
 
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/undo")
     async def post_movement_study_undo(family_name: str, study_name: str):

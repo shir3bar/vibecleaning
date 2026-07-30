@@ -324,6 +324,44 @@ def test_slim_anomaly_ranking_accepts_only_movement_features(tmp_path):
     assert response.json()["error"] == "Invalid feature_set"
 
 
+def test_slim_anomaly_ranking_runs_as_background_job(tmp_path):
+    client = create_slim_test_client(tmp_path)
+    loaded = client.get(
+        "/api/apps/movement/family/movement_raw/study/raw_study/load"
+    ).json()
+
+    response = client.post(
+        "/api/apps/movement/family/movement_raw/study/raw_study/"
+        "actions/run-burst-anomaly-ranking",
+        json={
+            "dataset_id": loaded["dataset_id"],
+            "logical_name": loaded["logical_name"],
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": 7200,
+            "feature_set": "movement_only",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 202
+    queued = response.json()
+    assert queued["job_id"].startswith("analysis_job_")
+    job = client.get(
+        "/api/apps/movement/family/movement_raw/study/raw_study/"
+        f"analysis-jobs/{queued['job_id']}"
+    )
+    assert job.status_code == 200
+    completed = job.json()
+    assert completed["status"] == "completed"
+    assert completed["result"]["analysis"]["parameters"]["action"] == (
+        "run_burst_anomaly_ranking"
+    )
+    assert completed["result"]["summary"]["run_status"] in {
+        "completed",
+        "unresolved",
+    }
+
+
 def test_slim_profile_does_not_load_osm_interaction_module():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 

@@ -718,6 +718,10 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert 'this.refs.sideTabRanking.addEventListener("click", () => this.setSideSheet("ranking"))' in source
     assert "runBurstAnomalyRanking()" in source
     assert "run-burst-anomaly-ranking" in source
+    assert "waitForAnomalyRankingJob" in handler
+    assert "analysis-jobs" in handler
+    assert "waitForAbortableDelay" in source
+    assert "started in the background" in handler
     assert 'this.setSideSheet("ranking")' in handler
     assert "ranked_individuals" in source
     assert "ranked_burst_refs" in source

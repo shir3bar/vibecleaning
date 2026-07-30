@@ -197,6 +197,7 @@ const DEFAULT_FAMILY = MOVEMENT_APP_CONFIG.defaultFamily;
 const NUMERIC_COLOR_MIN_QUANTILE = 0.01;
 const NUMERIC_COLOR_MAX_QUANTILE = 0.99;
 const REPORT_SNAPSHOT_IDLE_TIMEOUT_MS = 12000;
+const ANALYSIS_JOB_POLL_INTERVAL_MS = 1500;
 const TABLE_INITIAL_ROW_LIMIT = 250;
 const TABLE_ROW_INCREMENT = 250;
 const FIX_POPUP_DEFAULT_FIELDS = [
@@ -3678,7 +3679,7 @@ class MovementExampleApp {
     this.updateActionButtons();
     this.setStatus(`Running burst anomaly ranking analysis (${featureSetLabel})...`);
     try {
-      const result = await this.requestJSON(
+      let result = await this.requestJSON(
         `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/run-burst-anomaly-ranking`,
         {
           method: "POST",
@@ -3694,6 +3695,14 @@ class MovementExampleApp {
           }),
         },
       );
+      const jobId = String(result?.job_id || "");
+      if (jobId) {
+        this.setSideSheet("ranking");
+        this.setStatus(
+          `Burst anomaly ranking started in the background (${featureSetLabel}). You can keep using the map while it runs.`,
+        );
+        result = await this.waitForAnomalyRankingJob(jobId, controller);
+      }
       if (this.requestControllers.anomalyRanking !== controller) {
         return;
       }
@@ -3738,6 +3747,30 @@ class MovementExampleApp {
         this.requestControllers.anomalyRanking = null;
         this.updateActionButtons();
       }
+    }
+  }
+
+  async waitForAnomalyRankingJob(jobId, controller) {
+    const startedAt = Date.now();
+    while (true) {
+      if (controller.signal.aborted) {
+        throw new DOMException("Request aborted", "AbortError");
+      }
+      const job = await this.fetchJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis-jobs/${encodeURIComponent(jobId)}`,
+        { signal: controller.signal },
+      );
+      if (job.status === "completed") {
+        return job.result || {};
+      }
+      if (job.status === "failed") {
+        throw new Error(job.error || "Burst anomaly ranking failed");
+      }
+      const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+      this.setStatus(
+        `Running burst anomaly ranking in the background (${this.anomalyFeatureSetLabel()}; ${formatCount(elapsedSeconds)} s elapsed)...`,
+      );
+      await waitForAbortableDelay(ANALYSIS_JOB_POLL_INTERVAL_MS, controller.signal);
     }
   }
 
@@ -11187,6 +11220,26 @@ function buildWindowBounds(windowFixes, { tight = false } = {}) {
     [maxLon + lonPad, maxLat + latPad],
   );
 }
+
+function waitForAbortableDelay(delayMs, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Request aborted", "AbortError"));
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      signal?.removeEventListener("abort", handleAbort);
+      resolve();
+    }, delayMs);
+    const handleAbort = () => {
+      window.clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", handleAbort);
+      reject(new DOMException("Request aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", handleAbort, { once: true });
+  });
+}
+
 
 async function waitForMapReady(map, timeoutMs = REPORT_SNAPSHOT_IDLE_TIMEOUT_MS) {
   if (!map) {
