@@ -74,6 +74,11 @@ def test_slim_movement_serves_shared_viewer_with_slim_profile(tmp_path):
     assert "slim movement review" in response.text
     assert 'id="login-form"' in response.text
     assert 'id="app-shell" hidden' in response.text
+    assert 'class="topbar-actions"' in response.text
+    assert 'data-role="edit-lock-profile"' in response.text
+    assert response.text.index('data-role="edit-lock-profile"') < response.text.index(
+        'id="logout-button"'
+    )
     assert app_js.status_code == 200
     assert "MOVEMENT_APP_CONFIG" in app_js.text
     assert login_js.status_code == 200

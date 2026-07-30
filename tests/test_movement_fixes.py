@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 MOVEMENT_APP_JS = REPO_ROOT / "examples" / "movement" / "static" / "app.js"
+MOVEMENT_INDEX = REPO_ROOT / "examples" / "movement" / "static" / "index.html"
 OSM_LAYER_JS = REPO_ROOT / "examples" / "movement" / "static" / "osm_layer.js"
 
 from app.execution import create_analysis, create_step
@@ -703,17 +704,21 @@ def test_hidden_output_links_do_not_leave_an_empty_root_grid_row():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
     assert ".movement-toolbar {\n          grid-row: 1;" in source
-    assert ".movement-status-stack {\n          grid-row: 2;" in source
+    assert ".movement-status {\n          grid-row: 2;" in source
     assert ".movement-output-links {\n          grid-row: 3;" in source
     assert ".movement-main {\n          grid-row: 4;" in source
 
 
 def test_movement_frontend_exposes_history_lock_and_resume_controls():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    index = MOVEMENT_INDEX.read_text(encoding="utf-8")
 
-    assert 'data-role="edit-lock-profile"' in source
-    assert 'data-role="resume-history"' in source
+    assert 'data-role="edit-lock-profile"' in index
+    assert 'data-role="resume-history"' in index
+    assert '<span class="movement-edit-lock-badge">Read-only</span>' in index
+    assert "document.querySelector('[data-role=\"edit-lock-profile\"]')" in source
     assert 'data-role="resume-modal"' in source
+    assert ".movement-edit-lock-message {" in source
     assert "/edit-profile?" in source
     assert "/resume`" in source
     assert "expected_current_dataset_id: this.expectedCurrentDatasetId()" in source

@@ -988,10 +988,8 @@ class MovementExampleApp {
           grid-row: 1;
         }
         .movement-status {
-          min-width: 0;
-        }
-        .movement-status-stack {
           grid-row: 2;
+          min-width: 0;
         }
         .movement-output-links {
           grid-row: 3;
@@ -1161,26 +1159,35 @@ class MovementExampleApp {
           color: #9df6dc;
         }
         .movement-edit-lock {
-          display: flex;
+          display: inline-flex;
           align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-          padding: 9px 16px;
-          border-bottom: 1px solid rgba(251, 191, 36, 0.22);
+          gap: 7px;
+          max-width: min(460px, 42vw);
+          padding: 5px 7px;
+          border: 1px solid rgba(251, 191, 36, 0.28);
+          border-radius: 9px;
           background: rgba(120, 53, 15, 0.3);
           color: #fde68a;
-          font-size: 12px;
-          line-height: 1.4;
+          font-size: 11px;
+          line-height: 1.25;
         }
         .movement-edit-lock.hidden {
           display: none;
         }
-        .movement-edit-lock strong {
+        .movement-edit-lock-badge {
+          flex: 0 0 auto;
+          font-weight: 700;
           color: #fef3c7;
+        }
+        .movement-edit-lock-message {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
         .movement-edit-lock button {
           flex: 0 0 auto;
-          padding: 6px 10px;
+          padding: 4px 7px;
           border: 1px solid rgba(251, 191, 36, 0.32);
           border-radius: 9px;
           background: rgba(217, 119, 6, 0.22);
@@ -2509,13 +2516,7 @@ class MovementExampleApp {
           <button type="button" data-role="export-reviewed-csv">Export reviewed CSV</button>
           <button type="button" data-role="undo">Undo</button>
         </div>
-        <div class="movement-status-stack">
-          <div class="movement-edit-lock hidden" data-role="edit-lock-profile">
-            <div data-role="edit-lock-message"></div>
-            <button type="button" data-role="resume-history">Resume from this version</button>
-          </div>
-          <div class="movement-status" data-role="status"></div>
-        </div>
+        <div class="movement-status" data-role="status"></div>
         <div class="movement-output-links" data-role="output-links"></div>
         <div class="movement-main">
           <div class="movement-map-wrap">
@@ -2842,9 +2843,9 @@ class MovementExampleApp {
       generateReport: this.mountEl.querySelector('[data-role="generate-report"]'),
       exportReviewedCsv: this.mountEl.querySelector('[data-role="export-reviewed-csv"]'),
       undo: this.mountEl.querySelector('[data-role="undo"]'),
-      editLockProfile: this.mountEl.querySelector('[data-role="edit-lock-profile"]'),
-      editLockMessage: this.mountEl.querySelector('[data-role="edit-lock-message"]'),
-      resumeHistory: this.mountEl.querySelector('[data-role="resume-history"]'),
+      editLockProfile: document.querySelector('[data-role="edit-lock-profile"]'),
+      editLockMessage: document.querySelector('[data-role="edit-lock-message"]'),
+      resumeHistory: document.querySelector('[data-role="resume-history"]'),
       status: this.mountEl.querySelector('[data-role="status"]'),
       outputLinks: this.mountEl.querySelector('[data-role="output-links"]'),
       sideSheetTabs: this.mountEl.querySelector('[data-role="side-sheet-tabs"]'),
@@ -5206,15 +5207,19 @@ class MovementExampleApp {
     this.refs.editLockProfile.classList.toggle("hidden", !locked);
     if (!locked) {
       this.refs.editLockMessage.textContent = "";
+      this.refs.editLockProfile.removeAttribute("title");
       this.refs.resumeHistory.hidden = true;
       return;
     }
     const message = blockers.map(item => String(item?.message || "")).filter(Boolean).join(" ");
     const owner = blockers.find(item => item?.owner)?.owner;
-    this.refs.editLockMessage.innerHTML = (
-      `<strong>Read-only version.</strong> ${escapeHtml(message || "Persistent edits are locked.")}`
-      + (owner ? ` <span>Locked by ${escapeHtml(owner)}.</span>` : "")
-      + " Analyses, reports, exports, filtering, and visualization remain available."
+    const explanation = (
+      (message || "Persistent edits are locked.")
+      + (owner ? ` Locked by ${owner}.` : "")
+    );
+    this.refs.editLockMessage.textContent = explanation;
+    this.refs.editLockProfile.title = (
+      `${explanation} Analyses, reports, exports, filtering, and visualization remain available.`
     );
     this.refs.resumeHistory.hidden = profile.resume?.allowed !== true;
   }

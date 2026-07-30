@@ -125,6 +125,16 @@
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
+  .topbar-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    min-width: 0;
+  }
+  .topbar .movement-edit-lock.hidden {
+    display: none;
+  }
   .logout-button {
     padding: 6px 10px;
     border: 1px solid var(--border);
@@ -162,7 +172,14 @@
       <h1>vibecleaning</h1>
       <span>slim movement review</span>
     </div>
-    <button id="logout-button" class="logout-button" type="button">Log out</button>
+    <div class="topbar-actions">
+      <div class="movement-edit-lock hidden" data-role="edit-lock-profile">
+        <span class="movement-edit-lock-badge">Read-only</span>
+        <span class="movement-edit-lock-message" data-role="edit-lock-message"></span>
+        <button type="button" data-role="resume-history">Resume</button>
+      </div>
+      <button id="logout-button" class="logout-button" type="button">Log out</button>
+    </div>
   </header>
   <main id="app"></main>
 </div>
