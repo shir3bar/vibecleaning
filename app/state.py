@@ -69,6 +69,8 @@ def project_paths(project_dir: Path) -> dict[str, Path]:
         "analyses": meta_dir / "analyses",
         "steps": meta_dir / "steps",
         "outputs": meta_dir / "outputs",
+        "archives": meta_dir / "archives",
+        "mutation_lock": meta_dir / "mutation.lock",
     }
 
 

@@ -7,7 +7,12 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.execution import create_analysis, create_step
+from app.edit_locks import (
+    EditConflictError,
+    EditLockedError,
+    create_guarded_step,
+)
+from app.execution import create_analysis
 from app.query_library import get_query
 from app.state import (
     ProjectStateError,
@@ -15,6 +20,7 @@ from app.state import (
     get_dataset_artifact,
     list_history,
     load_dataset,
+    load_project_state,
 )
 from app.web import json_error, parse_json_body, validate_path_part
 
@@ -407,7 +413,7 @@ def register_movement_dev_routes(
                 return JSONResponse(reusable)
             user = body.get("user")
             return JSONResponse(
-                create_step(
+                create_guarded_step(
                     study_dir,
                     {
                         "user": user,
@@ -431,7 +437,29 @@ def register_movement_dev_routes(
                         "output_artifacts": ["movement_osm_context.csv"],
                         "set_as_head": True,
                     },
+                    selected_dataset_id=dataset_id,
+                    expected_current_dataset_id=str(
+                        body.get("expected_current_dataset_id")
+                        or load_project_state(study_dir)["current_dataset_id"]
+                    ),
                 )
+            )
+        except EditLockedError as exc:
+            return JSONResponse(
+                {
+                    "error": str(exc),
+                    "code": "edit_locked",
+                    "edit_profile": exc.profile,
+                },
+                status_code=423,
+            )
+        except EditConflictError as exc:
+            return JSONResponse(
+                {
+                    "error": str(exc),
+                    "code": "edit_conflict",
+                },
+                status_code=409,
             )
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)

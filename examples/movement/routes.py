@@ -11,13 +11,22 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from app.execution import create_analysis, create_step, undo_to_parent
+from app.edit_locks import (
+    EditConflictError,
+    EditLockedError,
+    build_edit_lock_profile,
+    create_guarded_step,
+    resume_from_dataset,
+    undo_guarded,
+)
+from app.execution import create_analysis
 from app.state import (
     ProjectStateError,
     get_dataset_artifact,
     graph_payload,
     load_dataset,
     load_json,
+    load_project_state,
     make_id,
     media_type_for_path,
     now_iso,
@@ -52,6 +61,27 @@ ArtifactFilter = Callable[[dict], bool]
 MAX_REPORT_SNAPSHOTS = 100
 MAX_REPORT_SNAPSHOT_BYTES = 20 * 1024 * 1024
 MAX_BACKGROUND_ANALYSIS_JOBS = 100
+
+
+def _edit_locked_response(exc: EditLockedError) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": str(exc),
+            "code": "edit_locked",
+            "edit_profile": exc.profile,
+        },
+        status_code=423,
+    )
+
+
+def _edit_conflict_response(exc: EditConflictError) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": str(exc),
+            "code": "edit_conflict",
+        },
+        status_code=409,
+    )
 
 
 def _build_initial_study_payload(
@@ -726,6 +756,23 @@ def register_movement_routes(
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
+    @app.get(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/edit-profile"
+    )
+    async def get_movement_study_edit_profile(
+        family_name: str,
+        study_name: str,
+        dataset_id: str,
+    ):
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            normalized_dataset_id = validate_path_part(dataset_id, label="dataset")
+            return JSONResponse(
+                build_edit_lock_profile(study_dir, normalized_dataset_id)
+            )
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 404)
+
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/load")
     async def get_movement_study_load(family_name: str, study_name: str):
         try:
@@ -1024,10 +1071,63 @@ def register_movement_routes(
             return json_error(str(exc), 404)
 
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/undo")
-    async def post_movement_study_undo(family_name: str, study_name: str):
+    async def post_movement_study_undo(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
         try:
             study_dir = configured_study_dir(family_name, study_name)
-            return JSONResponse(undo_to_parent(study_dir))
+            body = await parse_json_body(request)
+            expected_current_dataset_id = (
+                validate_path_part(
+                    body.get("expected_current_dataset_id"),
+                    label="expected current dataset",
+                )
+                if body
+                else str(load_project_state(study_dir)["current_dataset_id"])
+            )
+            return JSONResponse(
+                undo_guarded(
+                    study_dir,
+                    expected_current_dataset_id=expected_current_dataset_id,
+                )
+            )
+        except EditConflictError as exc:
+            return _edit_conflict_response(exc)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/resume")
+    async def post_movement_study_resume(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            expected_current_dataset_id = validate_path_part(
+                body.get("expected_current_dataset_id"),
+                label="expected current dataset",
+            )
+            resume_token = str(body.get("resume_token") or "").strip()
+            if not resume_token:
+                raise ValueError("Resume token is required")
+            return JSONResponse(
+                resume_from_dataset(
+                    study_dir,
+                    selected_dataset_id=dataset_id,
+                    expected_current_dataset_id=expected_current_dataset_id,
+                    resume_token=resume_token,
+                    user=body.get("user"),
+                )
+            )
+        except EditConflictError as exc:
+            return _edit_conflict_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1134,7 +1234,21 @@ def register_movement_routes(
                 "output_artifacts": ["movement_review_annotations.json"],
                 "set_as_head": True,
             }
-            return JSONResponse(create_step(study_dir, payload))
+            return JSONResponse(
+                create_guarded_step(
+                    study_dir,
+                    payload,
+                    selected_dataset_id=dataset_id,
+                    expected_current_dataset_id=str(
+                        body.get("expected_current_dataset_id")
+                        or load_project_state(study_dir)["current_dataset_id"]
+                    ),
+                )
+            )
+        except EditLockedError as exc:
+            return _edit_locked_response(exc)
+        except EditConflictError as exc:
+            return _edit_conflict_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1180,7 +1294,21 @@ def register_movement_routes(
                 "output_artifacts": ["movement_review_annotations.json"],
                 "set_as_head": True,
             }
-            return JSONResponse(create_step(study_dir, payload))
+            return JSONResponse(
+                create_guarded_step(
+                    study_dir,
+                    payload,
+                    selected_dataset_id=dataset_id,
+                    expected_current_dataset_id=str(
+                        body.get("expected_current_dataset_id")
+                        or load_project_state(study_dir)["current_dataset_id"]
+                    ),
+                )
+            )
+        except EditLockedError as exc:
+            return _edit_locked_response(exc)
+        except EditConflictError as exc:
+            return _edit_conflict_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1230,7 +1358,21 @@ def register_movement_routes(
                 "output_artifacts": ["movement_review_annotations.json"],
                 "set_as_head": True,
             }
-            return JSONResponse(create_step(study_dir, payload))
+            return JSONResponse(
+                create_guarded_step(
+                    study_dir,
+                    payload,
+                    selected_dataset_id=dataset_id,
+                    expected_current_dataset_id=str(
+                        body.get("expected_current_dataset_id")
+                        or load_project_state(study_dir)["current_dataset_id"]
+                    ),
+                )
+            )
+        except EditLockedError as exc:
+            return _edit_locked_response(exc)
+        except EditConflictError as exc:
+            return _edit_conflict_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
