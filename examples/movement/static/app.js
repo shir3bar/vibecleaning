@@ -192,7 +192,7 @@ const MAX_SIDE_PANE_WIDTH_RATIO = 0.55;
 const SIDE_PANE_HANDLE_WIDTH_PX = 12;
 const STACKED_SIDE_LAYOUT_BREAKPOINT_PX = 1080;
 const MIN_INDIVIDUAL_LIST_HEIGHT_PX = 80;
-const MIN_CHECKED_FIXES_HEIGHT_PX = 120;
+const MIN_CHECKED_FIXES_HEIGHT_PX = 60;
 const MAX_SELECTED_FIXES_SHOWN = 150;
 const LARGE_MAP_POINT_THRESHOLD = 50000;
 const DEFAULT_FAMILY = MOVEMENT_APP_CONFIG.defaultFamily;
@@ -758,17 +758,25 @@ class MovementExampleApp {
     }
     const sheetRect = sheet.getBoundingClientRect();
     const listRect = list.getBoundingClientRect();
-    if (sheet.classList.contains("hidden") || sheetRect.height <= 0 || listRect.height <= 0) {
+    if (
+      sheet.classList.contains("hidden")
+      || sheet.classList.contains("queue-mode")
+      || sheetRect.height <= 0
+      || listRect.height <= 0
+    ) {
       return null;
     }
-    const remainingHeight = sheetRect.bottom
+    const availableHeight = sheetRect.bottom
       - listRect.top
       - (resize?.offsetHeight || 0)
-      - (fixHead?.offsetHeight || 0)
-      - MIN_CHECKED_FIXES_HEIGHT_PX;
+      - (fixHead?.offsetHeight || 0);
     return {
       min: MIN_INDIVIDUAL_LIST_HEIGHT_PX,
-      max: Math.max(MIN_INDIVIDUAL_LIST_HEIGHT_PX, Math.floor(remainingHeight)),
+      max: Math.max(
+        MIN_INDIVIDUAL_LIST_HEIGHT_PX,
+        Math.floor(availableHeight - MIN_CHECKED_FIXES_HEIGHT_PX),
+      ),
+      available: Math.floor(availableHeight),
     };
   }
 
@@ -784,8 +792,13 @@ class MovementExampleApp {
       return;
     }
     const nextHeight = Math.round(Math.min(bounds.max, Math.max(bounds.min, requested)));
+    const checkedFixesHeight = Math.max(
+      MIN_CHECKED_FIXES_HEIGHT_PX,
+      bounds.available - nextHeight,
+    );
     this.individualListHeightPx = nextHeight;
     this.refs.sideSheetIndividuals.style.setProperty("--movement-individual-list-height", `${nextHeight}px`);
+    this.refs.sideSheetIndividuals.style.setProperty("--movement-checked-fixes-height", `${checkedFixesHeight}px`);
     this.refs.individualResize?.setAttribute("aria-valuenow", String(nextHeight));
     this.refs.individualResize?.setAttribute("aria-valuemax", String(bounds.max));
     if (save) {
@@ -798,9 +811,6 @@ class MovementExampleApp {
       return;
     }
     event.preventDefault();
-    if (this.individualListHeightPx === null) {
-      this.applyIndividualListHeight(this.refs.individuals?.getBoundingClientRect().height, { save: false });
-    }
     this.individualPaneResize.active = true;
     this.individualPaneResize.pointerId = event.pointerId;
     this.refs.sideSheetIndividuals?.classList.add("is-resizing");
@@ -811,18 +821,22 @@ class MovementExampleApp {
   }
 
   onIndividualPanePointerMove(event) {
-    if (!this.individualPaneResize.active || event.pointerId !== this.individualPaneResize.pointerId) {
+    if (
+      !this.individualPaneResize.active
+      || event.pointerId !== this.individualPaneResize.pointerId
+      || !this.refs?.individuals
+    ) {
       return;
     }
-    const listRect = this.refs.individuals?.getBoundingClientRect();
-    if (!listRect) {
-      return;
-    }
+    const listRect = this.refs.individuals.getBoundingClientRect();
     this.applyIndividualListHeight(event.clientY - listRect.top, { save: false });
   }
 
   onIndividualPanePointerUp(event) {
-    if (!this.individualPaneResize.active || event.pointerId !== this.individualPaneResize.pointerId) {
+    if (
+      !this.individualPaneResize.active
+      || event.pointerId !== this.individualPaneResize.pointerId
+    ) {
       return;
     }
     this.individualPaneResize.active = false;
@@ -962,6 +976,18 @@ class MovementExampleApp {
             radial-gradient(circle at top left, rgba(114, 252, 196, 0.08), transparent 28%),
             radial-gradient(circle at bottom right, rgba(72, 187, 255, 0.12), transparent 24%),
             linear-gradient(180deg, rgba(6, 12, 20, 0.98), rgba(4, 8, 14, 0.98));
+        }
+        .movement-toolbar {
+          grid-row: 1;
+        }
+        .movement-status {
+          grid-row: 2;
+        }
+        .movement-output-links {
+          grid-row: 3;
+        }
+        .movement-main {
+          grid-row: 4;
         }
         .movement-root .movement-profile-hidden,
         .movement-root [hidden] {
@@ -1638,7 +1664,8 @@ class MovementExampleApp {
           display: none;
         }
         .movement-side-sheet.individuals {
-          grid-template-rows: auto auto minmax(80px, var(--movement-individual-list-height, 1fr)) 10px auto minmax(120px, 0.75fr);
+          grid-template-rows: auto auto minmax(80px, var(--movement-individual-list-height, 1fr)) 10px auto minmax(${MIN_CHECKED_FIXES_HEIGHT_PX}px, var(--movement-checked-fixes-height, 0.75fr));
+          align-content: start;
         }
         .movement-side-sheet.individuals.queue-mode {
           grid-template-rows: auto auto minmax(0, 1fr);

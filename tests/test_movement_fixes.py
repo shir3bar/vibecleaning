@@ -683,6 +683,31 @@ def test_movement_frontend_includes_individual_search_and_resizable_side_pane():
     assert "sidePaneWidthPx" in source
 
 
+def test_individual_fix_splitter_mirrors_working_side_pane_drag():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "const MIN_CHECKED_FIXES_HEIGHT_PX = 60" in source
+    assert 'addEventListener("pointerdown", event => this.beginIndividualPaneResize(event))' in source
+    assert "this.individualPaneResize.pointerId = event.pointerId" in source
+    assert "this.refs.individualResize?.setPointerCapture?.(event.pointerId)" in source
+    assert 'window.addEventListener("pointermove", this.handleIndividualPanePointerMove)' in source
+    assert "event.clientY - listRect.top" in source
+    assert "this.refs.individualResize?.releasePointerCapture?.(event.pointerId)" in source
+    assert "--movement-checked-fixes-height" in source
+    assert "bounds.available - nextHeight" in source
+    assert "align-content: start;" in source
+    assert 'sheet.classList.contains("queue-mode")' in source
+
+
+def test_hidden_output_links_do_not_leave_an_empty_root_grid_row():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert ".movement-toolbar {\n          grid-row: 1;" in source
+    assert ".movement-status {\n          grid-row: 2;" in source
+    assert ".movement-output-links {\n          grid-row: 3;" in source
+    assert ".movement-main {\n          grid-row: 4;" in source
+
+
 def test_movement_frontend_includes_auto_burst_controls():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
