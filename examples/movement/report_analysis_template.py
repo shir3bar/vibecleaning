@@ -359,11 +359,7 @@ def recompute_analytical_movement_context(valid_records):
         record["step_length_m"] = None
         record["speed_mps"] = None
         status = normalize_review_status((record.get("review") or {}).get("status"))
-        visible = str((record.get("raw") or {}).get("visible", "")).strip().lower()
-        if (
-            status == "confirmed"
-            or (status != "suspected" and visible in {"false", "f", "no", "n", "0"})
-        ):
+        if status == "confirmed":
             record["analytically_excluded"] = True
             continue
         record["analytically_excluded"] = False

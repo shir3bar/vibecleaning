@@ -6140,7 +6140,11 @@ class MovementExampleApp {
       }
     }
 
-    legendEl.innerHTML = `${header}${body}`;
+    const sourceFlaggedCount = (this.data.fixes || []).filter(isSourceOnlyFlaggedFix).length;
+    const sourceFlagNote = sourceFlaggedCount
+      ? `<div class="movement-legend-note">Thin faded sections were flagged in the source data (${escapeHtml(formatCount(sourceFlaggedCount))} loaded fixes); they remain analytically included until confirmed in Vibecleaning.</div>`
+      : "";
+    legendEl.innerHTML = `${header}${body}${sourceFlagNote}`;
     legendEl.classList.remove("hidden");
   }
 
@@ -6292,7 +6296,9 @@ class MovementExampleApp {
     const visibleIndividuals = new Set(this.data.selectedIndividuals);
     const visibleSetNames = this.getVisibleSetNames();
     const pathData = [];
+    const sourceFlaggedPathData = [];
     const pointData = [];
+    const sourceFlaggedPointData = [];
     const thresholdPointData = [];
     const selectedThresholdPointData = [];
     const candidatePointData = [];
@@ -6335,6 +6341,7 @@ class MovementExampleApp {
         burst,
         path: burst.path,
         color: autoBurstColor(burst, 185),
+        sourceFlagged: this.isSourceOnlyFlaggedBurst(burst),
       }));
     const visibleAutoBurstPoints = visibleAutoBursts
       .filter(burst => burst.path.length >= 1)
@@ -6343,6 +6350,7 @@ class MovementExampleApp {
         position: burst.path[0],
         color: autoBurstColor(burst, 220),
         fillColor: autoBurstColor(burst, 48),
+        sourceFlagged: this.isSourceOnlyFlaggedBurst(burst),
       }));
     const visibleTableSelection = this.getVisibleTableSelectionFixes();
     const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
@@ -6394,23 +6402,55 @@ class MovementExampleApp {
       }
       for (const setName of visibleSetNames) {
         const suppressBaseTrack = suppressedBaseTrackKeys.has(movementTrackKey(individual, setName));
-        const series = this.buildVisibleTrackSeries(individual, setName);
+        const exactFixes = this.getExactVisibleTrackFixes(individual, setName);
+        const series = this.buildVisibleTrackSeries(individual, setName, exactFixes);
         if (!series) {
           continue;
         }
         if (!suppressBaseTrack && series.positions.length >= 2) {
-          pathData.push({
-            individual,
-            setName,
-            path: series.positions,
-            color: splitColor(this.data.individualPalette[individual], setName, PATH_ALPHA),
-          });
+          const trackColor = splitColor(this.data.individualPalette[individual], setName, PATH_ALPHA);
+          if (exactFixes.length >= 2) {
+            for (const path of buildSourceAwareTrackPaths(exactFixes, trackColor)) {
+              (path.sourceFlagged ? sourceFlaggedPathData : pathData).push({
+                individual,
+                setName,
+                ...path,
+              });
+            }
+          } else {
+            pathData.push({
+              individual,
+              setName,
+              path: series.positions,
+              color: trackColor,
+            });
+          }
         }
         const cursorPosition = interpolateSeriesPosition(series, this.currentTimeMs);
         if (cursorPosition) {
           cursorData.push({ position: cursorPosition });
         }
       }
+    }
+
+    for (const fix of this.data.fixes) {
+      if (
+        !isSourceOnlyFlaggedFix(fix)
+        || !visibleIndividuals.has(fix.individual)
+        || !visibleSetNames.has(fix.setName)
+      ) {
+        continue;
+      }
+      const trackColor = splitColor(
+        this.data.individualPalette[fix.individual],
+        fix.setName,
+        72,
+      );
+      sourceFlaggedPointData.push({
+        fixKey: fix.fixKey,
+        position: fix.position,
+        color: trackColor,
+      });
     }
 
     if (showPoints) {
@@ -6489,6 +6529,17 @@ class MovementExampleApp {
     }
     layers.push(
       new deck.PathLayer({
+        id: "movement-source-flagged-paths",
+        data: sourceFlaggedPathData,
+        getPath: item => item.path,
+        getColor: item => item.color,
+        getWidth: 1.5,
+        widthMinPixels: 1,
+        pickable: false,
+      }),
+    );
+    layers.push(
+      new deck.PathLayer({
         id: "movement-paths",
         data: pathData,
         getPath: item => item.path,
@@ -6509,9 +6560,11 @@ class MovementExampleApp {
           getPath: item => item.path,
           getColor: item => hasFocusedRankingBurst
             ? this.mutedRankingContextColor(item.color, 36)
-            : item.color,
-          getWidth: 5,
-          widthMinPixels: 3,
+            : item.sourceFlagged
+              ? this.mutedRankingContextColor(item.color, 58)
+              : item.color,
+          getWidth: item => item.sourceFlagged ? 2 : 5,
+          widthMinPixels: 1,
           pickable: Boolean(this.burstFeatureSpace?.points?.length),
         }),
       );
@@ -6525,10 +6578,14 @@ class MovementExampleApp {
           getPosition: item => item.position,
           getFillColor: item => hasFocusedRankingBurst
             ? this.mutedRankingContextColor(item.fillColor, 18)
-            : item.fillColor,
+            : item.sourceFlagged
+              ? this.mutedRankingContextColor(item.fillColor, 20)
+              : item.fillColor,
           getLineColor: item => hasFocusedRankingBurst
             ? this.mutedRankingContextColor(item.color, 42)
-            : item.color,
+            : item.sourceFlagged
+              ? this.mutedRankingContextColor(item.color, 70)
+              : item.color,
           filled: true,
           stroked: true,
           lineWidthMinPixels: 2,
@@ -6536,6 +6593,25 @@ class MovementExampleApp {
           radiusMinPixels: 6,
           radiusMaxPixels: 15,
           pickable: Boolean(this.burstFeatureSpace?.points?.length),
+        }),
+      );
+    }
+
+    if (sourceFlaggedPointData.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-source-flagged-points",
+          data: sourceFlaggedPointData,
+          getPosition: item => item.position,
+          getFillColor: item => this.mutedRankingContextColor(item.color, 22),
+          getLineColor: item => this.mutedRankingContextColor(item.color, 76),
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 1,
+          getRadius: 42,
+          radiusMinPixels: 2,
+          radiusMaxPixels: 4,
+          pickable: true,
         }),
       );
     }
@@ -6805,8 +6881,7 @@ class MovementExampleApp {
     this.renderFixPopup();
   }
 
-  buildVisibleTrackSeries(individual, setName) {
-    const exactFixes = this.getExactVisibleTrackFixes(individual, setName);
+  buildVisibleTrackSeries(individual, setName, exactFixes = this.getExactVisibleTrackFixes(individual, setName)) {
     if (exactFixes.length) {
       return {
         source: "exact-detail",
@@ -6840,6 +6915,15 @@ class MovementExampleApp {
         && fix.setName === setName
       ))
       .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
+  }
+
+  isSourceOnlyFlaggedBurst(burst) {
+    const fixKeys = Array.isArray(burst?.fixKeys) ? burst.fixKeys : [];
+    if (!fixKeys.length || !this.data?.fixByKey) {
+      return false;
+    }
+    const fixes = fixKeys.map(fixKey => this.data.fixByKey.get(fixKey)).filter(Boolean);
+    return fixes.length === fixKeys.length && fixes.every(isSourceOnlyFlaggedFix);
   }
 
   colorForFix(fix) {
@@ -7033,13 +7117,15 @@ class MovementExampleApp {
     if (fix.analyticallyExcluded || fix.review?.status === "confirmed") {
       return this.refs.showConfirmed.checked;
     }
-    if (!this.refs.showPoints.checked) {
-      return false;
-    }
     const visibleIndividuals = this.data.selectedIndividuals instanceof Set
       ? this.data.selectedIndividuals
       : new Set();
-    return visibleIndividuals.has(fix.individual) && this.getVisibleSetNames().has(fix.setName);
+    const inVisibleTrack = visibleIndividuals.has(fix.individual)
+      && this.getVisibleSetNames().has(fix.setName);
+    if (isSourceOnlyFlaggedFix(fix)) {
+      return inVisibleTrack;
+    }
+    return this.refs.showPoints.checked && inVisibleTrack;
   }
 
   syncFixPopupVisibility() {
@@ -7120,6 +7206,11 @@ class MovementExampleApp {
     };
     addRow("individual", "Individual", fix.individual, { allowMissing: true });
     addRow("timestamp", "Timestamp", formatTimestamp(fix.timeMs), { allowMissing: true });
+    addRow(
+      "source_flags",
+      "Source flags",
+      Array.isArray(fix.sourceFlags) ? fix.sourceFlags.join(", ") : "",
+    );
 
     for (const fieldKey of FIX_POPUP_DEFAULT_FIELDS) {
       const resolved = this.resolvePopupFieldValue(fix, fieldKey);
@@ -9661,6 +9752,37 @@ function initialMovementVisibleIndividuals(data) {
 }
 
 
+function isSourceOnlyFlaggedFix(fix) {
+  const status = String(fix?.review?.status || "").trim().toLowerCase();
+  return Array.isArray(fix?.sourceFlags)
+    && fix.sourceFlags.length > 0
+    && status !== "suspected"
+    && status !== "confirmed";
+}
+
+function buildSourceAwareTrackPaths(fixes, trackColor) {
+  const paths = [];
+  for (let index = 1; index < fixes.length; index += 1) {
+    const previous = fixes[index - 1];
+    const current = fixes[index];
+    const sourceFlagged = isSourceOnlyFlaggedFix(previous) || isSourceOnlyFlaggedFix(current);
+    const last = paths[paths.length - 1];
+    if (last && last.sourceFlagged === sourceFlagged) {
+      last.path.push(current.position);
+      continue;
+    }
+    paths.push({
+      path: [previous.position, current.position],
+      color: sourceFlagged
+        ? [trackColor[0], trackColor[1], trackColor[2], 52]
+        : trackColor,
+      sourceFlagged,
+    });
+  }
+  return paths;
+}
+
+
 function parseMovementBurstGap(summary) {
   const nested = summary?.burst_gap || {};
   const mode = String(nested.mode ?? summary?.burst_gap_mode ?? DEFAULT_BURST_GAP_MODE).trim().toLowerCase();
@@ -9764,6 +9886,9 @@ function parseMovementFixes(items) {
     },
     segments: normalizeSegmentMemberships(item?.segments),
     analyticallyExcluded: Boolean(item?.analytically_excluded),
+    sourceFlags: Array.isArray(item?.source_flags)
+      ? item.source_flags.map(value => String(value || "")).filter(Boolean)
+      : [],
   })).filter(item => item.fixKey) : [];
 }
 

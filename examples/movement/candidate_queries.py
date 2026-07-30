@@ -619,14 +619,9 @@ def _run_raw_csv_attribute_candidate_query(
             row = _raw_csv_candidate_row(raw, columns, row_index)
             if row is None:
                 continue
-            visible_value = str(raw.get("visible") or "").strip().lower()
             status_value = str(raw.get("outlier_status") or "").strip().lower()
             if (
                 status_value == "confirmed"
-                or (
-                    status_value != "suspected"
-                    and visible_value in {"false", "f", "no", "n", "0"}
-                )
                 or row["fix_key"] in confirmed_fix_key_set
                 or (row["individual"], "") in confirmed_individual_track_set
                 or (row["individual"], row.get("set_name", "train")) in confirmed_individual_track_set

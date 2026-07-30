@@ -422,6 +422,42 @@ fix_c,alpha,2024-01-01T02:00:00Z,-70.2,40.2,true,
     ]
 
 
+def test_source_flags_remain_in_analysis_until_app_confirmation(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,visible,manually-marked-outlier,algorithm-marked-outlier,outlier_status
+fix_a,alpha,2024-01-01T00:00:00Z,-70.0,40.0,true,false,false,
+fix_b,alpha,2024-01-01T01:00:00Z,-70.1,40.1,false,true,false,
+fix_c,alpha,2024-01-01T02:00:00Z,-70.2,40.2,true,false,true,
+""",
+        encoding="utf-8",
+    )
+
+    payload = build_movement_fixes(
+        csv_path,
+        burst_gap_mode="manual",
+        burst_gap_seconds=10_800,
+    )
+    by_key = {fix["fix_key"]: fix for fix in payload["fixes"]}
+
+    assert "analytically_excluded" not in by_key["id:fix_b#row:2"]
+    assert "analytically_excluded" not in by_key["id:fix_c#row:3"]
+    assert by_key["id:fix_b#row:2"]["source_flags"] == [
+        "visible=false",
+        "manually-marked-outlier=true",
+    ]
+    assert by_key["id:fix_c#row:3"]["source_flags"] == [
+        "algorithm-marked-outlier=true",
+    ]
+    assert by_key["id:fix_b#row:2"]["attributes"]["time_delta_s"] == 3600.0
+    assert by_key["id:fix_c#row:3"]["attributes"]["time_delta_s"] == 3600.0
+    assert payload["auto_bursts"][0]["fix_keys"] == [
+        "id:fix_a#row:1",
+        "id:fix_b#row:2",
+        "id:fix_c#row:3",
+    ]
+
+
 def test_build_movement_overview_auto_bursts_use_sorted_track_order(tmp_path):
     csv_path = tmp_path / "movement.csv"
     csv_path.write_text(
@@ -646,7 +682,7 @@ def test_movement_frontend_uses_canonical_track_paths_with_burst_suppression():
         source.index("  buildVisibleTrackSeries(")
     ]
 
-    assert "buildVisibleTrackSeries(individual, setName)" in source
+    assert "buildVisibleTrackSeries(individual, setName, exactFixes)" in source
     assert "getExactVisibleTrackFixes(individual, setName)" in source
     assert 'source: "exact-detail"' in source
     assert 'source: "sampled-overview"' in source
@@ -658,6 +694,18 @@ def test_movement_frontend_uses_canonical_track_paths_with_burst_suppression():
         "if (!suppressBaseTrack && series.positions.length >= 2)"
     )
     assert "if (suppressBaseTrack) {\n          continue;" not in renderer
+
+
+def test_movement_frontend_distinguishes_source_flags_from_review_status():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "sourceFlags:" in source
+    assert "function isSourceOnlyFlaggedFix(fix)" in source
+    assert "function buildSourceAwareTrackPaths(fixes, trackColor)" in source
+    assert 'id: "movement-source-flagged-paths"' in source
+    assert 'id: "movement-source-flagged-points"' in source
+    assert "they remain analytically included until confirmed in Vibecleaning" in source
+    assert '"source_flags",\n      "Source flags"' in source
 
 
 def test_movement_frontend_uses_on_demand_individual_loading_for_truncated_overviews():

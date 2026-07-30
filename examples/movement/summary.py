@@ -368,6 +368,17 @@ def _portable_row_is_visible(raw: dict) -> bool:
     return value not in {"false", "f", "no", "n", "0"}
 
 
+def _source_row_flags(raw: dict) -> list[str]:
+    flags = []
+    if not _portable_row_is_visible(raw):
+        flags.append("visible=false")
+    if parse_bool(raw.get("manually-marked-outlier")) is True:
+        flags.append("manually-marked-outlier=true")
+    if parse_bool(raw.get("algorithm-marked-outlier")) is True:
+        flags.append("algorithm-marked-outlier=true")
+    return flags
+
+
 def _row_is_analytically_excluded(
     raw: dict,
     *,
@@ -387,9 +398,7 @@ def _row_is_analytically_excluded(
         or (individual, set_name) in confirmed_individual_tracks
     ):
         return True
-    if review_status == "suspected":
-        return False
-    return not _portable_row_is_visible(raw)
+    return False
 
 
 def _build_attributes(raw: dict, *, color_fields: list[dict], step_length_m, speed_mps, time_delta_s) -> dict:
@@ -425,6 +434,7 @@ def _build_fix_record(
     attributes: dict,
     review: dict,
     segment_memberships: list[dict],
+    source_flags: list[str] | None = None,
     analytically_excluded: bool = False,
 ) -> dict:
     fix = {
@@ -442,6 +452,8 @@ def _build_fix_record(
         fix["review"] = review
     if segment_memberships:
         fix["segments"] = [dict(item) for item in segment_memberships]
+    if source_flags:
+        fix["source_flags"] = list(source_flags)
     if analytically_excluded:
         fix["analytically_excluded"] = True
     return fix
@@ -932,6 +944,7 @@ def _build_movement_overview_cached(
             ),
             review=context["review"],
             segment_memberships=context["segment_memberships"],
+            source_flags=_source_row_flags(context["raw"]),
             analytically_excluded=context["analytically_excluded"],
         )
         for context in sorted(overview_fix_contexts, key=_record_sort_key)
@@ -1248,6 +1261,7 @@ def _build_movement_fixes(
                     ),
                     review=review,
                     segment_memberships=segment_memberships,
+                    source_flags=_source_row_flags(record["raw"]),
                     analytically_excluded=record["analytically_excluded"],
                 )
             )
