@@ -690,6 +690,15 @@ def test_movement_frontend_includes_auto_burst_controls():
     assert 'data-role="burst-gap-mode"' in source
     assert 'data-role="burst-gap-seconds"' in source
     assert 'data-role="burst-gap-quantile"' in source
+    assert 'data-role="burst-gap-seconds-control"' in source
+    assert 'data-role="burst-gap-quantile-control"' in source
+    assert "<option value=\"quantile\">Gap quantile</option>" in source
+    assert "<option value=\"manual\">Fixed time gap</option>" in source
+    assert "Gap quantile (0–1)" in source
+    assert "Time gap (seconds)" in source
+    assert "Fallback (s)" not in source
+    assert 'this.refs.burstGapQuantileControl.hidden = mode !== "quantile";' in source
+    assert 'this.refs.burstGapSecondsControl.hidden = mode !== "manual";' in source
     assert 'data-role="burst-count"' in source
     assert "burst_gap_mode: this.getBurstGapMode()" in source
     assert "burst_gap_quantile: String(this.getBurstGapQuantile())" in source

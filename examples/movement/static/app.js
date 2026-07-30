@@ -533,14 +533,21 @@ class MovementExampleApp {
   }
 
   syncBurstGapControls() {
-    if (!this.refs?.burstGapMode || !this.refs?.burstGapQuantile || !this.refs?.burstGapSecondsLabel) {
+    if (
+      !this.refs?.burstGapMode
+      || !this.refs?.burstGapQuantile
+      || !this.refs?.burstGapQuantileControl
+      || !this.refs?.burstGapSeconds
+      || !this.refs?.burstGapSecondsControl
+    ) {
       return;
     }
     const mode = this.getBurstGapMode();
     this.refs.burstGapMode.value = mode;
-    this.refs.burstGapSecondsLabel.textContent = mode === "quantile" ? "Fallback (s)" : "Burst gap (s)";
-    this.refs.burstGapQuantile.hidden = mode !== "quantile";
+    this.refs.burstGapQuantileControl.hidden = mode !== "quantile";
     this.refs.burstGapQuantile.disabled = mode !== "quantile";
+    this.refs.burstGapSecondsControl.hidden = mode !== "manual";
+    this.refs.burstGapSeconds.disabled = mode !== "manual";
   }
 
   handleBurstGapSettingsChange() {
@@ -2223,17 +2230,19 @@ class MovementExampleApp {
           <label class="movement-toggle"><input type="checkbox" data-role="show-points"> Points</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-bursts"> Bursts</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-confirmed"> Confirmed exclusions</label>
-          <label>Burst gap
+          <label>Burst definition
             <select data-role="burst-gap-mode">
-              <option value="quantile">Quantile</option>
-              <option value="manual">Manual seconds</option>
+              <option value="quantile">Gap quantile</option>
+              <option value="manual">Fixed time gap</option>
             </select>
           </label>
-          <label class="movement-burst-gap-control"><span data-role="burst-gap-seconds-label">Fallback (s)</span>
-            <input type="number" min="1" step="300" data-role="burst-gap-seconds">
-            <input type="number" min="0.001" max="1" step="0.001" data-role="burst-gap-quantile" aria-label="Burst gap quantile">
-            <span class="movement-burst-count" data-role="burst-count">No bursts loaded</span>
+          <label class="movement-burst-gap-control" data-role="burst-gap-quantile-control">Gap quantile (0–1)
+            <input type="number" min="0.001" max="1" step="0.001" data-role="burst-gap-quantile">
           </label>
+          <label class="movement-burst-gap-control" data-role="burst-gap-seconds-control">Time gap (seconds)
+            <input type="number" min="1" step="300" data-role="burst-gap-seconds">
+          </label>
+          <span class="movement-burst-count" data-role="burst-count">No bursts loaded</span>
           <button type="button" data-role="select-all">All individuals</button>
           <button type="button" data-role="select-none">No individuals</button>
           <button type="button" data-role="select-suspicious">Load suspicious fixes</button>
@@ -2508,7 +2517,8 @@ class MovementExampleApp {
       showBursts: this.mountEl.querySelector('[data-role="show-bursts"]'),
       showConfirmed: this.mountEl.querySelector('[data-role="show-confirmed"]'),
       burstGapMode: this.mountEl.querySelector('[data-role="burst-gap-mode"]'),
-      burstGapSecondsLabel: this.mountEl.querySelector('[data-role="burst-gap-seconds-label"]'),
+      burstGapQuantileControl: this.mountEl.querySelector('[data-role="burst-gap-quantile-control"]'),
+      burstGapSecondsControl: this.mountEl.querySelector('[data-role="burst-gap-seconds-control"]'),
       burstGapSeconds: this.mountEl.querySelector('[data-role="burst-gap-seconds"]'),
       burstGapQuantile: this.mountEl.querySelector('[data-role="burst-gap-quantile"]'),
       burstCount: this.mountEl.querySelector('[data-role="burst-count"]'),
