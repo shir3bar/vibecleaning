@@ -188,6 +188,8 @@ const DEFAULT_SIDE_PANE_WIDTH_PX = 420;
 const MIN_SIDE_PANE_WIDTH_PX = 300;
 const MAX_SIDE_PANE_WIDTH_RATIO = 0.55;
 const SIDE_PANE_HANDLE_WIDTH_PX = 12;
+const STACKED_SIDE_LAYOUT_BREAKPOINT_PX = 1080;
+const SLIM_STACKED_SIDE_LAYOUT_BREAKPOINT_PX = 760;
 const MIN_INDIVIDUAL_LIST_HEIGHT_PX = 80;
 const MIN_CHECKED_FIXES_HEIGHT_PX = 120;
 const MAX_SELECTED_FIXES_SHOWN = 150;
@@ -603,7 +605,10 @@ class MovementExampleApp {
   }
 
   isStackedSideLayout() {
-    return window.matchMedia?.("(max-width: 1080px)")?.matches === true;
+    const breakpoint = MOVEMENT_APP_CONFIG.mode === "slim_movement"
+      ? SLIM_STACKED_SIDE_LAYOUT_BREAKPOINT_PX
+      : STACKED_SIDE_LAYOUT_BREAKPOINT_PX;
+    return window.matchMedia?.(`(max-width: ${breakpoint}px)`)?.matches === true;
   }
 
   getSidePaneWidthBounds() {
@@ -859,6 +864,17 @@ class MovementExampleApp {
     } else if (nextSheet === "individuals" && this.individualListHeightPx !== null) {
       this.applyIndividualListHeight(this.individualListHeightPx, { save: false });
     }
+    if (this.map) {
+      window.requestAnimationFrame(() => {
+        if (!this.map) {
+          return;
+        }
+        try {
+          this.map.resize();
+        } catch {}
+        this.renderLayers();
+      });
+    }
   }
 
   applyAppProfile() {
@@ -1079,6 +1095,7 @@ class MovementExampleApp {
         }
         .movement-map-wrap,
         .movement-side {
+          min-width: 0;
           min-height: 0;
           border-radius: 16px;
           overflow: hidden;
@@ -1552,11 +1569,13 @@ class MovementExampleApp {
           color: #d8fff3;
         }
         .movement-side-content {
+          min-width: 0;
           min-height: 0;
           overflow: hidden;
         }
         .movement-side-sheet {
           display: grid;
+          min-width: 0;
           min-height: 100%;
           height: 100%;
         }
@@ -1620,6 +1639,9 @@ class MovementExampleApp {
         .movement-anomaly-ranking {
           overflow-y: auto;
           padding: 10px 12px;
+        }
+        .movement-anomaly-ranking {
+          overflow-x: auto;
         }
         .movement-anomaly-meta,
         .movement-anomaly-warnings {
@@ -2154,14 +2176,26 @@ class MovementExampleApp {
           color: #9df6dc;
         }
         @media (max-width: 1080px) {
-          .movement-main {
+          .movement-root:not(.is-slim) .movement-main {
             grid-template-columns: 1fr;
             grid-template-rows: minmax(320px, 1fr) minmax(320px, 1fr);
           }
-          .movement-side-resize {
+          .movement-root:not(.is-slim) .movement-side-resize {
             display: none;
           }
-          .movement-side {
+          .movement-root:not(.is-slim) .movement-side {
+            grid-template-rows: auto minmax(320px, 1fr) auto;
+          }
+        }
+        @media (max-width: 760px) {
+          .movement-root.is-slim .movement-main {
+            grid-template-columns: 1fr;
+            grid-template-rows: minmax(320px, 1fr) minmax(320px, 1fr);
+          }
+          .movement-root.is-slim .movement-side-resize {
+            display: none;
+          }
+          .movement-root.is-slim .movement-side {
             grid-template-rows: auto minmax(320px, 1fr) auto;
           }
         }
@@ -10035,7 +10069,12 @@ function refreshMovementFixCollections(data) {
   data.autoBursts = Array.from(mergedAutoBursts.values())
     .sort((left, right) => left.startTimeMs - right.startTimeMs || left.burstId.localeCompare(right.burstId));
   data.autoBurstById = new Map(data.autoBursts.map(burst => [burst.burstId, burst]));
-  data.colorStyles = computeMovementColorStyles(data.colorFields, data.fixes);
+  data.colorStyles = computeMovementColorStyles(
+    data.colorFields,
+    data.fixes.filter(fix => (
+      !fix.analyticallyExcluded && fix.review?.status !== "confirmed"
+    )),
+  );
 }
 
 function buildMovementColorFields(fields) {

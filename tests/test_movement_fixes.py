@@ -735,6 +735,18 @@ def test_movement_frontend_distinguishes_source_flags_from_review_status():
     assert '"source_flags",\n      "Source flags"' in source
 
 
+def test_movement_frontend_excludes_confirmed_audit_fixes_from_color_scale():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    refresh = source[
+        source.index("function refreshMovementFixCollections(data)")
+        :source.index("function buildMovementColorFields(fields)")
+    ]
+
+    assert "computeMovementColorStyles(" in refresh
+    assert "!fix.analyticallyExcluded" in refresh
+    assert 'fix.review?.status !== "confirmed"' in refresh
+
+
 def test_movement_frontend_uses_on_demand_individual_loading_for_truncated_overviews():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 

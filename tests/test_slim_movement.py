@@ -352,3 +352,15 @@ def test_shared_individual_tab_has_persisted_vertical_resize_control():
     assert "beginIndividualPaneResize" in source
     assert "applyIndividualListHeight" in source
     assert "individualListHeightPx: this.individualListHeightPx" in source
+
+
+def test_slim_ranking_layout_keeps_map_wide_and_resizes_canvas():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "const SLIM_STACKED_SIDE_LAYOUT_BREAKPOINT_PX = 760;" in source
+    assert ".movement-root:not(.is-slim) .movement-main" in source
+    assert ".movement-root.is-slim .movement-main" in source
+    assert ".movement-anomaly-ranking {\n          overflow-x: auto;" in source
+    assert "this.map.resize();" in source[
+        source.index("  setSideSheet("):source.index("  applyAppProfile(")
+    ]
