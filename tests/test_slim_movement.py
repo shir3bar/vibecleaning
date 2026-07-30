@@ -398,7 +398,23 @@ def test_slim_ranking_layout_keeps_map_wide_and_resizes_canvas():
     assert "const SLIM_STACKED_SIDE_LAYOUT_BREAKPOINT_PX = 760;" in source
     assert ".movement-root:not(.is-slim) .movement-main" in source
     assert ".movement-root.is-slim .movement-main" in source
-    assert ".movement-anomaly-ranking {\n          overflow-x: auto;" in source
+    movement_main_css = source[
+        source.index("        .movement-main {"):source.index(
+            "        .movement-map-wrap,",
+            source.index("        .movement-main {"),
+        )
+    ]
+    assert "height: 100%;" in movement_main_css
+    assert "min-height: 0;" in movement_main_css
+    assert "overflow: hidden;" in movement_main_css
+    ranking_css = source[
+        source.index("        .movement-anomaly-ranking {"):source.index(
+            "        .movement-anomaly-meta,",
+            source.index("        .movement-anomaly-ranking {"),
+        )
+    ]
+    assert "min-height: 0;" in ranking_css
+    assert "overflow-x: auto;" in ranking_css
     assert "this.map.resize();" in source[
         source.index("  setSideSheet("):source.index("  applyAppProfile(")
     ]

@@ -1091,7 +1091,9 @@ class MovementExampleApp {
           display: grid;
           grid-template-columns: minmax(0, 1fr) ${SIDE_PANE_HANDLE_WIDTH_PX}px minmax(${MIN_SIDE_PANE_WIDTH_PX}px, var(--movement-side-width));
           gap: 0;
+          height: 100%;
           min-height: 0;
+          overflow: hidden;
           padding: 0 16px 14px;
         }
         .movement-map-wrap,
@@ -1546,6 +1548,7 @@ class MovementExampleApp {
         .movement-side {
           display: grid;
           grid-template-rows: auto minmax(0, 1fr) auto;
+          min-height: 0;
         }
         .movement-side-tabs {
           display: flex;
@@ -1577,8 +1580,9 @@ class MovementExampleApp {
         .movement-side-sheet {
           display: grid;
           min-width: 0;
-          min-height: 100%;
+          min-height: 0;
           height: 100%;
+          overflow: hidden;
         }
         .movement-side-sheet.hidden {
           display: none;
@@ -1642,6 +1646,7 @@ class MovementExampleApp {
           padding: 10px 12px;
         }
         .movement-anomaly-ranking {
+          min-height: 0;
           overflow-x: auto;
         }
         .movement-anomaly-meta,
