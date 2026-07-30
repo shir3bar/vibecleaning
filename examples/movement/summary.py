@@ -1120,10 +1120,16 @@ def build_movement_fixes(
     burst_gap_mode: str = DEFAULT_BURST_GAP_MODE,
     burst_gap_seconds: float = DEFAULT_BURST_GAP_SECONDS,
     burst_gap_quantile: float = DEFAULT_BURST_GAP_QUANTILE,
+    burst_gap_effective_seconds: float | None = None,
 ) -> dict:
     normalized_burst_gap_mode = normalize_burst_gap_mode(burst_gap_mode)
     normalized_burst_gap_seconds = normalize_burst_gap_seconds(burst_gap_seconds)
     normalized_burst_gap_quantile = normalize_burst_gap_quantile(burst_gap_quantile)
+    normalized_burst_gap_effective_seconds = (
+        None
+        if burst_gap_effective_seconds is None
+        else normalize_burst_gap_seconds(burst_gap_effective_seconds)
+    )
     normalized_status = str(review_status or "").strip().lower()
     if normalized_status == "reviewed":
         normalized_status = "reviewed"
@@ -1166,6 +1172,7 @@ def build_movement_fixes(
         normalized_burst_gap_mode,
         normalized_burst_gap_seconds,
         normalized_burst_gap_quantile,
+        normalized_burst_gap_effective_seconds,
     )
 
 
@@ -1185,6 +1192,7 @@ def _build_movement_fixes(
     burst_gap_mode: str,
     burst_gap_seconds: float,
     burst_gap_quantile: float,
+    burst_gap_effective_seconds: float | None,
 ) -> dict:
     path = Path(path_str)
     fieldnames, columns, field_stats = _prepare_scan_context_cached(path_str, mtime_ns, size)
@@ -1201,6 +1209,10 @@ def _build_movement_fixes(
     additional_review_individual_set = set(additional_review_individuals)
     confirmed_fix_key_set = set(confirmed_fix_keys)
     confirmed_individual_track_set = set(confirmed_individual_tracks)
+    needs_source_wide_gap_records = (
+        burst_gap_mode == "quantile"
+        and burst_gap_effective_seconds is None
+    )
 
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -1223,7 +1235,7 @@ def _build_movement_fixes(
                 confirmed_fix_keys=confirmed_fix_key_set,
                 confirmed_individual_tracks=confirmed_individual_track_set,
             )
-            if not analytically_excluded:
+            if not analytically_excluded and needs_source_wide_gap_records:
                 gap_records_by_group.setdefault(_track_key(item_individual, set_name), []).append(
                     {
                         "row_index": row_index,
@@ -1257,12 +1269,22 @@ def _build_movement_fixes(
     eligible_records = [record for record in records if not record["analytically_excluded"]]
     eligible_records_by_group = _group_track_records(eligible_records)
     movement_by_fix_key, _stat_samples = compute_track_movement(eligible_records_by_group)
-    burst_gap = resolve_burst_gap_strategy(
-        gap_records_by_group,
-        burst_gap_mode=burst_gap_mode,
-        burst_gap_seconds=burst_gap_seconds,
-        burst_gap_quantile=burst_gap_quantile,
-    )
+    if burst_gap_effective_seconds is None:
+        burst_gap = resolve_burst_gap_strategy(
+            gap_records_by_group,
+            burst_gap_mode=burst_gap_mode,
+            burst_gap_seconds=burst_gap_seconds,
+            burst_gap_quantile=burst_gap_quantile,
+        )
+    else:
+        burst_gap = {
+            "mode": burst_gap_mode,
+            "quantile": float(burst_gap_quantile),
+            "fallback_seconds": float(burst_gap_seconds),
+            "effective_seconds": float(burst_gap_effective_seconds),
+            "gap_count": 0,
+            "used_fallback": False,
+        }
 
     for _group_key, sorted_records in _sorted_track_records(records_by_group):
         for record in sorted_records:

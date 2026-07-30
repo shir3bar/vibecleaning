@@ -677,6 +677,11 @@ def register_movement_routes(
             raise ValueError("Invalid burst_gap_seconds")
         return value
 
+    def parse_optional_burst_gap_effective_seconds(raw_value: object) -> float | None:
+        if raw_value in (None, ""):
+            return None
+        return parse_burst_gap_seconds(raw_value)
+
     def parse_burst_gap_mode(raw_value: object) -> str:
         if raw_value in (None, ""):
             return DEFAULT_BURST_GAP_MODE
@@ -845,6 +850,7 @@ def register_movement_routes(
         burst_gap_mode: str | None = None,
         burst_gap_seconds: float | None = None,
         burst_gap_quantile: float | None = None,
+        burst_gap_effective_seconds: float | None = None,
     ):
         try:
             study_dir = configured_study_dir(family_name, study_name)
@@ -882,6 +888,9 @@ def register_movement_routes(
                 burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
                 burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
                 burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
+                burst_gap_effective_seconds=parse_optional_burst_gap_effective_seconds(
+                    burst_gap_effective_seconds
+                ),
             )
             payload = apply_review_annotations(payload, annotations, source_artifact=logical_name)
             if normalized_review_status:

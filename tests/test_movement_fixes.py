@@ -321,6 +321,34 @@ fix_b_2,beta,2024-01-01T01:00:00Z,-71.1,41.1,train
     assert sorted(burst["fix_count"] for burst in payload["auto_bursts"]) == [1, 1, 3]
 
 
+def test_movement_fixes_reuses_resolved_quantile_gap_for_selected_tracks(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,set
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_a_2,alpha,2024-01-01T00:00:10Z,-70.1,40.1,train
+fix_a_3,alpha,2024-01-01T00:00:40Z,-70.2,40.2,train
+fix_b_1,beta,2024-01-01T00:00:00Z,-71.0,41.0,train
+fix_b_2,beta,2024-01-01T01:00:00Z,-71.1,41.1,train
+""",
+        encoding="utf-8",
+    )
+
+    payload = build_movement_fixes(
+        csv_path,
+        individual="alpha",
+        burst_gap_mode="quantile",
+        burst_gap_seconds=60,
+        burst_gap_quantile=0.5,
+        burst_gap_effective_seconds=20,
+    )
+
+    assert payload["burst_gap_mode"] == "quantile"
+    assert payload["burst_gap_seconds"] == 20.0
+    assert payload["burst_gap_gap_count"] == 0
+    assert [burst["fix_count"] for burst in payload["auto_bursts"]] == [2, 1]
+
+
 def test_build_movement_fixes_derives_steps_in_sorted_track_order(tmp_path):
     csv_path = tmp_path / "movement.csv"
     csv_path.write_text(
@@ -1073,6 +1101,28 @@ def test_movement_fixes_route_accepts_repeated_individuals(tmp_path):
     assert {fix["individual"] for fix in payload["fixes"]} == {"alpha", "beta"}
 
 
+def test_movement_fixes_route_accepts_resolved_burst_gap(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+
+    response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/fixes",
+        params={
+            "logical_name": "movement.csv",
+            "individual": "alpha",
+            "burst_gap_mode": "quantile",
+            "burst_gap_seconds": "60",
+            "burst_gap_quantile": "0.5",
+            "burst_gap_effective_seconds": "20",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["burst_gap_mode"] == "quantile"
+    assert payload["burst_gap_seconds"] == 20.0
+    assert payload["burst_gap_gap_count"] == 0
+
+
 def test_movement_fixes_route_supports_legacy_individual_query(tmp_path):
     client, dataset_id = create_movement_test_client(tmp_path)
 
@@ -1418,6 +1468,7 @@ def test_movement_frontend_restores_saved_burst_analyses():
 
     assert "restoreSavedAnalyses" in source
     assert "loadSavedAnomalyRanking" in source
+    assert 'params.set("burst_gap_effective_seconds"' in source
     assert "latest_compatible_by_action" in source
     assert "burst_anomaly_ranking.json" in source
     assert 'status: "checking"' in source

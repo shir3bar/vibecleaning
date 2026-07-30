@@ -9948,7 +9948,6 @@ class MovementExampleApp {
       this.data.detailMatchingFixCount = Number(payload.matching_fix_count) || 0;
       this.data.detailReturnedFixCount = Number(payload.returned_fix_count) || 0;
       this.data.detailTruncated = Boolean(payload.truncated);
-      this.data.burstGap = parseMovementBurstGap(payload);
       this.data.detailFixes = parseMovementFixes(payload.fixes || []);
       this.data.detailSegments = parseMovementSegments(payload.segments || []);
       this.data.detailAutoBursts = parseMovementAutoBursts(payload.auto_bursts || []);
@@ -9990,6 +9989,10 @@ class MovementExampleApp {
     params.set("burst_gap_mode", this.getBurstGapMode());
     params.set("burst_gap_seconds", String(this.getBurstGapSeconds()));
     params.set("burst_gap_quantile", String(this.getBurstGapQuantile()));
+    const effectiveBurstGapSeconds = finiteOrNull(this.data?.burstGap?.effectiveSeconds);
+    if (effectiveBurstGapSeconds !== null && effectiveBurstGapSeconds > 0) {
+      params.set("burst_gap_effective_seconds", String(effectiveBurstGapSeconds));
+    }
     const normalizedIndividuals = uniqueNonEmpty(individuals).sort((left, right) => left.localeCompare(right));
     const allIndividuals = this.data ? [...this.data.individuals].sort((left, right) => left.localeCompare(right)) : [];
     const shouldOmitIndividuals = normalizedIndividuals.length > 0 && arraysEqual(normalizedIndividuals, allIndividuals);
