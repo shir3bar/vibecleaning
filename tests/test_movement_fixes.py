@@ -1264,9 +1264,15 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert "const INDIVIDUAL_QUEUE_GROUP_SIZE = 5" in source
     assert 'data-role="individual-view-browse">Browse all</button>' in source
     assert 'data-role="individual-view-queue">Review queue</button>' in source
-    assert 'data-queue-scope="solo">Solo current</button>' in source
-    assert 'data-queue-scope="group">Show group of five</button>' in source
-    assert 'data-queue-scope="all">All individuals</button>' in source
+    assert source.index('data-role="individual-view-browse"') < source.index('data-role="side-sheet-tabs"')
+    assert 'data-queue-scope="solo">Only current</button>' in source
+    assert 'data-queue-scope="group">Group view</button>' in source
+    assert 'data-queue-scope="all"' not in source
+    assert '.movement-side-tabs.hidden,' in source
+    assert ".movement-side-sheet.individuals.queue-mode" in source
+    assert 'data-queue-comment data-individual=' in source
+    assert 'data-queue-table data-individual=' in source
+    assert 'data-role="individual-queue-comment"' not in source
     assert "getIndividualQueueMapIndividuals()" in source
     assert "return position.group;" in source
     assert "/actions/review-individuals" in source

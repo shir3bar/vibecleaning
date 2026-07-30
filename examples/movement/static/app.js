@@ -381,9 +381,12 @@ class MovementExampleApp {
       activeIndividual: "",
       mapScope: "group",
       browseContext: null,
+      browseSideSheet: this.uiState.sideSheet || "individuals",
       queueMapView: null,
       stagedDecisions: new Map(),
       skippedIndividuals: new Set(),
+      commentDrafts: new Map(),
+      commentEditingIndividual: "",
       saving: false,
       appliedRankingAnalysisId: "",
       pendingRankingAnalysisId: "",
@@ -858,6 +861,9 @@ class MovementExampleApp {
       ? ["table", "ranking", "feature_space"]
       : ["table", "ranking"];
     const nextSheet = enabledSheets.includes(sheet) ? sheet : "individuals";
+    if (this.individualReviewQueue?.mode === "browse") {
+      this.individualReviewQueue.browseSideSheet = nextSheet;
+    }
     if (this.refs?.sideSheetTabs) {
       this.refs.sideSheetTabs.dataset.activeSheet = nextSheet;
     }
@@ -1577,8 +1583,18 @@ class MovementExampleApp {
         }
         .movement-side {
           display: grid;
-          grid-template-rows: auto minmax(0, 1fr) auto;
+          grid-template-rows: auto auto minmax(0, 1fr) auto;
           min-height: 0;
+        }
+        .movement-individual-view-tabs {
+          display: flex;
+          gap: 8px;
+          padding: 10px 14px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+          background: rgba(6, 13, 22, 0.72);
+        }
+        .movement-individual-view-tabs button {
+          flex: 1;
         }
         .movement-side-tabs {
           display: flex;
@@ -1586,6 +1602,10 @@ class MovementExampleApp {
           gap: 8px;
           padding: 12px 14px 10px;
           border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .movement-side-tabs.hidden,
+        .movement-queue-controls.hidden {
+          display: none;
         }
         .movement-side-tab {
           padding: 7px 12px;
@@ -1619,6 +1639,14 @@ class MovementExampleApp {
         }
         .movement-side-sheet.individuals {
           grid-template-rows: auto auto minmax(80px, var(--movement-individual-list-height, 1fr)) 10px auto minmax(120px, 0.75fr);
+        }
+        .movement-side-sheet.individuals.queue-mode {
+          grid-template-rows: auto auto minmax(0, 1fr);
+        }
+        .movement-side-sheet.individuals.queue-mode .movement-individual-resize,
+        .movement-side-sheet.individuals.queue-mode [data-role="fix-head"],
+        .movement-side-sheet.individuals.queue-mode [data-role="selected-fixes"] {
+          display: none;
         }
         .movement-individual-resize {
           position: relative;
@@ -1880,10 +1908,9 @@ class MovementExampleApp {
           color: #e5edf7;
           font: inherit;
         }
-        .movement-individual-view-tabs,
         .movement-queue-nav,
         .movement-queue-map-controls,
-        .movement-queue-review-actions {
+        .movement-queue-card-actions {
           display: flex;
           flex-wrap: wrap;
           align-items: center;
@@ -1892,8 +1919,8 @@ class MovementExampleApp {
         .movement-individual-view-tabs button,
         .movement-queue-controls button,
         .movement-queue-controls select,
-        .movement-queue-review-actions button,
-        .movement-queue-review-comment {
+        .movement-queue-card-actions button,
+        .movement-queue-card-comment {
           min-width: 0;
           padding: 6px 8px;
           border: 1px solid rgba(255, 255, 255, 0.09);
@@ -1905,7 +1932,7 @@ class MovementExampleApp {
         }
         .movement-individual-view-tabs button,
         .movement-queue-controls button,
-        .movement-queue-review-actions button {
+        .movement-queue-card-actions button {
           cursor: pointer;
         }
         .movement-individual-view-tabs button.is-active,
@@ -1935,18 +1962,15 @@ class MovementExampleApp {
         .movement-queue-ranking-state.error {
           color: #f9c98b;
         }
-        .movement-queue-review-comment {
-          width: 100%;
-        }
-        .movement-queue-review-actions button[data-review-ok="true"] {
+        .movement-queue-card-actions button[data-review-ok="true"] {
           background: rgba(67, 206, 162, 0.2);
           color: #d8fff3;
         }
-        .movement-queue-review-actions button[data-review-ok="false"] {
+        .movement-queue-card-actions button[data-review-ok="false"] {
           background: rgba(245, 181, 54, 0.16);
           color: #ffe7a6;
         }
-        .movement-queue-review-actions button:disabled,
+        .movement-queue-card-actions button:disabled,
         .movement-queue-controls button:disabled {
           cursor: not-allowed;
           opacity: 0.45;
@@ -1954,6 +1978,26 @@ class MovementExampleApp {
         .movement-card.queue-active {
           border-color: rgba(125, 211, 252, 0.74);
           box-shadow: inset 3px 0 0 #7dd3fc;
+        }
+        .movement-card.queue-card {
+          gap: 4px;
+          margin-bottom: 6px;
+          padding: 7px 9px;
+        }
+        .movement-queue-card-meta {
+          overflow: hidden;
+          color: #8fa4b9;
+          font-size: 10px;
+          line-height: 1.3;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .movement-queue-card-actions {
+          padding-top: 3px;
+        }
+        .movement-queue-card-comment {
+          width: 100%;
+          margin-top: 3px;
         }
         .movement-review-state {
           padding: 3px 6px;
@@ -2415,6 +2459,10 @@ class MovementExampleApp {
             aria-valuemin="${MIN_SIDE_PANE_WIDTH_PX}"
           ></div>
           <div class="movement-side">
+            <div class="movement-individual-view-tabs">
+              <button type="button" data-role="individual-view-browse">Browse all</button>
+              <button type="button" data-role="individual-view-queue">Review queue</button>
+            </div>
             <div class="movement-side-tabs" data-role="side-sheet-tabs">
               <button type="button" class="movement-side-tab is-active" data-role="side-tab-individuals">Individuals</button>
               <button type="button" class="movement-side-tab" data-role="side-tab-table">Table</button>
@@ -2425,10 +2473,6 @@ class MovementExampleApp {
               <div class="movement-side-sheet individuals" data-role="side-sheet-individuals">
                 <div class="movement-side-head" data-role="individual-head">Individuals and coverage</div>
                 <div class="movement-side-search">
-                  <div class="movement-individual-view-tabs">
-                    <button type="button" data-role="individual-view-browse">Browse all</button>
-                    <button type="button" data-role="individual-view-queue">Review queue</button>
-                  </div>
                   <label>Search by individual ID
                     <input type="search" data-role="individual-search" placeholder="Find an individual ID">
                   </label>
@@ -2449,18 +2493,11 @@ class MovementExampleApp {
                       <button type="button" data-queue-nav="next-page">Next 25</button>
                     </div>
                     <div class="movement-queue-map-controls">
-                      <button type="button" data-queue-scope="solo">Solo current</button>
-                      <button type="button" data-queue-scope="group">Show group of five</button>
-                      <button type="button" data-queue-scope="all">All individuals</button>
+                      <button type="button" data-queue-scope="solo">Only current</button>
+                      <button type="button" data-queue-scope="group">Group view</button>
                     </div>
                     <div class="movement-queue-progress" data-role="individual-queue-progress"></div>
-                    <input class="movement-queue-review-comment" data-role="individual-queue-comment" placeholder="Optional review comment">
-                    <div class="movement-queue-review-actions">
-                      <button type="button" data-review-ok="true">Reviewed—OK</button>
-                      <button type="button" data-review-ok="false">Reviewed—issues found</button>
-                      <button type="button" data-role="individual-queue-skip">Skip</button>
-                      <button type="button" data-role="individual-queue-save">Save page</button>
-                    </div>
+                    <button type="button" data-role="individual-queue-save">Save page</button>
                   </div>
                 </div>
                 <div class="movement-individuals" data-role="individuals"></div>
@@ -2711,8 +2748,6 @@ class MovementExampleApp {
       individualQueueOrder: this.mountEl.querySelector('[data-role="individual-queue-order"]'),
       individualQueueRankingState: this.mountEl.querySelector('[data-role="individual-queue-ranking-state"]'),
       individualQueueProgress: this.mountEl.querySelector('[data-role="individual-queue-progress"]'),
-      individualQueueComment: this.mountEl.querySelector('[data-role="individual-queue-comment"]'),
-      individualQueueSkip: this.mountEl.querySelector('[data-role="individual-queue-skip"]'),
       individualQueueSave: this.mountEl.querySelector('[data-role="individual-queue-save"]'),
       individuals: this.mountEl.querySelector('[data-role="individuals"]'),
       individualResize: this.mountEl.querySelector('[data-role="individual-resize"]'),
@@ -2831,7 +2866,13 @@ class MovementExampleApp {
     if (this.individualListHeightPx !== null) {
       this.applyIndividualListHeight(this.individualListHeightPx, { save: false });
     }
-    this.setSideSheet(this.uiState.sideSheet || "individuals", { save: false });
+    this.setSideSheet(
+      this.individualReviewQueue.mode === "queue"
+        ? "individuals"
+        : this.uiState.sideSheet || "individuals",
+      { save: false },
+    );
+    this.renderIndividuals();
     this.renderAnomalyRanking();
     this.renderBurstFeatureSpace();
     this.updateActionButtons();
@@ -2873,11 +2914,6 @@ class MovementExampleApp {
         void this.setIndividualQueueMapScope(scopeButton.dataset.queueScope || "group");
         return;
       }
-      const reviewButton = event.target.closest("button[data-review-ok]");
-      if (reviewButton) {
-        void this.stageIndividualReviewDecision(reviewButton.dataset.reviewOk === "true");
-        return;
-      }
       const queueAction = event.target.closest("button[data-queue-action]");
       if (queueAction?.dataset.queueAction === "run-ranking") {
         void this.runBurstAnomalyRanking({ openRankingSheet: false });
@@ -2885,8 +2921,38 @@ class MovementExampleApp {
         void this.applyCompletedIndividualQueueRanking();
       }
     });
-    this.refs.individualQueueSkip.addEventListener("click", () => {
-      void this.skipIndividualQueueItem();
+    this.refs.individuals.addEventListener("click", event => {
+      const reviewButton = event.target.closest("button[data-review-ok]");
+      if (reviewButton) {
+        void this.stageIndividualReviewDecision(
+          reviewButton.dataset.individual || "",
+          reviewButton.dataset.reviewOk === "true",
+        );
+        return;
+      }
+      const skipButton = event.target.closest("button[data-queue-skip]");
+      if (skipButton) {
+        void this.skipIndividualQueueItem(skipButton.dataset.individual || "");
+        return;
+      }
+      const commentButton = event.target.closest("button[data-queue-comment]");
+      if (commentButton) {
+        this.toggleIndividualQueueComment(commentButton.dataset.individual || "");
+        return;
+      }
+      const tableButton = event.target.closest("button[data-queue-table]");
+      if (tableButton) {
+        void this.viewIndividualQueueTable(tableButton.dataset.individual || "");
+      }
+    });
+    this.refs.individuals.addEventListener("input", event => {
+      const input = event.target.closest("input[data-queue-comment-input]");
+      if (input) {
+        this.individualReviewQueue.commentDrafts.set(
+          input.dataset.individual || "",
+          input.value,
+        );
+      }
     });
     this.refs.individualQueueSave.addEventListener("click", () => {
       void this.flushIndividualReviewDecisions();
@@ -3003,6 +3069,9 @@ class MovementExampleApp {
     this.refs.selectAll.addEventListener("click", () => {
       if (!this.data) return;
       this.clearThresholdState();
+      if (this.individualReviewQueue.mode === "queue") {
+        this.individualReviewQueue.mapScope = "all";
+      }
       this.data.selectedIndividuals = new Set(this.data.individuals);
       this.saveUiState();
       this.renderIndividuals();
@@ -5660,14 +5729,23 @@ class MovementExampleApp {
   async setIndividualViewMode(mode) {
     const nextMode = mode === "queue" ? "queue" : "browse";
     const queue = this.individualReviewQueue;
-    if (queue.mode === nextMode || !this.data) {
+    if (!this.data) {
+      return;
+    }
+    if (queue.mode === nextMode) {
+      if (nextMode === "queue") {
+        this.setSideSheet("individuals");
+        this.renderIndividuals();
+      }
       return;
     }
     if (nextMode === "queue") {
       queue.browseContext = this.captureDatasetViewContext();
+      queue.browseSideSheet = this.refs.sideSheetTabs?.dataset.activeSheet || "individuals";
       queue.mode = "queue";
       queue.activeIndividual = "";
       queue.mapScope = "group";
+      this.setSideSheet("individuals", { save: false });
       this.renderIndividuals();
       await this.applyIndividualQueueMapScope({ zoom: !queue.queueMapView });
       if (queue.queueMapView && this.map) {
@@ -5696,6 +5774,7 @@ class MovementExampleApp {
       this.renderThresholdPane();
       this.renderLayers();
       await this.loadDetailForCurrentSelection();
+      this.setSideSheet(queue.browseSideSheet || "individuals", { save: false });
       if (context?.mapView && this.map) {
         this.map.jumpTo(context.mapView);
       }
@@ -5738,7 +5817,7 @@ class MovementExampleApp {
   }
 
   async setIndividualQueueMapScope(scope) {
-    if (!["solo", "group", "all"].includes(scope)) {
+    if (!["solo", "group"].includes(scope)) {
       return;
     }
     this.individualReviewQueue.mapScope = scope;
@@ -5783,7 +5862,6 @@ class MovementExampleApp {
     this.individualReviewQueue.activeIndividual = individual;
     const position = this.getIndividualQueuePosition();
     const nextGroup = position.group.join("\u0000");
-    this.refs.individualQueueComment.value = this.getIndividualReviewState(individual).comment || "";
     if (
       this.individualReviewQueue.mapScope === "solo"
       || (this.individualReviewQueue.mapScope === "group" && previousGroup !== nextGroup)
@@ -5850,12 +5928,17 @@ class MovementExampleApp {
     await this.focusIndividualQueueItem(position.page[nextPageIndex]);
   }
 
-  async stageIndividualReviewDecision(reviewOk) {
-    const individual = this.individualReviewQueue.activeIndividual;
+  async stageIndividualReviewDecision(individual, reviewOk) {
+    individual = individual || this.individualReviewQueue.activeIndividual;
     if (!individual) {
       return;
     }
-    const comment = this.refs.individualQueueComment.value.trim();
+    const existingState = this.getIndividualReviewState(individual);
+    const comment = (
+      this.individualReviewQueue.commentDrafts.has(individual)
+        ? this.individualReviewQueue.commentDrafts.get(individual)
+        : existingState.comment
+    ).trim();
     const batchIsFull = (
       !this.individualReviewQueue.stagedDecisions.has(individual)
       && this.individualReviewQueue.stagedDecisions.size >= INDIVIDUAL_QUEUE_PAGE_SIZE
@@ -5884,15 +5967,18 @@ class MovementExampleApp {
       comment,
     });
     this.individualReviewQueue.skippedIndividuals.delete(individual);
-    this.refs.individualQueueComment.value = "";
+    this.individualReviewQueue.commentDrafts.delete(individual);
+    if (this.individualReviewQueue.commentEditingIndividual === individual) {
+      this.individualReviewQueue.commentEditingIndividual = "";
+    }
     this.renderIndividuals();
     if (nextIndividual && nextIndividual !== individual) {
       await this.focusIndividualQueueItem(nextIndividual);
     }
   }
 
-  async skipIndividualQueueItem() {
-    const individual = this.individualReviewQueue.activeIndividual;
+  async skipIndividualQueueItem(individual) {
+    individual = individual || this.individualReviewQueue.activeIndividual;
     if (!individual) {
       return;
     }
@@ -5904,6 +5990,42 @@ class MovementExampleApp {
     if (nextIndividual && nextIndividual !== individual) {
       await this.focusIndividualQueueItem(nextIndividual);
     }
+  }
+
+  toggleIndividualQueueComment(individual) {
+    if (!individual) {
+      return;
+    }
+    const queue = this.individualReviewQueue;
+    if (queue.commentEditingIndividual === individual) {
+      queue.commentEditingIndividual = "";
+    } else {
+      queue.commentEditingIndividual = individual;
+      if (!queue.commentDrafts.has(individual)) {
+        queue.commentDrafts.set(
+          individual,
+          this.getIndividualReviewState(individual).comment || "",
+        );
+      }
+    }
+    this.renderIndividuals();
+    if (queue.commentEditingIndividual === individual) {
+      window.requestAnimationFrame(() => {
+        this.refs.individuals
+          .querySelector(`input[data-queue-comment-input][data-individual="${cssEscape(individual)}"]`)
+          ?.focus();
+      });
+    }
+  }
+
+  async viewIndividualQueueTable(individual) {
+    if (!individual || !this.data) {
+      return;
+    }
+    await this.focusIndividualQueueItem(individual, { zoom: false });
+    this.refs.tableFilter.value = individual;
+    this.saveUiState();
+    this.setSideSheet("table");
   }
 
   async flushIndividualReviewDecisions() {
@@ -6038,6 +6160,14 @@ class MovementExampleApp {
 
   renderIndividuals() {
     this.refs.individuals.innerHTML = "";
+    this.refs.sideSheetIndividuals.classList.toggle(
+      "queue-mode",
+      this.individualReviewQueue.mode === "queue",
+    );
+    this.refs.sideSheetTabs.classList.toggle(
+      "hidden",
+      this.individualReviewQueue.mode === "queue",
+    );
     this.refs.individualViewBrowse.classList.toggle(
       "is-active",
       this.individualReviewQueue.mode === "browse",
@@ -6176,7 +6306,6 @@ class MovementExampleApp {
       )
       : "No individuals match the current search.";
     this.refs.individualQueueSave.disabled = queue.saving || !queue.stagedDecisions.size;
-    this.refs.individualQueueComment.disabled = queue.saving || !queue.activeIndividual;
     this.refs.individualQueueSave.textContent = queue.saving
       ? "Saving..."
       : `Save page (${formatCount(queue.stagedDecisions.size)})`;
@@ -6192,10 +6321,6 @@ class MovementExampleApp {
     for (const button of this.refs.individualQueueControls.querySelectorAll("button[data-queue-nav]")) {
       button.disabled = queue.saving || Boolean(navDisabled[button.dataset.queueNav]);
     }
-    for (const button of this.refs.individualQueueControls.querySelectorAll("button[data-review-ok]")) {
-      button.disabled = queue.saving || !queue.activeIndividual;
-    }
-    this.refs.individualQueueSkip.disabled = queue.saving || !queue.activeIndividual;
     for (const button of this.refs.individualQueueControls.querySelectorAll("button[data-queue-scope]")) {
       button.classList.toggle("is-active", button.dataset.queueScope === queue.mapScope);
       button.disabled = queue.saving || !position.ordered.length;
@@ -6208,8 +6333,12 @@ class MovementExampleApp {
       const stats = this.data.stats[individual] || {};
       const reviewState = this.getIndividualReviewState(individual);
       const isActive = individual === queue.activeIndividual;
+      const isEditingComment = queue.commentEditingIndividual === individual;
+      const comment = queue.commentDrafts.has(individual)
+        ? queue.commentDrafts.get(individual)
+        : reviewState.comment || "";
       const card = document.createElement("div");
-      card.className = `movement-card interactive${isActive ? " queue-active" : ""}`;
+      card.className = `movement-card queue-card interactive${isActive ? " queue-active" : ""}`;
       const stateLabel = reviewState.reviewed
         ? reviewState.reviewOk
           ? "Reviewed—OK"
@@ -6224,25 +6353,44 @@ class MovementExampleApp {
         <div class="movement-row">
           <div class="movement-row-left">
             <div class="movement-title">${escapeHtml(individual)}</div>
-            ${this.data.speciesByIndividual[individual] ? `<span class="movement-subtle">• ${escapeHtml(this.data.speciesByIndividual[individual])}</span>` : ""}
+            <span class="movement-review-state${stateClass}">${escapeHtml(stateLabel)}${reviewState.staged ? " • staged" : ""}</span>
           </div>
-          <span class="movement-review-state${stateClass}">${escapeHtml(stateLabel)}${reviewState.staged ? " • staged" : ""}</span>
+          <div class="movement-queue-card-actions">
+            <button type="button" data-queue-comment data-individual="${escapeHtml(individual)}">${comment ? "Note ✓" : "Note"}</button>
+            <button type="button" data-queue-table data-individual="${escapeHtml(individual)}">Table</button>
+          </div>
         </div>
-        <div class="movement-stats">
-          ${statChipHtml(`${formatCount(stats.rowCount)} fixes`)}
-          ${statChipHtml(`median speed ${formatMaybeNumber(stats.medianSpeedMps, "m/s")}`)}
-          ${statChipHtml(`suspected ${formatCount(stats.suspectedCount)}`)}
-          ${statChipHtml(`confirmed ${formatCount(stats.confirmedCount)}`)}
+        <div class="movement-queue-card-meta">
+          ${escapeHtml(this.data.speciesByIndividual[individual] || "")}
+          ${this.data.speciesByIndividual[individual] ? " • " : ""}
+          ${escapeHtml(formatCount(stats.rowCount))} fixes
+          • ${escapeHtml(formatCount(stats.suspectedCount))} suspected
+          • ${escapeHtml(formatCount(stats.confirmedCount))} confirmed
         </div>
+        ${isActive ? `
+          <div class="movement-queue-card-actions">
+            <button type="button" data-review-ok="true" data-individual="${escapeHtml(individual)}">Reviewed—OK</button>
+            <button type="button" data-review-ok="false" data-individual="${escapeHtml(individual)}">Issues found</button>
+            <button type="button" data-queue-skip data-individual="${escapeHtml(individual)}">Skip</button>
+          </div>
+        ` : ""}
+        ${isEditingComment ? `
+          <input
+            class="movement-queue-card-comment"
+            data-queue-comment-input
+            data-individual="${escapeHtml(individual)}"
+            value="${escapeHtml(comment)}"
+            placeholder="Optional note for this individual"
+          >
+        ` : ""}
       `;
-      card.addEventListener("click", () => {
+      card.addEventListener("click", event => {
+        if (event.target.closest("button, input")) {
+          return;
+        }
         void this.focusIndividualQueueItem(individual);
       });
       this.refs.individuals.appendChild(card);
-    }
-    const activeState = this.getIndividualReviewState(queue.activeIndividual);
-    if (document.activeElement !== this.refs.individualQueueComment) {
-      this.refs.individualQueueComment.value = activeState.comment || "";
     }
   }
 
@@ -12234,10 +12382,6 @@ function statChip(text) {
   const element = document.createElement("span");
   element.textContent = text;
   return element;
-}
-
-function statChipHtml(text) {
-  return `<span>${escapeHtml(text)}</span>`;
 }
 
 function rangeToPercent(min, max, start, end) {
