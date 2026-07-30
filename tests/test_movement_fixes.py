@@ -703,9 +703,23 @@ def test_hidden_output_links_do_not_leave_an_empty_root_grid_row():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
     assert ".movement-toolbar {\n          grid-row: 1;" in source
-    assert ".movement-status {\n          grid-row: 2;" in source
+    assert ".movement-status-stack {\n          grid-row: 2;" in source
     assert ".movement-output-links {\n          grid-row: 3;" in source
     assert ".movement-main {\n          grid-row: 4;" in source
+
+
+def test_movement_frontend_exposes_history_lock_and_resume_controls():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert 'data-role="edit-lock-profile"' in source
+    assert 'data-role="resume-history"' in source
+    assert 'data-role="resume-modal"' in source
+    assert "/edit-profile?" in source
+    assert "/resume`" in source
+    assert "expected_current_dataset_id: this.expectedCurrentDatasetId()" in source
+    assert "this.canPersistEdits()" in source
+    assert "Generated outputs will be deleted." in source
+    assert "Analyses, reports, exports, filtering, and visualization remain available." in source
 
 
 def test_movement_frontend_includes_auto_burst_controls():
@@ -868,6 +882,171 @@ def create_movement_test_client(tmp_path: Path, *, csv_content: str = CSV_CONTEN
     dataset_id = load_project_state(study_dir)["current_dataset_id"]
     client = TestClient(app)
     return client, dataset_id
+
+
+def test_movement_history_locks_undo_and_resume_across_persistent_routes(tmp_path):
+    clean_csv = """eventid,individual,timestamp,longitude,latitude,set
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
+"""
+    client, root_id = create_movement_test_client(tmp_path, csv_content=clean_csv)
+    base_url = "/api/apps/movement/family/movement_clean/study/test_study"
+
+    suspected = client.post(
+        f"{base_url}/actions/annotate-scope",
+        json={
+            "dataset_id": root_id,
+            "expected_current_dataset_id": root_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "fix", "fix_keys": ["id:fix_a_2#row:2"]},
+            "status": "suspected",
+            "origin": "manual",
+            "issue_type": "speed review",
+            "comment": "Check this fix",
+            "owner_question": "Is this movement plausible?",
+            "user": "reviewer",
+        },
+    )
+    assert suspected.status_code == 200
+    suspected_dataset_id = suspected.json()["dataset"]["dataset_id"]
+    suspected_annotation_id = suspected.json()["step"]["step_id"]
+
+    confirmed = client.post(
+        f"{base_url}/actions/confirm-issues",
+        json={
+            "dataset_id": suspected_dataset_id,
+            "expected_current_dataset_id": suspected_dataset_id,
+            "logical_name": "movement.csv",
+            "confirmations": [{
+                "parent_annotation_id": suspected_annotation_id,
+                "fix_keys": ["id:fix_a_2#row:2"],
+            }],
+            "user": "reviewer",
+        },
+    )
+    assert confirmed.status_code == 200
+    confirmed_dataset_id = confirmed.json()["dataset"]["dataset_id"]
+    graph_before = client.get(f"{base_url}/graph").json()
+
+    blocked_requests = [
+        client.post(
+            f"{base_url}/actions/annotate-scope",
+            json={
+                "dataset_id": root_id,
+                "expected_current_dataset_id": confirmed_dataset_id,
+                "logical_name": "movement.csv",
+                "scope": {"kind": "fix", "fix_keys": ["id:fix_a_1#row:1"]},
+                "status": "suspected",
+                "origin": "manual",
+                "issue_type": "historical edit",
+                "comment": "This must not create a branch",
+                "owner_question": "Please review",
+                "user": "reviewer",
+            },
+        ),
+        client.post(
+            f"{base_url}/actions/review-individuals",
+            json={
+                "dataset_id": root_id,
+                "expected_current_dataset_id": confirmed_dataset_id,
+                "logical_name": "movement.csv",
+                "decisions": [{"individual": "alpha", "review_ok": True}],
+                "user": "reviewer",
+            },
+        ),
+        client.post(
+            f"{base_url}/actions/confirm-issues",
+            json={
+                "dataset_id": suspected_dataset_id,
+                "expected_current_dataset_id": confirmed_dataset_id,
+                "logical_name": "movement.csv",
+                "confirmations": [{
+                    "parent_annotation_id": suspected_annotation_id,
+                    "fix_keys": ["id:fix_a_2#row:2"],
+                }],
+                "user": "reviewer",
+            },
+        ),
+    ]
+    assert [response.status_code for response in blocked_requests] == [423, 423, 423]
+    assert all(
+        response.json()["edit_profile"]["blockers"][0]["code"] == "historical_version"
+        for response in blocked_requests
+    )
+    assert client.get(f"{base_url}/graph").json() == graph_before
+
+    overview = client.get(
+        f"{base_url}/dataset/{root_id}/overview",
+        params={"logical_name": "movement.csv"},
+    )
+    exported = client.post(
+        f"{base_url}/actions/export-reviewed-csv",
+        json={
+            "dataset_id": root_id,
+            "logical_name": "movement.csv",
+            "user": "reviewer",
+        },
+    )
+    assert overview.status_code == 200
+    assert exported.status_code == 200
+
+    first_undo = client.post(
+        f"{base_url}/undo",
+        json={"expected_current_dataset_id": confirmed_dataset_id},
+    )
+    assert first_undo.status_code == 200
+    assert first_undo.json()["dataset"]["dataset_id"] == suspected_dataset_id
+    rewound_profile = client.get(
+        f"{base_url}/edit-profile",
+        params={"dataset_id": suspected_dataset_id},
+    ).json()
+    assert rewound_profile["editable"] is False
+    assert rewound_profile["blockers"][0]["code"] == "forward_history_pending"
+
+    blocked_rewound_edit = client.post(
+        f"{base_url}/actions/review-individuals",
+        json={
+            "dataset_id": suspected_dataset_id,
+            "expected_current_dataset_id": suspected_dataset_id,
+            "logical_name": "movement.csv",
+            "decisions": [{"individual": "alpha", "review_ok": True}],
+            "user": "reviewer",
+        },
+    )
+    assert blocked_rewound_edit.status_code == 423
+    assert (
+        blocked_rewound_edit.json()["edit_profile"]["blockers"][0]["code"]
+        == "forward_history_pending"
+    )
+
+    second_undo = client.post(
+        f"{base_url}/undo",
+        json={"expected_current_dataset_id": suspected_dataset_id},
+    )
+    assert second_undo.status_code == 200
+    assert second_undo.json()["dataset"]["dataset_id"] == root_id
+    root_profile = client.get(
+        f"{base_url}/edit-profile",
+        params={"dataset_id": root_id},
+    ).json()
+    assert root_profile["resume"]["discard_dataset_count"] == 2
+    assert root_profile["resume"]["discard_step_count"] == 2
+
+    resumed = client.post(
+        f"{base_url}/resume",
+        json={
+            "dataset_id": root_id,
+            "expected_current_dataset_id": root_id,
+            "resume_token": root_profile["resume"]["token"],
+            "user": "reviewer",
+        },
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["profile"]["editable"] is True
+    active_graph = client.get(f"{base_url}/graph").json()
+    assert [dataset["dataset_id"] for dataset in active_graph["datasets"]] == [root_id]
+    assert active_graph["steps"] == []
 
 
 def test_movement_fixes_route_accepts_repeated_individuals(tmp_path):

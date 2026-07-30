@@ -353,6 +353,13 @@ class MovementExampleApp {
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
     this.pendingConfirmationGroups = [];
+    this.editLockProfile = {
+      editable: false,
+      blockers: [],
+      current_dataset_id: "",
+      selected_dataset_id: "",
+      resume: { allowed: false },
+    };
     this.focusedRankingBurst = null;
     this.tableSelection = {
       anchorFixKey: "",
@@ -981,6 +988,9 @@ class MovementExampleApp {
           grid-row: 1;
         }
         .movement-status {
+          min-width: 0;
+        }
+        .movement-status-stack {
           grid-row: 2;
         }
         .movement-output-links {
@@ -1149,6 +1159,33 @@ class MovementExampleApp {
         }
         .movement-output-links a {
           color: #9df6dc;
+        }
+        .movement-edit-lock {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 9px 16px;
+          border-bottom: 1px solid rgba(251, 191, 36, 0.22);
+          background: rgba(120, 53, 15, 0.3);
+          color: #fde68a;
+          font-size: 12px;
+          line-height: 1.4;
+        }
+        .movement-edit-lock.hidden {
+          display: none;
+        }
+        .movement-edit-lock strong {
+          color: #fef3c7;
+        }
+        .movement-edit-lock button {
+          flex: 0 0 auto;
+          padding: 6px 10px;
+          border: 1px solid rgba(251, 191, 36, 0.32);
+          border-radius: 9px;
+          background: rgba(217, 119, 6, 0.22);
+          color: #fef3c7;
+          cursor: pointer;
         }
         .movement-main {
           --movement-side-width: 420px;
@@ -2472,7 +2509,13 @@ class MovementExampleApp {
           <button type="button" data-role="export-reviewed-csv">Export reviewed CSV</button>
           <button type="button" data-role="undo">Undo</button>
         </div>
-        <div class="movement-status" data-role="status"></div>
+        <div class="movement-status-stack">
+          <div class="movement-edit-lock hidden" data-role="edit-lock-profile">
+            <div data-role="edit-lock-message"></div>
+            <button type="button" data-role="resume-history">Resume from this version</button>
+          </div>
+          <div class="movement-status" data-role="status"></div>
+        </div>
         <div class="movement-output-links" data-role="output-links"></div>
         <div class="movement-main">
           <div class="movement-map-wrap">
@@ -2731,6 +2774,27 @@ class MovementExampleApp {
         </div>
       </div>
 
+      <div class="movement-modal hidden" data-role="resume-modal">
+        <div class="movement-modal-card">
+          <div class="movement-modal-head">
+            <h3>Resume from historical version</h3>
+            <button type="button" data-role="resume-close">Close</button>
+          </div>
+          <div class="movement-modal-body">
+            <div data-role="resume-meta"></div>
+            <div class="movement-selection-list" data-role="resume-warning"></div>
+            <label>User
+              <input type="text" data-role="resume-user" placeholder="Name used for attribution">
+            </label>
+            <div class="movement-modal-status" data-role="resume-status"></div>
+          </div>
+          <div class="movement-modal-foot">
+            <span>This cannot be recovered from the app.</span>
+            <button type="button" class="movement-danger" data-role="resume-submit">Discard forward history and resume</button>
+          </div>
+        </div>
+      </div>
+
     `;
 
     this.refs = {
@@ -2778,6 +2842,9 @@ class MovementExampleApp {
       generateReport: this.mountEl.querySelector('[data-role="generate-report"]'),
       exportReviewedCsv: this.mountEl.querySelector('[data-role="export-reviewed-csv"]'),
       undo: this.mountEl.querySelector('[data-role="undo"]'),
+      editLockProfile: this.mountEl.querySelector('[data-role="edit-lock-profile"]'),
+      editLockMessage: this.mountEl.querySelector('[data-role="edit-lock-message"]'),
+      resumeHistory: this.mountEl.querySelector('[data-role="resume-history"]'),
       status: this.mountEl.querySelector('[data-role="status"]'),
       outputLinks: this.mountEl.querySelector('[data-role="output-links"]'),
       sideSheetTabs: this.mountEl.querySelector('[data-role="side-sheet-tabs"]'),
@@ -2865,6 +2932,13 @@ class MovementExampleApp {
       reportStatus: this.mountEl.querySelector('[data-role="report-status"]'),
       reportClose: this.mountEl.querySelector('[data-role="report-close"]'),
       reportSubmit: this.mountEl.querySelector('[data-role="report-submit"]'),
+      resumeModal: this.mountEl.querySelector('[data-role="resume-modal"]'),
+      resumeMeta: this.mountEl.querySelector('[data-role="resume-meta"]'),
+      resumeWarning: this.mountEl.querySelector('[data-role="resume-warning"]'),
+      resumeUser: this.mountEl.querySelector('[data-role="resume-user"]'),
+      resumeStatus: this.mountEl.querySelector('[data-role="resume-status"]'),
+      resumeClose: this.mountEl.querySelector('[data-role="resume-close"]'),
+      resumeSubmit: this.mountEl.querySelector('[data-role="resume-submit"]'),
     };
 
     this.applyAppProfile();
@@ -3192,6 +3266,7 @@ class MovementExampleApp {
     this.refs.undo.addEventListener("click", async () => {
       await this.undoCurrentHead();
     });
+    this.refs.resumeHistory.addEventListener("click", () => this.openResumeModal());
     this.refs.slider.addEventListener("input", () => {
       this.currentTimeMs = Number(this.refs.slider.value) || 0;
       this.updateTimeLabel();
@@ -3254,15 +3329,24 @@ class MovementExampleApp {
     this.refs.reportSnapshotLimit.addEventListener("input", () => this.renderReportSelection());
     this.refs.reportSpreadIndividuals.addEventListener("change", () => this.renderReportSelection());
     this.refs.reportSubmit.addEventListener("click", async () => this.submitGenerateReport());
+    this.refs.resumeClose.addEventListener("click", () => this.closeModal(this.refs.resumeModal, this.refs.resumeSubmit));
+    this.refs.resumeSubmit.addEventListener("click", async () => this.submitResumeHistory());
 
-    for (const modal of [this.refs.issueModal, this.refs.confirmModal, this.refs.reportModal]) {
+    for (const modal of [
+      this.refs.issueModal,
+      this.refs.confirmModal,
+      this.refs.reportModal,
+      this.refs.resumeModal,
+    ]) {
       modal.addEventListener("click", (event) => {
         if (event.target === modal) {
           const submitButton = modal === this.refs.issueModal
             ? this.refs.issueSubmit
             : modal === this.refs.confirmModal
               ? this.refs.confirmSubmit
-              : this.refs.reportSubmit;
+              : modal === this.refs.reportModal
+                ? this.refs.reportSubmit
+                : this.refs.resumeSubmit;
           this.closeModal(modal, submitButton);
         }
       });
@@ -3283,7 +3367,10 @@ class MovementExampleApp {
     const response = await this.fetchResponse(url, options);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(payload.error || `${response.status} ${response.statusText}`);
+      const error = new Error(payload.error || `${response.status} ${response.statusText}`);
+      error.status = response.status;
+      error.payload = payload;
+      throw error;
     }
     return payload;
   }
@@ -4674,7 +4761,7 @@ class MovementExampleApp {
               <div class="movement-anomaly-burst-actions">
                 <button type="button" data-action="zoom-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Zoom to burst</button>
                 <button type="button" data-action="check-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Check fixes</button>
-                <button type="button" data-action="flag-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Flag result</button>
+                <button type="button" data-action="flag-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}"${this.canPersistEdits() ? "" : " disabled"}>Flag result</button>
               </div>
             </div>
           `;
@@ -5097,6 +5184,124 @@ class MovementExampleApp {
     this.refs.status.classList.toggle("error", isError);
   }
 
+  canPersistEdits() {
+    return this.editLockProfile?.editable === true;
+  }
+
+  expectedCurrentDatasetId() {
+    return String(
+      this.editLockProfile?.current_dataset_id
+      || this.graph?.current_dataset_id
+      || "",
+    );
+  }
+
+  renderEditLockProfile() {
+    if (!this.refs?.editLockProfile) {
+      return;
+    }
+    const profile = this.editLockProfile || {};
+    const blockers = Array.isArray(profile.blockers) ? profile.blockers : [];
+    const locked = Boolean(this.currentDatasetId) && profile.editable !== true;
+    this.refs.editLockProfile.classList.toggle("hidden", !locked);
+    if (!locked) {
+      this.refs.editLockMessage.textContent = "";
+      this.refs.resumeHistory.hidden = true;
+      return;
+    }
+    const message = blockers.map(item => String(item?.message || "")).filter(Boolean).join(" ");
+    const owner = blockers.find(item => item?.owner)?.owner;
+    this.refs.editLockMessage.innerHTML = (
+      `<strong>Read-only version.</strong> ${escapeHtml(message || "Persistent edits are locked.")}`
+      + (owner ? ` <span>Locked by ${escapeHtml(owner)}.</span>` : "")
+      + " Analyses, reports, exports, filtering, and visualization remain available."
+    );
+    this.refs.resumeHistory.hidden = profile.resume?.allowed !== true;
+  }
+
+  async loadEditLockProfile() {
+    if (!this.currentFamily || !this.currentStudy || !this.currentDatasetId) {
+      this.editLockProfile = {
+        editable: false,
+        blockers: [],
+        current_dataset_id: "",
+        selected_dataset_id: "",
+        resume: { allowed: false },
+      };
+      this.renderEditLockProfile();
+      this.updateActionButtons();
+      return;
+    }
+    this.editLockProfile = {
+      editable: false,
+      blockers: [{
+        code: "loading",
+        message: "Checking whether this version is editable.",
+      }],
+      current_dataset_id: this.graph?.current_dataset_id || "",
+      selected_dataset_id: this.currentDatasetId,
+      resume: { allowed: false },
+    };
+    this.renderEditLockProfile();
+    this.updateActionButtons();
+    try {
+      const params = new URLSearchParams({ dataset_id: this.currentDatasetId });
+      const profile = await this.fetchJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/edit-profile?${params.toString()}`,
+        { cache: "no-store" },
+      );
+      if (profile.selected_dataset_id !== this.currentDatasetId) {
+        return;
+      }
+      this.editLockProfile = profile;
+    } catch (error) {
+      this.editLockProfile = {
+        ...this.editLockProfile,
+        editable: false,
+        blockers: [{
+          code: "profile_unavailable",
+          message: `Edit status could not be verified: ${error.message}`,
+        }],
+      };
+    }
+    this.renderEditLockProfile();
+    this.renderIndividuals();
+    this.renderAnomalyRanking();
+    this.updateActionButtons();
+  }
+
+  rejectLockedEdit() {
+    if (this.canPersistEdits()) {
+      return false;
+    }
+    const message = (this.editLockProfile?.blockers || [])
+      .map(item => item?.message)
+      .filter(Boolean)
+      .join(" ");
+    this.setStatus(message || "This version is read-only.", true);
+    return true;
+  }
+
+  async handleEditRequestError(error) {
+    if (error?.payload?.edit_profile) {
+      this.editLockProfile = error.payload.edit_profile;
+      this.renderEditLockProfile();
+      this.renderIndividuals();
+      this.renderAnomalyRanking();
+      this.updateActionButtons();
+      return true;
+    }
+    if (error?.status === 409) {
+      const viewContext = this.captureDatasetViewContext();
+      await this.loadStudy({
+        preferredDatasetId: this.currentDatasetId,
+        viewContext,
+      });
+      return true;
+    }
+    return false;
+  }
+
   showOverlay(message) {
     this.refs.overlay.classList.remove("hidden");
     this.refs.overlay.querySelector("p").textContent = message;
@@ -5406,6 +5611,7 @@ class MovementExampleApp {
       this.currentDataset = dataset;
       this.currentDatasetId = selectedDatasetId;
       this.currentArtifact = artifactName;
+      await this.loadEditLockProfile();
       if (this.currentDataset && Array.isArray(this.currentDataset.artifacts)) {
         const artifacts = this.selectableArtifacts(this.currentDataset);
         this.refs.artifact.innerHTML = "";
@@ -5520,6 +5726,7 @@ class MovementExampleApp {
       ) {
         return;
       }
+      await this.loadEditLockProfile();
       this.updateActionButtons();
     } catch (error) {
       if (this.isAbortError(error)) {
@@ -5986,6 +6193,9 @@ class MovementExampleApp {
   }
 
   async stageIndividualReviewDecision(individual, reviewOk) {
+    if (this.rejectLockedEdit()) {
+      return;
+    }
     individual = individual || this.individualReviewQueue.activeIndividual;
     if (!individual) {
       return;
@@ -6090,6 +6300,9 @@ class MovementExampleApp {
     if (!queue.stagedDecisions.size) {
       return true;
     }
+    if (this.rejectLockedEdit()) {
+      return false;
+    }
     if (queue.saving || !this.currentArtifact) {
       return false;
     }
@@ -6103,6 +6316,7 @@ class MovementExampleApp {
           method: "POST",
           body: JSON.stringify({
             dataset_id: this.currentDatasetId,
+            expected_current_dataset_id: this.expectedCurrentDatasetId(),
             logical_name: this.currentArtifact,
             decisions,
             user: this.getUser() || "reviewer",
@@ -6116,6 +6330,7 @@ class MovementExampleApp {
       );
       return true;
     } catch (error) {
+      await this.handleEditRequestError(error);
       this.setStatus(`Could not save individual reviews: ${error.message}`, true);
       return false;
     } finally {
@@ -6294,6 +6509,7 @@ class MovementExampleApp {
       flagButton.type = "button";
       flagButton.className = "movement-fix-remove";
       flagButton.textContent = "Flag for review";
+      flagButton.disabled = !this.canPersistEdits();
       flagButton.addEventListener("click", event => {
         event.stopPropagation();
         this.openIndividualReviewModal(individual);
@@ -6362,7 +6578,12 @@ class MovementExampleApp {
         + ` • ${formatCount(queue.stagedDecisions.size)} staged`
       )
       : "No individuals match the current search.";
-    this.refs.individualQueueSave.disabled = queue.saving || !queue.stagedDecisions.size;
+    const editsLocked = !this.canPersistEdits();
+    this.refs.individualQueueSave.disabled = (
+      editsLocked
+      || queue.saving
+      || !queue.stagedDecisions.size
+    );
     this.refs.individualQueueSave.textContent = queue.saving
       ? "Saving..."
       : `Save page (${formatCount(queue.stagedDecisions.size)})`;
@@ -6426,8 +6647,8 @@ class MovementExampleApp {
         </div>
         ${isActive ? `
           <div class="movement-queue-card-actions">
-            <button type="button" data-review-ok="true" data-individual="${escapeHtml(individual)}">Reviewed—OK</button>
-            <button type="button" data-review-ok="false" data-individual="${escapeHtml(individual)}">Issues found</button>
+            <button type="button" data-review-ok="true" data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Reviewed—OK</button>
+            <button type="button" data-review-ok="false" data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Issues found</button>
             <button type="button" data-queue-skip data-individual="${escapeHtml(individual)}">Skip</button>
           </div>
         ` : ""}
@@ -7001,7 +7222,8 @@ class MovementExampleApp {
     const selection = this.getCurrentSegmentSelection();
     this.refs.segmentClear.disabled = !this.tableSelection.selectedFixKeys.size;
     const segmentActionDisabled = (
-      mode !== "fixes"
+      !this.canPersistEdits()
+      || mode !== "fixes"
       || !hasDetail
       || !selection
       || selection.fixes.length < 2
@@ -7083,7 +7305,7 @@ class MovementExampleApp {
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(burst.endTimeMs))}</td>
                 <td class="movement-table-cell-actions">
                   <button type="button" data-action="zoom-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}">Zoom</button>
-                  <button type="button" data-action="flag-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}">Flag</button>
+                  <button type="button" data-action="flag-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}"${this.canPersistEdits() ? "" : " disabled"}>Flag</button>
                 </td>
               </tr>
             `).join("")}
@@ -9966,6 +10188,7 @@ class MovementExampleApp {
 
   updateActionButtons() {
     const hasData = Boolean(this.data);
+    const canPersistEdits = this.canPersistEdits();
     const hasSelectedIndividuals = this.getSelectedIndividuals().length > 0;
     const hasDetail = this.hasLoadedDetailSelection();
     const selectedFixes = this.getSelectedFixes();
@@ -10014,9 +10237,16 @@ class MovementExampleApp {
         element?.classList.add("movement-profile-hidden");
       }
     }
-    this.refs.markSuspected.disabled = !hasData || !hasSelectedIndividuals || !canEditSelectedFixes || selectedCount === 0;
+    this.refs.markSuspected.disabled = (
+      !canPersistEdits
+      || !hasData
+      || !hasSelectedIndividuals
+      || !canEditSelectedFixes
+      || selectedCount === 0
+    );
     this.refs.markConfirmed.disabled = (
-      !hasData
+      !canPersistEdits
+      || !hasData
       || !canConfirmSelectedFixes
     );
     this.refs.generateReport.disabled = !hasData || !(this.data?.individuals || []).length;
@@ -10098,6 +10328,9 @@ class MovementExampleApp {
   }
 
   openConfirmModal(fixes = this.getSelectedFixes()) {
+    if (this.rejectLockedEdit()) {
+      return;
+    }
     const selectedFixes = Array.isArray(fixes) ? fixes.filter(Boolean) : [];
     const groups = this.getUnresolvedSuspectedIssueGroups(selectedFixes);
     if (!selectedFixes.length || !groups.length || !this.canConfirmFixes(selectedFixes)) {
@@ -10146,6 +10379,10 @@ class MovementExampleApp {
     if (!this.pendingConfirmationGroups.length || !this.currentArtifact) {
       return;
     }
+    if (this.rejectLockedEdit()) {
+      this.refs.confirmModal.classList.add("hidden");
+      return;
+    }
     const selectedGroups = [...this.refs.confirmGroups.querySelectorAll("input[data-confirm-group-index]:checked")]
       .map(input => this.pendingConfirmationGroups[Number(input.dataset.confirmGroupIndex)])
       .filter(Boolean);
@@ -10177,6 +10414,7 @@ class MovementExampleApp {
           method: "POST",
           body: JSON.stringify({
             dataset_id: this.currentDatasetId,
+            expected_current_dataset_id: this.expectedCurrentDatasetId(),
             logical_name: this.currentArtifact,
             confirmations: selectedGroups.map(group => ({
               parent_annotation_id: group.parentAnnotationId,
@@ -10193,6 +10431,7 @@ class MovementExampleApp {
       await this.loadStudyAtDataset(result.dataset.dataset_id);
       this.setStatus(`Confirmed suspected outliers in ${result.dataset.dataset_id}.`);
     } catch (error) {
+      await this.handleEditRequestError(error);
       this.refs.confirmStatus.textContent = error.message;
       this.refs.confirmStatus.classList.add("error");
       this.refs.confirmSubmit.disabled = false;
@@ -10316,6 +10555,9 @@ class MovementExampleApp {
   }
 
   openIssueModal(status) {
+    if (this.rejectLockedEdit()) {
+      return;
+    }
     const selectedFixes = this.getSelectedFixes();
     if (!selectedFixes.length || !this.currentArtifact) {
       return;
@@ -10364,6 +10606,9 @@ class MovementExampleApp {
   }
 
   openSegmentModal(status) {
+    if (this.rejectLockedEdit()) {
+      return;
+    }
     const selection = this.getCurrentSegmentSelection();
     if (!selection || selection.fixes.length < 2 || !this.currentArtifact) {
       return;
@@ -10409,6 +10654,9 @@ class MovementExampleApp {
   }
 
   openIndividualReviewModal(individual, { queueReview = false } = {}) {
+    if (this.rejectLockedEdit()) {
+      return;
+    }
     if (!this.data || !individual || !this.currentArtifact) {
       return;
     }
@@ -10454,6 +10702,9 @@ class MovementExampleApp {
   }
 
   openBurstReviewModal(burst, { origin = "manual", sourceAnalysisId = "" } = {}) {
+    if (this.rejectLockedEdit()) {
+      return;
+    }
     const burstId = String(burst?.burstId || burst?.burst_id || "");
     if (!this.data || !burstId || !this.currentArtifact) {
       return;
@@ -10539,6 +10790,10 @@ class MovementExampleApp {
   }
 
   async submitIssueAction() {
+    if (this.rejectLockedEdit()) {
+      this.refs.issueModal.classList.add("hidden");
+      return;
+    }
     const context = this.pendingIssueContext || {
       mode: "fixes",
       fixes: this.getSelectedFixes(),
@@ -10608,6 +10863,7 @@ class MovementExampleApp {
       }
       const body = {
         dataset_id: this.currentDatasetId,
+        expected_current_dataset_id: this.expectedCurrentDatasetId(),
         logical_name: this.currentArtifact,
         scope,
         status: this.pendingIssueStatus,
@@ -10640,6 +10896,7 @@ class MovementExampleApp {
       }
       this.setStatus(`Created ${result.step.title} in ${result.dataset.dataset_id}.`);
     } catch (error) {
+      await this.handleEditRequestError(error);
       this.refs.issueStatus.textContent = error.message;
       this.refs.issueStatus.classList.add("error");
       this.refs.issueSubmit.disabled = false;
@@ -10820,6 +11077,93 @@ class MovementExampleApp {
     await this.loadStudy({ preferredDatasetId: datasetId, viewContext });
   }
 
+  openResumeModal() {
+    const profile = this.editLockProfile || {};
+    const resume = profile.resume || {};
+    if (!this.currentDatasetId || resume.allowed !== true || !resume.token) {
+      this.setStatus("This dataset version is not currently eligible for Resume.", true);
+      return;
+    }
+    const datasetCount = Number(resume.discard_dataset_count) || 0;
+    const stepCount = Number(resume.discard_step_count) || 0;
+    const analysisCount = Number(resume.discard_analysis_count) || 0;
+    this.refs.resumeMeta.innerHTML = `
+      <div><strong>Resume at:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+      <div><strong>Current pointer:</strong> ${escapeHtml(profile.current_dataset_id || "")}</div>
+      <div><strong>Datasets removed from active history:</strong> ${escapeHtml(formatCount(datasetCount))}</div>
+      <div><strong>Steps removed from active history:</strong> ${escapeHtml(formatCount(stepCount))}</div>
+      <div><strong>Analyses removed from active history:</strong> ${escapeHtml(formatCount(analysisCount))}</div>
+    `;
+    this.refs.resumeWarning.innerHTML = `
+      <strong>Generated outputs will be deleted.</strong>
+      Resuming keeps this dataset version and its complete ancestor chain. Every other active
+      dataset version, step, and associated analysis will be removed from the active graph.
+      A compact metadata archive will retain provenance, scripts, summaries, IDs, file sizes,
+      actor, and discarded paths, but the generated data and analysis outputs will not be
+      recoverable from the app.
+    `;
+    this.refs.resumeUser.value = this.getUser() || "reviewer";
+    this.refs.resumeStatus.textContent = "";
+    this.refs.resumeStatus.classList.remove("error");
+    this.refs.resumeSubmit.disabled = false;
+    this.refs.resumeClose.disabled = false;
+    this.refs.resumeModal.classList.remove("hidden");
+    this.refs.resumeUser.focus();
+  }
+
+  async submitResumeHistory() {
+    const profile = this.editLockProfile || {};
+    const resume = profile.resume || {};
+    const user = this.refs.resumeUser.value.trim();
+    if (!user) {
+      this.refs.resumeStatus.textContent = "User is required.";
+      this.refs.resumeStatus.classList.add("error");
+      return;
+    }
+    if (resume.allowed !== true || !resume.token) {
+      this.refs.resumeStatus.textContent = "History changed. Close this dialog and reopen Resume.";
+      this.refs.resumeStatus.classList.add("error");
+      return;
+    }
+    this.refs.resumeSubmit.disabled = true;
+    this.refs.resumeClose.disabled = true;
+    this.refs.resumeStatus.textContent = "Archiving metadata and removing forward history...";
+    this.refs.resumeStatus.classList.remove("error");
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/resume`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            expected_current_dataset_id: profile.current_dataset_id,
+            resume_token: resume.token,
+            user,
+          }),
+        },
+      );
+      this.setUser(user);
+      this.refs.resumeModal.classList.add("hidden");
+      await this.loadStudyAtDataset(result.dataset.dataset_id);
+      const archive = result.archive || {};
+      this.setStatus(
+        `Resumed at ${result.dataset.dataset_id}; archived metadata for `
+        + `${formatCount(archive.discarded_dataset_count || 0)} dataset(s), `
+        + `${formatCount(archive.discarded_step_count || 0)} step(s), and `
+        + `${formatCount(archive.discarded_analysis_count || 0)} analysis record(s).`,
+      );
+    } catch (error) {
+      const refreshed = await this.handleEditRequestError(error);
+      this.refs.resumeStatus.textContent = refreshed
+        ? `${error.message} Close this dialog and reopen Resume.`
+        : error.message;
+      this.refs.resumeStatus.classList.add("error");
+      this.refs.resumeSubmit.disabled = refreshed;
+      this.refs.resumeClose.disabled = false;
+      this.setStatus(error.message, true);
+    }
+  }
+
   async undoCurrentHead() {
     if (this.refs.undo.disabled) {
       return;
@@ -10832,11 +11176,17 @@ class MovementExampleApp {
     try {
       const result = await this.requestJSON(
         `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/undo`,
-        { method: "POST" },
+        {
+          method: "POST",
+          body: JSON.stringify({
+            expected_current_dataset_id: this.expectedCurrentDatasetId(),
+          }),
+        },
       );
       await this.loadStudyAtDataset(result.dataset.dataset_id);
       this.setStatus(`Undid to ${result.dataset.dataset_id}.`);
     } catch (error) {
+      await this.handleEditRequestError(error);
       this.setStatus(error.message, true);
       this.updateUndoButton();
     }
