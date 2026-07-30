@@ -192,8 +192,6 @@ const STACKED_SIDE_LAYOUT_BREAKPOINT_PX = 1080;
 const MIN_INDIVIDUAL_LIST_HEIGHT_PX = 80;
 const MIN_CHECKED_FIXES_HEIGHT_PX = 120;
 const MAX_SELECTED_FIXES_SHOWN = 150;
-const MAX_ORDINARY_MAP_POINTS = 100000;
-const MAX_SOURCE_FLAGGED_MAP_POINTS = 25000;
 const LARGE_MAP_POINT_THRESHOLD = 50000;
 const DEFAULT_FAMILY = MOVEMENT_APP_CONFIG.defaultFamily;
 const NUMERIC_COLOR_MIN_QUANTILE = 0.01;
@@ -6202,15 +6200,11 @@ class MovementExampleApp {
       }
     }
 
-    const pointRenderStats = this.data.mapPointRenderStats || {};
-    const pointSamplingNote = pointRenderStats.truncated
-      ? `<div class="movement-legend-note">Showing ${escapeHtml(formatCount(pointRenderStats.rendered))} of ${escapeHtml(formatCount(pointRenderStats.eligible))} loaded fixes as colored map points for responsive navigation. Checked, suspected, and active threshold/query fixes remain visible; all loaded fixes remain available for review and analysis.</div>`
-      : "";
     const sourceFlaggedCount = (this.data.fixes || []).filter(isSourceOnlyFlaggedFix).length;
     const sourceFlagNote = sourceFlaggedCount
       ? `<div class="movement-legend-note">Thin faded sections were flagged in the source data (${escapeHtml(formatCount(sourceFlaggedCount))} loaded fixes); they remain analytically included until confirmed in Vibecleaning.</div>`
       : "";
-    legendEl.innerHTML = `${header}${body}${pointSamplingNote}${sourceFlagNote}`;
+    legendEl.innerHTML = `${header}${body}${sourceFlagNote}`;
     legendEl.classList.remove("hidden");
   }
 
@@ -6359,13 +6353,11 @@ class MovementExampleApp {
       return;
     }
 
-    const previousPointRenderStats = this.data.mapPointRenderStats || null;
     const visibleIndividuals = new Set(this.data.selectedIndividuals);
     const visibleSetNames = this.getVisibleSetNames();
     const pathData = [];
     const sourceFlaggedPathData = [];
     const pointData = [];
-    const sourceFlaggedPointData = [];
     const thresholdPointData = [];
     const selectedThresholdPointData = [];
     const candidatePointData = [];
@@ -6490,30 +6482,7 @@ class MovementExampleApp {
       }
     }
 
-    const visibleSourceFlaggedFixes = this.data.fixes.filter(fix => (
-      isSourceOnlyFlaggedFix(fix)
-      && visibleIndividuals.has(fix.individual)
-      && visibleSetNames.has(fix.setName)
-    ));
-    for (const fix of sampleItemsEvenly(
-      visibleSourceFlaggedFixes,
-      MAX_SOURCE_FLAGGED_MAP_POINTS,
-    )) {
-      const trackColor = splitColor(
-        this.data.individualPalette[fix.individual],
-        fix.setName,
-        72,
-      );
-      sourceFlaggedPointData.push({
-        fixKey: fix.fixKey,
-        position: fix.position,
-        color: trackColor,
-      });
-    }
-
     if (showPoints) {
-      const priorityPointFixes = [];
-      const ordinaryPointFixes = [];
       for (const fix of this.data.fixes) {
         if (
           fix.analyticallyExcluded
@@ -6523,27 +6492,6 @@ class MovementExampleApp {
         ) {
           continue;
         }
-        if (
-          fix.review?.status === "suspected"
-          || this.data.selectedFixKeys.has(fix.fixKey)
-          || thresholdMatchKeys.has(fix.fixKey)
-          || candidateMatchKeys.has(fix.fixKey)
-        ) {
-          priorityPointFixes.push(fix);
-        } else {
-          ordinaryPointFixes.push(fix);
-        }
-      }
-      const sampledOrdinaryFixes = sampleItemsEvenly(
-        ordinaryPointFixes,
-        MAX_ORDINARY_MAP_POINTS,
-      );
-      this.data.mapPointRenderStats = {
-        eligible: priorityPointFixes.length + ordinaryPointFixes.length,
-        rendered: priorityPointFixes.length + sampledOrdinaryFixes.length,
-        truncated: sampledOrdinaryFixes.length < ordinaryPointFixes.length,
-      };
-      for (const fix of [...sampledOrdinaryFixes, ...priorityPointFixes]) {
         const point = {
           fixKey: fix.fixKey,
           individual: fix.individual,
@@ -6587,12 +6535,6 @@ class MovementExampleApp {
           }
         }
       }
-    } else {
-      this.data.mapPointRenderStats = {
-        eligible: 0,
-        rendered: 0,
-        truncated: false,
-      };
     }
 
     const layers = [];
@@ -6684,25 +6626,6 @@ class MovementExampleApp {
           radiusMinPixels: 6,
           radiusMaxPixels: 15,
           pickable: Boolean(this.burstFeatureSpace?.points?.length),
-        }),
-      );
-    }
-
-    if (sourceFlaggedPointData.length) {
-      layers.push(
-        new deck.ScatterplotLayer({
-          id: "movement-source-flagged-points",
-          data: sourceFlaggedPointData,
-          getPosition: item => item.position,
-          getFillColor: item => this.mutedRankingContextColor(item.color, 22),
-          getLineColor: item => this.mutedRankingContextColor(item.color, 76),
-          filled: true,
-          stroked: true,
-          lineWidthMinPixels: 1,
-          getRadius: 42,
-          radiusMinPixels: 2,
-          radiusMaxPixels: 4,
-          pickable: true,
         }),
       );
     }
@@ -6967,17 +6890,10 @@ class MovementExampleApp {
     try {
       this.overlay.setProps({
         layers,
-        useDevicePixels: (this.data.mapPointRenderStats?.rendered || 0) <= LARGE_MAP_POINT_THRESHOLD,
+        useDevicePixels: (pointData.length + selectedPointData.length) <= LARGE_MAP_POINT_THRESHOLD,
       });
     } catch (error) {
       this.setStatus(`Map warning: ${error.message}`, true);
-    }
-    if (
-      previousPointRenderStats?.eligible !== this.data.mapPointRenderStats?.eligible
-      || previousPointRenderStats?.rendered !== this.data.mapPointRenderStats?.rendered
-      || previousPointRenderStats?.truncated !== this.data.mapPointRenderStats?.truncated
-    ) {
-      this.renderLegend();
     }
     this.renderFixPopup();
   }
@@ -9775,7 +9691,6 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     detailFixesByTrack: new Map(),
     baseTrackPathCache: new Map(),
     autoBurstRenderCache: new Map(),
-    mapPointRenderStats: null,
     segments: [],
     segmentById: new Map(),
     autoBursts: [],
@@ -10118,7 +10033,6 @@ function refreshMovementFixCollections(data) {
   data.overviewFixesByTrack = buildMovementFixTrackIndex(data.overviewFixes || []);
   data.detailFixesByTrack = buildMovementFixTrackIndex(data.detailFixes || []);
   data.baseTrackPathCache = new Map();
-  data.mapPointRenderStats = null;
   const mergedSegments = new Map();
   for (const segment of [...(data.overviewSegments || []), ...(data.detailSegments || [])]) {
     mergedSegments.set(segment.segmentId, segment);

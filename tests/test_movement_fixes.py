@@ -730,7 +730,8 @@ def test_movement_frontend_distinguishes_source_flags_from_review_status():
     assert "function isSourceOnlyFlaggedFix(fix)" in source
     assert "function buildSourceAwareTrackPaths(fixes, trackColor)" in source
     assert 'id: "movement-source-flagged-paths"' in source
-    assert 'id: "movement-source-flagged-points"' in source
+    assert 'id: "movement-source-flagged-points"' not in source
+    assert 'id: "movement-suspected-outline"' in source
     assert "they remain analytically included until confirmed in Vibecleaning" in source
     assert '"source_flags",\n      "Source flags"' in source
 

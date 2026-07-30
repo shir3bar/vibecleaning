@@ -421,18 +421,14 @@ def test_slim_ranking_layout_keeps_map_full_height_and_resizes_canvas():
     ]
 
 
-def test_large_movement_views_bound_gpu_work_without_dropping_review_data():
+def test_large_movement_views_reuse_geometry_without_capping_color_by_points():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
-    assert "const MAX_ORDINARY_MAP_POINTS = 100000;" in source
-    assert "const MAX_SOURCE_FLAGGED_MAP_POINTS = 25000;" in source
-    assert "sampleItemsEvenly(\n        ordinaryPointFixes,\n        MAX_ORDINARY_MAP_POINTS," in source
-    assert "sampleItemsEvenly(\n      visibleSourceFlaggedFixes,\n      MAX_SOURCE_FLAGGED_MAP_POINTS," in source
-    assert 'fix.review?.status === "suspected"' in source
-    assert "this.data.selectedFixKeys.has(fix.fixKey)" in source
-    assert "thresholdMatchKeys.has(fix.fixKey)" in source
-    assert "candidateMatchKeys.has(fix.fixKey)" in source
-    assert "all loaded fixes remain available for review and analysis" in source
+    assert "MAX_ORDINARY_MAP_POINTS" not in source
+    assert "MAX_SOURCE_FLAGGED_MAP_POINTS" not in source
+    assert 'id: "movement-source-flagged-points"' not in source
+    assert 'id: "movement-source-flagged-paths"' in source
+    assert 'id: "movement-suspected-outline"' in source
     assert "useDevicePixels:" in source
     assert "dataComparator: sameArrayItems" in source
     assert "buildMovementFixTrackIndex" in source
