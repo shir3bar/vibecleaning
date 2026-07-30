@@ -48,6 +48,7 @@ QUALITY_KEYWORDS = (
 MAX_SERIES_POINTS = 1500
 DEFAULT_OVERVIEW_FIX_LIMIT = 25000
 DEFAULT_FIX_LIMIT = 1000000
+COMPACT_OVERVIEW_CACHE_SIZE = 4
 
 
 def normalize_header(header: str | None) -> str:
@@ -712,6 +713,8 @@ def build_movement_overview(
     burst_gap_mode: str = DEFAULT_BURST_GAP_MODE,
     burst_gap_seconds: float = DEFAULT_BURST_GAP_SECONDS,
     burst_gap_quantile: float = DEFAULT_BURST_GAP_QUANTILE,
+    overview_fix_limit: int | None = None,
+    max_series_points: int | None = None,
 ) -> dict:
     normalized_burst_gap_mode = normalize_burst_gap_mode(burst_gap_mode)
     normalized_burst_gap_seconds = normalize_burst_gap_seconds(burst_gap_seconds)
@@ -724,9 +727,21 @@ def build_movement_overview(
         for item in (confirmed_individual_tracks or [])
         if isinstance(item, (list, tuple)) and len(item) == 2 and str(item[0]).strip()
     }))
-    overview_fix_limit = max(0, int(DEFAULT_OVERVIEW_FIX_LIMIT))
+    normalized_overview_fix_limit = max(
+        0,
+        int(DEFAULT_OVERVIEW_FIX_LIMIT if overview_fix_limit is None else overview_fix_limit),
+    )
+    normalized_max_series_points = max(
+        1,
+        int(MAX_SERIES_POINTS if max_series_points is None else max_series_points),
+    )
     path_str, mtime_ns, size = _cache_metadata(path)
-    return _build_movement_overview_cached(
+    builder = (
+        _build_compact_movement_overview_cached
+        if normalized_overview_fix_limit == 0 and normalized_max_series_points <= 250
+        else _build_movement_overview_cached
+    )
+    return builder(
         path_str,
         mtime_ns,
         size,
@@ -735,7 +750,8 @@ def build_movement_overview(
         normalized_burst_gap_mode,
         normalized_burst_gap_seconds,
         normalized_burst_gap_quantile,
-        overview_fix_limit,
+        normalized_overview_fix_limit,
+        normalized_max_series_points,
     )
 
 
@@ -750,6 +766,54 @@ def _build_movement_overview_cached(
     burst_gap_seconds: float,
     burst_gap_quantile: float,
     overview_fix_limit: int,
+    max_series_points: int,
+) -> dict:
+    return _build_movement_overview(
+        path_str,
+        confirmed_fix_keys,
+        confirmed_individual_tracks,
+        burst_gap_mode,
+        burst_gap_seconds,
+        burst_gap_quantile,
+        overview_fix_limit,
+        max_series_points,
+    )
+
+
+@lru_cache(maxsize=COMPACT_OVERVIEW_CACHE_SIZE)
+def _build_compact_movement_overview_cached(
+    path_str: str,
+    mtime_ns: int,
+    size: int,
+    confirmed_fix_keys: tuple[str, ...],
+    confirmed_individual_tracks: tuple[tuple[str, str], ...],
+    burst_gap_mode: str,
+    burst_gap_seconds: float,
+    burst_gap_quantile: float,
+    overview_fix_limit: int,
+    max_series_points: int,
+) -> dict:
+    return _build_movement_overview(
+        path_str,
+        confirmed_fix_keys,
+        confirmed_individual_tracks,
+        burst_gap_mode,
+        burst_gap_seconds,
+        burst_gap_quantile,
+        overview_fix_limit,
+        max_series_points,
+    )
+
+
+def _build_movement_overview(
+    path_str: str,
+    confirmed_fix_keys: tuple[str, ...],
+    confirmed_individual_tracks: tuple[tuple[str, str], ...],
+    burst_gap_mode: str,
+    burst_gap_seconds: float,
+    burst_gap_quantile: float,
+    overview_fix_limit: int,
+    max_series_points: int,
 ) -> dict:
     path = Path(path_str)
     with path.open("r", newline="", encoding="utf-8") as handle:
@@ -969,7 +1033,7 @@ def _build_movement_overview_cached(
     series_by_individual: dict[str, dict[str, dict[str, list]]] = {}
     coverage_by_individual: dict[str, dict[str, dict[str, int]]] = {}
     for (individual, set_name), sorted_records in _sorted_track_records(eligible_track_records_by_group):
-        sorted_samples = _downsample_sorted_records(sorted_records, MAX_SERIES_POINTS)
+        sorted_samples = _downsample_sorted_records(sorted_records, max_series_points)
         series_by_individual.setdefault(individual, {})[set_name] = {
             "times": [int(item["time_ms"]) for item in sorted_samples],
             "positions": [[float(item["lon"]), float(item["lat"])] for item in sorted_samples],
@@ -1013,6 +1077,7 @@ def _build_movement_overview_cached(
         "auto_bursts_truncated": bool(overview_truncated),
         "overview_truncated": bool(overview_truncated),
         "overview_fix_limit": int(overview_fix_limit),
+        "overview_series_point_limit": int(max_series_points),
         **burst_gap_metadata(burst_gap),
         "initial_view": {
             "longitude": float((min_lon + max_lon) / 2),

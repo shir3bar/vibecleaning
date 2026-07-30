@@ -218,6 +218,26 @@ def test_slim_movement_load_selects_raw_csv_and_keeps_review_routes(tmp_path):
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/enrich-osm-context" not in paths
 
 
+def test_slim_movement_uses_compact_overviews(tmp_path):
+    client = create_slim_test_client(tmp_path)
+    loaded = client.get(
+        "/api/apps/movement/family/movement_raw/study/raw_study/load"
+    ).json()
+
+    response = client.get(
+        "/api/apps/movement/family/movement_raw/study/raw_study/"
+        f"dataset/{loaded['dataset_id']}/overview",
+        params={"logical_name": loaded["logical_name"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_rows"] == 2
+    assert payload["fixes"] == []
+    assert payload["overview_fix_limit"] == 0
+    assert payload["overview_series_point_limit"] == 250
+
+
 def test_slim_movement_can_flag_export_and_generate_report(tmp_path):
     client = create_slim_test_client(tmp_path)
     loaded = client.get("/api/apps/movement/family/movement_raw/study/raw_study/load").json()

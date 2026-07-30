@@ -30,6 +30,8 @@ def create_slim_movement_app(
         allowed_families={"movement_raw"},
         artifact_filter=is_slim_movement_artifact,
         include_dev_routes=False,
+        overview_fix_limit=0,
+        overview_series_points=250,
     )
     app.mount(
         "/slim-static",

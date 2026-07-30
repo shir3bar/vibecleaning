@@ -241,6 +241,11 @@ def test_movement_summary_does_not_write_full_response_disk_caches(tmp_path):
 def test_movement_summary_memory_caches_are_strictly_bounded():
     assert movement_summary._prepare_scan_context_cached.cache_info().maxsize == 4
     assert movement_summary._build_movement_overview_cached.cache_info().maxsize == 1
+    assert (
+        movement_summary._build_compact_movement_overview_cached.cache_info().maxsize
+        == movement_summary.COMPACT_OVERVIEW_CACHE_SIZE
+        == 4
+    )
     assert not hasattr(movement_summary._build_movement_fixes, "cache_info")
 
 
@@ -586,6 +591,28 @@ def test_build_movement_overview_suppresses_initial_payload_without_dropping_ind
     assert len(payload["fixes"]) == 2
     assert [fix["individual"] for fix in payload["fixes"]] == ["alpha", "alpha"]
     assert payload["auto_bursts"] == []
+
+
+def test_build_movement_overview_supports_compact_viewer_profile(tmp_path):
+    csv_path = write_movement_csv(tmp_path / "movement.csv")
+
+    payload = build_movement_overview(
+        csv_path,
+        overview_fix_limit=0,
+        max_series_points=1,
+    )
+
+    assert payload["total_rows"] == 5
+    assert payload["individuals"] == ["alpha", "beta", "gamma"]
+    assert payload["overview_truncated"] is True
+    assert payload["overview_fix_limit"] == 0
+    assert payload["overview_series_point_limit"] == 1
+    assert payload["fixes"] == []
+    assert all(
+        len(series["positions"]) <= 1
+        for sets in payload["series_by_individual"].values()
+        for series in sets.values()
+    )
 
 
 def test_manual_segments_and_auto_bursts_are_separate(tmp_path):

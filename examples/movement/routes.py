@@ -500,9 +500,17 @@ def register_movement_routes(
     allowed_families: set[str] | None = None,
     artifact_filter: ArtifactFilter | None = None,
     include_dev_routes: bool = True,
+    overview_fix_limit: int | None = None,
+    overview_series_points: int | None = None,
 ):
     data_root = data_root.resolve()
     configured_families = set(allowed_families or [])
+    configured_overview_fix_limit = (
+        None if overview_fix_limit is None else max(0, int(overview_fix_limit))
+    )
+    configured_overview_series_points = (
+        None if overview_series_points is None else max(1, int(overview_series_points))
+    )
 
     def require_configured_family(family_name: str) -> str:
         family = validate_path_part(family_name, label="family")
@@ -674,6 +682,8 @@ def register_movement_routes(
                 burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
                 burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
                 burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
+                overview_fix_limit=configured_overview_fix_limit,
+                max_series_points=configured_overview_series_points,
             )
             return JSONResponse(
                 apply_review_annotations(payload, annotations, source_artifact=logical_name)
