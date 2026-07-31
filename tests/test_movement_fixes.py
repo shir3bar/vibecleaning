@@ -2752,8 +2752,12 @@ def test_build_individual_profile_html_report_collapses_reviewed_fix_summary():
     assert "Status counts" not in html
 
 
-def test_movement_generate_report_route_keeps_issue_first_behavior(tmp_path):
+def test_movement_generate_report_route_keeps_issue_first_behavior_and_embeds_snapshots(tmp_path):
     client, dataset_id = create_movement_test_client(tmp_path)
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+        "AAIAAAoAAv/lPAAAAABJRU5ErkJggg=="
+    )
 
     response = client.post(
         "/api/apps/movement/family/movement_clean/study/test_study/actions/generate-report",
@@ -2790,9 +2794,34 @@ def test_movement_generate_report_route_keeps_issue_first_behavior(tmp_path):
                     },
                 }
             ],
-            "snapshot_windows": [],
-            "screenshot_mode": "manual",
-            "snapshots": [],
+            "snapshot_windows": [
+                {
+                    "snapshot_key": "snapshot_01",
+                    "caption": "alpha drift",
+                    "individual": "alpha",
+                    "set_name": "train",
+                    "issue_type": "drift",
+                    "issue_types": ["drift"],
+                    "anchor_fix_keys": ["id:fix_a_1#row:1"],
+                    "report_fix_keys": ["id:fix_a_1#row:1"],
+                    "start_fix_key": "id:fix_a_1#row:1",
+                    "end_fix_key": "id:fix_a_1#row:1",
+                    "start_time_ms": 1704067200000,
+                    "end_time_ms": 1704067200000,
+                    "start_time_text": "2024-01-01T00:00:00Z",
+                    "end_time_text": "2024-01-01T00:00:00Z",
+                    "window_fix_count": 1,
+                }
+            ],
+            "screenshot_mode": "auto",
+            "snapshots": [
+                {
+                    "snapshot_key": "snapshot_01",
+                    "caption": "alpha drift",
+                    "data_url": "data:image/png;base64,"
+                    + base64.b64encode(png_bytes).decode("ascii"),
+                }
+            ],
             "user": "tester",
         },
     )
@@ -2808,6 +2837,11 @@ def test_movement_generate_report_route_keeps_issue_first_behavior(tmp_path):
     assert html_response.status_code == 200
     assert appendix_response.status_code == 200
     assert "Movement Outlier Review Report" in html_response.text
+    assert (
+        "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+        in html_response.text
+    )
+    assert 'src="movement_snapshot_01.png"' not in html_response.text
     parameters = response.json()["analysis"]["parameters"]
     assert parameters["fix_row_ranges"] == [[1, 1]]
     assert "fix_keys" not in parameters

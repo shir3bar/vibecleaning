@@ -1839,7 +1839,7 @@ def main():
                 user,
                 screenshot_mode,
                 ordered_issue_sections,
-                snapshots_by_key,
+                embedded_snapshots_by_key,
                 len(matched_records),
             )
             html_report_path = Path(output_by_name["movement_outlier_report.html"]["path"])
