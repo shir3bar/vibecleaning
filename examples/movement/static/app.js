@@ -11091,6 +11091,7 @@ class MovementExampleApp {
       nextContext,
       durationSeconds,
       distanceMeters: movementPathDistanceMeters(positions),
+      medianStepMeters: movementMedianStepMeters(positions),
       gapBeforeSeconds,
       gapAfterSeconds,
       geometry: buildBurstPreviewGeometry(
@@ -11115,9 +11116,9 @@ class MovementExampleApp {
       `${formatCount(selected.fixCount || model.positions.length)} fixes`,
       `duration ${formatCompactDuration(model.durationSeconds)}`,
       `distance ${formatCompactDistance(model.distanceMeters)}`,
+      `median step ${formatCompactDistance(model.medianStepMeters)}`,
       `gap before ${formatCompactDuration(model.gapBeforeSeconds)}`,
       `gap after ${formatCompactDuration(model.gapAfterSeconds)}`,
-      scoreLabel,
     ].map(value => `<span>${escapeHtml(value)}</span>`).join("");
     if (!geometry) {
       return `
@@ -12645,6 +12646,24 @@ function movementPathDistanceMeters(path) {
     distance += movementPositionDistanceMeters(positions[index - 1], positions[index]);
   }
   return distance;
+}
+
+function movementMedianStepMeters(path) {
+  const positions = Array.isArray(path) ? path : [];
+  if (positions.length < 2) {
+    return null;
+  }
+  const distances = [];
+  for (let index = 1; index < positions.length; index += 1) {
+    distances.push(
+      movementPositionDistanceMeters(positions[index - 1], positions[index]),
+    );
+  }
+  distances.sort((left, right) => left - right);
+  const midpoint = Math.floor(distances.length / 2);
+  return distances.length % 2
+    ? distances[midpoint]
+    : (distances[midpoint - 1] + distances[midpoint]) / 2;
 }
 
 function formatCompactDuration(seconds) {

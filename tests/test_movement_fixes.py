@@ -1591,6 +1591,8 @@ def test_movement_issue_dialog_has_compact_burst_preview():
     assert "samplePreviewPath(next.path, 80)" in source
     assert "this.colorForFix(fix)" in source
     assert "movementPathDistanceMeters(positions)" in source
+    assert "movementMedianStepMeters(positions)" in source
+    assert "`median step ${formatCompactDistance(model.medianStepMeters)}`" in source
     assert "gap before ${formatCompactDuration(model.gapBeforeSeconds)}" in source
     assert "gap after ${formatCompactDuration(model.gapAfterSeconds)}" in source
     assert "Stationary or overlapping fixes" in source
@@ -1602,6 +1604,7 @@ def test_movement_issue_dialog_has_compact_burst_preview():
     assert "selectedIssueBursts()" in source
     assert "setIssueBurstIncluded(burstId, included)" in source
     assert "getIssueBurstAnomalyScore(selected.burstId)" in source
+    assert "scoreLabel," not in source
     assert "Highest anomaly score first" in source
     assert "loadIssueBurstScores()" in source
     assert "burst_anomaly_ranking.json" in source
