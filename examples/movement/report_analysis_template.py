@@ -261,91 +261,78 @@ def extract_quality_fields(fieldnames, columns):
     return result
 
 
-def load_rows_with_context(source_path):
+def load_rows_with_context(source_path, selected_individuals=None):
+    selected_individuals = {
+        str(item).strip()
+        for item in (selected_individuals or [])
+        if str(item).strip()
+    }
     with Path(source_path).open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        fieldnames = list(reader.fieldnames or [])
+        reader = csv.reader(handle)
+        fieldnames = list(next(reader, []))
         if not fieldnames:
             raise SystemExit("CSV did not contain a header row")
         columns = detect_columns(fieldnames)
         if not columns["individual"] or not columns["time"] or not columns["lon"] or not columns["lat"]:
             raise SystemExit("CSV is missing required columns for movement visualization")
-        rows = list(reader)
+        column_indexes = {name: index for index, name in enumerate(fieldnames)}
 
-    valid_records = []
-    fix_id_counts = {}
-    for row_index, raw in enumerate(rows, start=1):
-        individual = str(raw.get(columns["individual"], "")).strip()
-        if not individual:
-            continue
-        time_ms = parse_time_ms(raw.get(columns["time"]))
-        lon = try_float(raw.get(columns["lon"]))
-        lat = try_float(raw.get(columns["lat"]))
-        if time_ms is None or not is_valid_coordinate(lon, lat):
-            continue
-        fix_id = str(raw.get(columns["fix_id"], "")).strip() if columns["fix_id"] else ""
-        if fix_id:
-            fix_id_counts[fix_id] = fix_id_counts.get(fix_id, 0) + 1
+        def row_value(row, column_name):
+            index = column_indexes.get(column_name)
+            return row[index] if index is not None and index < len(row) else ""
 
-    previous_by_group = {}
-    for row_index, raw in enumerate(rows, start=1):
-        individual = str(raw.get(columns["individual"], "")).strip()
-        if not individual:
-            continue
-        time_ms = parse_time_ms(raw.get(columns["time"]))
-        lon = try_float(raw.get(columns["lon"]))
-        lat = try_float(raw.get(columns["lat"]))
-        if time_ms is None or not is_valid_coordinate(lon, lat):
-            continue
+        rows = []
+        valid_records = []
+        for row_index, values in enumerate(reader, start=1):
+            individual = str(row_value(values, columns["individual"])).strip()
+            if (
+                not individual
+                or (selected_individuals and individual not in selected_individuals)
+            ):
+                continue
+            time_raw = row_value(values, columns["time"])
+            time_ms = parse_time_ms(time_raw)
+            lon = try_float(row_value(values, columns["lon"]))
+            lat = try_float(row_value(values, columns["lat"]))
+            if time_ms is None or not is_valid_coordinate(lon, lat):
+                continue
 
-        set_name = str(raw.get(columns["set"], "")).strip().lower() if columns["set"] else "train"
-        if set_name != "test":
-            set_name = "train"
-        group_key = (individual, set_name)
-        previous = previous_by_group.get(group_key)
-        time_delta_s = None
-        step_length_m = None
-        speed_mps = None
-        if previous and time_ms > previous["time_ms"]:
-            time_delta_s = (time_ms - previous["time_ms"]) / 1000.0
-            from math import atan2, cos, radians, sin, sqrt
-            phi1 = radians(previous["lat"])
-            phi2 = radians(lat)
-            delta_phi = radians(lat - previous["lat"])
-            delta_lambda = radians(lon - previous["lon"])
-            a = sin(delta_phi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(delta_lambda / 2) ** 2
-            step_length_m = 6371000.0 * 2 * atan2(sqrt(a), sqrt(1 - a))
-            speed_mps = step_length_m / time_delta_s if time_delta_s > 0 else None
-        previous_by_group[group_key] = {"time_ms": time_ms, "lon": lon, "lat": lat}
-
-        fix_id = str(raw.get(columns["fix_id"], "")).strip() if columns["fix_id"] else ""
-        fix_key = make_fix_key(row_index, fix_id, bool(fix_id) and fix_id_counts.get(fix_id, 0) == 1, individual, time_ms)
-        review = {
-            "status": normalize_review_status(raw.get("outlier_status")),
-            "issue_type": str(raw.get("outlier_issue_type", "")).strip(),
-            "issue_note": str(raw.get("outlier_comments", "")).strip(),
-        }
-        review = {key: value for key, value in review.items() if value}
-        review["issues"] = parse_issue_refs(raw)
-        segments = []
-        valid_records.append(
-            {
-                "row_index": row_index,
-                "fix_key": fix_key,
-                "individual": individual,
-                "set_name": set_name,
-                "time_ms": time_ms,
-                "lon": lon,
-                "lat": lat,
-                "time_text": str(raw.get(columns["time"], "")).strip(),
-                "raw": dict(raw),
-                "review": review,
-                "segments": segments,
-                "step_length_m": step_length_m,
-                "speed_mps": speed_mps,
-                "time_delta_s": time_delta_s,
+            raw = {
+                name: values[index] if index < len(values) else ""
+                for index, name in enumerate(fieldnames)
             }
-        )
+            rows.append(raw)
+            set_name = str(raw.get(columns["set"], "")).strip().lower() if columns["set"] else "train"
+            if set_name != "test":
+                set_name = "train"
+            fix_id = str(raw.get(columns["fix_id"], "")).strip() if columns["fix_id"] else ""
+            fix_key = make_fix_key(row_index, fix_id, False, individual, time_ms)
+            review = {
+                "status": normalize_review_status(raw.get("outlier_status")),
+                "issue_type": str(raw.get("outlier_issue_type", "")).strip(),
+                "issue_note": str(raw.get("outlier_comments", "")).strip(),
+            }
+            review = {key: value for key, value in review.items() if value}
+            review["issues"] = parse_issue_refs(raw)
+            valid_records.append(
+                {
+                    "row_index": row_index,
+                    "fix_key": fix_key,
+                    "individual": individual,
+                    "set_name": set_name,
+                    "time_ms": time_ms,
+                    "lon": lon,
+                    "lat": lat,
+                    "time_text": str(time_raw).strip(),
+                    "raw": raw,
+                    "review": review,
+                    "segments": [],
+                    "step_length_m": None,
+                    "speed_mps": None,
+                    "time_delta_s": None,
+                }
+            )
+    recompute_analytical_movement_context(valid_records)
     return fieldnames, columns, rows, valid_records
 
 
@@ -1765,15 +1752,36 @@ def main():
             if any(name not in output_by_name for name in required_outputs):
                 raise SystemExit("Report outputs were not declared")
 
-            fieldnames, columns, _, valid_records = load_rows_with_context(source["path"])
+            annotations = []
             if sidecar is not None:
                 from examples.movement.review_annotations import (
                     apply_annotations_to_report_records,
                     load_review_annotations,
                 )
+                annotations = load_review_annotations(Path(sidecar["path"]))
+            report_individuals = {
+                str(window.get("individual") or "").strip()
+                for window in snapshot_windows
+                if str(window.get("individual") or "").strip()
+            }
+            if selected_issue_ids:
+                selected_issue_id_set = set(selected_issue_ids)
+                report_individuals.update(
+                    str((annotation.get("scope") or {}).get("individual") or "").strip()
+                    for annotation in annotations
+                    if (
+                        annotation.get("annotation_id") in selected_issue_id_set
+                        and str((annotation.get("scope") or {}).get("individual") or "").strip()
+                    )
+                )
+            fieldnames, columns, _, valid_records = load_rows_with_context(
+                source["path"],
+                selected_individuals=report_individuals,
+            )
+            if annotations:
                 apply_annotations_to_report_records(
                     valid_records,
-                    load_review_annotations(Path(sidecar["path"])),
+                    annotations,
                     source_artifact=target_artifact,
                 )
             recompute_analytical_movement_context(valid_records)
@@ -1910,7 +1918,10 @@ def main():
             })
             return
 
-        fieldnames, columns, _, valid_records = load_rows_with_context(source["path"])
+        fieldnames, columns, _, valid_records = load_rows_with_context(
+            source["path"],
+            selected_individuals=selected_individuals,
+        )
         if sidecar is not None:
             from examples.movement.review_annotations import (
                 apply_annotations_to_report_records,

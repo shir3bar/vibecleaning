@@ -2613,6 +2613,31 @@ def test_report_features_recompute_across_confirmed_fix(tmp_path):
     assert records[2]["step_length_m"] is not None
 
 
+def test_report_loader_retains_only_selected_individuals_with_source_row_keys(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        "eventid,individual,timestamp,longitude,latitude\n"
+        "fix_a,alpha,2024-01-01T00:00:00Z,-70.0,40.0\n"
+        "fix_b,beta,2024-01-01T00:30:00Z,-71.0,41.0\n"
+        "fix_c,alpha,2024-01-01T01:00:00Z,-70.1,40.1\n",
+        encoding="utf-8",
+    )
+
+    _, _, rows, records = load_rows_with_context(
+        csv_path,
+        selected_individuals={"alpha"},
+    )
+
+    assert len(rows) == 2
+    assert [record["individual"] for record in records] == ["alpha", "alpha"]
+    assert [record["fix_key"] for record in records] == [
+        "id:fix_a#row:1",
+        "id:fix_c#row:3",
+    ]
+    assert records[1]["time_delta_s"] == 3600.0
+    assert records[1]["step_length_m"] is not None
+
+
 def test_build_individual_profile_html_report_omits_optional_fields_when_missing():
     sections = [
         {
