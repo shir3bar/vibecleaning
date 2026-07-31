@@ -5787,6 +5787,55 @@ class MovementExampleApp {
     };
   }
 
+  captureAnnotationReloadContext() {
+    const queue = this.individualReviewQueue;
+    return {
+      anomalyRanking: this.hasCompatibleIndividualQueueRanking()
+        ? this.anomalyRanking
+        : null,
+      queue: {
+        orderMode: queue.orderMode,
+        pageIndex: queue.pageIndex,
+        groupIndex: queue.groupIndex,
+        activeIndividual: queue.activeIndividual,
+        mapScope: queue.mapScope,
+        appliedRankingAnalysisId: queue.appliedRankingAnalysisId,
+        pendingRankingAnalysisId: queue.pendingRankingAnalysisId,
+      },
+    };
+  }
+
+  restoreAnnotationReloadContext(viewContext = null) {
+    const preserved = viewContext?.annotationReloadContext;
+    if (!preserved) {
+      return;
+    }
+    const ranking = preserved.anomalyRanking;
+    if (
+      ranking?.status === "completed"
+      && ranking.analysisId
+      && Array.isArray(ranking.rankedIndividuals)
+      && ranking.rankedIndividuals.length
+    ) {
+      this.anomalyRanking = ranking;
+    }
+    const queueState = preserved.queue || {};
+    const queue = this.individualReviewQueue;
+    queue.orderMode = queueState.orderMode === "ranking" ? "ranking" : "dataset";
+    queue.pageIndex = Math.max(0, Number(queueState.pageIndex) || 0);
+    queue.groupIndex = Math.max(0, Number(queueState.groupIndex) || 0);
+    queue.activeIndividual = String(queueState.activeIndividual || "");
+    queue.mapScope = ["solo", "group"].includes(queueState.mapScope)
+      ? queueState.mapScope
+      : "group";
+    queue.appliedRankingAnalysisId = String(
+      queueState.appliedRankingAnalysisId || "",
+    );
+    queue.pendingRankingAnalysisId = String(
+      queueState.pendingRankingAnalysisId || "",
+    );
+  }
+
   initializeDatasetView(viewContext = null) {
     if (!this.data) {
       return new Set();
@@ -6088,6 +6137,7 @@ class MovementExampleApp {
       ) || null;
       this.clearLoadedStudyState();
       this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
+      this.restoreAnnotationReloadContext(viewContext);
       this.syncAnomalyFeatureSetOptions({ save: false });
       const preservedFixKeys = this.initializeDatasetView(viewContext);
       this.initializeIndividualQueueDatasetSelection();
@@ -6263,6 +6313,7 @@ class MovementExampleApp {
         return;
       }
       this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
+      this.restoreAnnotationReloadContext(viewContext);
       this.syncAnomalyFeatureSetOptions({ save: false });
       this.renderBurstCountIndicator();
       const preservedFixKeys = this.initializeDatasetView(viewContext);
@@ -6800,7 +6851,10 @@ class MovementExampleApp {
         },
       );
       queue.stagedDecisions.clear();
-      await this.loadStudyAtDataset(result.dataset.dataset_id);
+      await this.loadStudyAtDataset(
+        result.dataset.dataset_id,
+        { preserveAnnotationContext: true },
+      );
       this.setStatus(
         `Saved ${formatCount(decisions.length)} individual review decision(s) in one annotation step.`,
       );
@@ -11956,7 +12010,10 @@ class MovementExampleApp {
       this.setUser(user);
       this.pendingIssueContext = null;
       this.refs.issueModal.classList.add("hidden");
-      await this.loadStudyAtDataset(result.dataset.dataset_id);
+      await this.loadStudyAtDataset(
+        result.dataset.dataset_id,
+        { preserveAnnotationContext: true },
+      );
       if (queueReviewIndividual) {
         await this.stageIndividualReviewDecision(queueReviewIndividual, false);
       }
@@ -12137,8 +12194,14 @@ class MovementExampleApp {
     }
   }
 
-  async loadStudyAtDataset(datasetId) {
+  async loadStudyAtDataset(
+    datasetId,
+    { preserveAnnotationContext = false } = {},
+  ) {
     const viewContext = this.captureDatasetViewContext();
+    if (viewContext && preserveAnnotationContext) {
+      viewContext.annotationReloadContext = this.captureAnnotationReloadContext();
+    }
     this.currentDatasetId = datasetId;
     await this.loadStudy({ preferredDatasetId: datasetId, viewContext });
   }

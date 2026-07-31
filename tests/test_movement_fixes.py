@@ -1530,6 +1530,20 @@ def test_movement_frontend_preserves_view_context_across_dataset_nodes():
     assert "await this.loadStudy({ preferredDatasetId: datasetId, viewContext })" in source
 
 
+def test_movement_frontend_preserves_queue_context_across_annotation_steps():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "captureAnnotationReloadContext()" in source
+    assert "restoreAnnotationReloadContext(viewContext = null)" in source
+    assert "anomalyRanking: this.hasCompatibleIndividualQueueRanking()" in source
+    assert "orderMode: queue.orderMode" in source
+    assert "activeIndividual: queue.activeIndividual" in source
+    assert "mapScope: queue.mapScope" in source
+    assert "appliedRankingAnalysisId: queue.appliedRankingAnalysisId" in source
+    assert "this.restoreAnnotationReloadContext(viewContext)" in source
+    assert "{ preserveAnnotationContext: true }" in source
+
+
 def test_movement_frontend_exposes_lightweight_individual_review_queue():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
