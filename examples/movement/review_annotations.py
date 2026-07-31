@@ -292,6 +292,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
                     "step_id": item["step_id"],
                     "source_analysis_id": item["source_analysis_id"],
                     "scope_kind": item["scope"].get("kind"),
+                    "scope_burst_id": item["scope"].get("burst_id"),
                     "parent_annotation_id": item["parent_annotation_id"],
                     "annotation_kind": item["annotation_kind"],
                 }
@@ -456,6 +457,8 @@ def apply_annotations_to_report_records(
                     "reviewed_at": item["created_at"],
                     "origin": item["origin"],
                     "step_id": item["step_id"],
+                    "scope_kind": item["scope"].get("kind"),
+                    "scope_burst_id": item["scope"].get("burst_id"),
                     "parent_annotation_id": item["parent_annotation_id"],
                     "annotation_kind": item["annotation_kind"],
                 }

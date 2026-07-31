@@ -1514,6 +1514,22 @@ def test_movement_frontend_loads_suspicious_fixes_on_demand():
     assert "...(data.suspiciousFixes || [])" in source
 
 
+def test_movement_report_can_render_one_snapshot_per_flagged_burst():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert 'data-role="report-snapshot-unit"' in source
+    assert '<option value="burst">One per flagged burst</option>' in source
+    assert '<option value="context">Merge nearby flagged fixes</option>' in source
+    assert 'this.refs.reportSnapshotUnit.value = "burst"' in source
+    assert "buildBurstReportSnapshotWindows(reportFixes)" in source
+    assert 'issue.scopeKind !== "burst"' in source
+    assert "issue.scopeBurstId || \"\"" in source
+    assert "Math.min(...indices) - 8" in source
+    assert "Math.max(...indices) + 8" in source
+    assert 'snapshotKind: "burst"' in source
+    assert "burst_id: window.burstId || \"\"" in source
+
+
 def test_movement_frontend_preserves_view_context_across_dataset_nodes():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
@@ -1948,6 +1964,8 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     assert [fix["fix_key"] for fix in reviewed] == ["id:fix_a_1#row:1", "id:fix_a_2#row:2"]
     assert reviewed[0]["review"]["issues"][0]["origin"] == "algorithm"
     assert reviewed[0]["review"]["issues"][0]["issue_note"] == "Ranked as an unusual burst"
+    assert reviewed[0]["review"]["issues"][0]["scope_kind"] == "burst"
+    assert reviewed[0]["review"]["issues"][0]["scope_burst_id"] == "alpha:train:burst_000000"
 
     suspicious_response = client.get(
         f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{next_dataset_id}/fixes",

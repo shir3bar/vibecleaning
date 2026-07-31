@@ -2994,6 +2994,12 @@ class MovementExampleApp {
                 <option value="manual">Manual placeholder</option>
               </select>
             </label>
+            <label data-role="report-snapshot-unit-wrap">Snapshot unit
+              <select data-role="report-snapshot-unit">
+                <option value="burst">One per flagged burst</option>
+                <option value="context">Merge nearby flagged fixes</option>
+              </select>
+            </label>
             <label data-role="report-basemap-wrap">Report basemap
               <select data-role="report-basemap">
                 <option value="current">Match current map when possible</option>
@@ -3174,6 +3180,8 @@ class MovementExampleApp {
       reportOutputMode: this.mountEl.querySelector('[data-role="report-output-mode"]'),
       reportScreenshotModeWrap: this.mountEl.querySelector('[data-role="report-screenshot-mode-wrap"]'),
       reportScreenshotMode: this.mountEl.querySelector('[data-role="report-screenshot-mode"]'),
+      reportSnapshotUnitWrap: this.mountEl.querySelector('[data-role="report-snapshot-unit-wrap"]'),
+      reportSnapshotUnit: this.mountEl.querySelector('[data-role="report-snapshot-unit"]'),
       reportBasemapWrap: this.mountEl.querySelector('[data-role="report-basemap-wrap"]'),
       reportBasemap: this.mountEl.querySelector('[data-role="report-basemap"]'),
       reportSnapshotLimitWrap: this.mountEl.querySelector('[data-role="report-snapshot-limit-wrap"]'),
@@ -3580,6 +3588,7 @@ class MovementExampleApp {
     this.refs.reportIndividual.addEventListener("change", () => this.renderReportSelection());
     this.refs.reportOutputMode.addEventListener("change", () => this.renderReportSelection());
     this.refs.reportScreenshotMode.addEventListener("change", () => this.renderReportSelection());
+    this.refs.reportSnapshotUnit.addEventListener("change", () => this.renderReportSelection());
     this.refs.reportBasemap.addEventListener("change", () => this.renderReportSelection());
     this.refs.reportSnapshotLimit.addEventListener("input", () => this.renderReportSelection());
     this.refs.reportSpreadIndividuals.addEventListener("change", () => this.renderReportSelection());
@@ -10432,7 +10441,10 @@ class MovementExampleApp {
   }
 
   getReportSnapshotWindows() {
-    return this.buildReportSnapshotWindows(this.getReportFixes());
+    return this.buildReportSnapshotWindows(
+      this.getReportFixes(),
+      this.refs.reportSnapshotUnit.value || "burst",
+    );
   }
 
   buildIndividualProfileSnapshotWindows() {
@@ -10530,6 +10542,7 @@ class MovementExampleApp {
     const showIssueFirstControls = reportType === "issue_first";
     this.refs.reportOutputModeWrap.hidden = reportType !== "individual_profile" || reportIndividuals.length <= 1;
     this.refs.reportScreenshotModeWrap.hidden = !showIssueFirstControls;
+    this.refs.reportSnapshotUnitWrap.hidden = !showIssueFirstControls;
     this.refs.reportBasemapWrap.hidden = false;
     this.refs.reportSnapshotLimitWrap.hidden = !showIssueFirstControls;
     this.refs.reportSpreadIndividualsWrap.hidden = !showIssueFirstControls;
@@ -10547,6 +10560,8 @@ class MovementExampleApp {
   serializeSnapshotWindowForReport(window) {
     return {
       snapshot_key: window.snapshotKey,
+      snapshot_kind: window.snapshotKind || "context",
+      burst_id: window.burstId || "",
       caption: window.caption,
       individual: window.individual,
       set_name: window.setName,
@@ -10564,7 +10579,162 @@ class MovementExampleApp {
     };
   }
 
-  buildReportSnapshotWindows(reportFixes) {
+  buildReportSnapshotWindows(reportFixes, snapshotUnit = "burst") {
+    if (snapshotUnit !== "burst") {
+      return this.buildMergedReportSnapshotWindows(reportFixes);
+    }
+    const burstWindows = this.buildBurstReportSnapshotWindows(reportFixes);
+    const coveredFixKeys = new Set(
+      burstWindows.flatMap(window => window.reportFixKeys || []),
+    );
+    const uncoveredFixes = reportFixes.filter(fix => !coveredFixKeys.has(fix.fixKey));
+    const fallbackWindows = uncoveredFixes.length
+      ? this.buildMergedReportSnapshotWindows(uncoveredFixes)
+      : [];
+    return [...burstWindows, ...fallbackWindows].map((window, index) => ({
+      ...window,
+      snapshotKey: `snapshot_${String(index + 1).padStart(2, "0")}`,
+    }));
+  }
+
+  buildBurstReportSnapshotWindows(reportFixes) {
+    if (!this.data || !reportFixes.length) {
+      return [];
+    }
+    const groups = new Map();
+    for (const fix of reportFixes) {
+      const issues = Array.isArray(fix.review?.issues) ? fix.review.issues : [];
+      for (const issue of issues) {
+        if (
+          issue.status !== "suspected"
+          || issue.scopeKind !== "burst"
+          || !issue.issueId
+        ) {
+          continue;
+        }
+        const issueType = issue.issueType || "Unspecified issue";
+        const burstIdentity = issue.scopeBurstId || issue.issueId;
+        const groupKey = `${burstIdentity}\u0000${issueType}`;
+        const group = groups.get(groupKey) || {
+          issueId: issue.issueId,
+          issueType,
+          burstId: issue.scopeBurstId || "",
+          individual: fix.individual,
+          setName: fix.setName,
+          fixes: new Map(),
+        };
+        group.fixes.set(fix.fixKey, fix);
+        groups.set(groupKey, group);
+      }
+    }
+    if (!groups.size) {
+      return [];
+    }
+
+    const scope = this.refs.reportScope.value || "visible";
+    const trackFixesSource = this.getFixesForScope(scope, {
+      allowPartialFull: scope === "full",
+    });
+    const trackFixesByKey = new Map();
+    const indexByFixKey = new Map();
+    for (const fix of trackFixesSource) {
+      const trackKey = reportTrackKey(fix.individual, fix.setName);
+      const track = trackFixesByKey.get(trackKey) || [];
+      track.push(fix);
+      trackFixesByKey.set(trackKey, track);
+    }
+    for (const [trackKey, track] of trackFixesByKey.entries()) {
+      track.sort((left, right) => (
+        left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey)
+      ));
+      track.forEach((fix, index) => {
+        indexByFixKey.set(fix.fixKey, { trackKey, index });
+      });
+    }
+
+    const currentField = this.getCurrentColorField();
+    const thresholdFieldKey = this.thresholdState.fieldKey || "";
+    const thresholdValue = typeof this.thresholdState.value === "number"
+      ? this.thresholdState.value
+      : null;
+    const thresholdReverse = this.thresholdState.reverse === true;
+    const allReportFixMap = new Map(reportFixes.map(fix => [fix.fixKey, fix]));
+    const orderedGroups = [...groups.values()].sort((left, right) => {
+      const leftTime = Math.min(...[...left.fixes.values()].map(fix => fix.timeMs));
+      const rightTime = Math.min(...[...right.fixes.values()].map(fix => fix.timeMs));
+      return (
+        left.individual.localeCompare(right.individual)
+        || left.setName.localeCompare(right.setName)
+        || leftTime - rightTime
+        || left.issueId.localeCompare(right.issueId)
+      );
+    });
+
+    const windows = [];
+    for (const group of orderedGroups) {
+      const focalFixes = [...group.fixes.values()].sort((left, right) => (
+        left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey)
+      ));
+      const located = focalFixes
+        .map(fix => indexByFixKey.get(fix.fixKey))
+        .filter(Boolean);
+      if (!located.length) {
+        continue;
+      }
+      const trackKey = located[0].trackKey;
+      const trackFixes = trackFixesByKey.get(trackKey) || focalFixes;
+      const indices = located
+        .filter(item => item.trackKey === trackKey)
+        .map(item => item.index);
+      const startIndex = Math.max(0, Math.min(...indices) - 8);
+      const endIndex = Math.min(trackFixes.length - 1, Math.max(...indices) + 8);
+      const windowFixes = trackFixes.slice(startIndex, endIndex + 1);
+      const focalFixKeys = focalFixes.map(fix => fix.fixKey);
+      const focalKeySet = new Set(focalFixKeys);
+      const secondaryFixKeys = windowFixes
+        .filter(fix => allReportFixMap.has(fix.fixKey) && !focalKeySet.has(fix.fixKey))
+        .map(fix => fix.fixKey);
+      const firstFix = focalFixes[0];
+      const lastFix = focalFixes[focalFixes.length - 1];
+      const burstLabel = group.burstId || group.issueId;
+      windows.push({
+        snapshotKey: "",
+        snapshotKind: "burst",
+        burstId: group.burstId,
+        caption: `${group.issueType} | ${group.individual} | ${burstLabel} | ${formatTimestamp(firstFix.timeMs)} to ${formatTimestamp(lastFix.timeMs)}`,
+        individual: group.individual,
+        setName: group.setName,
+        issueType: group.issueType,
+        issueTypes: [group.issueType],
+        anchorFixKeys: focalFixKeys,
+        secondaryFixKeys,
+        reportFixKeys: focalFixKeys,
+        startFixKey: firstFix.fixKey,
+        endFixKey: lastFix.fixKey,
+        startTimeMs: firstFix.timeMs,
+        endTimeMs: lastFix.timeMs,
+        startTimeText: formatTimestamp(firstFix.timeMs),
+        endTimeText: formatTimestamp(lastFix.timeMs),
+        windowFixCount: windowFixes.length,
+        windowFixes,
+        reportWindowFixes: focalFixes,
+        showGrid: true,
+        sampleValue: deriveReportSampleValue(
+          focalFixes,
+          currentField,
+          this.data.colorFieldByKey,
+          {
+            thresholdFieldKey,
+            thresholdValue,
+            thresholdReverse,
+          },
+        ),
+      });
+    }
+    return windows;
+  }
+
+  buildMergedReportSnapshotWindows(reportFixes) {
     if (!this.data || !reportFixes.length) {
       return [];
     }
@@ -10756,6 +10926,7 @@ class MovementExampleApp {
     const snapshotWindows = this.getReportSnapshotWindows();
     const effectiveSnapshotWindows = this.getEffectiveReportSnapshotWindows();
     const screenshotMode = this.refs.reportScreenshotMode.value || "manual";
+    const snapshotUnit = this.refs.reportSnapshotUnit.value || "burst";
     const samplingLimit = this.getRequestedReportSnapshotLimit();
     const issueTypes = uniqueNonEmpty(reportFixes.flatMap(fix => reportIssueTypes(fix)));
     const reportBasemapLabel = this.refs.reportBasemap.value === "current"
@@ -10783,6 +10954,7 @@ class MovementExampleApp {
       <div><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</div>
       <div><strong>Individual:</strong> ${escapeHtml(individualLabel)}</div>
       <div><strong>Snapshot basemap:</strong> ${escapeHtml(reportBasemapLabel)}</div>
+      <div><strong>Snapshot unit:</strong> ${escapeHtml(snapshotUnit === "burst" ? "One per flagged burst" : "Merged nearby flagged fixes")}</div>
       <div><strong>Suspected fixes in report:</strong> ${escapeHtml(formatCount(reportFixes.length))}</div>
       <div><strong>Snapshot windows:</strong> ${escapeHtml(formatCount(snapshotWindows.length))}</div>
       <div><strong>Auto snapshots to render:</strong> ${escapeHtml(formatCount(effectiveSnapshotWindows.length))}</div>
@@ -11871,6 +12043,7 @@ class MovementExampleApp {
     this.refs.reportScope.value = "visible";
     this.refs.reportOutputMode.value = "combined";
     this.refs.reportScreenshotMode.value = "auto";
+    this.refs.reportSnapshotUnit.value = "burst";
     this.refs.reportBasemap.value = "current";
     this.refs.reportSpreadIndividuals.checked = true;
     this.renderReportLinks();
@@ -12913,6 +13086,7 @@ function normalizeReviewIssues(review) {
       stepId: String(item.step_id || item.stepId || "").trim(),
       sourceAnalysisId: String(item.source_analysis_id || item.sourceAnalysisId || "").trim(),
       scopeKind: String(item.scope_kind || item.scopeKind || "").trim(),
+      scopeBurstId: String(item.scope_burst_id || item.scopeBurstId || "").trim(),
       parentAnnotationId: String(item.parent_annotation_id || item.parentAnnotationId || "").trim(),
       annotationKind: String(item.annotation_kind || item.annotationKind || "issue").trim(),
     }))
@@ -12934,6 +13108,7 @@ function normalizeReviewIssues(review) {
     stepId: String(review?.step_id || review?.stepId || "").trim(),
     sourceAnalysisId: String(review?.source_analysis_id || review?.sourceAnalysisId || "").trim(),
     scopeKind: String(review?.scope_kind || review?.scopeKind || "").trim(),
+    scopeBurstId: String(review?.scope_burst_id || review?.scopeBurstId || "").trim(),
     parentAnnotationId: String(review?.parent_annotation_id || review?.parentAnnotationId || "").trim(),
     annotationKind: String(review?.annotation_kind || review?.annotationKind || "issue").trim(),
   };

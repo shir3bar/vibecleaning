@@ -1645,6 +1645,8 @@ def normalize_snapshot_windows(items):
         normalized.append(
             {
                 "snapshot_key": snapshot_key,
+                "snapshot_kind": str(item.get("snapshot_kind", "")).strip() or "context",
+                "burst_id": str(item.get("burst_id", "")).strip(),
                 "caption": str(item.get("caption", "")).strip(),
                 "individual": str(item.get("individual", "")).strip(),
                 "set_name": str(item.get("set_name", "")).strip() or "train",

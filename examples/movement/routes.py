@@ -458,6 +458,8 @@ def _validate_snapshot_windows(value: object) -> list[dict]:
         cleaned.append(
             {
                 "snapshot_key": _validate_required_text(item.get("snapshot_key"), label="Snapshot key", max_length=120),
+                "snapshot_kind": _validate_optional_text(item.get("snapshot_kind"), label="Snapshot kind", max_length=40),
+                "burst_id": _validate_optional_text(item.get("burst_id"), label="Burst ID", max_length=240),
                 "caption": _validate_optional_text(item.get("caption"), label="Snapshot caption", max_length=240),
                 "individual": _validate_optional_text(item.get("individual"), label="Individual", max_length=200),
                 "set_name": _validate_optional_text(item.get("set_name"), label="Track", max_length=40),
