@@ -11172,11 +11172,12 @@ class MovementExampleApp {
         + `<text x="${(endPoint.x + 8).toFixed(2)}" y="${(endPoint.y - 7).toFixed(2)}" fill="#334155" font-size="10" font-weight="700">End</text>`
       );
     const stationaryNote = geometry.stationary
-      ? '<text x="12" y="149" fill="#475569" font-size="10">Stationary or overlapping fixes</text>'
+      ? '<text x="12" y="113" fill="#475569" font-size="10">Stationary or overlapping fixes</text>'
       : "";
     const contextNote = model.previousContext.length || model.nextContext.length
       ? '<text x="508" y="14" text-anchor="end" fill="#475569" font-size="10">Dashed gray: adjacent bursts</text>'
       : "";
+    const scaleBarSvg = previewScaleBarSvg(geometry);
     const samplingNote = model.positions.length > model.points.length
       ? `<text x="508" y="149" text-anchor="end" fill="#475569" font-size="10">Showing ${formatCount(model.points.length)} of ${formatCount(model.positions.length)} fix marks</text>`
       : "";
@@ -11201,6 +11202,7 @@ class MovementExampleApp {
             ${endpointSvg}
             ${stationaryNote}
             ${contextNote}
+            ${scaleBarSvg}
             ${samplingNote}
           </svg>
         </div>
@@ -12763,6 +12765,7 @@ function buildBurstPreviewGeometry(
     width,
     height,
     stationary,
+    metersPerPixel: (111195.0802335 * spanX) / frameWidth,
     mapPosition,
     mapPath,
   };
@@ -12772,6 +12775,40 @@ function previewSvgPoints(points) {
   return (Array.isArray(points) ? points : [])
     .map(point => `${Number(point?.x).toFixed(2)},${Number(point?.y).toFixed(2)}`)
     .join(" ");
+}
+
+function formatPreviewScaleDistance(distanceMeters) {
+  if (distanceMeters >= 1000) {
+    return formatScaleDistance(distanceMeters);
+  }
+  if (distanceMeters >= 1) {
+    return distanceMeters < 10
+      ? `${Number(distanceMeters.toFixed(1))} m`
+      : `${Math.round(distanceMeters)} m`;
+  }
+  if (distanceMeters >= 0.01) {
+    return `${Number((distanceMeters * 100).toFixed(1))} cm`;
+  }
+  return `${Number((distanceMeters * 1000).toFixed(1))} mm`;
+}
+
+function previewScaleBarSvg(geometry, targetWidth = 90) {
+  const metersPerPixel = finiteOrNull(geometry?.metersPerPixel);
+  if (metersPerPixel === null || metersPerPixel <= 0) {
+    return "";
+  }
+  const distanceMeters = niceScaleDistance(metersPerPixel * targetWidth);
+  const width = Math.max(1, distanceMeters / metersPerPixel);
+  const left = 18;
+  const right = left + width;
+  const barY = 143;
+  return `
+    <g aria-label="${escapeHtml(`Scale ${formatPreviewScaleDistance(distanceMeters)}`)}">
+      <rect x="12" y="119" width="${(width + 12).toFixed(2)}" height="33" rx="4" fill="#f8fafc" fill-opacity="0.82"/>
+      <text x="${((left + right) / 2).toFixed(2)}" y="132" text-anchor="middle" fill="#334155" font-size="10" font-weight="700">${escapeHtml(formatPreviewScaleDistance(distanceMeters))}</text>
+      <path d="M ${left} ${barY - 5} V ${barY + 5} M ${left} ${barY} H ${right.toFixed(2)} M ${right.toFixed(2)} ${barY - 5} V ${barY + 5}" fill="none" stroke="#334155" stroke-width="2"/>
+    </g>
+  `;
 }
 
 function normalizeReviewIssues(review) {

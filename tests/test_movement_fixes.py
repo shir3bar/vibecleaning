@@ -1597,6 +1597,9 @@ def test_movement_issue_dialog_has_compact_burst_preview():
     assert "gap after ${formatCompactDuration(model.gapAfterSeconds)}" in source
     assert "Stationary or overlapping fixes" in source
     assert "Dashed gray: adjacent bursts" in source
+    assert "previewScaleBarSvg(geometry)" in source
+    assert "metersPerPixel: (111195.0802335 * spanX) / frameWidth" in source
+    assert "formatPreviewScaleDistance(distanceMeters)" in source
     assert "previewContextCueSvg" not in source
     assert "Burst metadata is available, but its path is not loaded" in source
     assert '<option value="burst">By Burst</option>' in source
