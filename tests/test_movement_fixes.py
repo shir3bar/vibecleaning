@@ -1576,6 +1576,30 @@ def test_movement_individual_queue_explains_burst_ranking_availability():
     assert "queue.pendingRankingAnalysisId = this.anomalyRanking.analysisId" in source
 
 
+def test_movement_issue_dialog_has_compact_burst_preview():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert 'data-role="issue-burst-preview"' in source
+    assert 'data-role="issue-burst-preview-frame"' in source
+    assert 'data-role="issue-burst-preview-metrics"' in source
+    assert "buildIssueBurstPreviewModel(burst)" in source
+    assert "renderIssueBurstPreview(selectedBurst)" in source
+    assert "this.renderIssueBurstPreview(burst)" in source
+    assert "this.hideIssueBurstPreview()" in source
+    assert "item.individual === selected.individual" in source
+    assert "item.setName === selected.setName" in source
+    assert "previous.path.slice(-8)" in source
+    assert "next.path.slice(0, 8)" in source
+    assert "this.colorForFix(fix)" in source
+    assert "movementPathDistanceMeters(positions)" in source
+    assert "gap before ${formatCompactDuration(model.gapBeforeSeconds)}" in source
+    assert "gap after ${formatCompactDuration(model.gapAfterSeconds)}" in source
+    assert "Stationary or overlapping fixes" in source
+    assert "Previous burst is outside this preview" in source
+    assert "Next burst is outside this preview" in source
+    assert "Burst metadata is available, but its path is not loaded" in source
+
+
 def test_export_reviewed_csv_combines_portable_and_sidecar_annotations(tmp_path):
     source_path = tmp_path / "movement.csv"
     source_path.write_text(

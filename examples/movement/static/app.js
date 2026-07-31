@@ -2494,6 +2494,70 @@ class MovementExampleApp {
         .movement-issue-scope [hidden] {
           display: none;
         }
+        .movement-burst-preview {
+          display: grid;
+          gap: 8px;
+          padding: 10px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 12px;
+          background: rgba(255, 255, 255, 0.025);
+        }
+        .movement-burst-preview.hidden {
+          display: none;
+        }
+        .movement-burst-preview-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          color: #dbe4ef;
+          font-size: 12px;
+        }
+        .movement-burst-preview-head span {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: #9bb0c6;
+        }
+        .movement-burst-preview-frame {
+          height: 160px;
+          overflow: hidden;
+          border: 1px solid rgba(255, 255, 255, 0.06);
+          border-radius: 10px;
+          background:
+            linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+            #050914;
+          background-size: 24px 24px;
+        }
+        .movement-burst-preview-frame svg {
+          display: block;
+          width: 100%;
+          height: 100%;
+        }
+        .movement-burst-preview-empty {
+          height: 100%;
+          display: grid;
+          place-items: center;
+          padding: 16px;
+          color: #9bb0c6;
+          font-size: 12px;
+          text-align: center;
+        }
+        .movement-burst-preview-metrics {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+        }
+        .movement-burst-preview-metrics span {
+          padding: 3px 7px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.05);
+          color: #b8c6d8;
+          font-size: 11px;
+          white-space: nowrap;
+        }
         .movement-modal textarea {
           min-height: 88px;
           resize: vertical;
@@ -2754,6 +2818,14 @@ class MovementExampleApp {
                 <select data-role="issue-burst"></select>
               </label>
             </div>
+            <div class="movement-burst-preview hidden" data-role="issue-burst-preview">
+              <div class="movement-burst-preview-head">
+                <strong>Burst preview</strong>
+                <span data-role="issue-burst-preview-title"></span>
+              </div>
+              <div class="movement-burst-preview-frame" data-role="issue-burst-preview-frame"></div>
+              <div class="movement-burst-preview-metrics" data-role="issue-burst-preview-metrics"></div>
+            </div>
             <div class="movement-selection-list" data-role="issue-selection"></div>
             <label>User
               <input type="text" data-role="issue-user" placeholder="Name used for attribution">
@@ -2988,6 +3060,10 @@ class MovementExampleApp {
       issueScope: this.mountEl.querySelector('[data-role="issue-scope"]'),
       issueBurstControl: this.mountEl.querySelector('[data-role="issue-burst-control"]'),
       issueBurst: this.mountEl.querySelector('[data-role="issue-burst"]'),
+      issueBurstPreview: this.mountEl.querySelector('[data-role="issue-burst-preview"]'),
+      issueBurstPreviewTitle: this.mountEl.querySelector('[data-role="issue-burst-preview-title"]'),
+      issueBurstPreviewFrame: this.mountEl.querySelector('[data-role="issue-burst-preview-frame"]'),
+      issueBurstPreviewMetrics: this.mountEl.querySelector('[data-role="issue-burst-preview-metrics"]'),
       issueSelection: this.mountEl.querySelector('[data-role="issue-selection"]'),
       issueUser: this.mountEl.querySelector('[data-role="issue-user"]'),
       issueType: this.mountEl.querySelector('[data-role="issue-type"]'),
@@ -10792,6 +10868,234 @@ class MovementExampleApp {
     }
   }
 
+  hideIssueBurstPreview() {
+    if (!this.refs?.issueBurstPreview) {
+      return;
+    }
+    this.refs.issueBurstPreview.classList.add("hidden");
+    this.refs.issueBurstPreviewTitle.textContent = "";
+    this.refs.issueBurstPreviewFrame.innerHTML = "";
+    this.refs.issueBurstPreviewMetrics.innerHTML = "";
+  }
+
+  normalizeIssueBurstPreviewSource(burst) {
+    const burstId = String(burst?.burstId || burst?.burst_id || "");
+    if (!burstId || !this.data) {
+      return null;
+    }
+    const stored = this.data.autoBurstById?.get(burstId);
+    if (stored) {
+      return stored;
+    }
+    const fixKeys = Array.isArray(burst?.fixKeys)
+      ? burst.fixKeys.map(value => String(value || "")).filter(Boolean)
+      : Array.isArray(burst?.fix_keys)
+        ? burst.fix_keys.map(value => String(value || "")).filter(Boolean)
+        : [];
+    const fixes = fixKeys
+      .map(fixKey => this.data.fixByKey.get(fixKey))
+      .filter(Boolean)
+      .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
+    const suppliedPath = Array.isArray(burst?.path)
+      ? burst.path
+      : fixes.map(fix => fix.position);
+    const path = suppliedPath
+      .map(position => [Number(position?.[0]), Number(position?.[1])])
+      .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]));
+    return {
+      burstId,
+      burstIdx: Math.max(0, Number(burst?.burstIdx ?? burst?.burst_idx) || 0),
+      individual: String(burst?.individual || ""),
+      setName: String(burst?.setName || burst?.set_name || "train") || "train",
+      startFixKey: String(burst?.startFixKey || burst?.start_fix_key || fixKeys[0] || ""),
+      endFixKey: String(burst?.endFixKey || burst?.end_fix_key || fixKeys[fixKeys.length - 1] || ""),
+      startTimeMs: Number(burst?.startTimeMs ?? burst?.start_time_ms ?? fixes[0]?.timeMs) || 0,
+      endTimeMs: Number(burst?.endTimeMs ?? burst?.end_time_ms ?? fixes[fixes.length - 1]?.timeMs) || 0,
+      fixCount: Number(burst?.fixCount ?? burst?.fix_count ?? burst?.n_fixes) || fixKeys.length || path.length,
+      burstGapSeconds: Number(burst?.burstGapSeconds ?? burst?.burst_gap_seconds) || this.data.burstGap?.effectiveSeconds || DEFAULT_BURST_GAP_SECONDS,
+      fixKeys,
+      path,
+    };
+  }
+
+  buildIssueBurstPreviewModel(burst) {
+    const selected = this.normalizeIssueBurstPreviewSource(burst);
+    if (!selected) {
+      return null;
+    }
+    const trackBursts = (this.data?.autoBursts || [])
+      .filter(item => (
+        item.individual === selected.individual
+        && item.setName === selected.setName
+      ))
+      .sort((left, right) => (
+        left.startTimeMs - right.startTimeMs
+        || left.burstIdx - right.burstIdx
+        || left.burstId.localeCompare(right.burstId)
+      ));
+    const selectedIndex = trackBursts.findIndex(item => item.burstId === selected.burstId);
+    const previous = selectedIndex > 0
+      ? trackBursts[selectedIndex - 1]
+      : [...trackBursts]
+        .reverse()
+        .find(item => item.endTimeMs <= selected.startTimeMs && item.burstId !== selected.burstId)
+        || null;
+    const next = selectedIndex >= 0 && selectedIndex < trackBursts.length - 1
+      ? trackBursts[selectedIndex + 1]
+      : trackBursts.find(
+        item => item.startTimeMs >= selected.endTimeMs && item.burstId !== selected.burstId,
+      ) || null;
+    const selectedFixes = selected.fixKeys
+      .map(fixKey => this.data.fixByKey.get(fixKey) || null);
+    const positions = selected.path;
+    const pointIndices = samplePreviewIndices(positions.length, 120);
+    const points = pointIndices.map(index => {
+      const fix = selectedFixes[index] || null;
+      return {
+        index,
+        position: positions[index],
+        color: fix ? this.colorForFix(fix) : [124, 210, 255, POINT_ALPHA],
+      };
+    });
+    const previousContext = Array.isArray(previous?.path)
+      ? previous.path.slice(-8)
+      : [];
+    const nextContext = Array.isArray(next?.path)
+      ? next.path.slice(0, 8)
+      : [];
+    const durationSeconds = selected.endTimeMs >= selected.startTimeMs
+      ? (selected.endTimeMs - selected.startTimeMs) / 1000
+      : null;
+    const gapBeforeSeconds = previous && selected.startTimeMs >= previous.endTimeMs
+      ? (selected.startTimeMs - previous.endTimeMs) / 1000
+      : null;
+    const gapAfterSeconds = next && next.startTimeMs >= selected.endTimeMs
+      ? (next.startTimeMs - selected.endTimeMs) / 1000
+      : null;
+    return {
+      selected,
+      previous,
+      next,
+      positions,
+      pathPositions: samplePreviewPath(positions, 300),
+      points,
+      previousContext,
+      nextContext,
+      durationSeconds,
+      distanceMeters: movementPathDistanceMeters(positions),
+      gapBeforeSeconds,
+      gapAfterSeconds,
+      geometry: buildBurstPreviewGeometry(
+        positions,
+        previousContext,
+        nextContext,
+      ),
+    };
+  }
+
+  renderIssueBurstPreview(burst) {
+    if (!this.refs?.issueBurstPreview) {
+      return;
+    }
+    const model = this.buildIssueBurstPreviewModel(burst);
+    if (!model) {
+      this.hideIssueBurstPreview();
+      return;
+    }
+    const { selected, geometry } = model;
+    const currentField = this.getCurrentColorField();
+    this.refs.issueBurstPreview.classList.remove("hidden");
+    this.refs.issueBurstPreviewTitle.textContent = (
+      `${selected.burstId}`
+      + (currentField ? ` • color by ${currentField.label}` : "")
+    );
+    this.refs.issueBurstPreviewMetrics.innerHTML = [
+      `${formatCount(selected.fixCount || model.positions.length)} fixes`,
+      `duration ${formatCompactDuration(model.durationSeconds)}`,
+      `distance ${formatCompactDistance(model.distanceMeters)}`,
+      `gap before ${formatCompactDuration(model.gapBeforeSeconds)}`,
+      `gap after ${formatCompactDuration(model.gapAfterSeconds)}`,
+    ].map(value => `<span>${escapeHtml(value)}</span>`).join("");
+    if (!geometry) {
+      this.refs.issueBurstPreviewFrame.innerHTML = (
+        '<div class="movement-burst-preview-empty">'
+        + "Burst metadata is available, but its path is not loaded in the current map view."
+        + "</div>"
+      );
+      return;
+    }
+
+    const selectedPath = geometry.mapPath(model.pathPositions);
+    const previousPath = geometry.contextPath(model.previousContext, "previous");
+    const nextPath = geometry.contextPath(model.nextContext, "next");
+    const previewPoints = model.points.map(item => ({
+      ...item,
+      point: geometry.mapPosition(item.position),
+    }));
+    const startPoint = geometry.mapPosition(model.positions[0]);
+    const endPoint = geometry.mapPosition(model.positions[model.positions.length - 1]);
+    const sameEndpoint = (
+      Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y) < 1
+    );
+    const contextSvg = [
+      previousPath.points.length
+        ? (
+          `<polyline points="${previewSvgPoints(previousPath.points)}" fill="none" stroke="rgba(148,163,184,0.58)" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round" stroke-linejoin="round"><title>Previous burst context</title></polyline>`
+          + `<circle cx="${previousPath.points[previousPath.points.length - 1].x.toFixed(2)}" cy="${previousPath.points[previousPath.points.length - 1].y.toFixed(2)}" r="2.8" fill="rgba(148,163,184,0.82)"><title>Previous burst context</title></circle>`
+        )
+        : "",
+      nextPath.points.length
+        ? (
+          `<polyline points="${previewSvgPoints(nextPath.points)}" fill="none" stroke="rgba(148,163,184,0.58)" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round" stroke-linejoin="round"><title>Next burst context</title></polyline>`
+          + `<circle cx="${nextPath.points[0].x.toFixed(2)}" cy="${nextPath.points[0].y.toFixed(2)}" r="2.8" fill="rgba(148,163,184,0.82)"><title>Next burst context</title></circle>`
+        )
+        : "",
+      previousPath.cue
+        ? previewContextCueSvg(previousPath.cue, "P", "Previous burst is outside this preview")
+        : "",
+      nextPath.cue
+        ? previewContextCueSvg(nextPath.cue, "N", "Next burst is outside this preview")
+        : "",
+    ].join("");
+    const pointsSvg = previewPoints.map(item => (
+      `<circle cx="${item.point.x.toFixed(2)}" cy="${item.point.y.toFixed(2)}" r="3.2" fill="${rgbaCss(item.color)}" stroke="rgba(3,7,18,0.72)" stroke-width="0.8"><title>Fix ${formatCount(item.index + 1)}</title></circle>`
+    )).join("");
+    const endpointSvg = sameEndpoint
+      ? (
+        `<circle cx="${startPoint.x.toFixed(2)}" cy="${startPoint.y.toFixed(2)}" r="7" fill="rgba(196,181,253,0.95)" stroke="#f8fafc" stroke-width="1.5"/>`
+        + `<text x="${(startPoint.x + 9).toFixed(2)}" y="${(startPoint.y - 7).toFixed(2)}" fill="#f8fafc" font-size="10" font-weight="700">S/E</text>`
+      )
+      : (
+        `<circle cx="${startPoint.x.toFixed(2)}" cy="${startPoint.y.toFixed(2)}" r="6" fill="rgba(34,211,238,0.96)" stroke="#f8fafc" stroke-width="1.4"/>`
+        + `<text x="${(startPoint.x + 8).toFixed(2)}" y="${(startPoint.y - 7).toFixed(2)}" fill="#a5f3fc" font-size="10" font-weight="700">S</text>`
+        + `<circle cx="${endPoint.x.toFixed(2)}" cy="${endPoint.y.toFixed(2)}" r="6" fill="rgba(244,114,182,0.96)" stroke="#f8fafc" stroke-width="1.4"/>`
+        + `<text x="${(endPoint.x + 8).toFixed(2)}" y="${(endPoint.y - 7).toFixed(2)}" fill="#fbcfe8" font-size="10" font-weight="700">E</text>`
+      );
+    const stationaryNote = geometry.stationary
+      ? '<text x="12" y="149" fill="#94a3b8" font-size="10">Stationary or overlapping fixes</text>'
+      : "";
+    const samplingNote = model.positions.length > model.points.length
+      ? `<text x="508" y="149" text-anchor="end" fill="#94a3b8" font-size="10">Showing ${formatCount(model.points.length)} of ${formatCount(model.positions.length)} fix marks</text>`
+      : "";
+    this.refs.issueBurstPreviewFrame.innerHTML = `
+      <svg viewBox="0 0 520 160" role="img" aria-label="${escapeHtml(`Spatial preview of ${selected.burstId}`)}">
+        ${contextSvg}
+        <polyline
+          points="${previewSvgPoints(selectedPath)}"
+          fill="none"
+          stroke="${rgbaCss(autoBurstColor(selected, 235))}"
+          stroke-width="3.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+        ${pointsSvg}
+        ${endpointSvg}
+        ${stationaryNote}
+        ${samplingNote}
+      </svg>
+    `;
+  }
+
   resetIssueScopeControls() {
     this.refs.issueScopeControl?.classList.add("hidden");
     if (this.refs.issueScope) {
@@ -10803,6 +11107,7 @@ class MovementExampleApp {
     if (this.refs.issueBurst) {
       this.refs.issueBurst.innerHTML = "";
     }
+    this.hideIssueBurstPreview();
   }
 
   setupIndividualQueueIssueScope(individual) {
@@ -10878,6 +11183,11 @@ class MovementExampleApp {
     context.individual = individual;
     context.setName = useBurst ? selectedBurst.setName : "";
     context.burstId = useBurst ? selectedBurst.burstId : "";
+    if (useBurst) {
+      this.renderIssueBurstPreview(selectedBurst);
+    } else {
+      this.hideIssueBurstPreview();
+    }
 
     this.refs.issueMeta.innerHTML = `
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
@@ -11097,6 +11407,7 @@ class MovementExampleApp {
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
     this.refs.issueClose.disabled = false;
+    this.renderIssueBurstPreview(burst);
     this.refs.issueModal.classList.remove("hidden");
     this.refs.issueNote.focus();
   }
@@ -11129,6 +11440,7 @@ class MovementExampleApp {
     }
     if (modal === this.refs.issueModal) {
       this.pendingIssueContext = null;
+      this.hideIssueBurstPreview();
     }
     if (modal === this.refs.confirmModal) {
       this.pendingConfirmationGroups = [];
@@ -11904,6 +12216,198 @@ function parseMovementAutoBursts(items) {
         .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]))
       : [],
   })).filter(item => item.burstId) : [];
+}
+
+function samplePreviewIndices(length, maxItems) {
+  const count = Math.max(0, Number(length) || 0);
+  const limit = Math.max(2, Number(maxItems) || 2);
+  if (count <= limit) {
+    return Array.from({ length: count }, (_value, index) => index);
+  }
+  const indices = new Set([0, count - 1]);
+  for (let sampleIndex = 1; sampleIndex < limit - 1; sampleIndex += 1) {
+    indices.add(Math.round((sampleIndex * (count - 1)) / (limit - 1)));
+  }
+  return [...indices].sort((left, right) => left - right);
+}
+
+function samplePreviewPath(path, maxItems) {
+  const positions = Array.isArray(path) ? path : [];
+  return samplePreviewIndices(positions.length, maxItems)
+    .map(index => positions[index])
+    .filter(Boolean);
+}
+
+function movementPositionDistanceMeters(left, right) {
+  const lon1 = Number(left?.[0]);
+  const lat1 = Number(left?.[1]);
+  const lon2 = Number(right?.[0]);
+  const lat2 = Number(right?.[1]);
+  if (![lon1, lat1, lon2, lat2].every(Number.isFinite)) {
+    return 0;
+  }
+  const radians = value => value * Math.PI / 180;
+  const deltaLat = radians(lat2 - lat1);
+  const deltaLon = radians(lon2 - lon1);
+  const a = (
+    Math.sin(deltaLat / 2) ** 2
+    + Math.cos(radians(lat1)) * Math.cos(radians(lat2))
+      * Math.sin(deltaLon / 2) ** 2
+  );
+  return 6371008.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+}
+
+function movementPathDistanceMeters(path) {
+  const positions = Array.isArray(path) ? path : [];
+  let distance = 0;
+  for (let index = 1; index < positions.length; index += 1) {
+    distance += movementPositionDistanceMeters(positions[index - 1], positions[index]);
+  }
+  return distance;
+}
+
+function formatCompactDuration(seconds) {
+  const value = finiteOrNull(seconds);
+  if (value === null || value < 0) {
+    return "—";
+  }
+  if (value < 60) {
+    return `${formatMaybeNumber(value, "s")}`;
+  }
+  if (value < 3600) {
+    return `${formatMaybeNumber(value / 60, "min")}`;
+  }
+  if (value < 86400) {
+    return `${formatMaybeNumber(value / 3600, "h")}`;
+  }
+  return `${formatMaybeNumber(value / 86400, "d")}`;
+}
+
+function formatCompactDistance(meters) {
+  const value = finiteOrNull(meters);
+  if (value === null || value < 0) {
+    return "—";
+  }
+  return value < 1000
+    ? formatMaybeNumber(value, "m")
+    : formatMaybeNumber(value / 1000, "km");
+}
+
+function buildBurstPreviewGeometry(
+  selectedPositions,
+  previousPositions = [],
+  nextPositions = [],
+  {
+    width = 520,
+    height = 160,
+    padding = 18,
+  } = {},
+) {
+  const validPositions = positions => (Array.isArray(positions) ? positions : [])
+    .map(position => [Number(position?.[0]), Number(position?.[1])])
+    .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]));
+  const selected = validPositions(selectedPositions);
+  if (!selected.length) {
+    return null;
+  }
+  const meanLatitude = selected.reduce((sum, position) => sum + position[1], 0) / selected.length;
+  const longitudeScale = Math.max(1e-6, Math.abs(Math.cos(meanLatitude * Math.PI / 180)));
+  const rawPosition = position => ({
+    x: Number(position[0]) * longitudeScale,
+    y: Number(position[1]),
+  });
+  const rawSelected = selected.map(rawPosition);
+  const rawMinX = Math.min(...rawSelected.map(point => point.x));
+  const rawMaxX = Math.max(...rawSelected.map(point => point.x));
+  const rawMinY = Math.min(...rawSelected.map(point => point.y));
+  const rawMaxY = Math.max(...rawSelected.map(point => point.y));
+  const originalSpanX = rawMaxX - rawMinX;
+  const originalSpanY = rawMaxY - rawMinY;
+  const stationary = originalSpanX < 1e-10 && originalSpanY < 1e-10;
+  const centerX = (rawMinX + rawMaxX) / 2;
+  const centerY = (rawMinY + rawMaxY) / 2;
+  let spanX = Math.max(originalSpanX, 1e-7);
+  let spanY = Math.max(originalSpanY, 1e-7);
+  const frameWidth = Math.max(1, width - (padding * 2));
+  const frameHeight = Math.max(1, height - (padding * 2));
+  const targetAspect = frameWidth / frameHeight;
+  if ((spanX / spanY) > targetAspect) {
+    spanY = spanX / targetAspect;
+  } else {
+    spanX = spanY * targetAspect;
+  }
+  spanX *= 1.18;
+  spanY *= 1.18;
+  const minX = centerX - (spanX / 2);
+  const maxX = centerX + (spanX / 2);
+  const minY = centerY - (spanY / 2);
+  const maxY = centerY + (spanY / 2);
+  const mapRaw = point => ({
+    x: padding + (((point.x - minX) / spanX) * frameWidth),
+    y: padding + (((maxY - point.y) / spanY) * frameHeight),
+  });
+  const isInside = point => (
+    point.x >= minX
+    && point.x <= maxX
+    && point.y >= minY
+    && point.y <= maxY
+  );
+  const mapPosition = position => mapRaw(rawPosition(position));
+  const mapPath = path => validPositions(path).map(mapPosition);
+  const contextPath = (path, side) => {
+    const raw = validPositions(path).map(rawPosition);
+    if (!raw.length) {
+      return { points: [], cue: null };
+    }
+    const anchor = side === "previous" ? raw[raw.length - 1] : raw[0];
+    const points = [];
+    if (side === "previous") {
+      for (let index = raw.length - 1; index >= 0; index -= 1) {
+        if (!isInside(raw[index])) {
+          break;
+        }
+        points.unshift(mapRaw(raw[index]));
+      }
+    } else {
+      for (let index = 0; index < raw.length; index += 1) {
+        if (!isInside(raw[index])) {
+          break;
+        }
+        points.push(mapRaw(raw[index]));
+      }
+    }
+    const mappedAnchor = mapRaw(anchor);
+    const cue = isInside(anchor)
+      ? null
+      : {
+        x: clamp(mappedAnchor.x, 10, width - 10),
+        y: clamp(mappedAnchor.y, 10, height - 10),
+      };
+    return { points, cue };
+  };
+  return {
+    width,
+    height,
+    stationary,
+    mapPosition,
+    mapPath,
+    contextPath,
+  };
+}
+
+function previewSvgPoints(points) {
+  return (Array.isArray(points) ? points : [])
+    .map(point => `${Number(point?.x).toFixed(2)},${Number(point?.y).toFixed(2)}`)
+    .join(" ");
+}
+
+function previewContextCueSvg(point, label, title) {
+  return (
+    `<g>`
+    + `<circle cx="${Number(point?.x).toFixed(2)}" cy="${Number(point?.y).toFixed(2)}" r="8" fill="rgba(71,85,105,0.96)" stroke="rgba(203,213,225,0.86)" stroke-width="1"><title>${escapeHtml(title)}</title></circle>`
+    + `<text x="${Number(point?.x).toFixed(2)}" y="${(Number(point?.y) + 3.4).toFixed(2)}" text-anchor="middle" fill="#f8fafc" font-size="9" font-weight="700">${escapeHtml(label)}</text>`
+    + "</g>"
+  );
 }
 
 function normalizeReviewIssues(review) {
