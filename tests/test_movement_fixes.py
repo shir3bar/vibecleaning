@@ -1550,6 +1550,8 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert 'data-role="individual-queue-comment"' not in source
     assert "getIndividualQueueMapIndividuals()" in source
     assert "return position.group;" in source
+    assert "queue.browseShowPoints = this.refs.showPoints.checked" in source
+    assert "this.refs.showPoints.checked = true" in source
     assert "/actions/review-individuals" in source
     assert "flushIndividualReviewDecisions()" in source
     assert 'id: "movement-active-individual-outline"' not in source
