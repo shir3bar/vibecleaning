@@ -2494,6 +2494,42 @@ class MovementExampleApp {
         .movement-issue-scope [hidden] {
           display: none;
         }
+        .movement-burst-pick-actions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+          grid-column: 1 / -1;
+        }
+        .movement-burst-pick-actions .movement-inline-check {
+          margin-right: auto;
+        }
+        .movement-burst-pick-actions button {
+          padding: 6px 9px;
+        }
+        .movement-burst-selection {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+          grid-column: 1 / -1;
+          min-height: 24px;
+          color: #9bb0c6;
+          font-size: 11px;
+        }
+        .movement-burst-selection button {
+          max-width: 100%;
+          padding: 4px 7px;
+          border: 1px solid rgba(82, 214, 181, 0.28);
+          border-radius: 999px;
+          background: rgba(82, 214, 181, 0.08);
+          color: #b9f3e5;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .movement-burst-selection-empty {
+          align-self: center;
+        }
         .movement-burst-preview {
           display: grid;
           gap: 8px;
@@ -2811,12 +2847,21 @@ class MovementExampleApp {
               <label>Flag scope
                 <select data-role="issue-scope">
                   <option value="individual">Entire individual</option>
-                  <option value="burst">One burst</option>
+                  <option value="burst">One or more bursts</option>
                 </select>
               </label>
-              <label data-role="issue-burst-control">Burst
+              <label data-role="issue-burst-control">Burst to preview
                 <select data-role="issue-burst"></select>
               </label>
+              <div class="movement-burst-pick-actions" data-role="issue-burst-actions">
+                <label class="movement-inline-check">
+                  <input type="checkbox" data-role="issue-burst-included">
+                  Include previewed burst
+                </label>
+                <button type="button" data-role="issue-burst-add-next">Include + next</button>
+                <button type="button" data-role="issue-burst-clear">Clear</button>
+              </div>
+              <div class="movement-burst-selection" data-role="issue-burst-selection"></div>
             </div>
             <div class="movement-burst-preview hidden" data-role="issue-burst-preview">
               <div class="movement-burst-preview-head">
@@ -3060,6 +3105,11 @@ class MovementExampleApp {
       issueScope: this.mountEl.querySelector('[data-role="issue-scope"]'),
       issueBurstControl: this.mountEl.querySelector('[data-role="issue-burst-control"]'),
       issueBurst: this.mountEl.querySelector('[data-role="issue-burst"]'),
+      issueBurstActions: this.mountEl.querySelector('[data-role="issue-burst-actions"]'),
+      issueBurstIncluded: this.mountEl.querySelector('[data-role="issue-burst-included"]'),
+      issueBurstAddNext: this.mountEl.querySelector('[data-role="issue-burst-add-next"]'),
+      issueBurstClear: this.mountEl.querySelector('[data-role="issue-burst-clear"]'),
+      issueBurstSelection: this.mountEl.querySelector('[data-role="issue-burst-selection"]'),
       issueBurstPreview: this.mountEl.querySelector('[data-role="issue-burst-preview"]'),
       issueBurstPreviewTitle: this.mountEl.querySelector('[data-role="issue-burst-preview-title"]'),
       issueBurstPreviewFrame: this.mountEl.querySelector('[data-role="issue-burst-preview-frame"]'),
@@ -3479,6 +3529,17 @@ class MovementExampleApp {
     this.refs.issueSubmit.addEventListener("click", async () => this.submitIssueAction());
     this.refs.issueScope.addEventListener("change", () => this.updateIndividualQueueIssueScope());
     this.refs.issueBurst.addEventListener("change", () => this.updateIndividualQueueIssueScope());
+    this.refs.issueBurstIncluded.addEventListener("change", () => {
+      this.setCurrentIssueBurstIncluded(this.refs.issueBurstIncluded.checked);
+    });
+    this.refs.issueBurstAddNext.addEventListener("click", () => this.includeCurrentIssueBurstAndAdvance());
+    this.refs.issueBurstClear.addEventListener("click", () => this.clearIssueBurstSelection());
+    this.refs.issueBurstSelection.addEventListener("click", event => {
+      const button = event.target.closest("[data-remove-issue-burst]");
+      if (button) {
+        this.removeIssueBurst(button.dataset.removeIssueBurst);
+      }
+    });
     this.refs.confirmClose.addEventListener("click", () => this.closeModal(this.refs.confirmModal, this.refs.confirmSubmit));
     this.refs.confirmSubmit.addEventListener("click", async () => this.submitConfirmIssues());
     this.refs.reportClose.addEventListener("click", () => this.closeModal(this.refs.reportModal, this.refs.reportSubmit));
@@ -11104,15 +11165,27 @@ class MovementExampleApp {
     if (this.refs.issueBurstControl) {
       this.refs.issueBurstControl.hidden = true;
     }
+    if (this.refs.issueBurstActions) {
+      this.refs.issueBurstActions.hidden = true;
+    }
     if (this.refs.issueBurst) {
       this.refs.issueBurst.innerHTML = "";
+    }
+    if (this.refs.issueBurstIncluded) {
+      this.refs.issueBurstIncluded.checked = false;
+    }
+    if (this.refs.issueBurstSelection) {
+      this.refs.issueBurstSelection.innerHTML = "";
     }
     this.hideIssueBurstPreview();
   }
 
-  setupIndividualQueueIssueScope(individual) {
+  setupIndividualQueueIssueScope(
+    individual,
+    { initialBurstId = "", initialScope = "individual" } = {},
+  ) {
     const context = this.pendingIssueContext;
-    if (!context || context.queueReviewIndividual !== individual) {
+    if (!context || context.individual !== individual) {
       return;
     }
     const bursts = (this.data?.autoBursts || [])
@@ -11123,35 +11196,123 @@ class MovementExampleApp {
         || left.burstId.localeCompare(right.burstId)
       ));
     context.queueReviewBursts = bursts;
+    context.selectedBurstIds = new Set(
+      initialBurstId && bursts.some(burst => burst.burstId === initialBurstId)
+        ? [initialBurstId]
+        : [],
+    );
     this.refs.issueBurst.innerHTML = "";
     for (const burst of bursts) {
       const option = document.createElement("option");
       option.value = burst.burstId;
       option.textContent = (
         `Burst ${formatCount(burst.burstIdx + 1)}`
+        + ` • ${burst.setName}`
         + ` • ${formatTimestamp(burst.startTimeMs)}`
         + ` • ${formatCount(burst.fixCount)} fixes`
       );
       this.refs.issueBurst.appendChild(option);
     }
+    if (initialBurstId) {
+      this.refs.issueBurst.value = initialBurstId;
+    }
     const burstScopeOption = this.refs.issueScope.querySelector('option[value="burst"]');
     if (burstScopeOption) {
       burstScopeOption.disabled = !bursts.length;
       burstScopeOption.textContent = bursts.length
-        ? `One burst (${formatCount(bursts.length)} available)`
-        : "One burst (none available)";
+        ? `One or more bursts (${formatCount(bursts.length)} available)`
+        : "One or more bursts (none available)";
     }
-    this.refs.issueScope.value = "individual";
+    this.refs.issueScope.value = initialScope === "burst" && bursts.length
+      ? "burst"
+      : "individual";
     this.refs.issueScopeControl.classList.remove("hidden");
+    this.updateIndividualQueueIssueScope();
+  }
+
+  selectedIssueBursts() {
+    const context = this.pendingIssueContext;
+    const selectedIds = context?.selectedBurstIds instanceof Set
+      ? context.selectedBurstIds
+      : new Set();
+    return (context?.queueReviewBursts || []).filter(
+      burst => selectedIds.has(burst.burstId),
+    );
+  }
+
+  renderIssueBurstSelection() {
+    if (!this.refs.issueBurstSelection) {
+      return;
+    }
+    const selectedBursts = this.selectedIssueBursts();
+    if (!selectedBursts.length) {
+      this.refs.issueBurstSelection.innerHTML = (
+        '<span class="movement-burst-selection-empty">No bursts selected.</span>'
+      );
+      return;
+    }
+    this.refs.issueBurstSelection.innerHTML = selectedBursts.map(burst => `
+      <button
+        type="button"
+        data-remove-issue-burst="${escapeHtml(burst.burstId)}"
+        title="Remove ${escapeHtml(burst.burstId)}"
+      >${escapeHtml(`Burst ${formatCount(burst.burstIdx + 1)} • ${burst.setName}`)} ×</button>
+    `).join("");
+  }
+
+  setCurrentIssueBurstIncluded(included) {
+    const context = this.pendingIssueContext;
+    const burstId = String(this.refs.issueBurst.value || "");
+    if (!context?.selectedBurstIds || !burstId) {
+      return;
+    }
+    if (included) {
+      context.selectedBurstIds.add(burstId);
+    } else {
+      context.selectedBurstIds.delete(burstId);
+    }
+    this.updateIndividualQueueIssueScope();
+  }
+
+  includeCurrentIssueBurstAndAdvance() {
+    const context = this.pendingIssueContext;
+    const options = [...this.refs.issueBurst.options];
+    const currentIndex = Math.max(0, this.refs.issueBurst.selectedIndex);
+    const burstId = String(options[currentIndex]?.value || "");
+    if (!context?.selectedBurstIds || !burstId) {
+      return;
+    }
+    context.selectedBurstIds.add(burstId);
+    if (currentIndex < options.length - 1) {
+      this.refs.issueBurst.selectedIndex = currentIndex + 1;
+    }
+    this.updateIndividualQueueIssueScope();
+  }
+
+  clearIssueBurstSelection() {
+    const context = this.pendingIssueContext;
+    if (!(context?.selectedBurstIds instanceof Set)) {
+      return;
+    }
+    context.selectedBurstIds.clear();
+    this.updateIndividualQueueIssueScope();
+  }
+
+  removeIssueBurst(burstId) {
+    const context = this.pendingIssueContext;
+    if (!(context?.selectedBurstIds instanceof Set)) {
+      return;
+    }
+    context.selectedBurstIds.delete(String(burstId || ""));
     this.updateIndividualQueueIssueScope();
   }
 
   updateIndividualQueueIssueScope() {
     const context = this.pendingIssueContext;
-    if (!context?.queueReviewIndividual) {
+    if (!context?.individual || !Array.isArray(context.queueReviewBursts)) {
       return;
     }
-    const individual = context.queueReviewIndividual;
+    const individual = context.individual;
     const bursts = Array.isArray(context.queueReviewBursts)
       ? context.queueReviewBursts
       : [];
@@ -11159,14 +11320,28 @@ class MovementExampleApp {
       burst => burst.burstId === this.refs.issueBurst.value,
     ) || bursts[0] || null;
     const useBurst = this.refs.issueScope.value === "burst" && Boolean(selectedBurst);
+    if (
+      useBurst
+      && context.mode !== "bursts"
+      && context.selectedBurstIds instanceof Set
+      && !context.selectedBurstIds.size
+    ) {
+      context.selectedBurstIds.add(selectedBurst.burstId);
+    }
+    const selectedBursts = this.selectedIssueBursts();
     this.refs.issueScope.value = useBurst ? "burst" : "individual";
     this.refs.issueBurstControl.hidden = !useBurst;
+    this.refs.issueBurstActions.hidden = !useBurst;
+    this.refs.issueBurstSelection.hidden = !useBurst;
+    this.refs.issueBurstIncluded.checked = useBurst
+      && selectedBursts.some(burst => burst.burstId === selectedBurst.burstId);
+    this.renderIssueBurstSelection();
 
     const previousDefaultType = context.defaultIssueType || "";
     const previousDefaultQuestion = context.defaultOwnerQuestion || "";
     const defaultIssueType = useBurst ? "burst review" : "individual review";
     const defaultOwnerQuestion = useBurst
-      ? "Could you confirm whether this burst should be treated as an outlier?"
+      ? "Could you confirm whether these bursts should be treated as outliers?"
       : "Could you confirm whether this individual's track should be treated as an outlier?";
     if (!this.refs.issueType.value.trim() || this.refs.issueType.value === previousDefaultType) {
       this.refs.issueType.value = defaultIssueType;
@@ -11179,10 +11354,12 @@ class MovementExampleApp {
     }
     context.defaultIssueType = defaultIssueType;
     context.defaultOwnerQuestion = defaultOwnerQuestion;
-    context.mode = useBurst ? "burst" : "individual";
+    context.mode = useBurst ? "bursts" : "individual";
     context.individual = individual;
-    context.setName = useBurst ? selectedBurst.setName : "";
-    context.burstId = useBurst ? selectedBurst.burstId : "";
+    context.setName = "";
+    context.burstIds = useBurst
+      ? selectedBursts.map(burst => burst.burstId)
+      : [];
     if (useBurst) {
       this.renderIssueBurstPreview(selectedBurst);
     } else {
@@ -11193,27 +11370,38 @@ class MovementExampleApp {
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
       <div><strong>Individual:</strong> ${escapeHtml(individual)}</div>
-      ${useBurst ? `<div><strong>Burst:</strong> ${escapeHtml(selectedBurst.burstId)}</div>` : ""}
-      <div><strong>Flag scope:</strong> ${useBurst ? "one burst" : "entire individual"}</div>
+      ${useBurst ? `<div><strong>Bursts selected:</strong> ${escapeHtml(formatCount(selectedBursts.length))}</div>` : ""}
+      <div><strong>Flag scope:</strong> ${useBurst ? "selected bursts" : "entire individual"}</div>
       <div><strong>Resolved fixes:</strong> ${escapeHtml(formatCount(
-        useBurst ? selectedBurst.fixCount : this.data?.stats?.[individual]?.rowCount || 0,
+        useBurst
+          ? selectedBursts.reduce((total, burst) => total + burst.fixCount, 0)
+          : this.data?.stats?.[individual]?.rowCount || 0,
       ))}</div>
+      <div><strong>Origin:</strong> ${escapeHtml(context.origin || "manual")}</div>
+      ${context.sourceAnalysisId ? `<div><strong>Source analysis:</strong> ${escapeHtml(context.sourceAnalysisId)}</div>` : ""}
       <div><strong>Review result:</strong> Reviewed—issues after this flag is created</div>
     `;
     if (useBurst) {
-      this.refs.issueSelection.textContent = (
-        `${selectedBurst.burstId}\n`
-        + `${formatTimestamp(selectedBurst.startTimeMs)} to ${formatTimestamp(selectedBurst.endTimeMs)}\n`
-        + `${formatCount(selectedBurst.fixCount)} fixes under the current burst definition.`
-      );
+      const displayed = selectedBursts.slice(0, 20).map(burst => (
+        `${burst.burstId} • ${burst.setName} • `
+        + `${formatTimestamp(burst.startTimeMs)} to ${formatTimestamp(burst.endTimeMs)} • `
+        + `${formatCount(burst.fixCount)} fixes`
+      ));
+      if (selectedBursts.length > displayed.length) {
+        displayed.push(`…and ${formatCount(selectedBursts.length - displayed.length)} more`);
+      }
+      this.refs.issueSelection.textContent = displayed.length
+        ? displayed.join("\n")
+        : "Choose at least one burst to flag.";
     } else {
       const burstNote = bursts.length
-        ? ` Choose “One burst” above to flag only one of the ${formatCount(bursts.length)} current bursts.`
+        ? ` Choose “One or more bursts” above to flag selected bursts from the ${formatCount(bursts.length)} available.`
         : " No bursts are currently available for this individual under the current burst definition.";
       this.refs.issueSelection.textContent = (
         `The annotation will apply to every fix for ${individual}.${burstNote}`
       );
     }
+    this.refs.issueSubmit.disabled = useBurst && !selectedBursts.length;
   }
 
   openIssueModal(status) {
@@ -11356,9 +11544,7 @@ class MovementExampleApp {
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
     this.refs.issueClose.disabled = false;
-    if (queueReview) {
-      this.setupIndividualQueueIssueScope(individual);
-    }
+    this.setupIndividualQueueIssueScope(individual);
     this.refs.issueModal.classList.remove("hidden");
     this.refs.issueNote.focus();
   }
@@ -11377,17 +11563,19 @@ class MovementExampleApp {
     const fixCount = Number(burst?.fixCount ?? burst?.fix_count ?? burst?.n_fixes) || 0;
     this.pendingIssueStatus = "suspected";
     this.pendingIssueContext = {
-      mode: "burst",
+      mode: "bursts",
       fixes: [],
-      burstId,
+      burstIds: [burstId],
       individual,
       setName,
       origin,
       sourceAnalysisId,
       issueField: "",
       issueThreshold: "",
+      defaultIssueType: origin === "algorithm" ? "burst anomaly" : "burst review",
+      defaultOwnerQuestion: "Could you confirm whether these bursts should be treated as outliers?",
     };
-    this.refs.issueTitle.textContent = "Flag burst for review";
+    this.refs.issueTitle.textContent = "Flag bursts for review";
     this.refs.issueMeta.innerHTML = `
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
@@ -11402,12 +11590,15 @@ class MovementExampleApp {
     this.refs.issueUser.value = this.getUser();
     this.refs.issueType.value = origin === "algorithm" ? "burst anomaly" : "burst review";
     this.refs.issueNote.value = "";
-    this.refs.issueQuestion.value = "Could you confirm whether this burst should be treated as an outlier?";
+    this.refs.issueQuestion.value = "Could you confirm whether these bursts should be treated as outliers?";
     this.refs.issueStatus.textContent = "";
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
     this.refs.issueClose.disabled = false;
-    this.renderIssueBurstPreview(burst);
+    this.setupIndividualQueueIssueScope(individual, {
+      initialBurstId: burstId,
+      initialScope: "burst",
+    });
     this.refs.issueModal.classList.remove("hidden");
     this.refs.issueNote.focus();
   }
@@ -11471,8 +11662,13 @@ class MovementExampleApp {
     const issueThreshold = context.issueThreshold || "";
     const issueNote = this.refs.issueNote.value.trim();
     const ownerQuestion = this.refs.issueQuestion.value.trim();
-    const groupScope = context.mode === "individual" || context.mode === "burst";
+    const groupScope = context.mode === "individual" || context.mode === "bursts";
     if (!selectedFixes.length && !groupScope) {
+      return;
+    }
+    if (context.mode === "bursts" && !(context.burstIds || []).length) {
+      this.refs.issueStatus.textContent = "Choose at least one burst to flag.";
+      this.refs.issueStatus.classList.add("error");
       return;
     }
     if (!user || !issueType || !issueNote || !ownerQuestion) {
@@ -11492,8 +11688,8 @@ class MovementExampleApp {
       ? `Marking ${formatCount(selectedFixes.length)} fixes as one ${this.pendingIssueStatus} segment...`
       : context.mode === "individual"
         ? `Flagging individual ${context.individual} for review...`
-        : context.mode === "burst"
-          ? `Flagging burst ${context.burstId} for review...`
+        : context.mode === "bursts"
+          ? `Flagging ${formatCount(context.burstIds?.length || 0)} burst(s) for review...`
           : `Marking ${formatCount(selectedFixes.length)} fixes as ${this.pendingIssueStatus}...`;
     this.refs.issueStatus.classList.remove("error");
     this.setStatus(this.refs.issueStatus.textContent);
@@ -11514,10 +11710,10 @@ class MovementExampleApp {
           individual: context.individual,
           set_name: context.setName || "",
         };
-      } else if (context.mode === "burst") {
+      } else if (context.mode === "bursts") {
         scope = {
-          kind: "burst",
-          burst_id: context.burstId,
+          kind: "bursts",
+          burst_ids: context.burstIds,
         };
       } else {
         scope = {

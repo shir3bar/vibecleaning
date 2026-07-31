@@ -1156,7 +1156,7 @@ def register_movement_routes(
             if not isinstance(raw_scope, dict):
                 raise ValueError("Review scope is required")
             scope_kind = str(raw_scope.get("kind") or "").strip().lower()
-            if scope_kind not in {"fix", "segment", "burst", "individual"}:
+            if scope_kind not in {"fix", "segment", "burst", "bursts", "individual"}:
                 raise ValueError("Invalid review scope")
             scope: dict[str, object] = {"kind": scope_kind}
             if scope_kind in {"fix", "segment"}:
@@ -1179,12 +1179,29 @@ def register_movement_routes(
                     label="Set name",
                     max_length=40,
                 )
-            else:
+            elif scope_kind == "burst":
                 scope["burst_id"] = _validate_required_text(
                     raw_scope.get("burst_id"),
                     label="Burst id",
                     max_length=240,
                 )
+            else:
+                raw_burst_ids = raw_scope.get("burst_ids")
+                if not isinstance(raw_burst_ids, list):
+                    raise ValueError("Burst ids must be a list")
+                burst_ids = list(
+                    dict.fromkeys(
+                        _validate_required_text(
+                            value,
+                            label="Burst id",
+                            max_length=240,
+                        )
+                        for value in raw_burst_ids
+                    )
+                )
+                if not burst_ids:
+                    raise ValueError("Choose at least one burst")
+                scope["burst_ids"] = burst_ids
 
             status = _validate_status(body.get("status"))
             if status != "suspected":
@@ -1217,9 +1234,14 @@ def register_movement_routes(
                 for artifact in dataset.get("artifacts", [])
             ):
                 input_artifacts.append("movement_review_annotations.json")
+            scope_title = (
+                f"{len(scope['burst_ids'])} bursts"
+                if scope_kind == "bursts"
+                else scope_kind
+            )
             payload = {
                 "user": user,
-                "title": f"Mark {scope_kind} as {status} in {logical_name}",
+                "title": f"Mark {scope_title} as {status} in {logical_name}",
                 "kind": "python",
                 "script": ANNOTATE_SCOPE_SCRIPT,
                 "parameters": {

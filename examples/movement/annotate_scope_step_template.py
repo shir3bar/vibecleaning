@@ -40,8 +40,7 @@ def main():
     fixes = movement["fixes"]
     raw_scope = dict(params.get("scope") or {})
     kind = str(raw_scope.get("kind") or "fix")
-    resolved_fix_keys = []
-    scope = {"kind": kind}
+    resolved_scopes = []
     if kind in {"fix", "segment"}:
         row_ranges = normalize_row_ranges(raw_scope.get("row_ranges") or [])
         resolved_fix_keys = [
@@ -52,10 +51,11 @@ def main():
         expected_count = int(raw_scope.get("fix_count") or 0)
         if expected_count and len(resolved_fix_keys) != expected_count:
             raise SystemExit("Some selected fixes were not found in the current dataset")
-        scope["row_ranges"] = row_ranges
+        scope = {"kind": kind, "row_ranges": row_ranges}
         if kind == "segment":
             scope["start_fix_key"] = str(raw_scope.get("start_fix_key") or "").strip()
             scope["end_fix_key"] = str(raw_scope.get("end_fix_key") or "").strip()
+        resolved_scopes.append((scope, resolved_fix_keys))
     elif kind == "individual":
         individual = str(raw_scope.get("individual") or "").strip()
         set_name = str(raw_scope.get("set_name") or "").strip()
@@ -64,48 +64,78 @@ def main():
             for item in fixes
             if item["individual"] == individual and (not set_name or item.get("set") == set_name)
         ]
-        scope.update({"individual": individual, "set_name": set_name})
-    elif kind == "burst":
-        burst_id = str(raw_scope.get("burst_id") or "").strip()
-        burst = next((item for item in movement["auto_bursts"] if item.get("burst_id") == burst_id), None)
-        if burst is None:
-            raise SystemExit("Selected burst was not found with the current burst settings")
-        resolved_fix_keys = list(burst.get("fix_keys") or [])
-        scope.update(
-            {
-                "burst_id": burst_id,
-                "individual": str(burst.get("individual") or ""),
-                "set_name": str(burst.get("set_name") or ""),
-                "start_fix_key": str(burst.get("start_fix_key") or ""),
-                "end_fix_key": str(burst.get("end_fix_key") or ""),
-                "row_ranges": compress_fix_keys(resolved_fix_keys),
-                "burst_gap": movement.get("burst_gap") or {},
-            }
+        resolved_scopes.append(
+            (
+                {"kind": kind, "individual": individual, "set_name": set_name},
+                resolved_fix_keys,
+            )
         )
+    elif kind in {"burst", "bursts"}:
+        burst_ids = (
+            [str(raw_scope.get("burst_id") or "").strip()]
+            if kind == "burst"
+            else [
+                str(item).strip()
+                for item in raw_scope.get("burst_ids") or []
+                if str(item).strip()
+            ]
+        )
+        bursts_by_id = {
+            str(item.get("burst_id") or ""): item
+            for item in movement["auto_bursts"]
+        }
+        for burst_id in burst_ids:
+            burst = bursts_by_id.get(burst_id)
+            if burst is None:
+                raise SystemExit("Selected burst was not found with the current burst settings")
+            resolved_fix_keys = list(burst.get("fix_keys") or [])
+            resolved_scopes.append(
+                (
+                    {
+                        "kind": "burst",
+                        "burst_id": burst_id,
+                        "individual": str(burst.get("individual") or ""),
+                        "set_name": str(burst.get("set_name") or ""),
+                        "start_fix_key": str(burst.get("start_fix_key") or ""),
+                        "end_fix_key": str(burst.get("end_fix_key") or ""),
+                        "row_ranges": compress_fix_keys(resolved_fix_keys),
+                        "burst_gap": movement.get("burst_gap") or {},
+                    },
+                    resolved_fix_keys,
+                )
+            )
     else:
         raise SystemExit("Invalid review scope")
-    if not resolved_fix_keys:
+    if not resolved_scopes or any(not fix_keys for _, fix_keys in resolved_scopes):
         raise SystemExit("Review scope did not resolve to any fixes")
 
     existing_input = inputs.get(REVIEW_SIDECAR_NAME)
     annotations = load_review_annotations(Path(existing_input["path"]) if existing_input else None)
-    annotation = {
-        "annotation_id": step_id,
-        "step_id": step_id,
-        "source_artifact": target_artifact,
-        "source_dataset_id": str(params.get("dataset_id") or "").strip(),
-        "status": str(params.get("status") or "").strip(),
-        "origin": str(params.get("origin") or "manual").strip(),
-        "issue_type": str(params.get("issue_type") or "").strip(),
-        "comment": str(params.get("comment") or "").strip(),
-        "owner_question": str(params.get("owner_question") or "").strip(),
-        "user": str(params.get("user") or "").strip(),
-        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "source_analysis_id": str(params.get("source_analysis_id") or "").strip(),
-        "scope": scope,
-        "resolved_fix_count": len(resolved_fix_keys),
-    }
-    annotations.append(annotation)
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    new_annotations = []
+    for index, (scope, resolved_fix_keys) in enumerate(resolved_scopes):
+        annotation = {
+            "annotation_id": (
+                step_id
+                if len(resolved_scopes) == 1
+                else f"{step_id}:scope:{index + 1:04d}"
+            ),
+            "step_id": step_id,
+            "source_artifact": target_artifact,
+            "source_dataset_id": str(params.get("dataset_id") or "").strip(),
+            "status": str(params.get("status") or "").strip(),
+            "origin": str(params.get("origin") or "manual").strip(),
+            "issue_type": str(params.get("issue_type") or "").strip(),
+            "comment": str(params.get("comment") or "").strip(),
+            "owner_question": str(params.get("owner_question") or "").strip(),
+            "user": str(params.get("user") or "").strip(),
+            "created_at": created_at,
+            "source_analysis_id": str(params.get("source_analysis_id") or "").strip(),
+            "scope": scope,
+            "resolved_fix_count": len(resolved_fix_keys),
+        }
+        annotations.append(annotation)
+        new_annotations.append(annotation)
     output_path = Path(output["path"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -117,11 +147,16 @@ def main():
             {
                 "app": "movement",
                 "action": "annotate_scope",
-                "annotation_id": annotation["annotation_id"],
+                "annotation_id": new_annotations[0]["annotation_id"],
+                "annotation_ids": [item["annotation_id"] for item in new_annotations],
+                "annotation_count": len(new_annotations),
                 "scope_kind": kind,
-                "status": annotation["status"],
-                "origin": annotation["origin"],
-                "resolved_fix_count": len(resolved_fix_keys),
+                "status": new_annotations[0]["status"],
+                "origin": new_annotations[0]["origin"],
+                "resolved_fix_count": sum(
+                    item["resolved_fix_count"]
+                    for item in new_annotations
+                ),
                 "source_artifact": target_artifact,
             },
             indent=2,

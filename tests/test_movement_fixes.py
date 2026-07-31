@@ -1584,7 +1584,7 @@ def test_movement_issue_dialog_has_compact_burst_preview():
     assert 'data-role="issue-burst-preview-metrics"' in source
     assert "buildIssueBurstPreviewModel(burst)" in source
     assert "renderIssueBurstPreview(selectedBurst)" in source
-    assert "this.renderIssueBurstPreview(burst)" in source
+    assert "initialBurstId: burstId" in source
     assert "this.hideIssueBurstPreview()" in source
     assert "item.individual === selected.individual" in source
     assert "item.setName === selected.setName" in source
@@ -1598,6 +1598,14 @@ def test_movement_issue_dialog_has_compact_burst_preview():
     assert "Previous burst is outside this preview" in source
     assert "Next burst is outside this preview" in source
     assert "Burst metadata is available, but its path is not loaded" in source
+    assert "One or more bursts" in source
+    assert 'data-role="issue-burst-included"' in source
+    assert 'data-role="issue-burst-add-next"' in source
+    assert 'data-role="issue-burst-selection"' in source
+    assert "selectedIssueBursts()" in source
+    assert "includeCurrentIssueBurstAndAdvance()" in source
+    assert 'kind: "bursts"' in source
+    assert "burst_ids: context.burstIds" in source
 
 
 def test_export_reviewed_csv_combines_portable_and_sidecar_annotations(tmp_path):
@@ -1987,6 +1995,100 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     ]
     assert all("Ranked as an unusual burst" not in row["outlier_comments"] for row in exported)
     assert all("vc_outlier_status" not in row for row in exported)
+
+
+def test_annotate_scope_flags_multiple_bursts_in_one_step(tmp_path):
+    clean_csv = """eventid,individual,timestamp,longitude,latitude,set
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+fix_a_3,alpha,2024-01-01T02:00:00Z,-70.2,40.2,train
+"""
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=clean_csv)
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {
+                "kind": "bursts",
+                "burst_ids": [
+                    "alpha:train:burst_000000",
+                    "alpha:train:burst_000002",
+                ],
+            },
+            "status": "suspected",
+            "origin": "manual",
+            "issue_type": "burst review",
+            "comment": "These two bursts need review",
+            "owner_question": "Are these bursts valid?",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": 1800,
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    summary = payload["step"]["summary"]
+    assert payload["step"]["title"] == "Mark 2 bursts as suspected in movement.csv"
+    assert summary["scope_kind"] == "bursts"
+    assert summary["annotation_count"] == 2
+    assert summary["resolved_fix_count"] == 2
+    assert len(summary["annotation_ids"]) == 2
+    assert len(set(summary["annotation_ids"])) == 2
+    assert payload["step"]["parameters"]["scope"]["burst_ids"] == [
+        "alpha:train:burst_000000",
+        "alpha:train:burst_000002",
+    ]
+
+    _, sidecar_path = get_dataset_artifact(
+        study_dir,
+        payload["dataset"]["dataset_id"],
+        "movement_review_annotations.json",
+    )
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    annotations = sidecar["annotations"]
+    assert [item["scope"]["kind"] for item in annotations] == ["burst", "burst"]
+    assert [item["scope"]["burst_id"] for item in annotations] == [
+        "alpha:train:burst_000000",
+        "alpha:train:burst_000002",
+    ]
+    assert [item["scope"]["row_ranges"] for item in annotations] == [
+        [[1, 1]],
+        [[3, 3]],
+    ]
+    assert {item["step_id"] for item in annotations} == {payload["step"]["step_id"]}
+
+    confirmed = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/confirm-issues",
+        json={
+            "dataset_id": payload["dataset"]["dataset_id"],
+            "logical_name": "movement.csv",
+            "confirmations": [
+                {
+                    "parent_annotation_id": annotations[0]["annotation_id"],
+                    "fix_keys": ["id:fix_a_1#row:1"],
+                }
+            ],
+            "user": "reviewer",
+        },
+    )
+    assert confirmed.status_code == 200
+    reviewed = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/"
+        f"dataset/{confirmed.json()['dataset']['dataset_id']}/fixes",
+        params={
+            "logical_name": "movement.csv",
+            "individual": "alpha",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": "1800",
+        },
+    ).json()["fixes"]
+    assert reviewed[0]["review"]["status"] == "confirmed"
+    assert reviewed[1].get("review", {}).get("status", "") == ""
+    assert reviewed[2]["review"]["status"] == "suspected"
 
 
 def test_annotate_scope_rejects_direct_confirmation(tmp_path):
