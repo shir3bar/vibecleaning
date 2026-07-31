@@ -386,7 +386,7 @@ class MovementExampleApp {
       pointerId: null,
     };
     this.individualReviewQueue = {
-      mode: this.uiState.individualViewMode === "queue" ? "queue" : "browse",
+      mode: "browse",
       orderMode: this.uiState.individualQueueOrder === "ranking" ? "ranking" : "dataset",
       pageIndex: Math.max(0, Number(this.uiState.individualQueuePage) || 0),
       groupIndex: 0,

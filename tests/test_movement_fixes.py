@@ -1565,6 +1565,8 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
 
     assert "const INDIVIDUAL_QUEUE_PAGE_SIZE = 25" in source
     assert "const INDIVIDUAL_QUEUE_GROUP_SIZE = 5" in source
+    assert 'mode: "browse",' in source
+    assert 'mode: this.uiState.individualViewMode === "queue" ? "queue" : "browse"' not in source
     assert 'data-role="individual-view-browse">Browse all</button>' in source
     assert 'data-role="individual-view-queue">Review queue</button>' in source
     assert source.index('data-role="individual-view-browse"') < source.index('data-role="side-sheet-tabs"')
