@@ -392,8 +392,6 @@ class MovementExampleApp {
       activeIndividual: "",
       mapScope: "group",
       browseContext: null,
-      browseShowPoints: null,
-      pointsVisibilityInitialized: false,
       browseSideSheet: this.uiState.sideSheet || "individuals",
       queueMapView: null,
       stagedDecisions: new Map(),
@@ -6126,10 +6124,6 @@ class MovementExampleApp {
     if (!this.data || this.individualReviewQueue.mode !== "queue") {
       return;
     }
-    if (!this.individualReviewQueue.pointsVisibilityInitialized) {
-      this.refs.showPoints.checked = true;
-      this.individualReviewQueue.pointsVisibilityInitialized = true;
-    }
     const available = new Set(this.data.individuals);
     if (!available.has(this.individualReviewQueue.activeIndividual)) {
       this.individualReviewQueue.activeIndividual = "";
@@ -6278,9 +6272,6 @@ class MovementExampleApp {
     }
     if (nextMode === "queue") {
       queue.browseContext = this.captureDatasetViewContext();
-      queue.browseShowPoints = this.refs.showPoints.checked;
-      queue.pointsVisibilityInitialized = true;
-      this.refs.showPoints.checked = true;
       queue.browseSideSheet = this.refs.sideSheetTabs?.dataset.activeSheet || "individuals";
       queue.mode = "queue";
       queue.activeIndividual = "";
@@ -6297,11 +6288,6 @@ class MovementExampleApp {
     } else {
       queue.queueMapView = this.captureCurrentMapView();
       queue.mode = "browse";
-      if (typeof queue.browseShowPoints === "boolean") {
-        this.refs.showPoints.checked = queue.browseShowPoints;
-      }
-      queue.browseShowPoints = null;
-      queue.pointsVisibilityInitialized = false;
       const context = queue.browseContext;
       if (context) {
         const available = new Set(this.data.individuals);
