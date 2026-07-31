@@ -1474,6 +1474,10 @@ def test_movement_frontend_restores_saved_burst_analyses():
     assert 'status: "checking"' in source
     assert 'status: "available"' in source
     assert 'status: "restoring"' in source
+    assert "const loadedRanking = this.hasCompatibleIndividualQueueRanking()" in source
+    assert "rankingAnalysisId === loadedRankingAnalysisId" in source
+    assert "createdAt: String(ranking.created_at || loadedRanking.createdAt || \"\")" in source
+    assert "this.anomalyRanking = loadedRanking || {" in source
     assert "Checking for a compatible saved burst ranking" in source
     assert "Loading saved burst ranking" in source
     assert 'data-action="load-saved-ranking"' in source

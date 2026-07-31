@@ -4272,17 +4272,23 @@ class MovementExampleApp {
     if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
       return;
     }
+    const loadedRanking = this.hasCompatibleIndividualQueueRanking()
+      ? this.anomalyRanking
+      : null;
+    const loadedRankingAnalysisId = String(loadedRanking?.analysisId || "");
     const familyName = this.currentFamily;
     const studyName = this.currentStudy;
     const datasetId = this.currentDatasetId;
     const artifactName = this.currentArtifact;
     const controller = this.beginRequest("analysisHistory");
-    this.anomalyRanking = {
-      ...this.makeEmptyAnomalyRanking(),
-      status: "checking",
-    };
-    this.renderAnomalyRanking();
-    this.renderIndividuals();
+    if (!loadedRanking) {
+      this.anomalyRanking = {
+        ...this.makeEmptyAnomalyRanking(),
+        status: "checking",
+      };
+      this.renderAnomalyRanking();
+      this.renderIndividuals();
+    }
     const params = new URLSearchParams({
       dataset_id: datasetId,
       logical_name: artifactName,
@@ -4313,14 +4319,26 @@ class MovementExampleApp {
       const restored = [];
       const tasks = [];
       if (ranking) {
-        this.anomalyRanking = {
-          ...this.makeEmptyAnomalyRanking(),
-          analysisId: String(ranking.analysis_id || ""),
-          status: "available",
-          createdAt: String(ranking.created_at || ""),
-          user: String(ranking.user || ""),
-          loadedFromHistory: true,
-        };
+        const rankingAnalysisId = String(ranking.analysis_id || "");
+        this.anomalyRanking = (
+          loadedRanking
+          && rankingAnalysisId
+          && rankingAnalysisId === loadedRankingAnalysisId
+        )
+          ? {
+            ...loadedRanking,
+            createdAt: String(ranking.created_at || loadedRanking.createdAt || ""),
+            user: String(ranking.user || loadedRanking.user || ""),
+            loadedFromHistory: true,
+          }
+          : {
+            ...this.makeEmptyAnomalyRanking(),
+            analysisId: rankingAnalysisId,
+            status: "available",
+            createdAt: String(ranking.created_at || ""),
+            user: String(ranking.user || ""),
+            loadedFromHistory: true,
+          };
       } else {
         this.anomalyRanking = {
           ...this.makeEmptyAnomalyRanking(),
@@ -4359,7 +4377,7 @@ class MovementExampleApp {
     } catch (error) {
       if (!this.isAbortError(error)) {
         console.warn("Could not load saved movement analyses", error);
-        this.anomalyRanking = {
+        this.anomalyRanking = loadedRanking || {
           ...this.makeEmptyAnomalyRanking(),
           status: "history_error",
           restoreError: error.message,
