@@ -5046,7 +5046,7 @@ class MovementExampleApp {
       && individual
       && individual !== this.individualReviewQueue.activeIndividual
     ) {
-      return 0.5;
+      return 0.25;
     }
     return 1;
   }

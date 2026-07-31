@@ -1553,7 +1553,7 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert "/actions/review-individuals" in source
     assert "flushIndividualReviewDecisions()" in source
     assert 'id: "movement-active-individual-outline"' not in source
-    assert "return 0.5;" in source
+    assert "return 0.25;" in source
     assert "this.queueMapColor(" in source
     assert 'data-role="issue-scope"' in source
     assert 'data-role="issue-burst"' in source
