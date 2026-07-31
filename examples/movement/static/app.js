@@ -319,6 +319,7 @@ class MovementExampleApp {
       candidateQuery: null,
       queryLibrary: null,
       anomalyRanking: null,
+      issueBurstScores: null,
       burstFeatureSpace: null,
       analysisHistory: null,
     };
@@ -2494,41 +2495,61 @@ class MovementExampleApp {
         .movement-issue-scope [hidden] {
           display: none;
         }
-        .movement-burst-pick-actions {
+        .movement-burst-picker {
+          display: grid;
+          gap: 8px;
+          grid-column: 1 / -1;
+        }
+        .movement-burst-picker-head {
           display: flex;
           align-items: center;
+          justify-content: space-between;
           gap: 8px;
-          flex-wrap: wrap;
-          grid-column: 1 / -1;
+          color: #dbe4ef;
+          font-size: 12px;
         }
-        .movement-burst-pick-actions .movement-inline-check {
-          margin-right: auto;
-        }
-        .movement-burst-pick-actions button {
-          padding: 6px 9px;
-        }
-        .movement-burst-selection {
-          display: flex;
-          gap: 6px;
-          flex-wrap: wrap;
-          grid-column: 1 / -1;
-          min-height: 24px;
+        .movement-burst-picker-head span {
           color: #9bb0c6;
           font-size: 11px;
+          text-align: right;
         }
-        .movement-burst-selection button {
-          max-width: 100%;
-          padding: 4px 7px;
-          border: 1px solid rgba(82, 214, 181, 0.28);
-          border-radius: 999px;
-          background: rgba(82, 214, 181, 0.08);
-          color: #b9f3e5;
+        .movement-burst-list {
+          max-height: 190px;
+          overflow: auto;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 10px;
+          background: rgba(2, 8, 18, 0.44);
+        }
+        .movement-modal-body label.movement-burst-choice {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 9px;
+          padding: 7px 9px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+          color: #dbe4ef;
+          cursor: pointer;
+        }
+        .movement-modal-body label.movement-burst-choice:last-child {
+          border-bottom: 0;
+        }
+        .movement-modal-body label.movement-burst-choice:hover,
+        .movement-modal-body label.movement-burst-choice:has(input:checked) {
+          background: rgba(82, 214, 181, 0.075);
+        }
+        .movement-modal-body label.movement-burst-choice input {
+          min-width: 0;
+          padding: 0;
+        }
+        .movement-burst-choice-main {
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-        .movement-burst-selection-empty {
-          align-self: center;
+        .movement-burst-choice-score {
+          color: #b9f3e5;
+          font-variant-numeric: tabular-nums;
+          white-space: nowrap;
         }
         .movement-burst-preview {
           display: grid;
@@ -2556,15 +2577,39 @@ class MovementExampleApp {
           white-space: nowrap;
           color: #9bb0c6;
         }
+        .movement-burst-preview-list {
+          display: grid;
+          gap: 10px;
+        }
+        .movement-burst-preview-card {
+          display: grid;
+          gap: 7px;
+          padding: 9px;
+          border-radius: 10px;
+          background: #e9eef5;
+          color: #152033;
+        }
+        .movement-burst-preview-card-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          color: #152033;
+          font-size: 11px;
+        }
+        .movement-burst-preview-card-head span {
+          color: #475569;
+          font-variant-numeric: tabular-nums;
+        }
         .movement-burst-preview-frame {
           height: 160px;
           overflow: hidden;
           border: 1px solid rgba(255, 255, 255, 0.06);
           border-radius: 10px;
           background:
-            linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-            #050914;
+            linear-gradient(rgba(71, 85, 105, 0.08) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(71, 85, 105, 0.08) 1px, transparent 1px),
+            #f8fafc;
           background-size: 24px 24px;
         }
         .movement-burst-preview-frame svg {
@@ -2577,7 +2622,7 @@ class MovementExampleApp {
           display: grid;
           place-items: center;
           padding: 16px;
-          color: #9bb0c6;
+          color: #475569;
           font-size: 12px;
           text-align: center;
         }
@@ -2589,8 +2634,8 @@ class MovementExampleApp {
         .movement-burst-preview-metrics span {
           padding: 3px 7px;
           border-radius: 999px;
-          background: rgba(255, 255, 255, 0.05);
-          color: #b8c6d8;
+          background: rgba(71, 85, 105, 0.1);
+          color: #334155;
           font-size: 11px;
           white-space: nowrap;
         }
@@ -2847,29 +2892,23 @@ class MovementExampleApp {
               <label>Flag scope
                 <select data-role="issue-scope">
                   <option value="individual">Entire individual</option>
-                  <option value="burst">One or more bursts</option>
+                  <option value="burst">By Burst</option>
                 </select>
               </label>
-              <label data-role="issue-burst-control">Burst to preview
-                <select data-role="issue-burst"></select>
-              </label>
-              <div class="movement-burst-pick-actions" data-role="issue-burst-actions">
-                <label class="movement-inline-check">
-                  <input type="checkbox" data-role="issue-burst-included">
-                  Include previewed burst
-                </label>
-                <button type="button" data-role="issue-burst-add-next">Include + next</button>
-                <button type="button" data-role="issue-burst-clear">Clear</button>
+              <div class="movement-burst-picker" data-role="issue-burst-control">
+                <div class="movement-burst-picker-head">
+                  <strong>Select bursts</strong>
+                  <span data-role="issue-burst-order"></span>
+                </div>
+                <div class="movement-burst-list" data-role="issue-burst-list"></div>
               </div>
-              <div class="movement-burst-selection" data-role="issue-burst-selection"></div>
             </div>
             <div class="movement-burst-preview hidden" data-role="issue-burst-preview">
               <div class="movement-burst-preview-head">
-                <strong>Burst preview</strong>
+                <strong>Selected burst previews</strong>
                 <span data-role="issue-burst-preview-title"></span>
               </div>
-              <div class="movement-burst-preview-frame" data-role="issue-burst-preview-frame"></div>
-              <div class="movement-burst-preview-metrics" data-role="issue-burst-preview-metrics"></div>
+              <div class="movement-burst-preview-list" data-role="issue-burst-preview-list"></div>
             </div>
             <div class="movement-selection-list" data-role="issue-selection"></div>
             <label>User
@@ -3104,16 +3143,11 @@ class MovementExampleApp {
       issueScopeControl: this.mountEl.querySelector('[data-role="issue-scope-control"]'),
       issueScope: this.mountEl.querySelector('[data-role="issue-scope"]'),
       issueBurstControl: this.mountEl.querySelector('[data-role="issue-burst-control"]'),
-      issueBurst: this.mountEl.querySelector('[data-role="issue-burst"]'),
-      issueBurstActions: this.mountEl.querySelector('[data-role="issue-burst-actions"]'),
-      issueBurstIncluded: this.mountEl.querySelector('[data-role="issue-burst-included"]'),
-      issueBurstAddNext: this.mountEl.querySelector('[data-role="issue-burst-add-next"]'),
-      issueBurstClear: this.mountEl.querySelector('[data-role="issue-burst-clear"]'),
-      issueBurstSelection: this.mountEl.querySelector('[data-role="issue-burst-selection"]'),
+      issueBurstOrder: this.mountEl.querySelector('[data-role="issue-burst-order"]'),
+      issueBurstList: this.mountEl.querySelector('[data-role="issue-burst-list"]'),
       issueBurstPreview: this.mountEl.querySelector('[data-role="issue-burst-preview"]'),
       issueBurstPreviewTitle: this.mountEl.querySelector('[data-role="issue-burst-preview-title"]'),
-      issueBurstPreviewFrame: this.mountEl.querySelector('[data-role="issue-burst-preview-frame"]'),
-      issueBurstPreviewMetrics: this.mountEl.querySelector('[data-role="issue-burst-preview-metrics"]'),
+      issueBurstPreviewList: this.mountEl.querySelector('[data-role="issue-burst-preview-list"]'),
       issueSelection: this.mountEl.querySelector('[data-role="issue-selection"]'),
       issueUser: this.mountEl.querySelector('[data-role="issue-user"]'),
       issueType: this.mountEl.querySelector('[data-role="issue-type"]'),
@@ -3528,16 +3562,10 @@ class MovementExampleApp {
     this.refs.issueClose.addEventListener("click", () => this.closeModal(this.refs.issueModal, this.refs.issueSubmit));
     this.refs.issueSubmit.addEventListener("click", async () => this.submitIssueAction());
     this.refs.issueScope.addEventListener("change", () => this.updateIndividualQueueIssueScope());
-    this.refs.issueBurst.addEventListener("change", () => this.updateIndividualQueueIssueScope());
-    this.refs.issueBurstIncluded.addEventListener("change", () => {
-      this.setCurrentIssueBurstIncluded(this.refs.issueBurstIncluded.checked);
-    });
-    this.refs.issueBurstAddNext.addEventListener("click", () => this.includeCurrentIssueBurstAndAdvance());
-    this.refs.issueBurstClear.addEventListener("click", () => this.clearIssueBurstSelection());
-    this.refs.issueBurstSelection.addEventListener("click", event => {
-      const button = event.target.closest("[data-remove-issue-burst]");
-      if (button) {
-        this.removeIssueBurst(button.dataset.removeIssueBurst);
+    this.refs.issueBurstList.addEventListener("change", event => {
+      const input = event.target.closest("input[data-issue-burst-id]");
+      if (input) {
+        this.setIssueBurstIncluded(input.dataset.issueBurstId, input.checked);
       }
     });
     this.refs.confirmClose.addEventListener("click", () => this.closeModal(this.refs.confirmModal, this.refs.confirmSubmit));
@@ -3700,6 +3728,7 @@ class MovementExampleApp {
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
+      this.cancelRequest("issueBurstScores");
       this.cancelRequest("burstFeatureSpace");
       this.cancelRequest("analysisHistory");
       return;
@@ -3715,6 +3744,7 @@ class MovementExampleApp {
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
+      this.cancelRequest("issueBurstScores");
       this.cancelRequest("burstFeatureSpace");
       this.cancelRequest("analysisHistory");
       return;
@@ -3729,6 +3759,7 @@ class MovementExampleApp {
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
+      this.cancelRequest("issueBurstScores");
       this.cancelRequest("burstFeatureSpace");
       this.cancelRequest("analysisHistory");
       return;
@@ -3742,6 +3773,7 @@ class MovementExampleApp {
       this.cancelRequest("osm");
       this.cancelRequest("candidateQuery");
       this.cancelRequest("anomalyRanking");
+      this.cancelRequest("issueBurstScores");
       this.cancelRequest("burstFeatureSpace");
       this.cancelRequest("analysisHistory");
     }
@@ -4162,11 +4194,24 @@ class MovementExampleApp {
     }
   }
 
+  makeBurstScoreMap(items) {
+    const scores = new Map();
+    for (const burst of Array.isArray(items) ? items : []) {
+      const burstId = String(burst?.burst_id || burst?.burstId || "");
+      const score = finiteOrNull(burst?.anomaly_score ?? burst?.anomalyScore);
+      if (burstId && score !== null) {
+        scores.set(burstId, score);
+      }
+    }
+    return scores;
+  }
+
   makeEmptyAnomalyRanking() {
     return {
       analysisId: "",
       status: "idle",
       rankedIndividuals: [],
+      burstScores: new Map(),
       warnings: [],
       burstGap: null,
       modelFit: null,
@@ -4179,6 +4224,7 @@ class MovementExampleApp {
 
   clearAnomalyRanking({ render = true } = {}) {
     this.cancelRequest("anomalyRanking");
+    this.cancelRequest("issueBurstScores");
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
     this.focusedRankingBurst = null;
     if (this.individualReviewQueue) {
@@ -4368,6 +4414,7 @@ class MovementExampleApp {
         analysisId,
         status: String(artifact?.run_status || "completed"),
         rankedIndividuals: Array.isArray(artifact?.ranked_individuals) ? artifact.ranked_individuals : [],
+        burstScores: this.makeBurstScoreMap(artifact?.scored_bursts),
         warnings: Array.isArray(artifact?.warnings) ? artifact.warnings : [],
         burstGap: artifact?.burst_gap || null,
         modelFit: artifact?.model_fit || artifact?.scorer || null,
@@ -4481,6 +4528,7 @@ class MovementExampleApp {
         analysisId: String(result?.analysis_id || result?.analysis?.analysis_id || ""),
         status: String(summary.run_status || "completed"),
         rankedIndividuals: Array.isArray(summary.ranked_individuals) ? summary.ranked_individuals : [],
+        burstScores: this.makeBurstScoreMap(summary.scored_bursts),
         warnings: Array.isArray(summary.warnings) ? summary.warnings : [],
         burstGap: summary.burst_gap || null,
         modelFit: summary.model_fit || summary.scorer || null,
@@ -10935,8 +10983,7 @@ class MovementExampleApp {
     }
     this.refs.issueBurstPreview.classList.add("hidden");
     this.refs.issueBurstPreviewTitle.textContent = "";
-    this.refs.issueBurstPreviewFrame.innerHTML = "";
-    this.refs.issueBurstPreviewMetrics.innerHTML = "";
+    this.refs.issueBurstPreviewList.innerHTML = "";
   }
 
   normalizeIssueBurstPreviewSource(burst) {
@@ -11019,10 +11066,10 @@ class MovementExampleApp {
       };
     });
     const previousContext = Array.isArray(previous?.path)
-      ? previous.path.slice(-8)
+      ? samplePreviewPath(previous.path, 80)
       : [];
     const nextContext = Array.isArray(next?.path)
-      ? next.path.slice(0, 8)
+      ? samplePreviewPath(next.path, 80)
       : [];
     const durationSeconds = selected.endTimeMs >= selected.startTimeMs
       ? (selected.endTimeMs - selected.startTimeMs) / 1000
@@ -11054,41 +11101,44 @@ class MovementExampleApp {
     };
   }
 
-  renderIssueBurstPreview(burst) {
-    if (!this.refs?.issueBurstPreview) {
-      return;
-    }
+  issueBurstPreviewCardHtml(burst) {
     const model = this.buildIssueBurstPreviewModel(burst);
     if (!model) {
-      this.hideIssueBurstPreview();
-      return;
+      return "";
     }
     const { selected, geometry } = model;
-    const currentField = this.getCurrentColorField();
-    this.refs.issueBurstPreview.classList.remove("hidden");
-    this.refs.issueBurstPreviewTitle.textContent = (
-      `${selected.burstId}`
-      + (currentField ? ` • color by ${currentField.label}` : "")
-    );
-    this.refs.issueBurstPreviewMetrics.innerHTML = [
+    const anomalyScore = this.getIssueBurstAnomalyScore(selected.burstId);
+    const scoreLabel = anomalyScore === null
+      ? "anomaly score unavailable"
+      : `anomaly score ${formatMaybeNumber(anomalyScore, "")}`;
+    const metrics = [
       `${formatCount(selected.fixCount || model.positions.length)} fixes`,
       `duration ${formatCompactDuration(model.durationSeconds)}`,
       `distance ${formatCompactDistance(model.distanceMeters)}`,
       `gap before ${formatCompactDuration(model.gapBeforeSeconds)}`,
       `gap after ${formatCompactDuration(model.gapAfterSeconds)}`,
+      scoreLabel,
     ].map(value => `<span>${escapeHtml(value)}</span>`).join("");
     if (!geometry) {
-      this.refs.issueBurstPreviewFrame.innerHTML = (
-        '<div class="movement-burst-preview-empty">'
-        + "Burst metadata is available, but its path is not loaded in the current map view."
-        + "</div>"
-      );
-      return;
+      return `
+        <article class="movement-burst-preview-card">
+          <div class="movement-burst-preview-card-head">
+            <strong>${escapeHtml(selected.burstId)}</strong>
+            <span>${escapeHtml(scoreLabel)}</span>
+          </div>
+          <div class="movement-burst-preview-frame">
+            <div class="movement-burst-preview-empty">
+              Burst metadata is available, but its path is not loaded in the current map view.
+            </div>
+          </div>
+          <div class="movement-burst-preview-metrics">${metrics}</div>
+        </article>
+      `;
     }
 
     const selectedPath = geometry.mapPath(model.pathPositions);
-    const previousPath = geometry.contextPath(model.previousContext, "previous");
-    const nextPath = geometry.contextPath(model.nextContext, "next");
+    const previousPath = geometry.mapPath(model.previousContext);
+    const nextPath = geometry.mapPath(model.nextContext);
     const previewPoints = model.points.map(item => ({
       ...item,
       point: geometry.mapPosition(item.position),
@@ -11099,65 +11149,87 @@ class MovementExampleApp {
       Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y) < 1
     );
     const contextSvg = [
-      previousPath.points.length
-        ? (
-          `<polyline points="${previewSvgPoints(previousPath.points)}" fill="none" stroke="rgba(148,163,184,0.58)" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round" stroke-linejoin="round"><title>Previous burst context</title></polyline>`
-          + `<circle cx="${previousPath.points[previousPath.points.length - 1].x.toFixed(2)}" cy="${previousPath.points[previousPath.points.length - 1].y.toFixed(2)}" r="2.8" fill="rgba(148,163,184,0.82)"><title>Previous burst context</title></circle>`
-        )
+      previousPath.length
+        ? `<polyline points="${previewSvgPoints(previousPath)}" fill="none" stroke="#64748b" stroke-opacity="0.68" stroke-width="2.2" stroke-dasharray="6 4" stroke-linecap="round" stroke-linejoin="round"><title>Previous adjacent burst</title></polyline>`
         : "",
-      nextPath.points.length
-        ? (
-          `<polyline points="${previewSvgPoints(nextPath.points)}" fill="none" stroke="rgba(148,163,184,0.58)" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round" stroke-linejoin="round"><title>Next burst context</title></polyline>`
-          + `<circle cx="${nextPath.points[0].x.toFixed(2)}" cy="${nextPath.points[0].y.toFixed(2)}" r="2.8" fill="rgba(148,163,184,0.82)"><title>Next burst context</title></circle>`
-        )
-        : "",
-      previousPath.cue
-        ? previewContextCueSvg(previousPath.cue, "P", "Previous burst is outside this preview")
-        : "",
-      nextPath.cue
-        ? previewContextCueSvg(nextPath.cue, "N", "Next burst is outside this preview")
+      nextPath.length
+        ? `<polyline points="${previewSvgPoints(nextPath)}" fill="none" stroke="#64748b" stroke-opacity="0.68" stroke-width="2.2" stroke-dasharray="6 4" stroke-linecap="round" stroke-linejoin="round"><title>Next adjacent burst</title></polyline>`
         : "",
     ].join("");
     const pointsSvg = previewPoints.map(item => (
-      `<circle cx="${item.point.x.toFixed(2)}" cy="${item.point.y.toFixed(2)}" r="3.2" fill="${rgbaCss(item.color)}" stroke="rgba(3,7,18,0.72)" stroke-width="0.8"><title>Fix ${formatCount(item.index + 1)}</title></circle>`
+      `<circle cx="${item.point.x.toFixed(2)}" cy="${item.point.y.toFixed(2)}" r="3.2" fill="${rgbaCss(item.color)}" stroke="#ffffff" stroke-width="1"><title>Fix ${formatCount(item.index + 1)}</title></circle>`
     )).join("");
     const endpointSvg = sameEndpoint
       ? (
-        `<circle cx="${startPoint.x.toFixed(2)}" cy="${startPoint.y.toFixed(2)}" r="7" fill="rgba(196,181,253,0.95)" stroke="#f8fafc" stroke-width="1.5"/>`
-        + `<text x="${(startPoint.x + 9).toFixed(2)}" y="${(startPoint.y - 7).toFixed(2)}" fill="#f8fafc" font-size="10" font-weight="700">S/E</text>`
+        `<circle cx="${startPoint.x.toFixed(2)}" cy="${startPoint.y.toFixed(2)}" r="7" fill="#8b5cf6" stroke="#ffffff" stroke-width="1.5"/>`
+        + `<text x="${(startPoint.x + 9).toFixed(2)}" y="${(startPoint.y - 7).toFixed(2)}" fill="#334155" font-size="10" font-weight="700">Start/end</text>`
       )
       : (
-        `<circle cx="${startPoint.x.toFixed(2)}" cy="${startPoint.y.toFixed(2)}" r="6" fill="rgba(34,211,238,0.96)" stroke="#f8fafc" stroke-width="1.4"/>`
-        + `<text x="${(startPoint.x + 8).toFixed(2)}" y="${(startPoint.y - 7).toFixed(2)}" fill="#a5f3fc" font-size="10" font-weight="700">S</text>`
-        + `<circle cx="${endPoint.x.toFixed(2)}" cy="${endPoint.y.toFixed(2)}" r="6" fill="rgba(244,114,182,0.96)" stroke="#f8fafc" stroke-width="1.4"/>`
-        + `<text x="${(endPoint.x + 8).toFixed(2)}" y="${(endPoint.y - 7).toFixed(2)}" fill="#fbcfe8" font-size="10" font-weight="700">E</text>`
+        `<circle cx="${startPoint.x.toFixed(2)}" cy="${startPoint.y.toFixed(2)}" r="6" fill="#0891b2" stroke="#ffffff" stroke-width="1.4"/>`
+        + `<text x="${(startPoint.x + 8).toFixed(2)}" y="${(startPoint.y - 7).toFixed(2)}" fill="#334155" font-size="10" font-weight="700">Start</text>`
+        + `<circle cx="${endPoint.x.toFixed(2)}" cy="${endPoint.y.toFixed(2)}" r="6" fill="#db2777" stroke="#ffffff" stroke-width="1.4"/>`
+        + `<text x="${(endPoint.x + 8).toFixed(2)}" y="${(endPoint.y - 7).toFixed(2)}" fill="#334155" font-size="10" font-weight="700">End</text>`
       );
     const stationaryNote = geometry.stationary
-      ? '<text x="12" y="149" fill="#94a3b8" font-size="10">Stationary or overlapping fixes</text>'
+      ? '<text x="12" y="149" fill="#475569" font-size="10">Stationary or overlapping fixes</text>'
+      : "";
+    const contextNote = model.previousContext.length || model.nextContext.length
+      ? '<text x="508" y="14" text-anchor="end" fill="#475569" font-size="10">Dashed gray: adjacent bursts</text>'
       : "";
     const samplingNote = model.positions.length > model.points.length
-      ? `<text x="508" y="149" text-anchor="end" fill="#94a3b8" font-size="10">Showing ${formatCount(model.points.length)} of ${formatCount(model.positions.length)} fix marks</text>`
+      ? `<text x="508" y="149" text-anchor="end" fill="#475569" font-size="10">Showing ${formatCount(model.points.length)} of ${formatCount(model.positions.length)} fix marks</text>`
       : "";
-    this.refs.issueBurstPreviewFrame.innerHTML = `
-      <svg viewBox="0 0 520 160" role="img" aria-label="${escapeHtml(`Spatial preview of ${selected.burstId}`)}">
-        ${contextSvg}
-        <polyline
-          points="${previewSvgPoints(selectedPath)}"
-          fill="none"
-          stroke="${rgbaCss(autoBurstColor(selected, 235))}"
-          stroke-width="3.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-        ${pointsSvg}
-        ${endpointSvg}
-        ${stationaryNote}
-        ${samplingNote}
-      </svg>
+    return `
+      <article class="movement-burst-preview-card">
+        <div class="movement-burst-preview-card-head">
+          <strong>${escapeHtml(selected.burstId)}</strong>
+          <span>${escapeHtml(scoreLabel)}</span>
+        </div>
+        <div class="movement-burst-preview-frame">
+          <svg viewBox="0 0 520 160" role="img" aria-label="${escapeHtml(`Spatial preview of ${selected.burstId} with adjacent bursts`)}">
+            ${contextSvg}
+            <polyline
+              points="${previewSvgPoints(selectedPath)}"
+              fill="none"
+              stroke="${rgbaCss(autoBurstColor(selected, 235))}"
+              stroke-width="3.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            ${pointsSvg}
+            ${endpointSvg}
+            ${stationaryNote}
+            ${contextNote}
+            ${samplingNote}
+          </svg>
+        </div>
+        <div class="movement-burst-preview-metrics">${metrics}</div>
+      </article>
     `;
   }
 
+  renderIssueBurstPreviews(bursts) {
+    if (!this.refs?.issueBurstPreview) {
+      return;
+    }
+    const selectedBursts = Array.isArray(bursts) ? bursts : [];
+    if (!selectedBursts.length) {
+      this.hideIssueBurstPreview();
+      return;
+    }
+    const currentField = this.getCurrentColorField();
+    this.refs.issueBurstPreview.classList.remove("hidden");
+    this.refs.issueBurstPreviewTitle.textContent = (
+      `${formatCount(selectedBursts.length)} selected`
+      + (currentField ? ` • color by ${currentField.label}` : "")
+    );
+    this.refs.issueBurstPreviewList.innerHTML = selectedBursts
+      .map(burst => this.issueBurstPreviewCardHtml(burst))
+      .join("");
+  }
+
   resetIssueScopeControls() {
+    this.cancelRequest("issueBurstScores");
     this.refs.issueScopeControl?.classList.add("hidden");
     if (this.refs.issueScope) {
       this.refs.issueScope.value = "individual";
@@ -11165,17 +11237,14 @@ class MovementExampleApp {
     if (this.refs.issueBurstControl) {
       this.refs.issueBurstControl.hidden = true;
     }
-    if (this.refs.issueBurstActions) {
-      this.refs.issueBurstActions.hidden = true;
+    if (this.refs.issueBurstList) {
+      this.refs.issueBurstList.innerHTML = "";
     }
-    if (this.refs.issueBurst) {
-      this.refs.issueBurst.innerHTML = "";
+    if (this.refs.issueBurstOrder) {
+      this.refs.issueBurstOrder.textContent = "";
     }
-    if (this.refs.issueBurstIncluded) {
-      this.refs.issueBurstIncluded.checked = false;
-    }
-    if (this.refs.issueBurstSelection) {
-      this.refs.issueBurstSelection.innerHTML = "";
+    if (this.refs.issueSelection) {
+      this.refs.issueSelection.hidden = false;
     }
     this.hideIssueBurstPreview();
   }
@@ -11201,27 +11270,10 @@ class MovementExampleApp {
         ? [initialBurstId]
         : [],
     );
-    this.refs.issueBurst.innerHTML = "";
-    for (const burst of bursts) {
-      const option = document.createElement("option");
-      option.value = burst.burstId;
-      option.textContent = (
-        `Burst ${formatCount(burst.burstIdx + 1)}`
-        + ` • ${burst.setName}`
-        + ` • ${formatTimestamp(burst.startTimeMs)}`
-        + ` • ${formatCount(burst.fixCount)} fixes`
-      );
-      this.refs.issueBurst.appendChild(option);
-    }
-    if (initialBurstId) {
-      this.refs.issueBurst.value = initialBurstId;
-    }
     const burstScopeOption = this.refs.issueScope.querySelector('option[value="burst"]');
     if (burstScopeOption) {
       burstScopeOption.disabled = !bursts.length;
-      burstScopeOption.textContent = bursts.length
-        ? `One or more bursts (${formatCount(bursts.length)} available)`
-        : "One or more bursts (none available)";
+      burstScopeOption.textContent = "By Burst";
     }
     this.refs.issueScope.value = initialScope === "burst" && bursts.length
       ? "burst"
@@ -11230,81 +11282,214 @@ class MovementExampleApp {
     this.updateIndividualQueueIssueScope();
   }
 
+  getIssueBurstScores() {
+    if (
+      this.anomalyRanking?.burstScores instanceof Map
+      && this.anomalyRanking.burstScores.size
+    ) {
+      return this.anomalyRanking.burstScores;
+    }
+    const scores = new Map();
+    for (const row of this.anomalyRanking?.rankedIndividuals || []) {
+      for (const ref of this.normalizeRankingBurstRefs(row)) {
+        const score = finiteOrNull(ref?.anomaly_score);
+        if (ref.burst_id && score !== null && !scores.has(ref.burst_id)) {
+          scores.set(ref.burst_id, score);
+        }
+      }
+    }
+    return scores;
+  }
+
+  getIssueBurstAnomalyScore(burstId) {
+    const target = String(burstId || "");
+    if (!target) {
+      return null;
+    }
+    const direct = this.anomalyRanking?.burstScores instanceof Map
+      ? this.anomalyRanking.burstScores.get(target)
+      : undefined;
+    if (direct !== undefined) {
+      return direct;
+    }
+    const ref = this.getRankingBurstRef(target);
+    return finiteOrNull(ref?.anomaly_score);
+  }
+
+  orderedIssueBursts() {
+    const bursts = this.pendingIssueContext?.queueReviewBursts || [];
+    const scores = this.getIssueBurstScores();
+    return [...bursts].sort((left, right) => {
+      const leftScore = scores.get(left.burstId);
+      const rightScore = scores.get(right.burstId);
+      if (leftScore !== undefined || rightScore !== undefined) {
+        if (leftScore === undefined) {
+          return 1;
+        }
+        if (rightScore === undefined) {
+          return -1;
+        }
+        if (leftScore !== rightScore) {
+          return rightScore - leftScore;
+        }
+      }
+      return (
+        left.startTimeMs - right.startTimeMs
+        || left.burstIdx - right.burstIdx
+        || left.burstId.localeCompare(right.burstId)
+      );
+    });
+  }
+
   selectedIssueBursts() {
-    const context = this.pendingIssueContext;
-    const selectedIds = context?.selectedBurstIds instanceof Set
-      ? context.selectedBurstIds
+    const selectedIds = this.pendingIssueContext?.selectedBurstIds instanceof Set
+      ? this.pendingIssueContext.selectedBurstIds
       : new Set();
-    return (context?.queueReviewBursts || []).filter(
+    return this.orderedIssueBursts().filter(
       burst => selectedIds.has(burst.burstId),
     );
   }
 
-  renderIssueBurstSelection() {
-    if (!this.refs.issueBurstSelection) {
+  renderIssueBurstPicker() {
+    const context = this.pendingIssueContext;
+    if (!context || !this.refs.issueBurstList) {
       return;
     }
-    const selectedBursts = this.selectedIssueBursts();
-    if (!selectedBursts.length) {
-      this.refs.issueBurstSelection.innerHTML = (
-        '<span class="movement-burst-selection-empty">No bursts selected.</span>'
+    const bursts = this.orderedIssueBursts();
+    const scores = this.getIssueBurstScores();
+    const scoredCount = bursts.filter(burst => scores.has(burst.burstId)).length;
+    if (context.issueBurstScoresLoading) {
+      this.refs.issueBurstOrder.textContent = "Loading anomaly scores…";
+    } else if (scoredCount) {
+      this.refs.issueBurstOrder.textContent = (
+        `Highest anomaly score first • ${formatCount(scoredCount)} scored`
+      );
+    } else if (context.issueBurstScoresError) {
+      this.refs.issueBurstOrder.textContent = "Scores unavailable • time order";
+    } else if (["checking", "restoring", "loading"].includes(this.anomalyRanking?.status)) {
+      this.refs.issueBurstOrder.textContent = "Ranking scores not ready • time order";
+    } else {
+      this.refs.issueBurstOrder.textContent = "Time order • no compatible burst ranking";
+    }
+    if (!bursts.length) {
+      this.refs.issueBurstList.innerHTML = (
+        '<div class="movement-empty">No bursts are available for this individual.</div>'
       );
       return;
     }
-    this.refs.issueBurstSelection.innerHTML = selectedBursts.map(burst => `
-      <button
-        type="button"
-        data-remove-issue-burst="${escapeHtml(burst.burstId)}"
-        title="Remove ${escapeHtml(burst.burstId)}"
-      >${escapeHtml(`Burst ${formatCount(burst.burstIdx + 1)} • ${burst.setName}`)} ×</button>
-    `).join("");
+    this.refs.issueBurstList.innerHTML = bursts.map(burst => {
+      const score = scores.get(burst.burstId);
+      const scoreLabel = score === undefined
+        ? "not scored"
+        : `score ${formatMaybeNumber(score, "")}`;
+      const checked = context.selectedBurstIds.has(burst.burstId) ? " checked" : "";
+      return `
+        <label class="movement-burst-choice">
+          <input
+            type="checkbox"
+            data-issue-burst-id="${escapeHtml(burst.burstId)}"
+            ${checked}
+          >
+          <span class="movement-burst-choice-main">
+            <strong>${escapeHtml(`Burst ${formatCount(burst.burstIdx + 1)}`)}</strong>
+            • ${escapeHtml(burst.setName)}
+            • ${escapeHtml(formatTimestamp(burst.startTimeMs))}
+            • ${escapeHtml(`${formatCount(burst.fixCount)} fixes`)}
+          </span>
+          <span class="movement-burst-choice-score">${escapeHtml(scoreLabel)}</span>
+        </label>
+      `;
+    }).join("");
   }
 
-  setCurrentIssueBurstIncluded(included) {
+  setIssueBurstIncluded(burstId, included) {
     const context = this.pendingIssueContext;
-    const burstId = String(this.refs.issueBurst.value || "");
     if (!context?.selectedBurstIds || !burstId) {
       return;
     }
+    const scrollTop = this.refs.issueBurstList.scrollTop;
     if (included) {
       context.selectedBurstIds.add(burstId);
     } else {
       context.selectedBurstIds.delete(burstId);
     }
     this.updateIndividualQueueIssueScope();
+    this.refs.issueBurstList.scrollTop = scrollTop;
   }
 
-  includeCurrentIssueBurstAndAdvance() {
+  async loadIssueBurstScores() {
     const context = this.pendingIssueContext;
-    const options = [...this.refs.issueBurst.options];
-    const currentIndex = Math.max(0, this.refs.issueBurst.selectedIndex);
-    const burstId = String(options[currentIndex]?.value || "");
-    if (!context?.selectedBurstIds || !burstId) {
+    const analysisId = String(this.anomalyRanking?.analysisId || "");
+    if (
+      !context?.individual
+      || !analysisId
+      || (
+        this.anomalyRanking?.burstScores instanceof Map
+        && this.anomalyRanking.burstScores.size
+      )
+    ) {
       return;
     }
-    context.selectedBurstIds.add(burstId);
-    if (currentIndex < options.length - 1) {
-      this.refs.issueBurst.selectedIndex = currentIndex + 1;
-    }
+    const familyName = this.currentFamily;
+    const studyName = this.currentStudy;
+    const datasetId = this.currentDatasetId;
+    const individual = context.individual;
+    const controller = this.beginRequest("issueBurstScores");
+    context.issueBurstScoresAttempted = true;
+    context.issueBurstScoresLoading = true;
+    context.issueBurstScoresError = "";
     this.updateIndividualQueueIssueScope();
-  }
-
-  clearIssueBurstSelection() {
-    const context = this.pendingIssueContext;
-    if (!(context?.selectedBurstIds instanceof Set)) {
-      return;
+    try {
+      const artifact = await this.fetchJSON(
+        `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/analysis/${encodeURIComponent(analysisId)}/artifact/burst_anomaly_ranking.json`,
+        { signal: controller.signal },
+      );
+      if (
+        this.requestControllers.issueBurstScores !== controller
+        || familyName !== this.currentFamily
+        || studyName !== this.currentStudy
+        || datasetId !== this.currentDatasetId
+        || this.pendingIssueContext !== context
+        || context.individual !== individual
+      ) {
+        return;
+      }
+      this.anomalyRanking = {
+        ...this.anomalyRanking,
+        status: String(artifact?.run_status || this.anomalyRanking.status || "completed"),
+        rankedIndividuals: (
+          !(this.anomalyRanking?.rankedIndividuals || []).length
+          && Array.isArray(artifact?.ranked_individuals)
+        )
+          ? artifact.ranked_individuals.map(row => ({
+            ...row,
+            ranked_burst_refs: Array.isArray(row?.ranked_burst_refs)
+              ? row.ranked_burst_refs.slice(0, 3)
+              : [],
+          }))
+          : this.anomalyRanking.rankedIndividuals,
+        burstScores: this.makeBurstScoreMap(artifact?.scored_bursts),
+        warnings: Array.isArray(artifact?.warnings)
+          ? artifact.warnings
+          : this.anomalyRanking.warnings,
+        burstGap: artifact?.burst_gap || this.anomalyRanking.burstGap,
+        modelFit: artifact?.model_fit || artifact?.scorer || this.anomalyRanking.modelFit,
+      };
+      context.issueBurstScoresLoading = false;
+      this.updateIndividualQueueIssueScope();
+      this.renderAnomalyRanking();
+      this.renderIndividuals();
+    } catch (error) {
+      if (!this.isAbortError(error) && this.pendingIssueContext === context) {
+        context.issueBurstScoresLoading = false;
+        context.issueBurstScoresError = error.message;
+        this.updateIndividualQueueIssueScope();
+      }
+    } finally {
+      if (this.requestControllers.issueBurstScores === controller) {
+        this.requestControllers.issueBurstScores = null;
+      }
     }
-    context.selectedBurstIds.clear();
-    this.updateIndividualQueueIssueScope();
-  }
-
-  removeIssueBurst(burstId) {
-    const context = this.pendingIssueContext;
-    if (!(context?.selectedBurstIds instanceof Set)) {
-      return;
-    }
-    context.selectedBurstIds.delete(String(burstId || ""));
-    this.updateIndividualQueueIssueScope();
   }
 
   updateIndividualQueueIssueScope() {
@@ -11316,26 +11501,22 @@ class MovementExampleApp {
     const bursts = Array.isArray(context.queueReviewBursts)
       ? context.queueReviewBursts
       : [];
-    const selectedBurst = bursts.find(
-      burst => burst.burstId === this.refs.issueBurst.value,
-    ) || bursts[0] || null;
-    const useBurst = this.refs.issueScope.value === "burst" && Boolean(selectedBurst);
+    const useBurst = this.refs.issueScope.value === "burst" && Boolean(bursts.length);
     if (
       useBurst
       && context.mode !== "bursts"
       && context.selectedBurstIds instanceof Set
       && !context.selectedBurstIds.size
     ) {
-      context.selectedBurstIds.add(selectedBurst.burstId);
+      const firstBurst = this.orderedIssueBursts()[0];
+      if (firstBurst) {
+        context.selectedBurstIds.add(firstBurst.burstId);
+      }
     }
     const selectedBursts = this.selectedIssueBursts();
     this.refs.issueScope.value = useBurst ? "burst" : "individual";
     this.refs.issueBurstControl.hidden = !useBurst;
-    this.refs.issueBurstActions.hidden = !useBurst;
-    this.refs.issueBurstSelection.hidden = !useBurst;
-    this.refs.issueBurstIncluded.checked = useBurst
-      && selectedBursts.some(burst => burst.burstId === selectedBurst.burstId);
-    this.renderIssueBurstSelection();
+    this.renderIssueBurstPicker();
 
     const previousDefaultType = context.defaultIssueType || "";
     const previousDefaultQuestion = context.defaultOwnerQuestion || "";
@@ -11361,7 +11542,7 @@ class MovementExampleApp {
       ? selectedBursts.map(burst => burst.burstId)
       : [];
     if (useBurst) {
-      this.renderIssueBurstPreview(selectedBurst);
+      this.renderIssueBurstPreviews(selectedBursts);
     } else {
       this.hideIssueBurstPreview();
     }
@@ -11382,26 +11563,29 @@ class MovementExampleApp {
       <div><strong>Review result:</strong> Reviewed—issues after this flag is created</div>
     `;
     if (useBurst) {
-      const displayed = selectedBursts.slice(0, 20).map(burst => (
-        `${burst.burstId} • ${burst.setName} • `
-        + `${formatTimestamp(burst.startTimeMs)} to ${formatTimestamp(burst.endTimeMs)} • `
-        + `${formatCount(burst.fixCount)} fixes`
-      ));
-      if (selectedBursts.length > displayed.length) {
-        displayed.push(`…and ${formatCount(selectedBursts.length - displayed.length)} more`);
-      }
-      this.refs.issueSelection.textContent = displayed.length
-        ? displayed.join("\n")
-        : "Choose at least one burst to flag.";
+      this.refs.issueSelection.hidden = true;
     } else {
       const burstNote = bursts.length
-        ? ` Choose “One or more bursts” above to flag selected bursts from the ${formatCount(bursts.length)} available.`
+        ? ` Choose “By Burst” above to select from the ${formatCount(bursts.length)} available bursts.`
         : " No bursts are currently available for this individual under the current burst definition.";
+      this.refs.issueSelection.hidden = false;
       this.refs.issueSelection.textContent = (
         `The annotation will apply to every fix for ${individual}.${burstNote}`
       );
     }
     this.refs.issueSubmit.disabled = useBurst && !selectedBursts.length;
+    if (
+      useBurst
+      && this.anomalyRanking?.analysisId
+      && !(
+        this.anomalyRanking?.burstScores instanceof Map
+        && this.anomalyRanking.burstScores.size
+      )
+      && !context.issueBurstScoresLoading
+      && !context.issueBurstScoresAttempted
+    ) {
+      void this.loadIssueBurstScores();
+    }
   }
 
   openIssueModal(status) {
@@ -11630,6 +11814,7 @@ class MovementExampleApp {
       return;
     }
     if (modal === this.refs.issueModal) {
+      this.cancelRequest("issueBurstScores");
       this.pendingIssueContext = null;
       this.hideIssueBurstPreview();
     }
@@ -12506,20 +12691,31 @@ function buildBurstPreviewGeometry(
   if (!selected.length) {
     return null;
   }
-  const meanLatitude = selected.reduce((sum, position) => sum + position[1], 0) / selected.length;
+  const previous = validPositions(previousPositions);
+  const next = validPositions(nextPositions);
+  const allPositions = [...previous, ...selected, ...next];
+  const meanLatitude = allPositions.reduce(
+    (sum, position) => sum + position[1],
+    0,
+  ) / allPositions.length;
   const longitudeScale = Math.max(1e-6, Math.abs(Math.cos(meanLatitude * Math.PI / 180)));
   const rawPosition = position => ({
     x: Number(position[0]) * longitudeScale,
     y: Number(position[1]),
   });
   const rawSelected = selected.map(rawPosition);
-  const rawMinX = Math.min(...rawSelected.map(point => point.x));
-  const rawMaxX = Math.max(...rawSelected.map(point => point.x));
-  const rawMinY = Math.min(...rawSelected.map(point => point.y));
-  const rawMaxY = Math.max(...rawSelected.map(point => point.y));
+  const rawAll = allPositions.map(rawPosition);
+  const rawMinX = Math.min(...rawAll.map(point => point.x));
+  const rawMaxX = Math.max(...rawAll.map(point => point.x));
+  const rawMinY = Math.min(...rawAll.map(point => point.y));
+  const rawMaxY = Math.max(...rawAll.map(point => point.y));
+  const selectedSpanX = Math.max(...rawSelected.map(point => point.x))
+    - Math.min(...rawSelected.map(point => point.x));
+  const selectedSpanY = Math.max(...rawSelected.map(point => point.y))
+    - Math.min(...rawSelected.map(point => point.y));
   const originalSpanX = rawMaxX - rawMinX;
   const originalSpanY = rawMaxY - rawMinY;
-  const stationary = originalSpanX < 1e-10 && originalSpanY < 1e-10;
+  const stationary = selectedSpanX < 1e-10 && selectedSpanY < 1e-10;
   const centerX = (rawMinX + rawMaxX) / 2;
   const centerY = (rawMinY + rawMaxY) / 2;
   let spanX = Math.max(originalSpanX, 1e-7);
@@ -12542,52 +12738,14 @@ function buildBurstPreviewGeometry(
     x: padding + (((point.x - minX) / spanX) * frameWidth),
     y: padding + (((maxY - point.y) / spanY) * frameHeight),
   });
-  const isInside = point => (
-    point.x >= minX
-    && point.x <= maxX
-    && point.y >= minY
-    && point.y <= maxY
-  );
   const mapPosition = position => mapRaw(rawPosition(position));
   const mapPath = path => validPositions(path).map(mapPosition);
-  const contextPath = (path, side) => {
-    const raw = validPositions(path).map(rawPosition);
-    if (!raw.length) {
-      return { points: [], cue: null };
-    }
-    const anchor = side === "previous" ? raw[raw.length - 1] : raw[0];
-    const points = [];
-    if (side === "previous") {
-      for (let index = raw.length - 1; index >= 0; index -= 1) {
-        if (!isInside(raw[index])) {
-          break;
-        }
-        points.unshift(mapRaw(raw[index]));
-      }
-    } else {
-      for (let index = 0; index < raw.length; index += 1) {
-        if (!isInside(raw[index])) {
-          break;
-        }
-        points.push(mapRaw(raw[index]));
-      }
-    }
-    const mappedAnchor = mapRaw(anchor);
-    const cue = isInside(anchor)
-      ? null
-      : {
-        x: clamp(mappedAnchor.x, 10, width - 10),
-        y: clamp(mappedAnchor.y, 10, height - 10),
-      };
-    return { points, cue };
-  };
   return {
     width,
     height,
     stationary,
     mapPosition,
     mapPath,
-    contextPath,
   };
 }
 
@@ -12595,15 +12753,6 @@ function previewSvgPoints(points) {
   return (Array.isArray(points) ? points : [])
     .map(point => `${Number(point?.x).toFixed(2)},${Number(point?.y).toFixed(2)}`)
     .join(" ");
-}
-
-function previewContextCueSvg(point, label, title) {
-  return (
-    `<g>`
-    + `<circle cx="${Number(point?.x).toFixed(2)}" cy="${Number(point?.y).toFixed(2)}" r="8" fill="rgba(71,85,105,0.96)" stroke="rgba(203,213,225,0.86)" stroke-width="1"><title>${escapeHtml(title)}</title></circle>`
-    + `<text x="${Number(point?.x).toFixed(2)}" y="${(Number(point?.y) + 3.4).toFixed(2)}" text-anchor="middle" fill="#f8fafc" font-size="9" font-weight="700">${escapeHtml(label)}</text>`
-    + "</g>"
-  );
 }
 
 function normalizeReviewIssues(review) {

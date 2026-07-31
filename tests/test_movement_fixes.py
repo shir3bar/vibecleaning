@@ -1556,7 +1556,7 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert "return 0.25;" in source
     assert "this.queueMapColor(" in source
     assert 'data-role="issue-scope"' in source
-    assert 'data-role="issue-burst"' in source
+    assert 'data-role="issue-burst-list"' in source
     assert "setupIndividualQueueIssueScope(individual)" in source
     assert "this.openIndividualReviewModal(individual, { queueReview: true })" in source
     assert "await this.stageIndividualReviewDecision(queueReviewIndividual, false)" in source
@@ -1580,30 +1580,32 @@ def test_movement_issue_dialog_has_compact_burst_preview():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
     assert 'data-role="issue-burst-preview"' in source
-    assert 'data-role="issue-burst-preview-frame"' in source
-    assert 'data-role="issue-burst-preview-metrics"' in source
+    assert 'data-role="issue-burst-preview-list"' in source
     assert "buildIssueBurstPreviewModel(burst)" in source
-    assert "renderIssueBurstPreview(selectedBurst)" in source
+    assert "renderIssueBurstPreviews(selectedBursts)" in source
     assert "initialBurstId: burstId" in source
     assert "this.hideIssueBurstPreview()" in source
     assert "item.individual === selected.individual" in source
     assert "item.setName === selected.setName" in source
-    assert "previous.path.slice(-8)" in source
-    assert "next.path.slice(0, 8)" in source
+    assert "samplePreviewPath(previous.path, 80)" in source
+    assert "samplePreviewPath(next.path, 80)" in source
     assert "this.colorForFix(fix)" in source
     assert "movementPathDistanceMeters(positions)" in source
     assert "gap before ${formatCompactDuration(model.gapBeforeSeconds)}" in source
     assert "gap after ${formatCompactDuration(model.gapAfterSeconds)}" in source
     assert "Stationary or overlapping fixes" in source
-    assert "Previous burst is outside this preview" in source
-    assert "Next burst is outside this preview" in source
+    assert "Dashed gray: adjacent bursts" in source
+    assert "previewContextCueSvg" not in source
     assert "Burst metadata is available, but its path is not loaded" in source
-    assert "One or more bursts" in source
-    assert 'data-role="issue-burst-included"' in source
-    assert 'data-role="issue-burst-add-next"' in source
-    assert 'data-role="issue-burst-selection"' in source
+    assert '<option value="burst">By Burst</option>' in source
+    assert 'data-issue-burst-id=' in source
     assert "selectedIssueBursts()" in source
-    assert "includeCurrentIssueBurstAndAdvance()" in source
+    assert "setIssueBurstIncluded(burstId, included)" in source
+    assert "getIssueBurstAnomalyScore(selected.burstId)" in source
+    assert "Highest anomaly score first" in source
+    assert "loadIssueBurstScores()" in source
+    assert "burst_anomaly_ranking.json" in source
+    assert "background: #e9eef5;" in source
     assert 'kind: "bursts"' in source
     assert "burst_ids: context.burstIds" in source
 
