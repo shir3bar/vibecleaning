@@ -46,6 +46,9 @@ def main():
         if kind == "segment":
             scope["start_fix_key"] = str(raw_scope.get("start_fix_key") or "").strip()
             scope["end_fix_key"] = str(raw_scope.get("end_fix_key") or "").strip()
+            scope["individual"] = str(raw_scope.get("individual") or "").strip()
+            scope["set_name"] = str(raw_scope.get("set_name") or "").strip()
+            scope["selection_method"] = str(raw_scope.get("selection_method") or "").strip()
         resolved_scopes.append((scope, resolved_fix_count))
     elif kind == "filter":
         filter_spec = dict(raw_scope.get("filter") or {})

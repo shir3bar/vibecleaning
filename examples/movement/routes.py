@@ -2157,6 +2157,24 @@ def register_movement_routes(
                         raw_scope.get("end_fix_key"),
                         label="End fix key",
                     )
+                    scope["individual"] = _validate_optional_text(
+                        raw_scope.get("individual"),
+                        label="Individual",
+                        max_length=240,
+                    )
+                    scope["set_name"] = _validate_optional_text(
+                        raw_scope.get("set_name"),
+                        label="Set name",
+                        max_length=40,
+                    )
+                    selection_method = _validate_optional_text(
+                        raw_scope.get("selection_method"),
+                        label="Selection method",
+                        max_length=40,
+                    )
+                    if selection_method and selection_method not in {"map_double_click", "table_shift_click"}:
+                        raise ValueError("Invalid segment selection method")
+                    scope["selection_method"] = selection_method
             elif scope_kind == "individual":
                 scope["individual"] = _normalize_individual_name(raw_scope.get("individual"))
                 scope["set_name"] = _validate_optional_text(

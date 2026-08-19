@@ -334,6 +334,7 @@ class MovementExampleApp {
     this.mapLoaded = false;
     this.overlay = null;
     this.pendingIssueStatus = "suspected";
+    this.flagTargetKind = "fixes";
     this.lastReportLinks = [];
     this.assetsLoaded = false;
     this.mapErrorMessage = "";
@@ -379,6 +380,7 @@ class MovementExampleApp {
       focusFixKey: "",
       selectedFixKeys: new Set(),
       contiguousRange: false,
+      selectionMethod: "",
     };
     this.mapRangeAwaitingEnd = false;
     this.tableRenderState = {
@@ -2819,7 +2821,7 @@ class MovementExampleApp {
           <button type="button" data-role="check-candidates">Check filter matches</button>
           <button type="button" data-role="clear-candidates">Clear candidates</button>
           <button type="button" data-role="reset-view">Reset view</button>
-          <button type="button" class="movement-emphasis" data-role="mark-suspected">Flag threshold matches</button>
+          <button type="button" class="movement-emphasis" data-role="mark-suspected">Flag checked fixes</button>
           <button type="button" class="movement-emphasis" data-role="mark-confirmed">Mark confirmed</button>
           <button type="button" data-role="dismiss-suspected">Not suspicious</button>
           <label data-role="anomaly-feature-set-control">Ranking features
@@ -2945,7 +2947,6 @@ class MovementExampleApp {
                   </div>
                   <div class="movement-table-toolbar-row">
                     <button type="button" data-role="segment-clear">Clear range</button>
-                    <button type="button" class="movement-emphasis" data-role="segment-suspected">Mark segment suspected</button>
                     <button type="button" class="movement-emphasis" data-role="segment-confirmed">Mark segment confirmed</button>
                   </div>
                 </div>
@@ -3269,7 +3270,6 @@ class MovementExampleApp {
       tableMeta: this.mountEl.querySelector('[data-role="table-meta"]'),
       tableWrap: this.mountEl.querySelector('[data-role="table-wrap"]'),
       segmentClear: this.mountEl.querySelector('[data-role="segment-clear"]'),
-      segmentSuspected: this.mountEl.querySelector('[data-role="segment-suspected"]'),
       segmentConfirmed: this.mountEl.querySelector('[data-role="segment-confirmed"]'),
       slider: this.mountEl.querySelector('[data-role="slider"]'),
       time: this.mountEl.querySelector('[data-role="time"]'),
@@ -3597,6 +3597,7 @@ class MovementExampleApp {
       this.renderThresholdPane();
       this.renderLayers();
       this.renderSelectedFixes();
+      this.updateActionButtons();
     });
     this.refs.showTrain.addEventListener("change", () => this.handleVisibilityChange());
     this.refs.showTest.addEventListener("change", () => this.handleVisibilityChange());
@@ -3665,6 +3666,7 @@ class MovementExampleApp {
     this.refs.clearFixes.addEventListener("click", () => {
       if (!this.data) return;
       this.data.selectedFixKeys = new Set();
+      this.flagTargetKind = "fixes";
       this.renderThresholdPane();
       this.renderSelectedFixes();
       this.renderLayers();
@@ -3682,7 +3684,7 @@ class MovementExampleApp {
     });
     this.refs.clearCandidates.addEventListener("click", () => this.clearCandidateQueryPreview({ announce: true }));
     this.refs.resetView.addEventListener("click", () => this.resetView());
-    this.refs.markSuspected.addEventListener("click", () => this.openIssueModal("suspected"));
+    this.refs.markSuspected.addEventListener("click", () => this.openActiveFlagModal());
     this.refs.markConfirmed.addEventListener("click", () => this.openConfirmModal());
     this.refs.dismissSuspected.addEventListener("click", () => this.openDismissModal());
     this.refs.runAnomalyRanking.addEventListener("click", () => {
@@ -3747,7 +3749,6 @@ class MovementExampleApp {
       this.renderTableSheet();
     });
     this.refs.segmentClear.addEventListener("click", () => this.clearTableSelection());
-    this.refs.segmentSuspected.addEventListener("click", () => this.openSegmentModal("suspected"));
     this.refs.segmentConfirmed.addEventListener("click", () => {
       const selection = this.getCurrentSegmentSelection();
       this.openConfirmModal(selection?.fixes || []);
@@ -5886,6 +5887,7 @@ class MovementExampleApp {
       }
     }
     this.data.selectedFixKeys = nextSelected;
+    this.flagTargetKind = "fixes";
     this.saveUiState();
     this.setSideSheet("individuals");
     this.renderIndividuals();
@@ -5902,6 +5904,7 @@ class MovementExampleApp {
     this.renderIndividuals();
     this.renderThresholdPane();
     this.renderLayers();
+    this.updateActionButtons();
   }
 
   setStatus(message, isError = false) {
@@ -6532,7 +6535,9 @@ class MovementExampleApp {
       focusFixKey: "",
       selectedFixKeys: new Set(),
       contiguousRange: false,
+      selectionMethod: "",
     };
+    this.flagTargetKind = "fixes";
     this.mapRangeAwaitingEnd = false;
     this.temporalSliderEngaged = false;
     if (this.pendingMapSingleClickTimer !== null) {
@@ -8361,6 +8366,7 @@ class MovementExampleApp {
       trackKey: anchorPosition.trackKey,
       startIndex,
       endIndex,
+      selectionMethod: this.tableSelection.selectionMethod || "",
     };
   }
 
@@ -8369,6 +8375,7 @@ class MovementExampleApp {
     focusFixKey = "",
     selectedFixKeys = [],
     contiguousRange = false,
+    selectionMethod = "",
   } = {}) {
     const normalizedKeys = selectedFixKeys instanceof Set
       ? new Set(selectedFixKeys)
@@ -8384,6 +8391,7 @@ class MovementExampleApp {
       focusFixKey: focus,
       selectedFixKeys: normalizedKeys,
       contiguousRange: Boolean(contiguousRange && anchor && focus),
+      selectionMethod: String(selectionMethod || ""),
     };
   }
 
@@ -8397,7 +8405,9 @@ class MovementExampleApp {
         anchorFixKey: fixKey,
         focusFixKey: fixKey,
         contiguousRange: true,
+        selectionMethod: "map_double_click",
       });
+      this.flagTargetKind = "segment";
       this.mapRangeAwaitingEnd = true;
       this.setStatus("Range start selected. Double-click the end fix on the same track.");
       return;
@@ -8408,7 +8418,9 @@ class MovementExampleApp {
         anchorFixKey: fixKey,
         focusFixKey: fixKey,
         contiguousRange: true,
+        selectionMethod: "map_double_click",
       });
+      this.flagTargetKind = "segment";
       this.mapRangeAwaitingEnd = true;
       this.setStatus("The track changed, so this fix is now the new range start.", true);
       return;
@@ -8417,9 +8429,11 @@ class MovementExampleApp {
       anchorFixKey: this.tableSelection.anchorFixKey,
       focusFixKey: fixKey,
       contiguousRange: true,
+      selectionMethod: "map_double_click",
     });
+    this.flagTargetKind = "segment";
     this.mapRangeAwaitingEnd = false;
-    this.setStatus(`Selected ${formatCount(selection.fixes.length)} fixes. Use a segment review action or double-click another start.`);
+    this.setStatus(`Selected ${formatCount(selection.fixes.length)} fixes as a track segment. Use “Flag selected segment” or double-click another start.`);
   }
 
   applyTableSelectionInteraction(fixKey, { additive = false, range = false } = {}) {
@@ -8436,6 +8450,7 @@ class MovementExampleApp {
         anchorFixKey: selection.anchorFixKey,
         focusFixKey: fixKey,
         contiguousRange: true,
+        selectionMethod: "table_shift_click",
       });
       return;
     }
@@ -8463,6 +8478,9 @@ class MovementExampleApp {
   clearTableSelection() {
     this.setTableSelection();
     this.mapRangeAwaitingEnd = false;
+    if (this.flagTargetKind === "segment") {
+      this.flagTargetKind = this.getActiveThresholdMatchKeys().size ? "filter" : "fixes";
+    }
     this.renderTableSheet();
     this.renderLayers();
     this.updateActionButtons();
@@ -8591,6 +8609,7 @@ class MovementExampleApp {
     if (!fixKey) {
       return;
     }
+    this.flagTargetKind = "segment";
     this.applyTableSelectionInteraction(fixKey, {
       additive: event.metaKey || event.ctrlKey,
       range: event.shiftKey,
@@ -8621,7 +8640,6 @@ class MovementExampleApp {
       || !selection
       || selection.fixes.length < 2
     );
-    this.refs.segmentSuspected.disabled = segmentActionDisabled;
     this.refs.segmentConfirmed.disabled = segmentActionDisabled || !this.canConfirmFixes(selection?.fixes || []);
 
     if (mode === "segments") {
@@ -9703,6 +9721,7 @@ class MovementExampleApp {
     } else {
       this.data.selectedFixKeys.add(fixKey);
     }
+    this.flagTargetKind = "fixes";
     this.renderThresholdPane();
     this.renderSelectedFixes();
     this.renderLayers();
@@ -9807,7 +9826,6 @@ class MovementExampleApp {
     const fixKey = picked.object.fixKey;
     const modifiers = {
       additive: Boolean(event?.originalEvent?.metaKey || event?.originalEvent?.ctrlKey),
-      range: Boolean(event?.originalEvent?.shiftKey),
     };
     if (this.pendingMapSingleClickTimer !== null) {
       window.clearTimeout(this.pendingMapSingleClickTimer);
@@ -9838,8 +9856,9 @@ class MovementExampleApp {
     }
     this.applyTableSelectionInteraction(fixKey, {
       additive: Boolean(modifiers.additive),
-      range: Boolean(modifiers.range),
+      range: false,
     });
+    this.flagTargetKind = "fixes";
     this.renderThresholdPane();
     this.renderSelectedFixes();
     if (this.refs?.sideSheetTabs?.dataset.activeSheet === "table") {
@@ -10138,7 +10157,12 @@ class MovementExampleApp {
     const visibleIndividuals = new Set(this.getSelectedIndividuals());
     const visibleSetNames = this.getVisibleSetNames();
     return this.data.fixes.filter(
-      fix => visibleIndividuals.has(fix.individual) && visibleSetNames.has(fix.setName),
+      fix => (
+        !fix.analyticallyExcluded
+        && fix.review?.status !== "confirmed"
+        && visibleIndividuals.has(fix.individual)
+        && visibleSetNames.has(fix.setName)
+      ),
     );
   }
 
@@ -10152,6 +10176,18 @@ class MovementExampleApp {
       histogramMin: null,
       histogramMax: null,
     };
+    if (this.flagTargetKind === "filter") {
+      this.flagTargetKind = "fixes";
+    }
+  }
+
+  syncFlagTargetToThreshold() {
+    if (this.getActiveThresholdMatchKeys().size) {
+      this.flagTargetKind = "filter";
+    } else if (this.flagTargetKind === "filter") {
+      this.flagTargetKind = "fixes";
+    }
+    this.updateActionButtons();
   }
 
   getThresholdContext() {
@@ -10383,9 +10419,9 @@ class MovementExampleApp {
         ? `${formatCount(matchCount)} fixes match ${formatCount(selectedLevels.length)} selected levels.`
         : "Choose one or more levels to highlight matching fixes.";
       const selectionNote = uncheckedCount > 0
-        ? `${formatCount(uncheckedCount)} matching fixes are not checked yet.`
+        ? `${formatCount(uncheckedCount)} matching fixes can optionally be added to the checked-fix list.`
         : matchCount > 0
-          ? "All fixes from the selected levels are already checked."
+          ? "All matching fixes are already in the checked-fix list."
           : "No levels are selected yet.";
       body = `
         <div class="movement-threshold-head">
@@ -10409,14 +10445,14 @@ class MovementExampleApp {
             </label>
           `).join("")}
         </div>
-        <div class="movement-threshold-note">${escapeHtml(selectionNote)} Select levels to gather those fixes for review.</div>
+        <div class="movement-threshold-note">${escapeHtml(selectionNote)} The main flag action applies the selected-level filter directly.</div>
         <div class="movement-threshold-actions">
           <button
             type="button"
             class="movement-emphasis"
             data-action="check-above-threshold"
             ${uncheckedCount === 0 ? "disabled" : ""}
-          >Check selected levels${uncheckedCount > 0 ? ` (${escapeHtml(formatCount(uncheckedCount))})` : ""}</button>
+          >Add matches to checked fixes${uncheckedCount > 0 ? ` (${escapeHtml(formatCount(uncheckedCount))})` : ""}</button>
           <button
             type="button"
             data-action="clear-threshold"
@@ -10460,8 +10496,8 @@ class MovementExampleApp {
         : matchCount === 0
           ? "No matches"
           : uncheckedCount > 0
-            ? `${formatCount(matchCount)} matches • ${formatCount(uncheckedCount)} unchecked`
-            : `${formatCount(matchCount)} matches • all checked`;
+            ? `${formatCount(matchCount)} matches • ${formatCount(uncheckedCount)} not in checked fixes`
+            : `${formatCount(matchCount)} matches • all in checked fixes`;
       body = `
         <div class="movement-threshold-head">
           <div>
@@ -10544,7 +10580,7 @@ class MovementExampleApp {
             class="movement-emphasis"
             data-action="check-above-threshold"
             ${uncheckedCount === 0 ? "disabled" : ""}
-          >Check ${reverse ? "below" : "above"} threshold</button>
+          >Add matches to checked fixes</button>
           <button
             type="button"
             data-action="clear-threshold"
@@ -10612,6 +10648,7 @@ class MovementExampleApp {
         };
         this.renderThresholdPane();
         this.renderLayers();
+        this.syncFlagTargetToThreshold();
       } else if (action === "reset-histogram-limits") {
         const field = this.getCurrentColorField();
         this.thresholdState = {
@@ -10667,6 +10704,7 @@ class MovementExampleApp {
     };
     this.renderThresholdPane();
     this.renderLayers();
+    this.syncFlagTargetToThreshold();
   }
 
   handleThresholdPaneChange(event) {
@@ -10731,6 +10769,7 @@ class MovementExampleApp {
       };
       this.renderThresholdPane();
       this.renderLayers();
+      this.syncFlagTargetToThreshold();
       return;
     }
     const checkbox = target.closest('input[data-action="toggle-threshold-reverse"]');
@@ -10747,6 +10786,7 @@ class MovementExampleApp {
       };
       this.renderThresholdPane();
       this.renderLayers();
+      this.syncFlagTargetToThreshold();
       return;
     }
     const levelInput = target.closest('input[data-action="toggle-threshold-level"]');
@@ -10774,6 +10814,7 @@ class MovementExampleApp {
     };
     this.renderThresholdPane();
     this.renderLayers();
+    this.syncFlagTargetToThreshold();
   }
 
   checkAboveThresholdSelection() {
@@ -10789,6 +10830,7 @@ class MovementExampleApp {
       nextSelected.add(fixKey);
     }
     this.data.selectedFixKeys = nextSelected;
+    this.flagTargetKind = "fixes";
     this.renderSelectedFixes();
     this.renderThresholdPane();
     this.renderLayers();
@@ -10948,6 +10990,7 @@ class MovementExampleApp {
         this.clearThresholdState();
         this.setTableSelection();
         this.data.selectedFixKeys = new Set(suspiciousFixes.map(fix => fix.fixKey));
+        this.flagTargetKind = "fixes";
         this.data.selectedIndividuals = new Set(suspiciousFixes.map(fix => fix.individual));
         this.refs.showTrain.checked = true;
         this.refs.showTest.checked = true;
@@ -11848,6 +11891,32 @@ class MovementExampleApp {
     this.refs.reportSubmit.disabled = reportFixes.length === 0;
   }
 
+  getActiveFlagTarget() {
+    if (!this.data) {
+      return { kind: "fixes", fixes: [], ready: false };
+    }
+    if (this.flagTargetKind === "segment") {
+      const selection = this.getCurrentSegmentSelection();
+      return {
+        kind: "segment",
+        fixes: selection?.fixes || [],
+        selection,
+        ready: Boolean(selection && selection.fixes.length >= 2),
+      };
+    }
+    if (this.flagTargetKind === "filter") {
+      const matchKeys = this.getActiveThresholdMatchKeys();
+      const fixes = [...matchKeys]
+        .map(fixKey => this.data.fixByKey.get(fixKey))
+        .filter(Boolean);
+      if (fixes.length || matchKeys.size) {
+        return { kind: "filter", fixes, ready: fixes.length > 0 };
+      }
+    }
+    const fixes = this.getSelectedFixes();
+    return { kind: "fixes", fixes, ready: fixes.length > 0 };
+  }
+
   updateActionButtons() {
     const hasData = Boolean(this.data);
     const canPersistEdits = this.canPersistEdits();
@@ -11855,14 +11924,16 @@ class MovementExampleApp {
     const hasDetail = this.hasLoadedDetailSelection();
     const selectedFixes = this.getSelectedFixes();
     const selectedCount = selectedFixes.length;
+    const flagTarget = this.getActiveFlagTarget();
+    const flagFixes = flagTarget.fixes || [];
     const loadedSuspiciousKeys = new Set(
       (this.data?.suspiciousFixes || []).map(fix => fix.fixKey),
     );
-    const selectedAreLoadedSuspicious = (
-      selectedCount > 0
-      && selectedFixes.every(fix => loadedSuspiciousKeys.has(fix.fixKey))
+    const flagFixesAreLoadedSuspicious = (
+      flagFixes.length > 0
+      && flagFixes.every(fix => loadedSuspiciousKeys.has(fix.fixKey))
     );
-    const canEditSelectedFixes = hasDetail || selectedAreLoadedSuspicious;
+    const canEditFlagTarget = hasDetail || flagFixesAreLoadedSuspicious;
     const canConfirmSelectedFixes = this.canConfirmFixes(selectedFixes);
     const suspiciousLoading = this.data?.suspiciousState === "loading";
     const candidatePreviewLoading = this.candidateQueryPreview?.status === "loading";
@@ -11902,12 +11973,19 @@ class MovementExampleApp {
         element?.classList.add("movement-profile-hidden");
       }
     }
+    this.refs.markSuspected.textContent = flagTarget.kind === "segment"
+      ? flagTarget.ready
+        ? `Flag selected segment (${formatCount(flagFixes.length)} fixes)`
+        : "Select segment end"
+      : flagTarget.kind === "filter"
+        ? `Flag threshold matches (${formatCount(flagFixes.length)})`
+        : `Flag checked fixes (${formatCount(flagFixes.length)})`;
     this.refs.markSuspected.disabled = (
       !canPersistEdits
       || !hasData
       || !hasSelectedIndividuals
-      || !canEditSelectedFixes
-      || selectedCount === 0
+      || !canEditFlagTarget
+      || !flagTarget.ready
     );
     this.refs.markConfirmed.disabled = (
       !canPersistEdits
@@ -12832,22 +12910,34 @@ class MovementExampleApp {
     }
   }
 
-  openIssueModal(status) {
+  openActiveFlagModal() {
+    const target = this.getActiveFlagTarget();
+    if (!target.ready) return;
+    if (target.kind === "segment") {
+      this.openSegmentModal("suspected");
+      return;
+    }
+    this.openIssueModal("suspected", target);
+  }
+
+  openIssueModal(status, target = null) {
     if (this.rejectLockedEdit()) {
       return;
     }
-    const selectedFixes = this.getSelectedFixes();
+    const selectedFixes = Array.isArray(target?.fixes) ? target.fixes : this.getSelectedFixes();
     if (!selectedFixes.length || !this.currentArtifact) {
       return;
     }
     this.resetIssueScopeControls();
     const field = this.getCurrentColorField();
-    const issueThreshold = this.getCurrentIssueThreshold();
+    const isFilterTarget = target?.kind === "filter";
+    const issueThreshold = isFilterTarget ? this.getCurrentIssueThreshold() : "";
     const candidateKeys = this.getCandidateQueryReturnedMatchKeys();
-    const candidateGenerated = Boolean(this.candidateQueryPreview?.analysisId)
+    const candidateGenerated = !isFilterTarget
+      && Boolean(this.candidateQueryPreview?.analysisId)
       && selectedFixes.every(fix => candidateKeys.has(fix.fixKey));
-    const origin = issueThreshold ? "threshold" : (candidateGenerated ? "algorithm" : "manual");
-    const thresholdFilter = issueThreshold
+    const origin = isFilterTarget ? "threshold" : (candidateGenerated ? "algorithm" : "manual");
+    const thresholdFilter = isFilterTarget
       ? {
           field_key: field?.key || "",
           field_kind: field?.kind || "",
@@ -12876,8 +12966,8 @@ class MovementExampleApp {
       <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
-      <div><strong>${issueThreshold ? "Checked preview fixes" : "Checked fixes"}:</strong> ${escapeHtml(formatCount(selectedFixes.length))}</div>
-      <div><strong>Flag scope:</strong> ${issueThreshold ? "all matching fixes in the full dataset" : "checked fixes"}</div>
+      <div><strong>${isFilterTarget ? "Visible preview matches" : "Checked fixes"}:</strong> ${escapeHtml(formatCount(selectedFixes.length))}</div>
+      <div><strong>Flag scope:</strong> ${isFilterTarget ? "all matching fixes in the full dataset" : "checked fixes"}</div>
       <div><strong>Issue variable:</strong> ${escapeHtml(field?.label || "Not set")}</div>
       <div><strong>Issue threshold:</strong> ${escapeHtml(issueThreshold || "Not set")}</div>
       <div><strong>Origin:</strong> ${escapeHtml(origin)}</div>
@@ -12916,6 +13006,7 @@ class MovementExampleApp {
       selectedFixKeys: selection.fixes.map(fix => fix.fixKey),
       individual: selection.individual,
       setName: selection.setName,
+      selectionMethod: selection.selectionMethod || "",
       issueField: "",
       issueThreshold: "",
     };
@@ -12926,6 +13017,7 @@ class MovementExampleApp {
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
       <div><strong>Track:</strong> ${escapeHtml(`${selection.individual} • ${selection.setName}`)}</div>
+      <div><strong>Selection method:</strong> ${escapeHtml(formatSelectionMethod(selection.selectionMethod))}</div>
       <div><strong>Segment fixes:</strong> ${escapeHtml(formatCount(selection.fixes.length))}</div>
       <div><strong>Start:</strong> ${escapeHtml(`${formatTimestamp(selection.fixes[0].timeMs)} • ${selection.startFixKey}`)}</div>
       <div><strong>End:</strong> ${escapeHtml(`${formatTimestamp(selection.fixes[selection.fixes.length - 1].timeMs)} • ${selection.endFixKey}`)}</div>
@@ -13156,6 +13248,9 @@ class MovementExampleApp {
           fix_keys: context.selectedFixKeys,
           start_fix_key: context.startFixKey,
           end_fix_key: context.endFixKey,
+          individual: context.individual,
+          set_name: context.setName,
+          selection_method: context.selectionMethod,
         };
       } else if (context.mode === "individual") {
         scope = {
@@ -13830,6 +13925,7 @@ function parseMovementSegments(items) {
     setName: String(item?.set_name || "train") || "train",
     startFixKey: String(item?.start_fix_key || ""),
     endFixKey: String(item?.end_fix_key || ""),
+    selectionMethod: String(item?.selection_method || ""),
     startTimeMs: Number(item?.start_time_ms) || 0,
     endTimeMs: Number(item?.end_time_ms) || 0,
     fixCount: Number(item?.fix_count) || 0,
@@ -14143,6 +14239,7 @@ function normalizeSegmentMemberships(items) {
       issueType: String(item.issue_type || item.issueType || "").trim(),
       startFixKey: String(item.start_fix_key || item.startFixKey || "").trim(),
       endFixKey: String(item.end_fix_key || item.endFixKey || "").trim(),
+      selectionMethod: String(item.selection_method || item.selectionMethod || "").trim(),
       issueNote: String(item.issue_note || item.issueNote || "").trim(),
       ownerQuestion: String(item.owner_question || item.ownerQuestion || "").trim(),
       reviewUser: String(item.review_user || item.reviewUser || "").trim(),
@@ -14282,6 +14379,12 @@ function buildFlaggedStepOverlays(data) {
   };
   for (const fix of data.fixes || []) {
     const status = String(fix.review?.status || "").trim().toLowerCase();
+    const effectiveIssues = Array.isArray(fix.review?.effectiveIssues)
+      ? fix.review.effectiveIssues.filter(issue => issue.status === status)
+      : [];
+    const needsFixInboundStep = !effectiveIssues.length
+      || effectiveIssues.some(issue => issue.scopeKind !== "segment");
+    if (!needsFixInboundStep) continue;
     if (status === "suspected") {
       addInboundStep(fix, status, data.eligibleFixesByTrack, data.eligibleTrackPositionByFixKey);
     } else if (status === "confirmed") {
@@ -14576,6 +14679,12 @@ function finiteOrNull(value) {
 
 function formatCount(value) {
   return new Intl.NumberFormat().format(Number(value) || 0);
+}
+
+function formatSelectionMethod(value) {
+  if (value === "map_double_click") return "Map endpoints";
+  if (value === "table_shift_click") return "Table range";
+  return "Track range";
 }
 
 function formatMaybeNumber(value, suffix) {

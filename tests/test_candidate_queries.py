@@ -1366,5 +1366,6 @@ def test_frontend_filter_run_flags_matches_and_reloads_created_dataset():
     assert "checkCandidateQueryPreview" in source
     assert "const fixKey = String(candidate?.fix_key || \"\")" in source
     assert "this.data.selectedFixKeys = nextSelected" in source
-    assert 'this.refs.markSuspected.addEventListener("click", () => this.openIssueModal("suspected"))' in source
+    assert 'this.refs.markSuspected.addEventListener("click", () => this.openActiveFlagModal())' in source
+    assert 'target?.kind === "filter"' in source
     assert "apply-candidate-query" not in source

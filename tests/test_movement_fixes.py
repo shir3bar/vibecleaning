@@ -974,6 +974,29 @@ def test_movement_frontend_has_shared_endpoint_range_selection():
     assert "range: event.shiftKey" in source
 
 
+def test_movement_frontend_uses_one_scope_aware_flag_action():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert source.count('data-role="mark-suspected"') == 2  # markup and ref
+    assert 'data-role="segment-suspected"' not in source
+    assert "openActiveFlagModal()" in source
+    assert 'kind: "segment"' in source
+    assert 'kind: "filter"' in source
+    assert 'kind: "fixes"' in source
+    assert "Flag selected segment" in source
+    assert "Flag threshold matches" in source
+    assert "Flag checked fixes" in source
+    assert 'this.flagTargetKind = "filter";' in source
+    check_start = source.index("  checkAboveThresholdSelection() {")
+    check_end = source.index("\n  getFixesForIndividualsFrom(", check_start)
+    assert 'this.flagTargetKind = "fixes";' in source[check_start:check_end]
+    assert "The main flag action applies the selected-level filter directly." in source
+    assert "Add matches to checked fixes" in source
+    assert 'selectionMethod: "map_double_click"' in source
+    assert 'selectionMethod: "table_shift_click"' in source
+    assert "selection_method: context.selectionMethod" in source
+
+
 def test_movement_frontend_precomputes_inbound_flagged_steps():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
@@ -984,6 +1007,7 @@ def test_movement_frontend_precomputes_inbound_flagged_steps():
     assert 'id: "movement-flagged-fix-steps"' in source
     assert "data: visibleFlaggedSteps" in source
     assert 'item.status === "confirmed"' in source
+    assert 'effectiveIssues.some(issue => issue.scopeKind !== "segment")' in source
 
 
 def test_movement_frontend_uses_cached_binary_searched_temporal_focus():
@@ -1136,6 +1160,68 @@ def test_annotate_scope_records_167_fixes_as_one_row_range_annotation(tmp_path):
     payload = response.json()
     assert payload["step"]["summary"]["resolved_fix_count"] == 167
     assert payload["step"]["parameters"]["scope"]["row_ranges"] == [[1, 167]]
+
+
+def test_segment_annotation_persists_track_identity_and_selection_method(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {
+                "kind": "segment",
+                "fix_keys": ["id:fix_a_1#row:1", "id:fix_a_2#row:2"],
+                "start_fix_key": "id:fix_a_1#row:1",
+                "end_fix_key": "id:fix_a_2#row:2",
+                "individual": "alpha",
+                "set_name": "train",
+                "selection_method": "map_double_click",
+            },
+            "status": "suspected",
+            "origin": "manual",
+            "issue_type": "track segment",
+            "comment": "Review this selected track segment",
+            "owner_question": "Does this movement section look valid?",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    scope = payload["step"]["parameters"]["scope"]
+    assert scope["kind"] == "segment"
+    assert scope["individual"] == "alpha"
+    assert scope["set_name"] == "train"
+    assert scope["selection_method"] == "map_double_click"
+    assert scope["row_ranges"] == [[1, 2]]
+
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+    _, sidecar_path = get_dataset_artifact(
+        study_dir,
+        payload["dataset"]["dataset_id"],
+        "movement_review_annotations.json",
+    )
+    annotation = json.loads(sidecar_path.read_text(encoding="utf-8"))["annotations"][-1]
+    assert annotation["step_id"] == payload["step"]["step_id"]
+    assert annotation["scope"]["individual"] == "alpha"
+    assert annotation["scope"]["set_name"] == "train"
+    assert annotation["scope"]["selection_method"] == "map_double_click"
+
+    detail = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{payload['dataset']['dataset_id']}/fixes",
+        params={"logical_name": "movement.csv", "individuals": "alpha"},
+    )
+    assert detail.status_code == 200
+    segment = next(
+        item for item in detail.json()["segments"]
+        if item["segment_id"] == payload["step"]["step_id"]
+    )
+    assert segment["individual"] == "alpha"
+    assert segment["set_name"] == "train"
+    assert segment["selection_method"] == "map_double_click"
+    assert segment["start_fix_key"] == "id:fix_a_1#row:1"
+    assert segment["end_fix_key"] == "id:fix_a_2#row:2"
 
 
 def test_threshold_annotation_evaluates_the_full_csv_not_checked_preview(tmp_path):

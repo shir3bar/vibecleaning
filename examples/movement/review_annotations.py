@@ -356,6 +356,7 @@ def normalize_annotation(raw: dict) -> dict:
             "set_name": str(scope.get("set_name") or "").strip(),
             "start_fix_key": str(scope.get("start_fix_key") or "").strip(),
             "end_fix_key": str(scope.get("end_fix_key") or "").strip(),
+            "selection_method": str(scope.get("selection_method") or "").strip(),
             "burst_gap": dict(scope.get("burst_gap") or {}),
         },
     }
@@ -732,6 +733,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
                 "set_name": str(segment_fixes[0].get("set") or "train"),
                 "start_fix_key": str(scope.get("start_fix_key") or segment_fixes[0].get("fix_key") or ""),
                 "end_fix_key": str(scope.get("end_fix_key") or segment_fixes[-1].get("fix_key") or ""),
+                "selection_method": str(scope.get("selection_method") or ""),
                 "start_time_ms": int(segment_fixes[0].get("time_ms") or 0),
                 "end_time_ms": int(segment_fixes[-1].get("time_ms") or 0),
                 "fix_count": len(segment_fixes),
