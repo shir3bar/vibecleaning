@@ -374,7 +374,10 @@ class MovementExampleApp {
       anchorFixKey: "",
       focusFixKey: "",
       selectedFixKeys: new Set(),
+      contiguousRange: false,
     };
+    this.rangeSelectionModeActive = false;
+    this.rangeSelectionAwaitingEnd = false;
     this.tableRenderState = {
       signature: "",
       rowLimit: TABLE_INITIAL_ROW_LIMIT,
@@ -2238,6 +2241,12 @@ class MovementExampleApp {
           background: rgba(67, 206, 162, 0.22);
           color: #d8fff3;
         }
+        .movement-table-toolbar button.is-active,
+        .movement-toolbar button.is-active {
+          border-color: #57daae;
+          background: rgba(87, 218, 174, 0.2);
+          color: #d9fff2;
+        }
         .movement-table-meta {
           padding: 10px 14px;
           border-bottom: 1px solid rgba(255, 255, 255, 0.05);
@@ -2746,6 +2755,7 @@ class MovementExampleApp {
           <button type="button" data-role="select-none">No individuals</button>
           <button type="button" data-role="select-suspicious">Review suspicious fixes</button>
           <button type="button" data-role="clear-fixes">Clear checked fixes</button>
+          <button type="button" data-role="range-select-mode">Select track range</button>
           <div class="movement-candidate-query-control" data-role="candidate-query-control">
             <label>Candidate query <select data-role="candidate-query-select"></select></label>
             <label>Scope
@@ -2887,6 +2897,7 @@ class MovementExampleApp {
                     <button type="button" data-role="table-sort-direction" data-direction="asc">Ascending</button>
                   </div>
                   <div class="movement-table-toolbar-row">
+                    <button type="button" data-role="table-range-select-mode">Select track range</button>
                     <button type="button" data-role="segment-clear">Clear range</button>
                     <button type="button" class="movement-emphasis" data-role="segment-suspected">Mark segment suspected</button>
                     <button type="button" class="movement-emphasis" data-role="segment-confirmed">Mark segment confirmed</button>
@@ -3133,6 +3144,7 @@ class MovementExampleApp {
       selectNone: this.mountEl.querySelector('[data-role="select-none"]'),
       selectSuspicious: this.mountEl.querySelector('[data-role="select-suspicious"]'),
       clearFixes: this.mountEl.querySelector('[data-role="clear-fixes"]'),
+      rangeSelectMode: this.mountEl.querySelector('[data-role="range-select-mode"]'),
       candidateQueryControl: this.mountEl.querySelector('[data-role="candidate-query-control"]'),
       candidateQuerySelect: this.mountEl.querySelector('[data-role="candidate-query-select"]'),
       candidateQueryScope: this.mountEl.querySelector('[data-role="candidate-query-scope"]'),
@@ -3198,6 +3210,7 @@ class MovementExampleApp {
       tableMeta: this.mountEl.querySelector('[data-role="table-meta"]'),
       tableWrap: this.mountEl.querySelector('[data-role="table-wrap"]'),
       segmentClear: this.mountEl.querySelector('[data-role="segment-clear"]'),
+      tableRangeSelectMode: this.mountEl.querySelector('[data-role="table-range-select-mode"]'),
       segmentSuspected: this.mountEl.querySelector('[data-role="segment-suspected"]'),
       segmentConfirmed: this.mountEl.querySelector('[data-role="segment-confirmed"]'),
       slider: this.mountEl.querySelector('[data-role="slider"]'),
@@ -3588,6 +3601,8 @@ class MovementExampleApp {
       this.renderLayers();
       this.updateActionButtons();
     });
+    this.refs.rangeSelectMode.addEventListener("click", () => this.toggleRangeSelectionMode());
+    this.refs.tableRangeSelectMode.addEventListener("click", () => this.toggleRangeSelectionMode());
     this.refs.candidateQuerySelect.addEventListener("change", () => this.selectCandidateQuery(this.refs.candidateQuerySelect.value));
     this.refs.candidateQueryScope.addEventListener("change", () => this.selectCandidateQueryExecutionScope(this.refs.candidateQueryScope.value));
     this.refs.candidateQueryParams.addEventListener("input", event => this.handleCandidateQueryParameterInput(event));
@@ -3658,6 +3673,12 @@ class MovementExampleApp {
     });
     this.refs.tableWrap.addEventListener("click", event => this.handleTableWrapClick(event));
     this.refs.tableWrap.addEventListener("scroll", () => this.handleTableWrapScroll());
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && this.rangeSelectionModeActive) {
+        this.clearTableSelection();
+        this.setStatus("Track range selection cancelled.");
+      }
+    });
     this.refs.anomalyRanking.addEventListener("click", event => {
       void this.handleAnomalyRankingClick(event);
     });
@@ -6325,7 +6346,11 @@ class MovementExampleApp {
       anchorFixKey: "",
       focusFixKey: "",
       selectedFixKeys: new Set(),
+      contiguousRange: false,
     };
+    this.rangeSelectionModeActive = false;
+    this.rangeSelectionAwaitingEnd = false;
+    this.syncRangeSelectionModeButtons();
     this.tableRenderState = {
       signature: "",
       rowLimit: TABLE_INITIAL_ROW_LIMIT,
@@ -8045,17 +8070,6 @@ class MovementExampleApp {
     this.renderTableSheet();
   }
 
-  getTrackOrderedVisibleFixes() {
-    return this.getVisibleDetailFixes()
-      .slice()
-      .sort((left, right) => (
-        left.individual.localeCompare(right.individual)
-        || left.setName.localeCompare(right.setName)
-        || left.timeMs - right.timeMs
-        || left.fixKey.localeCompare(right.fixKey)
-      ));
-  }
-
   getFilteredTableFixRows() {
     const filterText = String(this.refs.tableFilter.value || "").trim().toLowerCase();
     const rows = this.getVisibleDetailFixes();
@@ -8110,24 +8124,19 @@ class MovementExampleApp {
     if (!anchorFixKey || !targetFixKey) {
       return null;
     }
-    const ordered = this.getTrackOrderedVisibleFixes();
-    const byFixKey = new Map(ordered.map(fix => [fix.fixKey, fix]));
-    const anchor = byFixKey.get(anchorFixKey);
-    const target = byFixKey.get(targetFixKey);
+    const anchorPosition = this.data?.eligibleTrackPositionByFixKey?.get(anchorFixKey);
+    const targetPosition = this.data?.eligibleTrackPositionByFixKey?.get(targetFixKey);
+    if (!anchorPosition || !targetPosition || anchorPosition.trackKey !== targetPosition.trackKey) {
+      return null;
+    }
+    const track = this.data?.eligibleFixesByTrack?.get(anchorPosition.trackKey) || [];
+    const anchor = track[anchorPosition.index];
+    const target = track[targetPosition.index];
     if (!anchor || !target) {
       return null;
     }
-    if (anchor.individual !== target.individual || anchor.setName !== target.setName) {
-      return null;
-    }
-    const track = ordered.filter(fix => fix.individual === anchor.individual && fix.setName === anchor.setName);
-    const anchorIndex = track.findIndex(fix => fix.fixKey === anchorFixKey);
-    const targetIndex = track.findIndex(fix => fix.fixKey === targetFixKey);
-    if (anchorIndex < 0 || targetIndex < 0) {
-      return null;
-    }
-    const startIndex = Math.min(anchorIndex, targetIndex);
-    const endIndex = Math.max(anchorIndex, targetIndex);
+    const startIndex = Math.min(anchorPosition.index, targetPosition.index);
+    const endIndex = Math.max(anchorPosition.index, targetPosition.index);
     const fixes = track.slice(startIndex, endIndex + 1);
     return {
       anchorFixKey,
@@ -8137,24 +8146,103 @@ class MovementExampleApp {
       fixes,
       individual: anchor.individual,
       setName: anchor.setName,
+      trackKey: anchorPosition.trackKey,
+      startIndex,
+      endIndex,
     };
   }
 
-  setTableSelection({ anchorFixKey = "", focusFixKey = "", selectedFixKeys = [] } = {}) {
+  setTableSelection({
+    anchorFixKey = "",
+    focusFixKey = "",
+    selectedFixKeys = [],
+    contiguousRange = false,
+  } = {}) {
     const normalizedKeys = selectedFixKeys instanceof Set
       ? new Set(selectedFixKeys)
       : new Set(Array.isArray(selectedFixKeys) ? selectedFixKeys : []);
-    const anchor = normalizedKeys.has(anchorFixKey) ? anchorFixKey : (normalizedKeys.size ? [...normalizedKeys][0] : "");
-    const focus = normalizedKeys.has(focusFixKey) ? focusFixKey : (normalizedKeys.has(anchor) ? anchor : "");
+    const anchor = contiguousRange
+      ? anchorFixKey
+      : normalizedKeys.has(anchorFixKey) ? anchorFixKey : (normalizedKeys.size ? [...normalizedKeys][0] : "");
+    const focus = contiguousRange
+      ? focusFixKey || anchor
+      : normalizedKeys.has(focusFixKey) ? focusFixKey : (normalizedKeys.has(anchor) ? anchor : "");
     this.tableSelection = {
       anchorFixKey: anchor,
       focusFixKey: focus,
       selectedFixKeys: normalizedKeys,
+      contiguousRange: Boolean(contiguousRange && anchor && focus),
     };
+  }
+
+  syncRangeSelectionModeButtons() {
+    for (const button of [this.refs?.rangeSelectMode, this.refs?.tableRangeSelectMode]) {
+      if (!button) continue;
+      button.classList.toggle("is-active", this.rangeSelectionModeActive);
+      button.setAttribute("aria-pressed", this.rangeSelectionModeActive ? "true" : "false");
+      button.textContent = this.rangeSelectionModeActive
+        ? (this.rangeSelectionAwaitingEnd ? "Choose range end" : "Choose range start")
+        : "Select track range";
+    }
+  }
+
+  toggleRangeSelectionMode() {
+    this.rangeSelectionModeActive = !this.rangeSelectionModeActive;
+    this.rangeSelectionAwaitingEnd = false;
+    this.setTableSelection();
+    this.syncRangeSelectionModeButtons();
+    this.renderTableSheet();
+    this.renderLayers();
+    this.updateActionButtons();
+    this.setStatus(this.rangeSelectionModeActive
+      ? "Track range mode active. Choose the start fix on the map or in the table."
+      : "Track range selection cancelled.");
+  }
+
+  applyExplicitRangeSelection(fixKey) {
+    if (!this.data?.eligibleTrackPositionByFixKey?.has(fixKey)) {
+      this.setStatus("That fix is not part of the current analytical track.", true);
+      return;
+    }
+    if (!this.rangeSelectionAwaitingEnd || !this.tableSelection.anchorFixKey) {
+      this.setTableSelection({
+        anchorFixKey: fixKey,
+        focusFixKey: fixKey,
+        contiguousRange: true,
+      });
+      this.rangeSelectionAwaitingEnd = true;
+      this.syncRangeSelectionModeButtons();
+      this.setStatus("Range start selected. Choose the end fix on the same track.");
+      return;
+    }
+    const selection = this.resolveSegmentSelection(this.tableSelection.anchorFixKey, fixKey);
+    if (!selection) {
+      this.setTableSelection({
+        anchorFixKey: fixKey,
+        focusFixKey: fixKey,
+        contiguousRange: true,
+      });
+      this.rangeSelectionAwaitingEnd = true;
+      this.syncRangeSelectionModeButtons();
+      this.setStatus("The track changed, so this fix is now the new range start.", true);
+      return;
+    }
+    this.setTableSelection({
+      anchorFixKey: this.tableSelection.anchorFixKey,
+      focusFixKey: fixKey,
+      contiguousRange: true,
+    });
+    this.rangeSelectionAwaitingEnd = false;
+    this.syncRangeSelectionModeButtons();
+    this.setStatus(`Selected ${formatCount(selection.fixes.length)} fixes. Use a segment review action or choose another start.`);
   }
 
   applyTableSelectionInteraction(fixKey, { additive = false, range = false } = {}) {
     if (!this.data?.fixByKey?.has(fixKey)) {
+      return;
+    }
+    if (this.rangeSelectionModeActive) {
+      this.applyExplicitRangeSelection(fixKey);
       return;
     }
     if (range && this.tableSelection.anchorFixKey) {
@@ -8166,7 +8254,7 @@ class MovementExampleApp {
       this.setTableSelection({
         anchorFixKey: selection.anchorFixKey,
         focusFixKey: fixKey,
-        selectedFixKeys: selection.selectedFixKeys,
+        contiguousRange: true,
       });
       return;
     }
@@ -8193,13 +8281,16 @@ class MovementExampleApp {
 
   clearTableSelection() {
     this.setTableSelection();
+    this.rangeSelectionModeActive = false;
+    this.rangeSelectionAwaitingEnd = false;
+    this.syncRangeSelectionModeButtons();
     this.renderTableSheet();
     this.renderLayers();
     this.updateActionButtons();
   }
 
   getCurrentSegmentSelection() {
-    if (!this.tableSelection.anchorFixKey || !this.tableSelection.focusFixKey || !this.tableSelection.selectedFixKeys.size) {
+    if (!this.tableSelection.anchorFixKey || !this.tableSelection.focusFixKey) {
       return null;
     }
     const selected = this.resolveSegmentSelection(
@@ -8209,22 +8300,49 @@ class MovementExampleApp {
     if (!selected) {
       return null;
     }
-    if (selected.selectedFixKeys.size !== this.tableSelection.selectedFixKeys.size) {
-      return null;
-    }
-    for (const fixKey of selected.selectedFixKeys) {
-      if (!this.tableSelection.selectedFixKeys.has(fixKey)) {
+    if (!this.tableSelection.contiguousRange) {
+      if (selected.selectedFixKeys.size !== this.tableSelection.selectedFixKeys.size) {
         return null;
+      }
+      for (const fixKey of selected.selectedFixKeys) {
+        if (!this.tableSelection.selectedFixKeys.has(fixKey)) {
+          return null;
+        }
       }
     }
     return selected;
   }
 
+  hasTableSelection() {
+    return Boolean(
+      this.tableSelection.contiguousRange
+        ? this.tableSelection.anchorFixKey
+        : this.tableSelection.selectedFixKeys.size,
+    );
+  }
+
+  isFixInTableSelection(fixKey, selection = this.getCurrentSegmentSelection()) {
+    if (selection && this.tableSelection.contiguousRange) {
+      const position = this.data?.eligibleTrackPositionByFixKey?.get(fixKey);
+      return Boolean(
+        position
+        && position.trackKey === selection.trackKey
+        && position.index >= selection.startIndex
+        && position.index <= selection.endIndex,
+      );
+    }
+    return this.tableSelection.selectedFixKeys.has(fixKey);
+  }
+
   getVisibleTableSelectionFixes() {
     const visibleSetNames = this.getVisibleSetNames();
     const visibleIndividuals = new Set(this.getSelectedIndividuals());
-    return [...(this.tableSelection.selectedFixKeys || new Set())]
-      .map(fixKey => this.data?.fixByKey?.get(fixKey))
+    const selection = this.getCurrentSegmentSelection();
+    const fixes = selection && this.tableSelection.contiguousRange
+      ? selection.fixes
+      : [...(this.tableSelection.selectedFixKeys || new Set())]
+        .map(fixKey => this.data?.fixByKey?.get(fixKey));
+    return fixes
       .filter(fix => Boolean(fix) && visibleIndividuals.has(fix.individual) && visibleSetNames.has(fix.setName));
   }
 
@@ -8316,7 +8434,7 @@ class MovementExampleApp {
     const hasDetail = this.hasLoadedDetailSelection() || this.data.overviewHasAllFixes;
     const rows = mode === "fixes" ? this.getFilteredTableFixRows() : [];
     const selection = this.getCurrentSegmentSelection();
-    this.refs.segmentClear.disabled = !this.tableSelection.selectedFixKeys.size;
+    this.refs.segmentClear.disabled = !this.hasTableSelection() && !this.rangeSelectionModeActive;
     const segmentActionDisabled = (
       !this.canPersistEdits()
       || mode !== "fixes"
@@ -8436,11 +8554,12 @@ class MovementExampleApp {
     if (anchorFixKey) {
       selectionSummary = `Anchor set on ${anchorFixKey}. Shift-click another row on the same track to create a segment range.`;
     }
-    if (selectedRowKeys.size === 1) {
+    const selectedCount = selection?.fixes?.length || selectedRowKeys.size;
+    if (selectedCount === 1) {
       selectionSummary = `${anchorFixKey} selected. Shift-click another row on the same track to create a segment range.`;
     }
-    if (selectedRowKeys.size > 1) {
-      selectionSummary = `${formatCount(selectedRowKeys.size)} table rows selected. Shift-click within one track to turn the selection into a contiguous segment range.`;
+    if (selectedCount > 1) {
+      selectionSummary = `${formatCount(selectedCount)} table rows selected. Shift-click within one track to turn the selection into a contiguous segment range.`;
     }
     if (selection && selection.fixes.length >= 2) {
       selectionSummary = `${selection.individual} • ${selection.setName} • ${formatCount(selection.fixes.length)} fixes from ${formatTimestamp(selection.fixes[0].timeMs)} to ${formatTimestamp(selection.fixes[selection.fixes.length - 1].timeMs)}`;
@@ -8476,7 +8595,7 @@ class MovementExampleApp {
               : "";
             const rowClasses = [
               anchorFixKey === fix.fixKey ? "is-anchor" : "",
-              selectedRowKeys.has(fix.fixKey) ? "is-selected-range" : "",
+              this.isFixInTableSelection(fix.fixKey, selection) ? "is-selected-range" : "",
               this.data.selectedFixKeys.has(fix.fixKey) ? "is-checked-fix" : "",
             ].filter(Boolean).join(" ");
             return `
@@ -8785,6 +8904,11 @@ class MovementExampleApp {
       }
     }
     const visibleSegments = this.getVisibleSegments();
+    const visibleFlaggedSteps = (this.data.flaggedStepOverlays || []).filter(step => (
+      visibleIndividuals.has(step.individual)
+      && visibleSetNames.has(step.setName)
+      && (step.status !== "confirmed" || this.refs.showConfirmed.checked)
+    ));
     const visibleAutoBursts = this.getVisibleAutoBursts();
     const drawableAutoBursts = visibleAutoBursts.filter(burst => burst.path.length >= 2);
     const suppressedBaseTrackKeys = new Set(
@@ -8802,12 +8926,20 @@ class MovementExampleApp {
       position: fix.position,
       color: [87, 218, 174, 220],
     }));
-    const segmentSelection = this.tableSelection.selectedFixKeys.size
+    const segmentSelection = this.hasTableSelection()
       ? this.getCurrentSegmentSelection()
       : null;
     const tableSelectionPath = segmentSelection?.fixes
       ?.filter(fix => visibleTableSelectionKeys.has(fix.fixKey))
       .map(fix => fix.position) || [];
+    const tableSelectionEndpointData = segmentSelection?.fixes?.length
+      ? [
+        { role: "start", position: segmentSelection.fixes[0].position },
+        ...(segmentSelection.fixes.length > 1
+          ? [{ role: "end", position: segmentSelection.fixes[segmentSelection.fixes.length - 1].position }]
+          : []),
+      ]
+      : [];
     const thresholdMatchKeys = showPoints ? this.getActiveThresholdMatchKeys() : new Set();
     const candidateMatchKeys = showPoints ? this.getCandidateQueryMatchKeys() : new Set();
     const focusedRankingBurstFixes = this.getFocusedRankingBurstFixes();
@@ -8999,6 +9131,23 @@ class MovementExampleApp {
       }),
     );
 
+    if (visibleFlaggedSteps.length) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-flagged-fix-steps",
+          data: visibleFlaggedSteps,
+          dataComparator: sameArrayItems,
+          getPath: item => item.path,
+          getColor: item => item.status === "confirmed"
+            ? [92, 101, 110, 115]
+            : [255, 204, 40, 235],
+          getWidth: item => item.status === "confirmed" ? 3 : 5,
+          widthMinPixels: 2,
+          pickable: false,
+        }),
+      );
+    }
+
     if (visibleAutoBurstPaths.length) {
       layers.push(
         new deck.PathLayer({
@@ -9104,6 +9253,27 @@ class MovementExampleApp {
           getColor: [87, 218, 174, 210],
           getWidth: 6,
           widthMinPixels: 3,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (tableSelectionEndpointData.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-table-selection-endpoints",
+          data: tableSelectionEndpointData,
+          getPosition: item => item.position,
+          getFillColor: item => item.role === "start"
+            ? [87, 218, 174, 245]
+            : [244, 114, 182, 245],
+          getLineColor: [255, 255, 255, 245],
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 2,
+          getRadius: 118,
+          radiusMinPixels: 7,
+          radiusMaxPixels: 14,
           pickable: false,
         }),
       );
@@ -9493,10 +9663,12 @@ class MovementExampleApp {
       return;
     }
     const fixKey = picked.object.fixKey;
-    if (this.data.selectedFixKeys.has(fixKey)) {
-      this.data.selectedFixKeys.delete(fixKey);
-    } else {
-      this.data.selectedFixKeys.add(fixKey);
+    if (!this.rangeSelectionModeActive) {
+      if (this.data.selectedFixKeys.has(fixKey)) {
+        this.data.selectedFixKeys.delete(fixKey);
+      } else {
+        this.data.selectedFixKeys.add(fixKey);
+      }
     }
     this.applyTableSelectionInteraction(fixKey, {
       additive: event?.originalEvent?.metaKey || event?.originalEvent?.ctrlKey,
@@ -13837,6 +14009,11 @@ function refreshMovementFixCollections(data) {
   data.fixByKey = new Map(data.fixes.map(fix => [fix.fixKey, fix]));
   data.overviewFixesByTrack = buildMovementFixTrackIndex(data.overviewFixes || []);
   data.detailFixesByTrack = buildMovementFixTrackIndex(data.detailFixes || []);
+  data.eligibleFixesByTrack = buildMovementFixTrackIndex(data.fixes);
+  data.allFixesByTrack = buildMovementFixTrackIndex(data.fixes, { includeExcluded: true });
+  data.eligibleTrackPositionByFixKey = buildMovementTrackPositionLookup(data.eligibleFixesByTrack);
+  data.allTrackPositionByFixKey = buildMovementTrackPositionLookup(data.allFixesByTrack);
+  data.flaggedStepOverlays = buildFlaggedStepOverlays(data);
   data.baseTrackPathCache = new Map();
   const mergedSegments = new Map();
   for (const segment of [...(data.overviewSegments || []), ...(data.detailSegments || [])]) {
@@ -13907,10 +14084,10 @@ function buildAutoBurstEndpointMarkers(burst, sourceFlagged = false) {
   ];
 }
 
-function buildMovementFixTrackIndex(fixes) {
+function buildMovementFixTrackIndex(fixes, { includeExcluded = false } = {}) {
   const byTrack = new Map();
   for (const fix of fixes) {
-    if (fix.analyticallyExcluded || fix.review?.status === "confirmed") {
+    if (!includeExcluded && (fix.analyticallyExcluded || fix.review?.status === "confirmed")) {
       continue;
     }
     const key = movementTrackKey(fix.individual, fix.setName);
@@ -13922,6 +14099,46 @@ function buildMovementFixTrackIndex(fixes) {
     trackFixes.sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
   }
   return byTrack;
+}
+
+function buildMovementTrackPositionLookup(byTrack) {
+  const positions = new Map();
+  for (const [trackKey, fixes] of byTrack || []) {
+    fixes.forEach((fix, index) => positions.set(fix.fixKey, { trackKey, index }));
+  }
+  return positions;
+}
+
+function buildFlaggedStepOverlays(data) {
+  const overlays = [];
+  const seen = new Set();
+  const addInboundStep = (fix, status, byTrack, positionByFixKey) => {
+    const position = positionByFixKey.get(fix.fixKey);
+    if (!position || position.index <= 0) return;
+    const track = byTrack.get(position.trackKey) || [];
+    const previous = track[position.index - 1];
+    if (!previous) return;
+    const stepKey = `${status}:${previous.fixKey}->${fix.fixKey}`;
+    if (seen.has(stepKey)) return;
+    seen.add(stepKey);
+    overlays.push({
+      stepKey,
+      fixKey: fix.fixKey,
+      individual: fix.individual,
+      setName: fix.setName,
+      status,
+      path: [previous.position, fix.position],
+    });
+  };
+  for (const fix of data.fixes || []) {
+    const status = String(fix.review?.status || "").trim().toLowerCase();
+    if (status === "suspected") {
+      addInboundStep(fix, status, data.eligibleFixesByTrack, data.eligibleTrackPositionByFixKey);
+    } else if (status === "confirmed") {
+      addInboundStep(fix, status, data.allFixesByTrack, data.allTrackPositionByFixKey);
+    }
+  }
+  return overlays;
 }
 
 function isSourceOnlyFlaggedBurstFromData(data, burst) {

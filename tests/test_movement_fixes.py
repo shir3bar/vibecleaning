@@ -765,6 +765,36 @@ fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,120
     assert any(field["key"] == "height-above-msl" for field in payload["color_fields"])
 
 
+def test_gps_quality_color_fields_are_shared_by_overview_and_detail(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    rows = [
+        "eventid,individual,timestamp,longitude,latitude,gps:satellite-count,gps-time-to-fix,gps:fix-type-raw,gps:maximum-signal-strength,eobs:horizontal-accuracy-estimate,location-error-text"
+    ]
+    for index in range(14):
+        rows.append(
+            f"fix_{index},alpha,2024-01-01T00:{index:02d}:00Z,-70.{index},40.{index},"
+            f"{8 + index},{10 + index},{['2d', '3d', 'dgps'][index % 3]},{30 + index},{2 + index / 10},error-{index}"
+        )
+    csv_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    overview = build_movement_overview(csv_path)
+    detail = build_movement_fixes(csv_path)
+    overview_fields = {field["key"]: field["kind"] for field in overview["color_fields"]}
+    detail_attributes = detail["fixes"][0]["attributes"]
+
+    expected = {
+        "gps:satellite-count": "numeric",
+        "gps-time-to-fix": "numeric",
+        "gps:fix-type-raw": "categorical",
+        "gps:maximum-signal-strength": "numeric",
+        "eobs:horizontal-accuracy-estimate": "numeric",
+    }
+    assert {key: overview_fields[key] for key in expected} == expected
+    assert all(key in detail_attributes for key in expected)
+    assert "location-error-text" not in overview_fields
+    assert "location-error-text" not in detail_attributes
+
+
 def test_movement_frontend_includes_osm_streets_basemap_config():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
@@ -932,6 +962,32 @@ def test_movement_frontend_map_click_does_not_force_table_reveal():
     assert "this.revealFixInTable" not in source
     assert "scrollTableRowIntoView" not in source
     assert 'this.refs?.sideSheetTabs?.dataset.activeSheet === "table"' in source
+
+
+def test_movement_frontend_has_shared_endpoint_range_selection():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert 'data-role="range-select-mode">Select track range</button>' in source
+    assert 'data-role="table-range-select-mode">Select track range</button>' in source
+    assert "applyExplicitRangeSelection(fixKey)" in source
+    assert "eligibleTrackPositionByFixKey" in source
+    assert "track.slice(startIndex, endIndex + 1)" in source
+    assert "contiguousRange: true" in source
+    assert 'event.key === "Escape"' in source
+    assert 'id: "movement-table-selection-endpoints"' in source
+    assert "if (!this.rangeSelectionModeActive)" in source
+
+
+def test_movement_frontend_precomputes_inbound_flagged_steps():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "function buildFlaggedStepOverlays(data)" in source
+    assert "data.flaggedStepOverlays = buildFlaggedStepOverlays(data);" in source
+    assert "position.index <= 0" in source
+    assert "path: [previous.position, fix.position]" in source
+    assert 'id: "movement-flagged-fix-steps"' in source
+    assert "data: visibleFlaggedSteps" in source
+    assert 'item.status === "confirmed"' in source
 
 
 def test_movement_frontend_loads_ephemeral_osm_helpers_only_in_dev_mode():
