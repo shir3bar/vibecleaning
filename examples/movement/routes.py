@@ -39,6 +39,7 @@ from app.reviews import (
     complete_review,
     finish_editor_control,
     load_review_state,
+    review_coverage,
     review_profile,
     start_editor_control,
     valid_review_decisions,
@@ -799,6 +800,100 @@ def register_movement_routes(
     def active_annotations(study_dir: Path) -> list[dict]:
         dataset_id = str(load_project_state(study_dir)["current_dataset_id"])
         return _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+
+    def admin_review_summary(
+        family_name: str,
+        study_name: str,
+        *,
+        include_individuals: bool,
+    ) -> dict:
+        study_dir = configured_study_dir(family_name, study_name)
+        state = load_review_state(study_dir)
+        review = active_review(state)
+        if review is None:
+            review = next(
+                (
+                    item
+                    for item in reversed(state.get("reviews") or [])
+                    if item.get("status") == "completed" and item.get("final_dataset_id")
+                ),
+                None,
+            )
+        current_dataset_id = str(load_project_state(study_dir)["current_dataset_id"])
+        if review is None:
+            return {
+                "family": family_name,
+                "study": study_name,
+                "current_dataset_id": current_dataset_id,
+                "review": None,
+                "counts": {
+                    "required": 0,
+                    "reviewed": 0,
+                    "undecided": 0,
+                    "ok": 0,
+                    "not_ok": 0,
+                    "second_opinion": 0,
+                },
+                **({"individuals": []} if include_individuals else {}),
+            }
+        dataset_id = (
+            current_dataset_id
+            if review.get("status") == "active"
+            else str(review.get("final_dataset_id") or current_dataset_id)
+        )
+        annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+        valid = valid_review_decisions(
+            study_dir,
+            review,
+            annotations,
+            current_dataset_id=dataset_id,
+        )
+        coverage = review_coverage(
+            study_dir,
+            review,
+            annotations,
+            current_dataset_id=dataset_id,
+        )
+        decision_counts = {"ok": 0, "not_ok": 0, "second_opinion": 0}
+        for annotation in valid.values():
+            decision = str(annotation.get("review_decision") or "")
+            if decision in decision_counts:
+                decision_counts[decision] += 1
+        result = {
+            "family": family_name,
+            "study": study_name,
+            "current_dataset_id": current_dataset_id,
+            "review": {
+                "review_id": str(review.get("review_id") or ""),
+                "status": str(review.get("status") or ""),
+                "reviewer": dict(review.get("reviewer") or {}),
+                "assigned_at": str(review.get("assigned_at") or ""),
+                "completed_at": str(review.get("completed_at") or ""),
+            },
+            "counts": {
+                "required": int(coverage["required_count"]),
+                "reviewed": int(coverage["reviewed_count"]),
+                "undecided": int(coverage["remaining_count"]),
+                **decision_counts,
+            },
+        }
+        if include_individuals:
+            required = sorted(set(valid) | set(coverage["remaining_individuals"]))
+            result["individuals"] = [
+                {
+                    "individual": individual,
+                    "review_decision": str(
+                        (valid.get(individual) or {}).get("review_decision") or ""
+                    ),
+                    "reviewed_at": str(
+                        (valid.get(individual) or {}).get("created_at")
+                        or (valid.get(individual) or {}).get("reviewed_at")
+                        or ""
+                    ),
+                }
+                for individual in required
+            ]
+        return result
 
     def display_annotations(
         study_dir: Path,
@@ -1594,6 +1689,55 @@ def register_movement_routes(
                 }
             )
         except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 404)
+
+    @app.get("/api/apps/movement/admin/review-summary")
+    async def get_movement_admin_review_summary(
+        request: Request,
+        family: str = "",
+        study: str = "",
+        include_individuals: bool = False,
+    ):
+        actor = current_actor(request)
+        if actor is None or actor.role != "editor":
+            return json_error("Only editors can view review summaries", 403)
+        if include_individuals and (not family or not study):
+            return json_error("family and study are required for individual details", 400)
+        if bool(family) != bool(study):
+            return json_error("family and study must be provided together", 400)
+        try:
+            if family and study:
+                family_name = require_configured_family(family)
+                studies = [
+                    admin_review_summary(
+                        family_name,
+                        study,
+                        include_individuals=include_individuals,
+                    )
+                ]
+            else:
+                studies = []
+                families = list_families(data_root)
+                if configured_families:
+                    families = [
+                        item for item in families
+                        if item.get("name") in configured_families
+                    ]
+                for family_item in families:
+                    family_name = str(family_item["name"])
+                    for study_item in list_studies(data_root, family_name):
+                        studies.append(
+                            admin_review_summary(
+                                family_name,
+                                str(study_item["name"]),
+                                include_individuals=False,
+                            )
+                        )
+            return JSONResponse(
+                {"studies": studies},
+                headers={"Cache-Control": "no-store"},
+            )
+        except (ValueError, ProjectStateError, ReviewStateError) as exc:
             return json_error(str(exc), 404)
 
     @app.get("/api/apps/movement/reviewers")

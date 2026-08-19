@@ -2146,6 +2146,24 @@ class MovementExampleApp {
           background: rgba(245, 181, 54, 0.16);
           color: #ffe7a6;
         }
+        .movement-prior-decision-badge {
+          display: inline-flex;
+          width: fit-content;
+          margin-top: 7px;
+          padding: 4px 7px;
+          border-radius: 999px;
+          border: 1px solid rgba(148, 163, 184, 0.35);
+          color: #c8d4e3;
+          background: rgba(148, 163, 184, 0.1);
+          font-size: 11px;
+          font-weight: 700;
+        }
+        .movement-prior-decision-badge.issues,
+        .movement-prior-decision-badge.second-opinion {
+          border-color: rgba(255, 193, 77, 0.7);
+          color: #ffe1a1;
+          background: rgba(255, 193, 77, 0.14);
+        }
         .movement-queue-card-actions button:disabled,
         .movement-queue-controls button:disabled {
           cursor: not-allowed;
@@ -2518,6 +2536,33 @@ class MovementExampleApp {
         }
         .movement-modal-body label.movement-inline-check input {
           min-width: 0;
+        }
+        .movement-admin-dashboard-card {
+          width: min(1080px, 100%);
+        }
+        .movement-admin-dashboard-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 12px;
+        }
+        .movement-admin-dashboard-table th,
+        .movement-admin-dashboard-table td {
+          padding: 8px;
+          text-align: left;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          vertical-align: top;
+        }
+        .movement-admin-dashboard-actions {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+        }
+        .movement-admin-individuals {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 6px;
+          padding: 8px 0;
+          color: #b8c7d9;
         }
         .movement-issue-scope {
           display: grid;
@@ -3094,6 +3139,19 @@ class MovementExampleApp {
         </div>
       </div>
 
+      <div class="movement-modal hidden" data-role="admin-dashboard-modal">
+        <div class="movement-modal-card movement-admin-dashboard-card">
+          <div class="movement-modal-head">
+            <h3>Review dashboard</h3>
+            <button type="button" data-role="admin-dashboard-close">Close</button>
+          </div>
+          <div class="movement-modal-body">
+            <div class="movement-modal-status" data-role="admin-dashboard-status"></div>
+            <div data-role="admin-dashboard-content"></div>
+          </div>
+        </div>
+      </div>
+
       <div class="movement-modal hidden" data-role="resume-modal">
         <div class="movement-modal-card">
           <div class="movement-modal-head">
@@ -3169,6 +3227,7 @@ class MovementExampleApp {
       resumeHistory: document.querySelector('[data-role="resume-history"]'),
       authIdentity: document.querySelector('[data-role="auth-identity"]'),
       reviewProgress: document.querySelector('[data-role="review-progress"]'),
+      adminDashboard: document.querySelector('[data-role="admin-dashboard"]'),
       assignReview: document.querySelector('[data-role="assign-review"]'),
       completeReview: document.querySelector('[data-role="complete-review"]'),
       cancelReview: document.querySelector('[data-role="cancel-review"]'),
@@ -3222,6 +3281,10 @@ class MovementExampleApp {
       fixPopup: this.mountEl.querySelector('[data-role="fix-popup"]'),
       overlay: this.mountEl.querySelector('[data-role="overlay"]'),
       issueModal: this.mountEl.querySelector('[data-role="issue-modal"]'),
+      adminDashboardModal: this.mountEl.querySelector('[data-role="admin-dashboard-modal"]'),
+      adminDashboardClose: this.mountEl.querySelector('[data-role="admin-dashboard-close"]'),
+      adminDashboardStatus: this.mountEl.querySelector('[data-role="admin-dashboard-status"]'),
+      adminDashboardContent: this.mountEl.querySelector('[data-role="admin-dashboard-content"]'),
       issueTitle: this.mountEl.querySelector('[data-role="issue-title"]'),
       issueMeta: this.mountEl.querySelector('[data-role="issue-meta"]'),
       issueScopeControl: this.mountEl.querySelector('[data-role="issue-scope-control"]'),
@@ -3364,6 +3427,13 @@ class MovementExampleApp {
     this.refs.cancelReview?.addEventListener("click", () => void this.cancelCurrentReview());
     this.refs.editorControlStart?.addEventListener("click", () => void this.startCurrentEditorControl());
     this.refs.editorControlFinish?.addEventListener("click", () => void this.finishCurrentEditorControl());
+    this.refs.adminDashboard?.addEventListener("click", () => void this.openAdminDashboard());
+    this.refs.adminDashboardClose?.addEventListener("click", () => {
+      this.refs.adminDashboardModal.classList.add("hidden");
+    });
+    this.refs.adminDashboardContent?.addEventListener("click", event => {
+      void this.handleAdminDashboardClick(event);
+    });
     this.refs.sideTabIndividuals.addEventListener("click", () => this.setSideSheet("individuals"));
     this.refs.sideTabTable.addEventListener("click", () => this.setSideSheet("table"));
     this.refs.sideTabRanking.addEventListener("click", () => this.setSideSheet("ranking"));
@@ -5904,6 +5974,9 @@ class MovementExampleApp {
         this.currentStudy && capabilities.can_manage_assignment && !review
       );
     }
+    if (this.refs.adminDashboard) {
+      this.refs.adminDashboard.hidden = actor.role !== "editor";
+    }
     if (this.refs.completeReview) {
       this.refs.completeReview.hidden = !(review && (
         capabilities.can_complete
@@ -5924,6 +5997,123 @@ class MovementExampleApp {
     }
     if (this.refs.editorControlFinish) {
       this.refs.editorControlFinish.hidden = !(actor.role === "editor" && control?.owner_user_id === actor.user_id);
+    }
+  }
+
+  async openAdminDashboard() {
+    if (!this.refs.adminDashboardModal) return;
+    this.refs.adminDashboardModal.classList.remove("hidden");
+    this.refs.adminDashboardStatus.textContent = "Loading study review summaries...";
+    this.refs.adminDashboardStatus.classList.remove("error");
+    this.refs.adminDashboardContent.innerHTML = "";
+    try {
+      const payload = await this.fetchJSON(
+        "/api/apps/movement/admin/review-summary",
+        { cache: "no-store" },
+      );
+      this.renderAdminDashboard(payload);
+      this.refs.adminDashboardStatus.textContent = "";
+    } catch (error) {
+      this.refs.adminDashboardStatus.textContent = `Could not load review dashboard: ${error.message}`;
+      this.refs.adminDashboardStatus.classList.add("error");
+    }
+  }
+
+  renderAdminDashboard(payload) {
+    const studies = Array.isArray(payload?.studies) ? payload.studies : [];
+    if (!studies.length) {
+      this.refs.adminDashboardContent.innerHTML = '<div class="movement-empty">No movement studies are available.</div>';
+      return;
+    }
+    this.refs.adminDashboardContent.innerHTML = `
+      <table class="movement-admin-dashboard-table">
+        <thead><tr>
+          <th>Study</th><th>Review</th><th>Reviewer</th><th>Progress</th>
+          <th>OK</th><th>Issues</th><th>Second opinion</th><th>Undecided</th><th>Actions</th>
+        </tr></thead>
+        <tbody>
+          ${studies.map(item => {
+            const counts = item.counts || {};
+            const review = item.review || {};
+            const reviewer = review.reviewer?.display_name || review.reviewer?.username || "—";
+            return `
+              <tr data-admin-study-row data-family="${escapeHtml(item.family || "")}" data-study="${escapeHtml(item.study || "")}">
+                <td><strong>${escapeHtml(item.study || "")}</strong><br>${escapeHtml(item.family || "")}</td>
+                <td>${escapeHtml(review.status || "Not reviewed")}</td>
+                <td>${escapeHtml(reviewer)}</td>
+                <td>${escapeHtml(formatCount(counts.reviewed || 0))}/${escapeHtml(formatCount(counts.required || 0))}</td>
+                <td>${escapeHtml(formatCount(counts.ok || 0))}</td>
+                <td>${escapeHtml(formatCount(counts.not_ok || 0))}</td>
+                <td>${escapeHtml(formatCount(counts.second_opinion || 0))}</td>
+                <td>${escapeHtml(formatCount(counts.undecided || 0))}</td>
+                <td><div class="movement-admin-dashboard-actions">
+                  <button type="button" data-admin-action="expand">Individuals</button>
+                  <button type="button" data-admin-action="open">Open study</button>
+                </div></td>
+              </tr>
+              <tr data-admin-detail-row data-family="${escapeHtml(item.family || "")}" data-study="${escapeHtml(item.study || "")}" hidden>
+                <td colspan="9"><div class="movement-admin-individuals">Loading...</div></td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
+  async handleAdminDashboardClick(event) {
+    const button = event.target.closest("button[data-admin-action]");
+    if (!button) return;
+    const row = button.closest("tr[data-admin-study-row]");
+    const family = row?.dataset.family || "";
+    const study = row?.dataset.study || "";
+    if (!family || !study) return;
+    if (button.dataset.adminAction === "open") {
+      if (!(await this.flushIndividualReviewDecisions())) return;
+      this.refs.adminDashboardModal.classList.add("hidden");
+      if (family !== this.currentFamily) {
+        await this.switchFamily(family);
+      }
+      this.currentStudy = study;
+      this.refs.study.value = study;
+      this.closeStudyEvents();
+      this.currentDatasetId = "";
+      this.currentArtifact = "";
+      this.currentDataset = null;
+      this.saveUiState();
+      await this.loadStudy();
+      return;
+    }
+    const detailRow = [...this.refs.adminDashboardContent.querySelectorAll("tr[data-admin-detail-row]")]
+      .find(item => item.dataset.family === family && item.dataset.study === study);
+    if (!detailRow) return;
+    if (detailRow.dataset.loaded === "true") {
+      detailRow.hidden = !detailRow.hidden;
+      return;
+    }
+    detailRow.hidden = false;
+    button.disabled = true;
+    try {
+      const query = new URLSearchParams({
+        family,
+        study,
+        include_individuals: "true",
+      });
+      const payload = await this.fetchJSON(
+        `/api/apps/movement/admin/review-summary?${query}`,
+        { cache: "no-store" },
+      );
+      const individuals = payload?.studies?.[0]?.individuals || [];
+      detailRow.querySelector(".movement-admin-individuals").innerHTML = individuals.length
+        ? individuals.map(item => (
+          `<div><strong>${escapeHtml(item.individual || "")}</strong><br>${escapeHtml(item.review_decision || "Undecided")}</div>`
+        )).join("")
+        : '<div class="movement-empty">No individual decisions.</div>';
+      detailRow.dataset.loaded = "true";
+    } catch (error) {
+      detailRow.querySelector(".movement-admin-individuals").textContent = `Could not load individuals: ${error.message}`;
+    } finally {
+      button.disabled = false;
     }
   }
 
@@ -6877,6 +7067,10 @@ class MovementExampleApp {
   }
 
   getIndividualReviewState(individual) {
+    const priorDecision = (
+      this.editLockProfile?.coverage?.prior_decisions_by_individual?.[individual]
+      || null
+    );
     const staged = this.individualReviewQueue.stagedDecisions.get(individual);
     if (staged) {
       return {
@@ -6885,17 +7079,17 @@ class MovementExampleApp {
         reviewOk: staged.review_decision === "ok",
         comment: staged.comment || "",
         staged: true,
+        priorDecision,
+        priorSecondOpinion: priorDecision?.review_decision === "second_opinion",
       };
     }
     const stats = this.data?.stats?.[individual] || {};
-    const priorSecondOpinion = (
-      this.editLockProfile?.coverage?.prior_second_opinion_individuals || []
-    ).includes(individual);
     return {
       reviewed: stats.reviewed === true,
       reviewDecision: stats.reviewDecision || (stats.reviewed ? (stats.reviewOk ? "ok" : "not_ok") : ""),
       reviewOk: stats.reviewOk === true,
-      priorSecondOpinion,
+      priorDecision,
+      priorSecondOpinion: priorDecision?.review_decision === "second_opinion",
       comment: stats.reviewComment || "",
       staged: false,
     };
@@ -6942,13 +7136,6 @@ class MovementExampleApp {
       && this.individualReviewQueue.appliedRankingAnalysisId === this.anomalyRanking.analysisId
     );
     return [...visibleIndividuals].sort((left, right) => {
-      const leftState = this.getIndividualReviewState(left);
-      const rightState = this.getIndividualReviewState(right);
-      const leftReviewGroup = leftState.priorSecondOpinion ? 0 : !leftState.reviewed ? 1 : leftState.reviewDecision === "second_opinion" ? 2 : 3;
-      const rightReviewGroup = rightState.priorSecondOpinion ? 0 : !rightState.reviewed ? 1 : rightState.reviewDecision === "second_opinion" ? 2 : 3;
-      if (leftReviewGroup !== rightReviewGroup) {
-        return leftReviewGroup - rightReviewGroup;
-      }
       if (useRanking) {
         const leftRank = rankingIndex.get(left) ?? Number.MAX_SAFE_INTEGER;
         const rightRank = rankingIndex.get(right) ?? Number.MAX_SAFE_INTEGER;
@@ -7549,6 +7736,9 @@ class MovementExampleApp {
       const isSelected = this.data.selectedIndividuals.has(individual);
       const card = document.createElement("div");
       const unresolvedCount = Number(stats.unresolvedSuspectedCount) || 0;
+      const priorDecision = String(
+        this.getIndividualReviewState(individual).priorDecision?.review_decision || "",
+      );
       card.className = `movement-card interactive${unresolvedCount ? " has-unresolved-issues" : ""}`;
       card.style.opacity = isSelected ? "1" : "0.34";
 
@@ -7606,6 +7796,16 @@ class MovementExampleApp {
         notice.className = "movement-fix-note";
         notice.textContent = `Unresolved issues: ${formatCount(unresolvedCount)}${origins.length ? ` • ${origins.join(", ")}` : ""}`;
         card.appendChild(notice);
+      }
+      if (priorDecision) {
+        const badge = document.createElement("div");
+        badge.className = `movement-prior-decision-badge ${priorDecision === "not_ok" ? "issues" : priorDecision === "second_opinion" ? "second-opinion" : "ok"}`;
+        badge.textContent = priorDecision === "not_ok"
+          ? "Prior review: Issues found"
+          : priorDecision === "second_opinion"
+            ? "Prior review: Second opinion"
+            : "Prior review: OK";
+        card.appendChild(badge);
       }
 
       const track = document.createElement("div");
@@ -7702,6 +7902,17 @@ class MovementExampleApp {
       const card = document.createElement("div");
       const unresolvedCount = Number(stats.unresolvedSuspectedCount) || 0;
       const origins = Array.isArray(stats.unresolvedIssueOrigins) ? stats.unresolvedIssueOrigins : [];
+      const priorDecision = String(reviewState.priorDecision?.review_decision || "");
+      const priorLabel = priorDecision === "not_ok"
+        ? "Prior review: Issues found"
+        : priorDecision === "second_opinion"
+          ? "Prior review: Second opinion"
+          : priorDecision === "ok"
+            ? "Prior review: OK"
+            : "";
+      const priorClass = priorDecision === "not_ok"
+        ? "issues"
+        : priorDecision === "second_opinion" ? "second-opinion" : "ok";
       card.className = `movement-card queue-card interactive${isActive ? " queue-active" : ""}${unresolvedCount ? " has-unresolved-issues" : ""}`;
       const stateLabel = reviewState.reviewed
         ? reviewState.reviewDecision === "ok"
@@ -7709,8 +7920,10 @@ class MovementExampleApp {
           : reviewState.reviewDecision === "second_opinion"
             ? "Reviewed—second opinion"
             : "Reviewed—issues"
-        : reviewState.priorSecondOpinion
+        : priorDecision === "second_opinion"
           ? "Needs review—prior second opinion"
+          : priorDecision === "not_ok"
+            ? "Needs review—prior issues"
           : queue.skippedIndividuals.has(individual)
             ? "Skipped"
             : "Unreviewed";
@@ -7728,6 +7941,7 @@ class MovementExampleApp {
             <button type="button" data-queue-table data-individual="${escapeHtml(individual)}">Table</button>
           </div>
         </div>
+        ${priorLabel ? `<div class="movement-prior-decision-badge ${priorClass}">${escapeHtml(priorLabel)}</div>` : ""}
         <div class="movement-queue-card-meta">
           ${escapeHtml(this.data.speciesByIndividual[individual] || "")}
           ${this.data.speciesByIndividual[individual] ? " • " : ""}

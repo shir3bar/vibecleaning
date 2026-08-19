@@ -498,22 +498,68 @@ def carryover_second_opinions(
     annotation_list = list(annotations)
     scope = review_scope(project_dir, review, current_dataset_id=current_dataset_id)
     current = _valid_review_decisions(review, annotation_list, scope)
-    previous_latest: dict[str, str] = {}
-    for annotation in annotation_list:
-        if annotation.get("annotation_kind") != "individual_review" or not annotation.get("reviewed"):
-            continue
-        individual = str((annotation.get("scope") or {}).get("individual") or "").strip()
-        if individual not in scope["required_since"]:
-            continue
-        previous_latest[individual] = normalize_review_decision(
-            annotation.get("review_decision"),
-            review_ok=annotation.get("review_ok"),
-        )
+    previous_latest = prior_review_decisions(
+        project_dir,
+        review,
+        annotation_list,
+        current_dataset_id=current_dataset_id,
+    )
     return sorted(
         individual
-        for individual, decision in previous_latest.items()
-        if individual not in current and decision == "second_opinion"
+        for individual, item in previous_latest.items()
+        if individual not in current and item["review_decision"] == "second_opinion"
     )
+
+
+def prior_review_decisions(
+    project_dir: Path,
+    review: dict,
+    annotations: Iterable[dict],
+    *,
+    current_dataset_id: str | None = None,
+) -> dict[str, dict]:
+    """Return valid decisions from the immediately preceding completed review."""
+    state = load_review_state(project_dir)
+    review_id = str(review.get("review_id") or "")
+    prior_review = None
+    for candidate in reversed(state.get("reviews") or []):
+        candidate_id = str(candidate.get("review_id") or "")
+        if candidate_id == review_id:
+            continue
+        if candidate.get("status") == "completed" and candidate.get("final_dataset_id"):
+            prior_review = candidate
+            break
+    if prior_review is None:
+        return {}
+    current_scope = review_scope(project_dir, review, current_dataset_id=current_dataset_id)
+    try:
+        prior_scope = review_scope(
+            project_dir,
+            prior_review,
+            current_dataset_id=str(prior_review["final_dataset_id"]),
+        )
+    except ReviewStateError:
+        return {}
+    valid = _valid_review_decisions(prior_review, annotations, prior_scope)
+    reviewer = _normalize_actor_snapshot(prior_review.get("reviewer"))
+    result: dict[str, dict] = {}
+    for individual in current_scope["required_individuals"]:
+        annotation = valid.get(individual)
+        if annotation is None:
+            continue
+        result[individual] = {
+            "review_decision": str(annotation.get("review_decision") or ""),
+            "review_id": str(prior_review.get("review_id") or ""),
+            "reviewer": reviewer,
+            "reviewed_at": str(
+                annotation.get("created_at")
+                or annotation.get("reviewed_at")
+                or prior_review.get("completed_at")
+                or ""
+            ),
+            "annotation_id": str(annotation.get("annotation_id") or ""),
+        }
+    return result
 
 
 def complete_review(
@@ -618,7 +664,13 @@ def review_profile(project_dir: Path, actor: Actor, annotations: Iterable[dict] 
     )
     coverage = review_coverage(project_dir, review, annotation_list) if review else None
     if review and coverage is not None:
-        carryover = carryover_second_opinions(project_dir, review, annotation_list)
+        prior_decisions = prior_review_decisions(project_dir, review, annotation_list)
+        coverage["prior_decisions_by_individual"] = prior_decisions
+        carryover = sorted(
+            individual
+            for individual, item in prior_decisions.items()
+            if item.get("review_decision") == "second_opinion"
+        )
         coverage["prior_second_opinion_count"] = len(carryover)
         coverage["prior_second_opinion_individuals"] = carryover
     return {

@@ -389,6 +389,13 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
         },
     )
     assert completed.status_code == 200
+    completed_dashboard = editor_client.get("/api/apps/movement/admin/review-summary")
+    assert completed_dashboard.status_code == 200
+    completed_row = completed_dashboard.json()["studies"][0]
+    assert completed_row["review"]["status"] == "completed"
+    assert completed_row["counts"]["ok"] == 1
+    assert completed_row["counts"]["second_opinion"] == 1
+    assert completed_row["counts"]["undecided"] == 0
     reassigned = editor_client.post(
         "/api/apps/movement/family/movement_raw/study/study_one/review/assign",
         json={
@@ -412,3 +419,37 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
     ).json()
     assert fresh_profile["coverage"]["reviewed_count"] == 0
     assert fresh_profile["coverage"]["prior_second_opinion_individuals"] == ["beta"]
+    assert fresh_profile["coverage"]["prior_decisions_by_individual"]["alpha"]["review_decision"] == "ok"
+    assert fresh_profile["coverage"]["prior_decisions_by_individual"]["beta"]["review_decision"] == "second_opinion"
+
+    forbidden_dashboard = reviewer_client.get("/api/apps/movement/admin/review-summary")
+    assert forbidden_dashboard.status_code == 403
+
+    dashboard = editor_client.get("/api/apps/movement/admin/review-summary")
+    assert dashboard.status_code == 200
+    dashboard_row = dashboard.json()["studies"][0]
+    assert dashboard_row["family"] == "movement_raw"
+    assert dashboard_row["study"] == "study_one"
+    assert dashboard_row["review"]["status"] == "active"
+    assert dashboard_row["counts"] == {
+        "required": 2,
+        "reviewed": 0,
+        "undecided": 2,
+        "ok": 0,
+        "not_ok": 0,
+        "second_opinion": 0,
+    }
+
+    dashboard_detail = editor_client.get(
+        "/api/apps/movement/admin/review-summary",
+        params={
+            "family": "movement_raw",
+            "study": "study_one",
+            "include_individuals": "true",
+        },
+    )
+    assert dashboard_detail.status_code == 200
+    assert dashboard_detail.json()["studies"][0]["individuals"] == [
+        {"individual": "alpha", "review_decision": "", "reviewed_at": ""},
+        {"individual": "beta", "review_decision": "", "reviewed_at": ""},
+    ]

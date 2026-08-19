@@ -1878,6 +1878,23 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert "this.openIndividualReviewModal(addIssueButton.dataset.individual" in source
     assert 'data-add-individual-issue data-individual=' in source
     assert "await this.stageIndividualReviewDecision(queueReviewIndividual, false)" in source
+    assert "prior_decisions_by_individual" in source
+    assert "movement-prior-decision-badge" in source
+    assert "leftReviewGroup" not in source
+    assert 'data-review-decision="second_opinion"' in source
+
+
+def test_movement_frontend_has_lazy_editor_review_dashboard():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    index = MOVEMENT_INDEX.read_text(encoding="utf-8")
+
+    assert 'data-role="admin-dashboard" hidden>Review dashboard</button>' in index
+    assert 'data-role="admin-dashboard-modal"' in source
+    assert '"/api/apps/movement/admin/review-summary"' in source
+    assert 'include_individuals: "true"' in source
+    assert "openAdminDashboard()" in source
+    assert "handleAdminDashboardClick(event)" in source
+    assert "setInterval" not in source[source.index("  async openAdminDashboard() {"):source.index("  async assignCurrentReview() {")]
 
 
 def test_movement_individual_queue_explains_burst_ranking_availability():
