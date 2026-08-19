@@ -1818,6 +1818,17 @@ def test_movement_frontend_loads_suspicious_fixes_as_passive_overlay_with_focus_
     assert "...(data.suspiciousFixes || [])" in source
 
 
+def test_movement_frontend_limits_suspicious_halos_to_visible_individuals():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    collection_start = source.index("    if (showSuspectedOutlines) {")
+    collection_end = source.index("\n    if (showPoints) {", collection_start)
+    collection = source[collection_start:collection_end]
+
+    assert "for (const fix of this.data.suspiciousFixes || [])" in collection
+    assert "|| !visibleIndividuals.has(fix.individual)" in collection
+    assert "|| !visibleSetNames.has(fix.setName)" in collection
+
+
 def test_movement_report_can_render_one_snapshot_per_flagged_burst():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 

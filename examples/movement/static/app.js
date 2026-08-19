@@ -9232,6 +9232,7 @@ class MovementExampleApp {
       for (const fix of this.data.suspiciousFixes || []) {
         if (
           fix.review?.status !== "suspected"
+          || !visibleIndividuals.has(fix.individual)
           || !visibleSetNames.has(fix.setName)
           || seenSuspected.has(fix.fixKey)
         ) {
