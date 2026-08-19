@@ -370,7 +370,17 @@ def test_frontend_exposes_read_only_burst_feature_space_with_bidirectional_focus
     assert "selectMapBurstInFeatureSpace(burst)" in source
     assert "this.setFocusedRankingBurst({" in source
     assert "fix_keys: burst.fixKeys" in source
-    assert "pickable: Boolean(this.burstFeatureSpace?.points?.length)" in source
+    # Map-to-feature-space selection no longer depends on layer pickability;
+    # bursts are always pickable and the handler keeps its own guards, running
+    # ahead of both the burst-focus and fix-selection branches.
+    assert "pickable: Boolean(this.burstFeatureSpace?.points?.length)" not in source
+    assert "!(this.burstFeatureSpace?.points || []).length" in source
+    click_handler = source[
+        source.index("  handleMapClick(event) {"):
+        source.index("  handleMapContextMenu(event) {")
+    ]
+    assert click_handler.index("getMapPickedFeatureSpaceBurst") < click_handler.index("pickObject")
+    assert click_handler.index("selectMapBurstInFeatureSpace") < click_handler.index("focusMapBurst")
     assert "openIssueModal" not in feature_space_handler
     assert "openSegmentModal" not in feature_space_handler
     assert "run-candidate-query" not in feature_space_handler

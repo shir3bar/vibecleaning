@@ -750,21 +750,25 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert "this.setFocusedRankingBurst(ref)" in ranking_handler
     assert "getFocusedRankingBurstFixes" in source
     assert "clearFocusedRankingBurstIfHidden" in source
-    assert 'id: "movement-focused-ranking-burst-path-outline"' in source
-    assert 'id: "movement-focused-ranking-burst-path"' in source
-    assert 'id: "movement-focused-ranking-burst-points"' in source
-    assert 'id: "movement-focused-ranking-burst-markers"' in source
+    # A focused burst is styled inside the shared burst layers rather than
+    # drawn again by a parallel focused-burst layer stack.
+    assert 'id: "movement-burst-casing"' in source
+    assert 'id: "movement-bursts"' in source
+    assert 'id: "movement-burst-focus-ring"' in source
+    assert "movement-focused-ranking-burst" not in source
     assert 'markerRole: "start"' in source
     assert 'markerRole: "end"' in source
-    assert "focusedRankingBurstPath" in source
     assert "focusedRankingBurstPoints" in source
-    assert "focusedRankingBurstMarkers" in source
     assert "hasFocusedRankingBurst = focusedRankingBurstFixes.length > 0" in source
+    assert "focusedBurstId = hasFocusedRankingBurst" in source
     assert "mutedRankingContextColor" in source
     assert "this.mutedRankingContextColor(item.color, 34)" in source
-    assert "this.mutedRankingContextColor(item.color, 36)" in source
     assert "this.mutedRankingContextColor(item.color, 42)" in source
-    assert "getColor: [216, 180, 254, 245]" in source
+    # Context bursts mute while another burst is focused, and source-flagged
+    # context stays distinguishable from clean context.
+    assert "this.mutedRankingContextColor(item.color, item?.sourceFlagged ? 22 : 36)" in source
+    assert "const BURST_FOCUS_CASING_COLOR = [216, 180, 254, 255];" in source
+    assert "const BURST_FOCUS_RING_COLOR = [216, 180, 254, 235];" in source
     assert "focus-ranking-burst" not in source
     assert "Focus burst" not in source
     assert "<summary>Details</summary>" in source
