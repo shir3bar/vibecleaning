@@ -135,6 +135,9 @@
   .topbar .movement-edit-lock.hidden {
     display: none;
   }
+  .review-controls { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+  .review-controls button { padding: 6px 9px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--text); cursor: pointer; }
+  .auth-identity, .review-progress { color: var(--muted); font-size: 12px; }
   .logout-button {
     padding: 6px 10px;
     border: 1px solid var(--border);
@@ -152,10 +155,10 @@
   <form id="login-form" class="login-card">
     <h1 id="login-title" class="login-brand">vibecleaning</h1>
     <div class="login-kicker">slim movement review</div>
-    <p class="login-copy">Enter the temporary credentials shown in the server terminal.</p>
+    <p class="login-copy">Log in with the account provided by the application operator.</p>
     <label class="login-field">
       Username
-      <input id="login-username" name="username" value="reviewer" autocomplete="username" required>
+      <input id="login-username" name="username" autocomplete="username" required>
     </label>
     <label class="login-field">
       Password
@@ -173,6 +176,15 @@
       <span>slim movement review</span>
     </div>
     <div class="topbar-actions">
+      <div class="review-controls">
+        <span class="auth-identity" data-role="auth-identity"></span>
+        <span class="review-progress" data-role="review-progress"></span>
+        <button type="button" data-role="assign-review" hidden>Assign review</button>
+        <button type="button" data-role="complete-review" hidden>Complete review</button>
+        <button type="button" data-role="cancel-review" hidden>Cancel review</button>
+        <button type="button" data-role="editor-control-start" hidden>Start editor control</button>
+        <button type="button" data-role="editor-control-finish" hidden>Finish editor control</button>
+      </div>
       <div class="movement-edit-lock hidden" data-role="edit-lock-profile">
         <span class="movement-edit-lock-badge">Read-only</span>
         <span class="movement-edit-lock-message" data-role="edit-lock-message"></span>

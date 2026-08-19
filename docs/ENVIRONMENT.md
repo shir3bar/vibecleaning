@@ -145,18 +145,21 @@ was skipped or failed.
 
 ## Configuration
 
-The example servers accept `HOST` and `PORT`. `slim_movement` generates a
-temporary password at startup and accepts these optional overrides:
+The example servers accept `HOST` and `PORT`. Full and slim movement load the
+multi-user registry once from `data/.vibecleaning/users.json`. Bootstrap it before
+first startup:
 
-```text
-SLIM_MOVEMENT_USERNAME  default reviewer
-SLIM_MOVEMENT_PASSWORD  optional; minimum 12 characters when set
+```bash
+uv run python -m app.auth_cli bootstrap admin --display-name "Review Administrator"
+uv run python -m app.auth_cli add reviewer1 --display-name "Taylor Reviewer" --role reviewer
 ```
 
-The generated password is printed in the server terminal. An override password
-is never printed. The login credential is sent with protected requests, so the
-app must be placed behind HTTPS when shared beyond localhost. See
+Use the same CLI's `list`, `enable`, `disable`, and `reset-password` commands for
+operator account management and restart the server after changes. The app must
+be placed behind HTTPS when shared beyond localhost. See
 `examples/slim_movement/README.md`.
+
+Set `VIBECLEANING_SECURE_COOKIE=1` when the browser reaches the app over HTTPS.
 
 `move_viz` also recognizes:
 

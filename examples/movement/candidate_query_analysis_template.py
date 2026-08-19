@@ -12,7 +12,11 @@ def main():
         run_candidate_query,
         unresolved_candidate_query_result,
     )
-    from examples.movement.review_annotations import confirmed_exclusion_scopes, load_review_annotations
+    from examples.movement.review_annotations import (
+        compress_fix_keys,
+        confirmed_exclusion_scopes,
+        load_review_annotations,
+    )
 
     target_artifact = str(params.get("target_artifact") or "").strip()
     query_definition = dict(params.get("query_definition") or {})
@@ -66,12 +70,33 @@ def main():
             parameters=query_parameters,
             dataset_id=dataset_id,
             logical_name=target_artifact,
-            preview_limit=preview_limit,
+            preview_limit=None,
             execution_scope=execution_scope,
             confirmed_fix_keys=confirmed_fix_keys,
             confirmed_individual_tracks=confirmed_individual_tracks,
         )
         result["confirmed_exclusion_count"] = len(confirmed_fix_keys)
+
+    all_candidates = list(result.get("candidates") or [])
+    match_fix_keys = [
+        str(item.get("fix_key") or "")
+        for item in all_candidates
+        if str(item.get("fix_key") or "")
+    ]
+    result["match_row_ranges"] = compress_fix_keys(match_fix_keys)
+    if preview_limit is not None:
+        try:
+            preview_limit_value = max(1, int(preview_limit))
+        except (TypeError, ValueError):
+            preview_limit_value = None
+        if preview_limit_value is not None and len(all_candidates) > preview_limit_value:
+            result["candidates"] = all_candidates[:preview_limit_value]
+            result["returned_count"] = len(result["candidates"])
+            warnings = list(result.get("warnings") or [])
+            warnings.append(
+                f"Candidate preview was limited to {preview_limit_value} returned candidates."
+            )
+            result["warnings"] = warnings
 
     output_path = Path(output["path"])
     output_path.parent.mkdir(parents=True, exist_ok=True)

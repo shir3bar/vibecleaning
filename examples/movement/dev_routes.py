@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.auth import Actor, apply_actor, request_actor
 from app.edit_locks import (
     EditConflictError,
     EditLockedError,
@@ -15,6 +16,16 @@ from app.edit_locks import (
 )
 from app.execution import create_analysis
 from app.query_library import get_query
+from app.reviews import (
+    ReviewConflictError,
+    ReviewForbiddenError,
+    ReviewLockedError,
+    ReviewStateError,
+    active_review,
+    authorize_analysis,
+    authorize_persistent_change,
+    load_review_state,
+)
 from app.state import (
     ProjectStateError,
     dataset_summary,
@@ -240,8 +251,66 @@ def register_movement_dev_routes(
     default_burst_gap_mode: str,
     default_burst_gap_seconds: float,
     default_burst_gap_quantile: float,
+    annotate_scope_script: str,
+    publish_event: Callable[[str, str, Path, str, Actor | None], None] | None = None,
 ):
     """Register candidate, feature-space, and OSM-enrichment playground routes."""
+
+    authentication_enabled = getattr(app.state, "auth_manager", None) is not None
+
+    def prepare_analysis(request: Request, study_dir: Path, payload: dict) -> dict:
+        actor = request_actor(request) if authentication_enabled else None
+        if actor is None:
+            return payload
+        review = authorize_analysis(study_dir, actor)
+        return apply_actor(payload, actor, review_id=str((review or {}).get("review_id") or ""))
+
+    def review_error(exc: Exception) -> JSONResponse:
+        if isinstance(exc, ReviewForbiddenError):
+            return json_error(str(exc), 403)
+        if isinstance(exc, ReviewConflictError):
+            return json_error(str(exc), 409)
+        if isinstance(exc, ReviewLockedError):
+            return JSONResponse({"error": str(exc), "code": exc.code}, status_code=423)
+        return json_error(str(exc), 400)
+
+    def prepare_annotation_step(
+        request: Request,
+        study_dir: Path,
+        body: dict,
+        payload: dict,
+    ) -> tuple[dict, Callable[[], None] | None, Actor | None]:
+        actor = request_actor(request) if authentication_enabled else None
+        if actor is None:
+            return payload, None, None
+        expected_revision = body.get("expected_review_revision")
+        review = authorize_persistent_change(
+            study_dir,
+            actor,
+            expected_review_revision=expected_revision,
+            review_effect="annotation_only",
+        )
+        updated = apply_actor(
+            payload,
+            actor,
+            review_id=str((review or {}).get("review_id") or ""),
+        )
+        parameters = dict(updated.get("parameters") or {})
+        parameters["workflow"] = {
+            "review_effect": "annotation_only",
+            "review_impact": {"scope": "none", "actor": actor.as_dict()},
+        }
+        updated["parameters"] = parameters
+
+        def preflight() -> None:
+            authorize_persistent_change(
+                study_dir,
+                actor,
+                expected_review_revision=expected_revision,
+                review_effect="annotation_only",
+            )
+
+        return updated, preflight, actor
 
     @app.post(
         "/api/apps/movement/family/{family_name}/study/{study_name}/"
@@ -255,11 +324,13 @@ def register_movement_dev_routes(
         body = await parse_json_body(request)
         if body is None:
             return json_error("Invalid JSON body", 400)
+        analysis_result = None
         try:
             study_dir = configured_study_dir(family_name, study_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             dataset = load_dataset(study_dir, dataset_id)
+            head_at_analysis_start = str(load_project_state(study_dir)["current_dataset_id"])
             query_parameters = _validate_query_parameters(
                 body.get("query_parameters", body.get("parameters"))
             )
@@ -281,11 +352,19 @@ def register_movement_dev_routes(
                 or str(query_definition.get("query_id") or "").strip()
                 or "inline candidate query"
             )
-            user = body.get("user")
-            return JSONResponse(
-                create_analysis(
+            actor = request_actor(request) if authentication_enabled else None
+            user = actor.display_name if actor is not None else body.get("user")
+            if actor is not None:
+                authorize_persistent_change(
                     study_dir,
-                    {
+                    actor,
+                    expected_review_revision=body.get("expected_review_revision"),
+                    review_effect="annotation_only",
+                )
+            payload = prepare_analysis(
+                request,
+                study_dir,
+                {
                         "user": user,
                         "title": f"Run candidate query {query_label} on {logical_name}",
                         "kind": "python",
@@ -312,8 +391,81 @@ def register_movement_dev_routes(
                             "user": user,
                         },
                     },
-                )
             )
+            analysis_result = create_analysis(study_dir, payload)
+            summary = dict(analysis_result.get("summary") or {})
+            candidate_count = int(summary.get("candidate_count") or 0)
+            if summary.get("run_status") != "success" or candidate_count <= 0:
+                return JSONResponse(analysis_result)
+            row_ranges = list(summary.get("match_row_ranges") or [])
+            if not row_ranges:
+                raise ProjectStateError("Candidate analysis did not persist its complete match ranges")
+            input_artifacts = _movement_analysis_input_names(dataset, logical_name)
+            analysis_id = str((analysis_result.get("analysis") or {}).get("analysis_id") or "")
+            description = str(query_definition.get("description") or "").strip()
+            step_payload = {
+                "user": user,
+                "title": f"Flag {candidate_count} candidate fix(es) from {query_label}",
+                "kind": "python",
+                "script": annotate_scope_script,
+                "parameters": {
+                    "app": "movement",
+                    "action": "annotate_scope",
+                    "target_artifact": logical_name,
+                    "dataset_id": dataset_id,
+                    "scope": {
+                        "kind": "fix",
+                        "row_ranges": row_ranges,
+                        "fix_count": candidate_count,
+                    },
+                    "status": "suspected",
+                    "origin": "algorithm",
+                    "issue_type": query_label,
+                    "issue_field": "",
+                    "issue_threshold": "",
+                    "comment": description or f"Matched candidate query {query_label}.",
+                    "owner_question": "Should these filter matches be treated as outliers?",
+                    "source_analysis_id": analysis_id,
+                    "user": user,
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": input_artifacts,
+                "output_artifacts": ["movement_review_annotations.json"],
+                "set_as_head": True,
+            }
+            step_payload, preflight, actor = prepare_annotation_step(
+                request,
+                study_dir,
+                body,
+                step_payload,
+            )
+            step_result = create_guarded_step(
+                study_dir,
+                step_payload,
+                selected_dataset_id=dataset_id,
+                expected_current_dataset_id=str(
+                    body.get("expected_current_dataset_id")
+                    or head_at_analysis_start
+                ),
+                preflight=preflight,
+            )
+            if publish_event is not None:
+                publish_event(family_name, study_name, study_dir, "dataset_head_changed", actor)
+            return JSONResponse({**analysis_result, **step_result})
+        except EditLockedError as exc:
+            payload = {"error": str(exc), "code": "edit_locked", "edit_profile": exc.profile}
+            if analysis_result:
+                payload["analysis"] = analysis_result.get("analysis")
+                payload["summary"] = analysis_result.get("summary")
+            return JSONResponse(payload, status_code=423)
+        except EditConflictError as exc:
+            payload = {"error": str(exc), "code": "edit_conflict"}
+            if analysis_result:
+                payload["analysis"] = analysis_result.get("analysis")
+                payload["summary"] = analysis_result.get("summary")
+            return JSONResponse(payload, status_code=409)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return review_error(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -340,11 +492,12 @@ def register_movement_dev_routes(
                 if feature_set == "movement_plus_context"
                 else "movement only"
             )
-            user = body.get("user")
-            return JSONResponse(
-                create_analysis(
-                    study_dir,
-                    {
+            actor = request_actor(request) if authentication_enabled else None
+            user = actor.display_name if actor is not None else body.get("user")
+            payload = prepare_analysis(
+                request,
+                study_dir,
+                {
                         "user": user,
                         "title": (
                             "Project automatic movement bursts "
@@ -379,8 +532,10 @@ def register_movement_dev_routes(
                             "user": user,
                         },
                     },
-                )
             )
+            return JSONResponse(create_analysis(study_dir, payload))
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return review_error(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -398,6 +553,9 @@ def register_movement_dev_routes(
             return json_error("Invalid JSON body", 400)
         try:
             study_dir = configured_study_dir(family_name, study_name)
+            actor = request_actor(request) if authentication_enabled else None
+            if actor is not None and actor.role != "editor":
+                raise ReviewForbiddenError("Only editors can run persistent enrichment")
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             search_radius_m = _parse_osm_search_radius_m(body.get("search_radius_m"))
@@ -413,39 +571,71 @@ def register_movement_dev_routes(
             if reusable is not None:
                 return JSONResponse(reusable)
             require_editable_dataset(study_dir, dataset_id)
-            user = body.get("user")
-            return JSONResponse(
-                create_guarded_step(
+            user = actor.display_name if actor is not None else body.get("user")
+            payload = {
+                "user": user,
+                "title": f"Add OSM road and railway context to {logical_name}",
+                "kind": "python",
+                "script": OSM_ENRICHMENT_SCRIPT,
+                "parameters": {
+                    "app": "movement",
+                    "action": "enrich_osm_context",
+                    "target_artifact": logical_name,
+                    "search_radius_m": search_radius_m,
+                    "confirmed_large_download": confirmed_large_download,
+                    "data_root": str(data_root.resolve()),
+                    "user": user,
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": [logical_name],
+                "output_artifacts": ["movement_osm_context.csv"],
+                "set_as_head": True,
+            }
+            preflight = None
+            if actor is not None:
+                review = authorize_persistent_change(
                     study_dir,
-                    {
-                        "user": user,
-                        "title": (
-                            "Add OSM road and railway context to "
-                            f"{logical_name}"
-                        ),
-                        "kind": "python",
-                        "script": OSM_ENRICHMENT_SCRIPT,
-                        "parameters": {
-                            "app": "movement",
-                            "action": "enrich_osm_context",
-                            "target_artifact": logical_name,
-                            "search_radius_m": search_radius_m,
-                            "confirmed_large_download": confirmed_large_download,
-                            "data_root": str(data_root.resolve()),
-                            "user": user,
-                        },
-                        "parent_dataset_id": dataset_id,
-                        "input_artifacts": [logical_name],
-                        "output_artifacts": ["movement_osm_context.csv"],
-                        "set_as_head": True,
-                    },
-                    selected_dataset_id=dataset_id,
-                    expected_current_dataset_id=str(
-                        body.get("expected_current_dataset_id")
-                        or load_project_state(study_dir)["current_dataset_id"]
-                    ),
+                    actor,
+                    expected_review_revision=body.get("expected_review_revision"),
+                    review_effect="preserves_individual_scope",
                 )
+                payload = apply_actor(
+                    payload,
+                    actor,
+                    review_id=str((review or {}).get("review_id") or ""),
+                )
+                parameters = dict(payload.get("parameters") or {})
+                workflow = dict(parameters.get("workflow") or {})
+                workflow.update(
+                    {
+                        "review_effect": "preserves_individual_scope",
+                        "review_impact": {"scope": "none", "actor": actor.as_dict()},
+                    }
+                )
+                parameters["workflow"] = workflow
+                payload["parameters"] = parameters
+
+                def preflight() -> None:
+                    authorize_persistent_change(
+                        study_dir,
+                        actor,
+                        expected_review_revision=body.get("expected_review_revision"),
+                        review_effect="preserves_individual_scope",
+                    )
+
+            result = create_guarded_step(
+                study_dir,
+                payload,
+                selected_dataset_id=dataset_id,
+                expected_current_dataset_id=str(
+                    body.get("expected_current_dataset_id")
+                    or load_project_state(study_dir)["current_dataset_id"]
+                ),
+                preflight=preflight,
             )
+            if publish_event is not None:
+                publish_event(family_name, study_name, study_dir, "dataset_head_changed", actor)
+            return JSONResponse(result)
         except EditLockedError as exc:
             return JSONResponse(
                 {
@@ -463,5 +653,7 @@ def register_movement_dev_routes(
                 },
                 status_code=409,
             )
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return review_error(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)

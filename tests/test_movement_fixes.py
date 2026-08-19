@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import sys
 import base64
 import csv
@@ -20,6 +21,7 @@ from app.execution import create_analysis, create_step
 from app.state import get_dataset_artifact, load_project_state
 from app.web import create_app
 from examples.movement.routes import (
+    ANNOTATE_SCOPE_TEMPLATE_PATH,
     GENERATE_REPORT_SCRIPT,
     REPORT_ANALYSIS_TEMPLATE_PATH,
     _reviewed_csv_artifact_name,
@@ -37,8 +39,11 @@ from examples.movement.report_analysis_template import (
 )
 from examples.movement.review_annotations import (
     apply_review_annotations,
+    effective_issues_for_fix,
+    effective_review_status,
     export_reviewed_csv,
     normalize_annotation,
+    resolve_filter_row_ranges,
 )
 from examples.movement.bursts import build_auto_bursts
 from examples.movement.movement_features import STEP_FEATURE_FIELDS, compute_track_movement
@@ -543,6 +548,72 @@ fix_b,alpha,2024-01-01T01:00:00Z,-70.1,40.1
     assert ancestor_payload.get("review_annotations") in (None, [])
 
 
+def test_effective_issues_resolve_duplicate_parents_independently_with_confirmation_precedence():
+    annotations = [
+        normalize_annotation({
+            "annotation_id": "filter_run_1",
+            "status": "suspected",
+            "origin": "algorithm",
+            "issue_type": "fast fix",
+            "scope": {"kind": "fix", "row_ranges": [[2, 2]]},
+        }),
+        normalize_annotation({
+            "annotation_id": "filter_run_2",
+            "status": "suspected",
+            "origin": "algorithm",
+            "issue_type": "fast fix rerun",
+            "scope": {"kind": "fix", "row_ranges": [[2, 2]]},
+        }),
+        normalize_annotation({
+            "annotation_id": "dismiss_1",
+            "annotation_kind": "dismissal",
+            "parent_annotation_id": "filter_run_1",
+            "status": "dismissed",
+            "scope": {"kind": "dismissal", "row_ranges": [[2, 2]]},
+        }),
+    ]
+
+    effective = effective_issues_for_fix(
+        annotations,
+        fix_key="id:fix_a_2#row:2",
+        individual="alpha",
+        set_name="train",
+    )
+    assert {item["parent_issue_id"]: item["status"] for item in effective} == {
+        "filter_run_1": "dismissed",
+        "filter_run_2": "suspected",
+    }
+    assert effective_review_status(effective) == "suspected"
+
+    annotations.extend([
+        normalize_annotation({
+            "annotation_id": "confirm_2",
+            "annotation_kind": "confirmation",
+            "parent_annotation_id": "filter_run_2",
+            "status": "confirmed",
+            "scope": {"kind": "confirmation", "row_ranges": [[2, 2]]},
+        }),
+        normalize_annotation({
+            "annotation_id": "dismiss_2",
+            "annotation_kind": "dismissal",
+            "parent_annotation_id": "filter_run_2",
+            "status": "dismissed",
+            "scope": {"kind": "dismissal", "row_ranges": [[2, 2]]},
+        }),
+    ])
+    effective = effective_issues_for_fix(
+        annotations,
+        fix_key="id:fix_a_2#row:2",
+        individual="alpha",
+        set_name="train",
+    )
+    assert {item["parent_issue_id"]: item["status"] for item in effective} == {
+        "filter_run_1": "dismissed",
+        "filter_run_2": "confirmed",
+    }
+    assert effective_review_status(effective) == "confirmed"
+
+
 def test_duplicate_timestamps_use_row_order_without_per_fix_branching(tmp_path):
     csv_path = tmp_path / "movement.csv"
     csv_path.write_text(
@@ -777,13 +848,14 @@ def test_movement_frontend_includes_auto_burst_controls():
     assert "burst_gap_quantile: String(this.getBurstGapQuantile())" in source
     assert "formatBurstGapMetadata" in source
     assert '<option value="auto_bursts">Automatic bursts</option>' in source
-    assert "movement-auto-bursts" in source
+    assert "movement-burst-casing" in source
+    assert "movement-bursts" in source
     assert "movement-auto-burst-points" not in source
     assert "movement-auto-burst-endpoints" in source
     assert "buildAutoBurstEndpointMarkers" in source
     assert 'markerRole: "start"' in source
     assert 'markerRole: "end"' in source
-    assert "autoBurstColor" in source
+    assert "burstPathColor" in source
     assert "renderBurstCountIndicator" in source
     assert "getVisibleAutoBursts({ requireOverlay: false })" in source
 
@@ -819,7 +891,8 @@ def test_movement_frontend_distinguishes_source_flags_from_review_status():
     assert 'id: "movement-source-flagged-points"' not in source
     assert 'id: "movement-suspected-outline"' in source
     assert 'const showSuspectedOutlines = this.data.suspiciousState === "loaded";' in source
-    assert 'if (showSuspectedOutlines && fix.review?.status === "suspected")' in source
+    assert "for (const fix of this.data.suspiciousFixes || [])" in source
+    assert 'fix.review?.status !== "suspected"' in source
     assert "they remain analytically included until confirmed in Vibecleaning" in source
     assert '"source_flags",\n      "Source flags"' in source
 
@@ -901,6 +974,28 @@ fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,,drift,stale metadata
     assert "review" not in payload["fixes"][0]
 
 
+def test_overview_primes_schema_for_single_pass_detail_loading(tmp_path, monkeypatch):
+    csv_path = write_movement_csv(tmp_path / "movement.csv")
+    overview = build_movement_overview(csv_path)
+
+    def reject_redundant_schema_scan(*_args, **_kwargs):
+        raise AssertionError("detail loading repeated the full schema scan")
+
+    monkeypatch.setattr(
+        movement_summary,
+        "_prepare_scan_context_cached",
+        reject_redundant_schema_scan,
+    )
+    detail = build_movement_fixes(
+        csv_path,
+        individuals=["alpha"],
+        burst_gap_effective_seconds=overview["burst_gap_seconds"],
+    )
+
+    assert detail["returned_fix_count"] == 2
+    assert {item["individual"] for item in detail["fixes"]} == {"alpha"}
+
+
 def create_movement_test_client(tmp_path: Path, *, csv_content: str = CSV_CONTENT) -> tuple[TestClient, str]:
     data_root = tmp_path / "data"
     study_dir = data_root / "movement_clean" / "test_study"
@@ -916,6 +1011,132 @@ def create_movement_test_client(tmp_path: Path, *, csv_content: str = CSV_CONTEN
     dataset_id = load_project_state(study_dir)["current_dataset_id"]
     client = TestClient(app)
     return client, dataset_id
+
+
+def test_fix_annotation_template_uses_row_range_fast_path():
+    source = ANNOTATE_SCOPE_TEMPLATE_PATH.read_text(encoding="utf-8")
+    fix_branch = source.split('if kind in {"fix", "segment"}:', 1)[1].split(
+        'elif kind == "individual":', 1
+    )[0]
+
+    assert "build_movement_fixes" not in fix_branch
+    assert "resolved_fix_count = sum(" in fix_branch
+
+
+def test_annotate_scope_records_167_fixes_as_one_row_range_annotation(tmp_path):
+    rows = ["eventid,individual,timestamp,longitude,latitude,set"]
+    fix_keys = []
+    for row_number in range(1, 201):
+        rows.append(
+            f"fix_{row_number},alpha,2024-01-01T00:00:00Z,-70.0,40.0,train"
+        )
+        if row_number <= 167:
+            fix_keys.append(f"id:fix_{row_number}#row:{row_number}")
+    client, dataset_id = create_movement_test_client(
+        tmp_path,
+        csv_content="\n".join(rows) + "\n",
+    )
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "expected_current_dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "fix", "fix_keys": fix_keys},
+            "status": "suspected",
+            "origin": "threshold",
+            "issue_type": "unreasonable speed",
+            "comment": "Review this batch",
+            "owner_question": "Are these fixes valid?",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["step"]["summary"]["resolved_fix_count"] == 167
+    assert payload["step"]["parameters"]["scope"]["row_ranges"] == [[1, 167]]
+
+
+def test_threshold_annotation_evaluates_the_full_csv_not_checked_preview(tmp_path):
+    csv_content = """eventid,individual,timestamp,longitude,latitude,set,quality
+fix_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,1
+fix_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train,10
+fix_3,beta,2024-01-01T02:00:00Z,-70.2,40.2,test,20
+"""
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=csv_content)
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "expected_current_dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {
+                "kind": "filter",
+                "filter": {
+                    "field_key": "quality",
+                    "field_kind": "numeric",
+                    "operator": "gt",
+                    "threshold_value": 5,
+                },
+            },
+            "status": "suspected",
+            "origin": "threshold",
+            "issue_type": "quality",
+            "issue_field": "quality",
+            "issue_threshold": "> 5",
+            "comment": "Review every match",
+            "owner_question": "Are these valid?",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["step"]["summary"]["resolved_fix_count"] == 2
+    assert payload["step"]["parameters"]["scope"]["kind"] == "filter"
+    _, sidecar_path = get_dataset_artifact(
+        tmp_path / "data" / "movement_clean" / "test_study",
+        payload["dataset"]["dataset_id"],
+        "movement_review_annotations.json",
+    )
+    annotation = json.loads(sidecar_path.read_text(encoding="utf-8"))["annotations"][0]
+    assert annotation["scope"]["row_ranges"] == [[2, 3]]
+    assert annotation["scope"]["filter"]["field_key"] == "quality"
+    assert annotation["issue_field"] == "quality"
+    assert annotation["issue_threshold"] == "> 5"
+
+
+def test_derived_threshold_filter_preserves_chronological_track_semantics(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        """eventid,individual,timestamp,longitude,latitude,set
+late,alpha,2024-01-01T02:00:00Z,-70.2,40.2,train
+early,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+middle,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+""",
+        encoding="utf-8",
+    )
+
+    ranges, count = resolve_filter_row_ranges(
+        csv_path,
+        {
+            "field_key": "time_delta_s",
+            "field_kind": "numeric",
+            "operator": "gt",
+            "threshold_value": 3000,
+        },
+    )
+
+    assert count == 2
+    assert ranges == [[1, 1], [3, 3]]
+
+
+def test_threshold_issue_ui_sends_a_full_dataset_filter_scope():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    assert 'kind: "filter"' in source
+    assert '"all matching fixes in the full dataset"' in source
 
 
 def test_movement_history_locks_undo_and_resume_across_persistent_routes(tmp_path):
@@ -1502,11 +1723,15 @@ def test_movement_frontend_restores_saved_burst_analyses():
     assert "getUnresolvedSuspectedIssueGroups" in source
 
 
-def test_movement_frontend_loads_suspicious_fixes_on_demand():
+def test_movement_frontend_loads_suspicious_fixes_as_passive_overlay_with_focus_action():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
-    assert 'data-role="select-suspicious">Load suspicious fixes</button>' in source
-    assert "async loadSuspiciousFixes()" in source
+    assert 'data-role="select-suspicious">Review suspicious fixes</button>' in source
+    assert "async loadSuspiciousFixes({ focus = true } = {})" in source
+    assert "loadSuspiciousFixes({ focus: false })" in source
+    assert 'this.cancelRequest("detail");' in source
+    assert "if (focus)" in source
+    assert "Review suspicious fixes" in source
     assert 'reviewStatus: "suspected"' in source
     assert "this.data.suspiciousFixes = suspiciousFixes" in source
     assert "this.data.selectedIndividuals = new Set(suspiciousFixes.map" in source
@@ -1594,7 +1819,8 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert 'data-role="issue-scope"' in source
     assert 'data-role="issue-burst-list"' in source
     assert "setupIndividualQueueIssueScope(individual)" in source
-    assert "this.openIndividualReviewModal(individual, { queueReview: true })" in source
+    assert "this.openIndividualReviewModal(addIssueButton.dataset.individual" in source
+    assert 'data-add-individual-issue data-individual=' in source
     assert "await this.stageIndividualReviewDecision(queueReviewIndividual, false)" in source
 
 
@@ -1784,7 +2010,7 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0
         "movement_review_annotations.json",
     )
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
-    assert sidecar["schema_version"] == 4
+    assert sidecar["schema_version"] == 5
     assert [item["scope"]["individual"] for item in sidecar["annotations"]] == [
         "alpha",
         "beta",
@@ -1952,7 +2178,7 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     assert annotation["step_id"] == payload["step"]["step_id"]
     assert annotation["origin"] == "algorithm"
     assert annotation["source_analysis_id"] == "analysis_saved"
-    assert sidecar["schema_version"] == 3
+    assert sidecar["schema_version"] == 5
     assert annotation["scope"]["row_ranges"] == [[1, 2]]
     assert "fix_keys" not in annotation["scope"]
 
@@ -2238,7 +2464,7 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     )
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     confirmation = sidecar["annotations"][-1]
-    assert sidecar["schema_version"] == 3
+    assert sidecar["schema_version"] == 5
     assert confirmation["annotation_kind"] == "confirmation"
     assert confirmation["parent_annotation_id"] == suspected_annotation_id
     assert confirmation["origin"] == "threshold"
@@ -2277,6 +2503,120 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     assert suspected_annotation_id in exported[1]["outlier_flag_step_ids"]
     assert confirmed_payload["step"]["step_id"] in exported[1]["outlier_flag_step_ids"]
     assert not any(name.startswith("vc_") for name in exported[1])
+
+
+def test_dismiss_issues_partially_resolves_parent_and_preserves_audit_history(tmp_path):
+    clean_csv = """eventid,individual,timestamp,longitude,latitude,set
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
+"""
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=clean_csv)
+    base_url = "/api/apps/movement/family/movement_clean/study/test_study"
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+
+    suspected = client.post(
+        f"{base_url}/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {
+                "kind": "fix",
+                "fix_keys": ["id:fix_a_1#row:1", "id:fix_a_2#row:2"],
+            },
+            "status": "suspected",
+            "origin": "algorithm",
+            "issue_type": "filter run",
+            "comment": "Matched the test filter",
+            "source_analysis_id": "analysis_filter_1",
+            "user": "reviewer",
+        },
+    )
+    assert suspected.status_code == 200
+    suspected_payload = suspected.json()
+    parent_id = suspected_payload["step"]["step_id"]
+
+    dismissed = client.post(
+        f"{base_url}/actions/dismiss-issues",
+        json={
+            "dataset_id": suspected_payload["dataset"]["dataset_id"],
+            "expected_current_dataset_id": suspected_payload["dataset"]["dataset_id"],
+            "logical_name": "movement.csv",
+            "dismissals": [{
+                "parent_annotation_id": parent_id,
+                "fix_keys": ["id:fix_a_1#row:1"],
+            }],
+            "note": "Plausible after checking the track",
+            "user": "reviewer",
+        },
+    )
+    assert dismissed.status_code == 200
+    dismissed_payload = dismissed.json()
+    assert dismissed_payload["step"]["parameters"]["action"] == "dismiss_issues"
+    assert dismissed_payload["step"]["summary"]["dismissed_fix_count"] == 1
+    assert dismissed_payload["step"]["parameters"]["dismissals"][0]["row_ranges"] == [[1, 1]]
+    assert (study_dir / "movement.csv").read_text(encoding="utf-8") == clean_csv
+
+    _, sidecar_path = get_dataset_artifact(
+        study_dir,
+        dismissed_payload["dataset"]["dataset_id"],
+        "movement_review_annotations.json",
+    )
+    annotations = json.loads(sidecar_path.read_text(encoding="utf-8"))["annotations"]
+    assert len(annotations) == 2
+    assert annotations[0]["annotation_id"] == parent_id
+    assert annotations[1]["annotation_kind"] == "dismissal"
+    assert annotations[1]["parent_annotation_id"] == parent_id
+    assert annotations[1]["comment"] == "Plausible after checking the track"
+
+    fixes = client.get(
+        f"{base_url}/dataset/{dismissed_payload['dataset']['dataset_id']}/fixes",
+        params={"logical_name": "movement.csv", "individual": "alpha"},
+    )
+    assert fixes.status_code == 200
+    by_key = {item["fix_key"]: item for item in fixes.json()["fixes"]}
+    assert fixes.json()["stats"]["alpha"]["unresolved_suspected_count"] == 1
+    assert fixes.json()["stats"]["alpha"]["unresolved_issue_origins"] == ["algorithm"]
+    first_review = by_key["id:fix_a_1#row:1"]["review"]
+    second_review = by_key["id:fix_a_2#row:2"]["review"]
+    assert first_review["status"] == ""
+    assert first_review["effective_issues"][0]["status"] == "dismissed"
+    assert second_review["status"] == "suspected"
+    assert second_review["effective_issues"][0]["status"] == "suspected"
+
+    exported_response = client.post(
+        f"{base_url}/actions/export-reviewed-csv",
+        json={
+            "dataset_id": dismissed_payload["dataset"]["dataset_id"],
+            "logical_name": "movement.csv",
+            "user": "reviewer",
+        },
+    )
+    assert exported_response.status_code == 200
+    export_analysis_id = exported_response.json()["analysis"]["analysis_id"]
+    download = client.get(
+        f"{base_url}/analysis/{export_analysis_id}/artifact/movement_reviewed.csv"
+    )
+    exported_rows = list(csv.DictReader(io.StringIO(download.text)))
+    assert exported_rows[0]["outlier_status"] == ""
+    assert exported_rows[0]["algorithm-marked-outlier"] == "false"
+    assert exported_rows[1]["outlier_status"] == "suspected"
+    assert exported_rows[1]["algorithm-marked-outlier"] == "true"
+
+    repeated = client.post(
+        f"{base_url}/actions/dismiss-issues",
+        json={
+            "dataset_id": dismissed_payload["dataset"]["dataset_id"],
+            "logical_name": "movement.csv",
+            "dismissals": [{
+                "parent_annotation_id": parent_id,
+                "fix_keys": ["id:fix_a_1#row:1"],
+            }],
+            "user": "reviewer",
+        },
+    )
+    assert repeated.status_code == 400
+    assert "already resolved" in repeated.json()["error"]
 
 
 def test_movement_fixes_route_rejects_invalid_repeated_individual(tmp_path):
@@ -3066,3 +3406,160 @@ def test_movement_generate_report_route_validates_individual_profile_inputs(tmp_
     assert invalid_type.json()["error"] == "Invalid report type"
     assert invalid_output_mode.status_code == 400
     assert invalid_output_mode.json()["error"] == "Invalid output mode"
+
+
+def test_movement_frontend_colors_map_bursts_by_individual():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    # Burst identity on the map is individual palette plus casing boundaries,
+    # not a per-burst rainbow keyed on burstIdx.
+    assert "function burstPathColor(individualPalette, burst, alpha = 200)" in source
+    assert "color: burstPathColor(data.individualPalette, burst, 185)," in source
+    assert "function autoBurstColor(" not in source
+    assert "burstIdx * 47" not in source
+
+
+def test_movement_frontend_draws_bursts_with_a_shared_casing_layer():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert 'id: "movement-burst-casing"' in source
+    assert 'id: "movement-bursts"' in source
+
+    # Both layers must receive the same identity-stable array and comparator so
+    # deck.gl skips re-tesselation on unrelated renders.
+    casing_start = source.index('id: "movement-burst-casing"')
+    fill_start = source.index('id: "movement-bursts"')
+    casing_block = source[casing_start:fill_start]
+    fill_block = source[fill_start:fill_start + 800]
+    for block in (casing_block, fill_block):
+        assert "data: visibleAutoBurstPaths," in block
+        assert "dataComparator: sameArrayItems," in block
+
+    # No point-count threshold may gate the casing.
+    assert "BURST_CASING_MAX_POINTS" not in source
+
+
+def test_movement_frontend_expresses_burst_focus_as_a_style_predicate():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    # The parallel focused-burst layer stack is gone.
+    assert "movement-focused-ranking-burst-path-outline" not in source
+    assert "movement-focused-ranking-burst-path" not in source
+    assert "movement-focused-ranking-burst-points" not in source
+    assert "movement-focused-ranking-burst-markers" not in source
+
+    # Focus is an accessor branch refreshed by updateTriggers instead.
+    assert "isFocusedBurstItem(item, focusedBurstId)" in source
+    assert "burstCasingColor(item, focusedBurstId)" in source
+    assert "burstFillColor(item, focusedBurstId)" in source
+    assert "burstEndpointColor(item, focusedBurstId)" in source
+    # The casing layer must refresh on focus change; it also carries the queue
+    # dimming key, so assert the trigger contains focusedBurstId rather than
+    # matching an exact literal.
+    casing = source[source.index('id: "movement-burst-casing"'):]
+    casing = casing[:casing.index("}),")]
+    assert "updateTriggers" in casing
+    assert "focusedBurstId" in casing[casing.index("updateTriggers"):]
+
+    # Fix-level emphasis is a stroked ring that never recolors fixes.
+    assert 'id: "movement-burst-focus-ring"' in source
+    ring_start = source.index('id: "movement-burst-focus-ring"')
+    ring_block = source[ring_start:ring_start + 400]
+    assert "filled: false," in ring_block
+    assert "getFillColor" not in ring_block
+
+
+def test_movement_frontend_keeps_source_flag_distinction_under_focus():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    # The focus branch must not short-circuit the source-flag branch; flagged
+    # context bursts stay dimmer than clean context bursts.
+    assert "this.mutedRankingContextColor(item.color, item?.sourceFlagged ? 22 : 36)" in source
+    assert "item?.sourceFlagged ? 40 : 70" in source
+
+
+def test_movement_frontend_draws_tracks_whose_bursts_are_single_fixes():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    # Base-track suppression must derive from the drawable (>= 2 position)
+    # burst list, otherwise a single-fix burst erases its own track.
+    assert (
+        "const drawableAutoBursts = visibleAutoBursts.filter(burst => burst.path.length >= 2);"
+        in source
+    )
+    assert (
+        "drawableAutoBursts.map(burst => movementTrackKey(burst.individual, burst.setName))"
+        in source
+    )
+
+
+def test_movement_frontend_burst_picking_does_not_depend_on_feature_space():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    # Bursts are pickable regardless of whether a feature-space analysis ran.
+    assert "pickable: Boolean(this.burstFeatureSpace?.points?.length)" not in source
+    assert "focusMapBurst(burstId)" in source
+    assert "this.focusMapBurst(pickedBurstId)" in source
+
+    # Feature-space selection keeps its own independent guards and still runs
+    # first in the click handler.
+    assert 'this.refs?.sideSheetTabs?.dataset.activeSheet !== "feature_space"' in source
+    click_start = source.index("handleMapClick(event) {")
+    click_block = source[click_start:click_start + 1600]
+    assert click_block.index("getMapPickedFeatureSpaceBurst") < click_block.index("pickObject")
+    assert click_block.index("getMapPickedFeatureSpaceBurst") < click_block.index("focusMapBurst")
+
+
+def test_movement_frontend_burst_counter_counts_only_drawn_bursts():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    counter_start = source.index("renderBurstCountIndicator(message = \"\") {")
+    counter_block = source[counter_start:counter_start + 900]
+    assert "this.getVisibleAutoBursts({ requireOverlay: true }).length" in counter_block
+
+
+def test_movement_frontend_refreshes_queue_dimming_when_active_individual_changes():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    renderer = source[
+        source.index("  renderLayers() {"):
+        source.index("  buildVisibleTrackSeries(")
+    ]
+
+    # Queue dimming depends on state outside the data array, so every layer
+    # whose data is identity-stable must declare it as an update trigger.
+    # Without this, advancing the review queue leaves stale colors on screen.
+    assert 'this.individualReviewQueue.mode === "queue"' in renderer
+    assert "queue:${this.queueActiveIndividual()}" in renderer
+
+    # The map must not read the raw active-individual field, which can be empty
+    # when a render lands before the queue list has re-resolved it. An empty
+    # value draws the whole review batch at full opacity.
+    resolver = source[source.index("  queueActiveIndividual() {"):]
+    resolver = resolver[:resolver.index("\n  queueMapOpacity(")]
+    assert "this.getIndividualQueuePosition();" in resolver
+    opacity = source[source.index("  queueMapOpacity(individual) {"):]
+    opacity = opacity[:opacity.index("\n  }")]
+    assert "this.queueActiveIndividual()" in opacity
+    assert "this.individualReviewQueue.activeIndividual" not in opacity
+
+    layer_ids = re.findall(r'id: "([^"]+)"', renderer)
+    dimming_calls = (
+        "queueMapColor",
+        "burstFillColor",
+        "burstCasingColor",
+        "burstEndpointColor",
+    )
+    frozen = []
+    for match in re.finditer(r'id: "([^"]+)"', renderer):
+        block = renderer[match.start():match.start() + 1600]
+        end = block.find("}),")
+        block = block[:end] if end > 0 else block
+        dims = any(call in block for call in dimming_calls)
+        identity_stable = "dataComparator" in block
+        if dims and identity_stable and "queueDimKey" not in block:
+            frozen.append(match.group(1))
+
+    assert not frozen, f"layers dim but never refresh their dimming: {frozen}"
+    # Guard against the audit silently passing on an empty layer list.
+    assert "movement-paths" in layer_ids
+    assert "movement-bursts" in layer_ids

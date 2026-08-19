@@ -254,7 +254,7 @@ def list_datasets(project_dir: Path) -> list[dict]:
 
 
 def dataset_summary(dataset: dict) -> dict:
-    return {
+    summary = {
         "dataset_id": dataset["dataset_id"],
         "user": dataset.get("user"),
         "created_at": dataset.get("created_at"),
@@ -263,6 +263,9 @@ def dataset_summary(dataset: dict) -> dict:
         "artifact_count": len(dataset.get("artifacts", [])),
         "artifacts": dataset.get("artifacts", []),
     }
+    if isinstance(dataset.get("actor"), dict):
+        summary["actor"] = dict(dataset["actor"])
+    return summary
 
 
 def project_state_payload(project_dir: Path) -> dict:
@@ -294,6 +297,7 @@ def graph_payload(project_dir: Path) -> dict:
             "note": dataset.get("note"),
             "artifact_count": len(dataset.get("artifacts", [])),
             "artifact_names": [artifact.get("logical_name") for artifact in dataset.get("artifacts", [])],
+            "actor": dataset.get("actor"),
         }
         for dataset in datasets
     ]
@@ -308,6 +312,7 @@ def graph_payload(project_dir: Path) -> dict:
             "input_artifacts": step.get("input_artifacts", []),
             "output_artifacts": step.get("output_artifacts", []),
             "removed_artifacts": step.get("removed_artifacts", []),
+            "actor": step.get("actor"),
         }
         for step in history["steps"]
     ]

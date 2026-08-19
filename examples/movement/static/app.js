@@ -180,6 +180,9 @@ const BASEMAP_PRESETS = {
 
 const PATH_ALPHA = 110;
 const POINT_ALPHA = 215;
+const BURST_CASING_RGB = [8, 15, 26];
+const BURST_FOCUS_CASING_COLOR = [216, 180, 254, 255];
+const BURST_FOCUS_RING_COLOR = [216, 180, 254, 235];
 const STORAGE_VERSION = 5;
 const INDIVIDUAL_QUEUE_PAGE_SIZE = 25;
 const INDIVIDUAL_QUEUE_GROUP_SIZE = 5;
@@ -355,6 +358,7 @@ class MovementExampleApp {
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
     this.pendingConfirmationGroups = [];
+    this.pendingDismissalGroups = [];
     this.editLockProfile = {
       editable: false,
       blockers: [],
@@ -362,6 +366,9 @@ class MovementExampleApp {
       selected_dataset_id: "",
       resume: { allowed: false },
     };
+    this.studyEvents = null;
+    this.studyEventsKey = "";
+    this.studyEventRefreshPending = false;
     this.focusedRankingBurst = null;
     this.tableSelection = {
       anchorFixKey: "",
@@ -388,6 +395,7 @@ class MovementExampleApp {
     this.individualReviewQueue = {
       mode: "browse",
       orderMode: this.uiState.individualQueueOrder === "ranking" ? "ranking" : "dataset",
+      filterMode: "all",
       pageIndex: Math.max(0, Number(this.uiState.individualQueuePage) || 0),
       groupIndex: 0,
       activeIndividual: "",
@@ -507,7 +515,7 @@ class MovementExampleApp {
   }
 
   getUser() {
-    return localStorage.getItem("vibecleaning_user_name") || "";
+    return String(window.vibecleaningActor?.display_name || "");
   }
 
   getAnomalyFeatureSet() {
@@ -554,7 +562,7 @@ class MovementExampleApp {
   }
 
   setUser(user) {
-    localStorage.setItem("vibecleaning_user_name", user);
+    // Attribution comes from the authenticated session; browser-supplied names are ignored.
   }
 
   getBurstGapSeconds() {
@@ -618,7 +626,7 @@ class MovementExampleApp {
     }
 
     const total = this.data.autoBursts.length;
-    const visible = this.getVisibleAutoBursts({ requireOverlay: false }).length;
+    const visible = this.getVisibleAutoBursts({ requireOverlay: true }).length;
     const noun = total === 1 ? "burst" : "bursts";
     const scope = this.data.overviewHasAllFixes ? "generated" : "loaded";
     let text = `${formatCount(total)} ${noun} ${scope}`;
@@ -2126,11 +2134,12 @@ class MovementExampleApp {
         .movement-queue-ranking-state.error {
           color: #f9c98b;
         }
-        .movement-queue-card-actions button[data-review-ok="true"] {
+        .movement-queue-card-actions button[data-review-decision="ok"] {
           background: rgba(67, 206, 162, 0.2);
           color: #d8fff3;
         }
-        .movement-queue-card-actions button[data-review-ok="false"] {
+        .movement-queue-card-actions button[data-review-decision="not_ok"],
+        .movement-queue-card-actions button[data-review-decision="second_opinion"] {
           background: rgba(245, 181, 54, 0.16);
           color: #ffe7a6;
         }
@@ -2333,6 +2342,12 @@ class MovementExampleApp {
         .movement-card.interactive {
           cursor: pointer;
         }
+        .movement-card.is-suspected,
+        .movement-card.has-unresolved-issues {
+          border-color: rgba(251, 191, 36, 0.72);
+          background: rgba(245, 181, 54, 0.11);
+          box-shadow: inset 4px 0 0 rgba(251, 191, 36, 0.92);
+        }
         .movement-row {
           display: flex;
           justify-content: space-between;
@@ -2422,6 +2437,15 @@ class MovementExampleApp {
           background: transparent;
           border: 1px solid rgba(255, 255, 255, 0.08);
           color: #e8eef7;
+          border-radius: 8px;
+          padding: 4px 7px;
+          font-size: 11px;
+          cursor: pointer;
+        }
+        .movement-fix-dismiss {
+          background: rgba(245, 181, 54, 0.18);
+          border: 1px solid rgba(251, 191, 36, 0.55);
+          color: #ffe6a3;
           border-radius: 8px;
           padding: 4px 7px;
           font-size: 11px;
@@ -2720,7 +2744,7 @@ class MovementExampleApp {
           <span class="movement-burst-count" data-role="burst-count">No bursts loaded</span>
           <button type="button" data-role="select-all">All individuals</button>
           <button type="button" data-role="select-none">No individuals</button>
-          <button type="button" data-role="select-suspicious">Load suspicious fixes</button>
+          <button type="button" data-role="select-suspicious">Review suspicious fixes</button>
           <button type="button" data-role="clear-fixes">Clear checked fixes</button>
           <div class="movement-candidate-query-control" data-role="candidate-query-control">
             <label>Candidate query <select data-role="candidate-query-select"></select></label>
@@ -2731,15 +2755,16 @@ class MovementExampleApp {
                 <option value="all_individuals_per_individual">All individuals separately</option>
               </select>
             </label>
-            <button type="button" data-role="run-candidate-query">Preview query</button>
+            <button type="button" data-role="run-candidate-query">Run filter and flag</button>
             <div class="movement-candidate-query-params hidden" data-role="candidate-query-params"></div>
             <div class="movement-candidate-query-meta" data-role="candidate-query-meta">Loading saved queries...</div>
           </div>
-          <button type="button" data-role="check-candidates">Check candidates</button>
+          <button type="button" data-role="check-candidates">Check filter matches</button>
           <button type="button" data-role="clear-candidates">Clear candidates</button>
           <button type="button" data-role="reset-view">Reset view</button>
-          <button type="button" class="movement-emphasis" data-role="mark-suspected">Mark suspected</button>
+          <button type="button" class="movement-emphasis" data-role="mark-suspected">Flag threshold matches</button>
           <button type="button" class="movement-emphasis" data-role="mark-confirmed">Mark confirmed</button>
+          <button type="button" data-role="dismiss-suspected">Not suspicious</button>
           <label data-role="anomaly-feature-set-control">Ranking features
             <select data-role="anomaly-feature-set">
               <option value="movement_only">Movement only</option>
@@ -2798,6 +2823,13 @@ class MovementExampleApp {
                       <select data-role="individual-queue-order">
                         <option value="dataset">Dataset order</option>
                         <option value="ranking">Burst ranking</option>
+                      </select>
+                    </label>
+                    <label class="movement-queue-order">Queue
+                      <select data-role="individual-queue-filter">
+                        <option value="all">All individuals</option>
+                        <option value="unresolved">Unresolved issues</option>
+                        <option value="second_opinion">Second opinion</option>
                       </select>
                     </label>
                     <div class="movement-queue-ranking-state" data-role="individual-queue-ranking-state"></div>
@@ -2956,6 +2988,30 @@ class MovementExampleApp {
         </div>
       </div>
 
+      <div class="movement-modal hidden" data-role="dismiss-modal">
+        <div class="movement-modal-card">
+          <div class="movement-modal-head">
+            <h3>Mark as not suspicious</h3>
+            <button type="button" data-role="dismiss-close">Close</button>
+          </div>
+          <div class="movement-modal-body">
+            <div data-role="dismiss-meta"></div>
+            <div class="movement-selection-list" data-role="dismiss-groups"></div>
+            <label>User
+              <input type="text" data-role="dismiss-user" placeholder="Name used for attribution">
+            </label>
+            <label>Dismissal note (optional)
+              <textarea data-role="dismiss-note" placeholder="Why are these fixes not suspicious?"></textarea>
+            </label>
+            <div class="movement-modal-status" data-role="dismiss-status"></div>
+          </div>
+          <div class="movement-modal-foot">
+            <span>Each selected originating suspicion will be resolved for these fixes.</span>
+            <button type="button" class="movement-emphasis" data-role="dismiss-submit">Dismiss selected suspicions</button>
+          </div>
+        </div>
+      </div>
+
       <div class="movement-modal hidden" data-role="report-modal">
         <div class="movement-modal-card">
           <div class="movement-modal-head">
@@ -3088,6 +3144,7 @@ class MovementExampleApp {
       resetView: this.mountEl.querySelector('[data-role="reset-view"]'),
       markSuspected: this.mountEl.querySelector('[data-role="mark-suspected"]'),
       markConfirmed: this.mountEl.querySelector('[data-role="mark-confirmed"]'),
+      dismissSuspected: this.mountEl.querySelector('[data-role="dismiss-suspected"]'),
       anomalyFeatureSetControl: this.mountEl.querySelector('[data-role="anomaly-feature-set-control"]'),
       anomalyFeatureSet: this.mountEl.querySelector('[data-role="anomaly-feature-set"]'),
       runAnomalyRanking: this.mountEl.querySelector('[data-role="run-anomaly-ranking"]'),
@@ -3098,6 +3155,13 @@ class MovementExampleApp {
       editLockProfile: document.querySelector('[data-role="edit-lock-profile"]'),
       editLockMessage: document.querySelector('[data-role="edit-lock-message"]'),
       resumeHistory: document.querySelector('[data-role="resume-history"]'),
+      authIdentity: document.querySelector('[data-role="auth-identity"]'),
+      reviewProgress: document.querySelector('[data-role="review-progress"]'),
+      assignReview: document.querySelector('[data-role="assign-review"]'),
+      completeReview: document.querySelector('[data-role="complete-review"]'),
+      cancelReview: document.querySelector('[data-role="cancel-review"]'),
+      editorControlStart: document.querySelector('[data-role="editor-control-start"]'),
+      editorControlFinish: document.querySelector('[data-role="editor-control-finish"]'),
       status: this.mountEl.querySelector('[data-role="status"]'),
       outputLinks: this.mountEl.querySelector('[data-role="output-links"]'),
       sideSheetTabs: this.mountEl.querySelector('[data-role="side-sheet-tabs"]'),
@@ -3116,6 +3180,7 @@ class MovementExampleApp {
       individualViewQueue: this.mountEl.querySelector('[data-role="individual-view-queue"]'),
       individualQueueControls: this.mountEl.querySelector('[data-role="individual-queue-controls"]'),
       individualQueueOrder: this.mountEl.querySelector('[data-role="individual-queue-order"]'),
+      individualQueueFilter: this.mountEl.querySelector('[data-role="individual-queue-filter"]'),
       individualQueueRankingState: this.mountEl.querySelector('[data-role="individual-queue-ranking-state"]'),
       individualQueueProgress: this.mountEl.querySelector('[data-role="individual-queue-progress"]'),
       individualQueueSave: this.mountEl.querySelector('[data-role="individual-queue-save"]'),
@@ -3170,6 +3235,14 @@ class MovementExampleApp {
       confirmStatus: this.mountEl.querySelector('[data-role="confirm-status"]'),
       confirmClose: this.mountEl.querySelector('[data-role="confirm-close"]'),
       confirmSubmit: this.mountEl.querySelector('[data-role="confirm-submit"]'),
+      dismissModal: this.mountEl.querySelector('[data-role="dismiss-modal"]'),
+      dismissMeta: this.mountEl.querySelector('[data-role="dismiss-meta"]'),
+      dismissGroups: this.mountEl.querySelector('[data-role="dismiss-groups"]'),
+      dismissUser: this.mountEl.querySelector('[data-role="dismiss-user"]'),
+      dismissNote: this.mountEl.querySelector('[data-role="dismiss-note"]'),
+      dismissStatus: this.mountEl.querySelector('[data-role="dismiss-status"]'),
+      dismissClose: this.mountEl.querySelector('[data-role="dismiss-close"]'),
+      dismissSubmit: this.mountEl.querySelector('[data-role="dismiss-submit"]'),
       reportModal: this.mountEl.querySelector('[data-role="report-modal"]'),
       reportMeta: this.mountEl.querySelector('[data-role="report-meta"]'),
       reportUser: this.mountEl.querySelector('[data-role="report-user"]'),
@@ -3202,6 +3275,7 @@ class MovementExampleApp {
     };
 
     this.applyAppProfile();
+    this.renderReviewControls();
 
     for (const name of Object.keys(BASEMAP_PRESETS)) {
       const option = document.createElement("option");
@@ -3249,6 +3323,7 @@ class MovementExampleApp {
     this.refs.tableSortDirection.textContent = this.uiState.tableDescending ? "Descending" : "Ascending";
     this.refs.individualSearch.value = this.individualSearchQuery;
     this.refs.individualQueueOrder.value = this.individualReviewQueue.orderMode;
+    this.refs.individualQueueFilter.value = this.individualReviewQueue.filterMode;
     this.applySidePaneWidth(this.sidePaneWidthPx, { save: false, resizeMap: false });
     this.setSideSheet(
       this.individualReviewQueue.mode === "queue"
@@ -3267,6 +3342,15 @@ class MovementExampleApp {
 
   bindEvents() {
     window.addEventListener("resize", this.handleWindowResize);
+    window.addEventListener("focus", () => void this.refreshOpenStudyState());
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") void this.refreshOpenStudyState();
+    });
+    this.refs.assignReview?.addEventListener("click", () => void this.assignCurrentReview());
+    this.refs.completeReview?.addEventListener("click", () => void this.completeCurrentReview());
+    this.refs.cancelReview?.addEventListener("click", () => void this.cancelCurrentReview());
+    this.refs.editorControlStart?.addEventListener("click", () => void this.startCurrentEditorControl());
+    this.refs.editorControlFinish?.addEventListener("click", () => void this.finishCurrentEditorControl());
     this.refs.sideTabIndividuals.addEventListener("click", () => this.setSideSheet("individuals"));
     this.refs.sideTabTable.addEventListener("click", () => this.setSideSheet("table"));
     this.refs.sideTabRanking.addEventListener("click", () => this.setSideSheet("ranking"));
@@ -3283,6 +3367,16 @@ class MovementExampleApp {
     });
     this.refs.individualQueueOrder.addEventListener("change", () => {
       void this.changeIndividualQueueOrder(this.refs.individualQueueOrder.value);
+    });
+    this.refs.individualQueueFilter.addEventListener("change", () => {
+      const filterMode = this.refs.individualQueueFilter.value;
+      this.individualReviewQueue.filterMode = ["second_opinion", "unresolved"].includes(filterMode)
+        ? filterMode
+        : "all";
+      this.individualReviewQueue.pageIndex = 0;
+      this.individualReviewQueue.groupIndex = 0;
+      this.individualReviewQueue.activeIndividual = "";
+      void this.applyIndividualQueueMapScope();
     });
     this.refs.individualQueueControls.addEventListener("click", event => {
       const navButton = event.target.closest("button[data-queue-nav]");
@@ -3307,14 +3401,16 @@ class MovementExampleApp {
       }
     });
     this.refs.individuals.addEventListener("click", event => {
-      const reviewButton = event.target.closest("button[data-review-ok]");
+      const reviewButton = event.target.closest("button[data-review-decision]");
       if (reviewButton) {
         const individual = reviewButton.dataset.individual || "";
-        if (reviewButton.dataset.reviewOk === "true") {
-          void this.stageIndividualReviewDecision(individual, true);
-        } else {
-          this.openIndividualReviewModal(individual, { queueReview: true });
-        }
+        const decision = reviewButton.dataset.reviewDecision || "";
+        void this.stageIndividualReviewDecision(individual, decision);
+        return;
+      }
+      const addIssueButton = event.target.closest("button[data-add-individual-issue]");
+      if (addIssueButton) {
+        this.openIndividualReviewModal(addIssueButton.dataset.individual || "");
         return;
       }
       const skipButton = event.target.closest("button[data-queue-skip]");
@@ -3369,6 +3465,7 @@ class MovementExampleApp {
           return;
         }
         this.currentStudy = nextStudy;
+        this.closeStudyEvents();
         this.currentDatasetId = "";
         this.currentArtifact = "";
         this.currentDataset = null;
@@ -3505,6 +3602,7 @@ class MovementExampleApp {
     this.refs.resetView.addEventListener("click", () => this.resetView());
     this.refs.markSuspected.addEventListener("click", () => this.openIssueModal("suspected"));
     this.refs.markConfirmed.addEventListener("click", () => this.openConfirmModal());
+    this.refs.dismissSuspected.addEventListener("click", () => this.openDismissModal());
     this.refs.runAnomalyRanking.addEventListener("click", () => {
       void this.runBurstAnomalyRanking();
     });
@@ -3578,6 +3676,8 @@ class MovementExampleApp {
     });
     this.refs.confirmClose.addEventListener("click", () => this.closeModal(this.refs.confirmModal, this.refs.confirmSubmit));
     this.refs.confirmSubmit.addEventListener("click", async () => this.submitConfirmIssues());
+    this.refs.dismissClose.addEventListener("click", () => this.closeModal(this.refs.dismissModal, this.refs.dismissSubmit));
+    this.refs.dismissSubmit.addEventListener("click", async () => this.submitDismissIssues());
     this.refs.reportClose.addEventListener("click", () => this.closeModal(this.refs.reportModal, this.refs.reportSubmit));
     this.refs.reportType.addEventListener("change", () => {
       void this.handleReportTypeChange();
@@ -3599,6 +3699,7 @@ class MovementExampleApp {
     for (const modal of [
       this.refs.issueModal,
       this.refs.confirmModal,
+      this.refs.dismissModal,
       this.refs.reportModal,
       this.refs.resumeModal,
     ]) {
@@ -3608,6 +3709,8 @@ class MovementExampleApp {
             ? this.refs.issueSubmit
             : modal === this.refs.confirmModal
               ? this.refs.confirmSubmit
+              : modal === this.refs.dismissModal
+                ? this.refs.dismissSubmit
               : modal === this.refs.reportModal
                 ? this.refs.reportSubmit
                 : this.refs.resumeSubmit;
@@ -3618,13 +3721,10 @@ class MovementExampleApp {
   }
 
   async fetchResponse(url, options) {
-    const slimAuth = MOVEMENT_APP_CONFIG.mode === "slim_movement"
-      ? window.vibecleaningSlimAuth
-      : null;
-    if (slimAuth?.fetch) {
-      return slimAuth.fetch(url, options);
+    if (window.vibecleaningAuth?.fetch) {
+      return window.vibecleaningAuth.fetch(url, options);
     }
-    return fetch(url, options);
+    return fetch(url, { ...options, credentials: "same-origin" });
   }
 
   async fetchJSON(url, options) {
@@ -5251,13 +5351,85 @@ class MovementExampleApp {
     return [mutedChannel(red), mutedChannel(green), mutedChannel(blue), alpha];
   }
 
+  isFocusedBurstItem(item, focusedBurstId) {
+    return Boolean(focusedBurstId)
+      && String(item?.burst?.burstId || "") === focusedBurstId;
+  }
+
+  burstFillWidth(item) {
+    return item?.sourceFlagged ? 2 : 5;
+  }
+
+  burstCasingWidth(item, focusedBurstId) {
+    return this.burstFillWidth(item)
+      + (this.isFocusedBurstItem(item, focusedBurstId) ? 7 : 4);
+  }
+
+  burstFillColor(item, focusedBurstId) {
+    const individual = item?.burst?.individual;
+    if (this.isFocusedBurstItem(item, focusedBurstId)) {
+      return this.queueMapColor(item.color, individual);
+    }
+    if (focusedBurstId) {
+      // Source-flagged context stays dimmer than clean context so the
+      // distinction survives while another burst is focused.
+      return this.queueMapColor(
+        this.mutedRankingContextColor(item.color, item?.sourceFlagged ? 22 : 36),
+        individual,
+      );
+    }
+    if (item?.sourceFlagged) {
+      return this.queueMapColor(this.mutedRankingContextColor(item.color, 58), individual);
+    }
+    return this.queueMapColor(item.color, individual);
+  }
+
+  burstCasingColor(item, focusedBurstId) {
+    const individual = item?.burst?.individual;
+    if (this.isFocusedBurstItem(item, focusedBurstId)) {
+      return this.queueMapColor(BURST_FOCUS_CASING_COLOR, individual);
+    }
+    const alpha = focusedBurstId
+      ? (item?.sourceFlagged ? 40 : 70)
+      : (item?.sourceFlagged ? 120 : 205);
+    return this.queueMapColor([...BURST_CASING_RGB, alpha], individual);
+  }
+
+  burstEndpointColor(item, focusedBurstId) {
+    const individual = item?.burst?.individual;
+    const fillColor = Array.isArray(item?.fillColor) ? item.fillColor : [196, 181, 253, 220];
+    if (this.isFocusedBurstItem(item, focusedBurstId)) {
+      return this.queueMapColor([fillColor[0], fillColor[1], fillColor[2], 245], individual);
+    }
+    if (focusedBurstId) {
+      return this.queueMapColor(
+        this.mutedRankingContextColor(fillColor, item?.sourceFlagged ? 30 : 42),
+        individual,
+      );
+    }
+    if (item?.sourceFlagged) {
+      return this.queueMapColor(this.mutedRankingContextColor(fillColor, 92), individual);
+    }
+    return this.queueMapColor(fillColor, individual);
+  }
+
+  queueActiveIndividual() {
+    if (this.individualReviewQueue.mode !== "queue") {
+      return "";
+    }
+    if (!this.individualReviewQueue.activeIndividual && this.data) {
+      // The map can render before the queue list has re-resolved the active
+      // individual, and an empty value would draw the whole batch at full
+      // opacity. Resolve it the same way the list does instead of trusting
+      // the raw field. This repairs the field, so later calls are cheap.
+      this.getIndividualQueuePosition();
+    }
+    return String(this.individualReviewQueue.activeIndividual || "");
+  }
+
   queueMapOpacity(individual) {
-    if (
-      this.individualReviewQueue.mode === "queue"
-      && this.individualReviewQueue.activeIndividual
-      && individual
-      && individual !== this.individualReviewQueue.activeIndividual
-    ) {
+    const activeIndividual = this.queueActiveIndividual();
+    if (activeIndividual && individual && individual !== activeIndividual) {
       return 0.25;
     }
     return 1;
@@ -5512,7 +5684,7 @@ class MovementExampleApp {
       ...this.makeEmptyCandidateQueryPreview(),
       status: "loading",
     };
-    this.setStatus(`Running candidate query ${selectedQuery.name || selectedQuery.query_id}...`);
+    this.setStatus(`Running filter ${selectedQuery.name || selectedQuery.query_id} and flagging its matches...`);
     this.renderLayers();
     this.updateActionButtons();
 
@@ -5531,6 +5703,8 @@ class MovementExampleApp {
             query_version: selectedQuery.version,
             query_parameters: this.getCandidateQueryParameterValues(selectedQuery),
             execution_scope: executionScope,
+            expected_current_dataset_id: this.expectedCurrentDatasetId(),
+            expected_review_revision: this.expectedReviewRevision(),
           }),
         },
       );
@@ -5559,18 +5733,28 @@ class MovementExampleApp {
         candidateCount: Number(summary.candidate_count) || matchKeys.size,
         returnedCount: Number(summary.returned_count) || candidates.length,
       };
+      const createdDatasetId = String(result?.dataset?.dataset_id || "");
+      if (createdDatasetId) {
+        const flaggedCount = this.candidateQueryPreview.candidateCount;
+        const analysisId = this.candidateQueryPreview.analysisId;
+        await this.loadStudyAtDataset(createdDatasetId, { preserveAnnotationContext: true });
+        this.setStatus(
+          `Filter run ${analysisId || "completed"} flagged ${formatCount(flaggedCount)} fixes as suspicious in a new review step.`,
+        );
+        return;
+      }
       const visibleCount = this.getCandidateQueryMatchKeys().size;
       const returnedCount = this.getCandidateQueryReturnedMatchKeys().size;
       const warningText = this.candidateQueryPreview.warnings.length
         ? ` ${this.candidateQueryPreview.warnings[0]}`
         : "";
       if (this.candidateQueryPreview.status === "unresolved") {
-        this.setStatus(`Candidate query unresolved. ${warningText}`.trim(), true);
+        this.setStatus(`Filter run unresolved; no review step was created. ${warningText}`.trim(), true);
       } else {
         const visibilityText = visibleCount === returnedCount
           ? `${formatCount(visibleCount)} visible`
           : `${formatCount(visibleCount)} visible now; ${formatCount(returnedCount)} returned and available to check`;
-        this.setStatus(`Candidate query found ${formatCount(this.candidateQueryPreview.candidateCount)} candidates; ${visibilityText}.${warningText}`.trim());
+        this.setStatus(`Filter found no flaggable matches; no review step was created. ${visibilityText}.${warningText}`.trim());
       }
       this.renderLayers();
       this.updateActionButtons();
@@ -5653,7 +5837,246 @@ class MovementExampleApp {
     );
   }
 
+  expectedReviewRevision() {
+    return Number(this.editLockProfile?.review_revision || 0);
+  }
+
+  reviewActionUrl(action) {
+    return `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/${action}`;
+  }
+
+  reviewMutationBody(extra = {}) {
+    return {
+      expected_current_dataset_id: this.expectedCurrentDatasetId(),
+      expected_review_revision: this.expectedReviewRevision(),
+      ...extra,
+    };
+  }
+
+  renderReviewControls() {
+    const profile = this.editLockProfile || {};
+    const actor = profile.actor || window.vibecleaningActor || {};
+    const capabilities = profile.capabilities || {};
+    const review = profile.review || null;
+    const coverage = profile.coverage || null;
+    const control = profile.editor_control || null;
+    if (this.refs.authIdentity) {
+      this.refs.authIdentity.textContent = actor.display_name
+        ? `${actor.display_name} · ${actor.role || "user"}`
+        : "";
+    }
+    if (this.refs.reviewProgress) {
+      if (!review) {
+        this.refs.reviewProgress.textContent = this.currentStudy ? "No active review" : "";
+      } else if (coverage) {
+        const second = Number(coverage.second_opinion_count || 0);
+        const priorSecond = Number(coverage.prior_second_opinion_count || 0);
+        this.refs.reviewProgress.textContent = (
+          `${coverage.reviewed_count || 0}/${coverage.required_count || 0} reviewed`
+          + (second ? ` · ${second} second opinion` : "")
+          + (priorSecond ? ` · ${priorSecond} carried forward` : "")
+        );
+      }
+    }
+    if (this.refs.assignReview) {
+      this.refs.assignReview.hidden = !(
+        this.currentStudy && capabilities.can_manage_assignment && !review
+      );
+    }
+    if (this.refs.completeReview) {
+      this.refs.completeReview.hidden = !(review && (
+        capabilities.can_complete
+        || actor.role === "editor"
+        || review.reviewer_user_id === actor.user_id
+      ));
+      this.refs.completeReview.disabled = capabilities.can_complete !== true;
+      this.refs.completeReview.title = capabilities.can_complete
+        ? "Complete this study-level review"
+        : `${coverage?.remaining_count || 0} individual(s) still require a decision`;
+    }
+    if (this.refs.cancelReview) {
+      this.refs.cancelReview.hidden = !(actor.role === "editor" && review);
+    }
+    if (this.refs.editorControlStart) {
+      this.refs.editorControlStart.hidden = !(actor.role === "editor" && review && control?.owner_user_id !== actor.user_id);
+      this.refs.editorControlStart.textContent = control ? "Take over editor control" : "Start editor control";
+    }
+    if (this.refs.editorControlFinish) {
+      this.refs.editorControlFinish.hidden = !(actor.role === "editor" && control?.owner_user_id === actor.user_id);
+    }
+  }
+
+  async assignCurrentReview() {
+    if (!this.currentStudy) return;
+    try {
+      const payload = await this.fetchJSON("/api/apps/movement/reviewers", { cache: "no-store" });
+      const reviewers = Array.isArray(payload.reviewers) ? payload.reviewers : [];
+      if (!reviewers.length) {
+        this.setStatus("No enabled reviewer accounts are available.", true);
+        return;
+      }
+      const menu = reviewers.map(item => `${item.username} — ${item.display_name}`).join("\n");
+      const username = window.prompt(`Assign this review to which username?\n\n${menu}`, reviewers[0].username);
+      if (username === null) return;
+      const reviewer = reviewers.find(item => item.username.toLowerCase() === username.trim().toLowerCase());
+      if (!reviewer) {
+        this.setStatus("That reviewer username is not available.", true);
+        return;
+      }
+      await this.requestJSON(this.reviewActionUrl("review/assign"), {
+        method: "POST",
+        body: JSON.stringify(this.reviewMutationBody({
+          reviewer_user_id: reviewer.user_id,
+          logical_name: this.currentArtifact,
+        })),
+      });
+      await this.loadStudy({ preferredDatasetId: this.expectedCurrentDatasetId(), viewContext: this.captureDatasetViewContext() });
+      this.setStatus(`Assigned this review to ${reviewer.display_name}.`);
+    } catch (error) {
+      await this.handleEditRequestError(error);
+      this.setStatus(`Could not assign review: ${error.message}`, true);
+    }
+  }
+
+  async completeCurrentReview() {
+    const coverage = this.editLockProfile?.coverage || {};
+    const second = Number(coverage.second_opinion_count || 0);
+    const actor = this.editLockProfile?.actor || window.vibecleaningActor || {};
+    let reason = "";
+    if (actor.role === "editor" && this.editLockProfile?.review?.reviewer_user_id !== actor.user_id) {
+      reason = window.prompt("Audit reason for completing this review on the reviewer's behalf:", "") || "";
+      if (!reason) return;
+    }
+    const unresolved = Object.values(this.data?.stats || {}).reduce(
+      (sum, stats) => sum + (Number(stats?.unresolvedSuspectedCount) || 0),
+      0,
+    );
+    const warningParts = [];
+    if (second) {
+      warningParts.push(`${second} individual(s) still queued for a second opinion`);
+    }
+    if (unresolved) {
+      warningParts.push(`${unresolved} unresolved suspicious issue occurrence(s)`);
+    }
+    const warning = warningParts.length
+      ? ` Complete with ${warningParts.join(" and ")}? The unresolved flags will remain attached.`
+      : "";
+    if (!window.confirm(`Mark this study review complete?${warning}`)) return;
+    try {
+      await this.requestJSON(this.reviewActionUrl("review/complete"), {
+        method: "POST",
+        body: JSON.stringify(this.reviewMutationBody({ reason })),
+      });
+      await this.loadStudy({ preferredDatasetId: this.expectedCurrentDatasetId(), viewContext: this.captureDatasetViewContext() });
+      this.setStatus("Review completed. The study can now be reassigned.");
+    } catch (error) {
+      await this.handleEditRequestError(error);
+      this.setStatus(`Could not complete review: ${error.message}`, true);
+    }
+  }
+
+  async cancelCurrentReview() {
+    const reason = window.prompt("Audit reason for cancelling this active review:", "");
+    if (!reason?.trim()) return;
+    if (!window.confirm("Cancel this review? Its decisions remain in audit history.")) return;
+    try {
+      await this.requestJSON(this.reviewActionUrl("review/cancel"), {
+        method: "POST",
+        body: JSON.stringify(this.reviewMutationBody({ reason })),
+      });
+      await this.loadStudy({ preferredDatasetId: this.expectedCurrentDatasetId(), viewContext: this.captureDatasetViewContext() });
+      this.setStatus("Review cancelled. The study can now be assigned again.");
+    } catch (error) {
+      await this.handleEditRequestError(error);
+      this.setStatus(`Could not cancel review: ${error.message}`, true);
+    }
+  }
+
+  async startCurrentEditorControl() {
+    const control = this.editLockProfile?.editor_control;
+    const reason = window.prompt(
+      control ? "Audit reason for taking over editor control:" : "Why are you intervening in this review?",
+      "",
+    );
+    if (!reason?.trim()) return;
+    try {
+      const action = control ? "editor-control/takeover" : "editor-control/start";
+      await this.requestJSON(this.reviewActionUrl(action), {
+        method: "POST",
+        body: JSON.stringify(this.reviewMutationBody({ reason })),
+      });
+      await this.loadEditLockProfile();
+      this.setStatus(control ? "Editor control taken over." : "Editor control started.");
+    } catch (error) {
+      await this.handleEditRequestError(error);
+      this.setStatus(`Could not start editor control: ${error.message}`, true);
+    }
+  }
+
+  async finishCurrentEditorControl() {
+    if (!window.confirm("Release editor control and return editing to the assigned reviewer?")) return;
+    try {
+      await this.requestJSON(this.reviewActionUrl("editor-control/finish"), {
+        method: "POST",
+        body: JSON.stringify(this.reviewMutationBody()),
+      });
+      await this.loadEditLockProfile();
+      this.setStatus("Editor control released.");
+    } catch (error) {
+      await this.handleEditRequestError(error);
+      this.setStatus(`Could not release editor control: ${error.message}`, true);
+    }
+  }
+
+  connectStudyEvents() {
+    if (!this.currentFamily || !this.currentStudy || typeof EventSource === "undefined") return;
+    const key = `${this.currentFamily}/${this.currentStudy}`;
+    if (this.studyEvents && this.studyEventsKey === key) return;
+    this.studyEvents?.close();
+    this.studyEventsKey = key;
+    const events = new EventSource(this.reviewActionUrl("events"));
+    this.studyEvents = events;
+    events.addEventListener("study_state_changed", event => {
+      if (events !== this.studyEvents || this.studyEventRefreshPending) return;
+      let update;
+      try { update = JSON.parse(event.data); } catch { return; }
+      const remoteRevision = Number(update.review_revision || 0);
+      const remoteHead = String(update.current_dataset_id || "");
+      const localRevision = this.expectedReviewRevision();
+      const localHead = this.expectedCurrentDatasetId();
+      if (remoteRevision === localRevision && remoteHead === localHead) return;
+      this.studyEventRefreshPending = true;
+      const viewContext = this.captureDatasetViewContext();
+      const refresh = (async () => {
+        await this.loadEditLockProfile();
+        const validatedHead = this.expectedCurrentDatasetId();
+        if (validatedHead && validatedHead !== localHead) {
+          await this.loadStudy({ preferredDatasetId: validatedHead, viewContext });
+        }
+      })();
+      void refresh.finally(() => { this.studyEventRefreshPending = false; });
+    });
+  }
+
+  async refreshOpenStudyState() {
+    if (!this.currentStudy || !this.currentDatasetId || this.studyEventRefreshPending) return;
+    const previousHead = this.expectedCurrentDatasetId();
+    const viewContext = this.captureDatasetViewContext();
+    await this.loadEditLockProfile();
+    const nextHead = this.expectedCurrentDatasetId();
+    if (nextHead && previousHead && nextHead !== previousHead) {
+      await this.loadStudy({ preferredDatasetId: nextHead, viewContext });
+    }
+  }
+
+  closeStudyEvents() {
+    this.studyEvents?.close();
+    this.studyEvents = null;
+    this.studyEventsKey = "";
+  }
+
   renderEditLockProfile() {
+    this.renderReviewControls();
     if (!this.refs?.editLockProfile) {
       return;
     }
@@ -5682,6 +6105,7 @@ class MovementExampleApp {
 
   async loadEditLockProfile() {
     if (!this.currentFamily || !this.currentStudy || !this.currentDatasetId) {
+      this.closeStudyEvents();
       this.editLockProfile = {
         editable: false,
         blockers: [],
@@ -5704,6 +6128,7 @@ class MovementExampleApp {
       resume: { allowed: false },
     };
     this.renderEditLockProfile();
+    this.connectStudyEvents();
     this.updateActionButtons();
     try {
       const params = new URLSearchParams({ dataset_id: this.currentDatasetId });
@@ -5793,6 +6218,8 @@ class MovementExampleApp {
       selectedFixKeys: new Set(this.data.selectedFixKeys),
       currentTimeMs: this.currentTimeMs,
       mapView,
+      pendingIssueContext: this.pendingIssueContext,
+      pendingConfirmationGroups: this.pendingConfirmationGroups,
     };
   }
 
@@ -5867,6 +6294,12 @@ class MovementExampleApp {
     this.refs.slider.min = String(this.data.minTimeMs);
     this.refs.slider.max = String(this.data.maxTimeMs);
     this.refs.slider.value = String(this.currentTimeMs);
+    if (viewContext?.pendingIssueContext) {
+      this.pendingIssueContext = viewContext.pendingIssueContext;
+    }
+    if (Array.isArray(viewContext?.pendingConfirmationGroups)) {
+      this.pendingConfirmationGroups = viewContext.pendingConfirmationGroups;
+    }
     return preservedFixKeys;
   }
 
@@ -5887,6 +6320,7 @@ class MovementExampleApp {
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
     this.pendingConfirmationGroups = [];
+    this.pendingDismissalGroups = [];
     this.tableSelection = {
       anchorFixKey: "",
       focusFixKey: "",
@@ -5901,7 +6335,7 @@ class MovementExampleApp {
     this.currentTimeMs = 0;
     this.lastReportLinks = [];
     this.refs.outputLinks.innerHTML = "";
-    this.refs.selectSuspicious.textContent = "Load suspicious fixes";
+    this.refs.selectSuspicious.textContent = "Review suspicious fixes";
     this.refs.individuals.innerHTML = "";
     this.refs.selectedFixes.innerHTML = "";
     this.renderAnomalyRanking();
@@ -5925,6 +6359,7 @@ class MovementExampleApp {
       return;
     }
     this.cancelSelectionRequests("family");
+    this.closeStudyEvents();
     this.currentFamily = familyName;
     this.currentStudy = "";
     this.currentDatasetId = "";
@@ -6030,7 +6465,10 @@ class MovementExampleApp {
       for (const study of this.studies) {
         const option = document.createElement("option");
         option.value = study.name;
-        option.textContent = study.name;
+        const reviewerName = study.review?.reviewer?.display_name || "";
+        option.textContent = reviewerName
+          ? `${study.name} · active review: ${reviewerName}`
+          : `${study.name} · unassigned/history`;
         this.refs.study.appendChild(option);
       }
       if (!this.studies.length) {
@@ -6175,6 +6613,7 @@ class MovementExampleApp {
       if (this.refs.showConfirmed.checked) {
         void this.loadConfirmedFixes();
       }
+      void this.loadSuspiciousFixes({ focus: false });
     } catch (error) {
       if (this.isAbortError(error)) {
         return;
@@ -6352,6 +6791,7 @@ class MovementExampleApp {
       if (this.refs.showConfirmed.checked) {
         void this.loadConfirmedFixes();
       }
+      void this.loadSuspiciousFixes({ focus: false });
     } catch (error) {
       if (this.isAbortError(error) || requestId !== this.loadRequestId) {
         return;
@@ -6416,15 +6856,21 @@ class MovementExampleApp {
     if (staged) {
       return {
         reviewed: true,
-        reviewOk: staged.review_ok,
+        reviewDecision: staged.review_decision,
+        reviewOk: staged.review_decision === "ok",
         comment: staged.comment || "",
         staged: true,
       };
     }
     const stats = this.data?.stats?.[individual] || {};
+    const priorSecondOpinion = (
+      this.editLockProfile?.coverage?.prior_second_opinion_individuals || []
+    ).includes(individual);
     return {
       reviewed: stats.reviewed === true,
+      reviewDecision: stats.reviewDecision || (stats.reviewed ? (stats.reviewOk ? "ok" : "not_ok") : ""),
       reviewOk: stats.reviewOk === true,
+      priorSecondOpinion,
       comment: stats.reviewComment || "",
       staged: false,
     };
@@ -6451,6 +6897,15 @@ class MovementExampleApp {
 
   getIndividualQueueOrder() {
     const individuals = this.data?.individuals || [];
+    const visibleIndividuals = individuals.filter(individual => {
+      const state = this.getIndividualReviewState(individual);
+      if (this.individualReviewQueue.filterMode === "unresolved") {
+        return Number(this.data?.stats?.[individual]?.unresolvedSuspectedCount) > 0;
+      }
+      return this.individualReviewQueue.filterMode !== "second_opinion"
+        || state.reviewDecision === "second_opinion"
+        || state.priorSecondOpinion;
+    });
     const datasetIndex = new Map(this.data?.individuals?.map((individual, index) => [individual, index]) || []);
     const rankingIndex = new Map(
       (this.anomalyRanking?.rankedIndividuals || [])
@@ -6461,9 +6916,11 @@ class MovementExampleApp {
       && this.hasCompatibleIndividualQueueRanking()
       && this.individualReviewQueue.appliedRankingAnalysisId === this.anomalyRanking.analysisId
     );
-    return [...individuals].sort((left, right) => {
-      const leftReviewGroup = this.data?.stats?.[left]?.reviewed === true ? 1 : 0;
-      const rightReviewGroup = this.data?.stats?.[right]?.reviewed === true ? 1 : 0;
+    return [...visibleIndividuals].sort((left, right) => {
+      const leftState = this.getIndividualReviewState(left);
+      const rightState = this.getIndividualReviewState(right);
+      const leftReviewGroup = leftState.priorSecondOpinion ? 0 : !leftState.reviewed ? 1 : leftState.reviewDecision === "second_opinion" ? 2 : 3;
+      const rightReviewGroup = rightState.priorSecondOpinion ? 0 : !rightState.reviewed ? 1 : rightState.reviewDecision === "second_opinion" ? 2 : 3;
       if (leftReviewGroup !== rightReviewGroup) {
         return leftReviewGroup - rightReviewGroup;
       }
@@ -6728,7 +7185,7 @@ class MovementExampleApp {
     await this.focusIndividualQueueItem(position.page[nextPageIndex]);
   }
 
-  async stageIndividualReviewDecision(individual, reviewOk) {
+  async stageIndividualReviewDecision(individual, reviewDecision) {
     if (this.rejectLockedEdit()) {
       return;
     }
@@ -6736,6 +7193,11 @@ class MovementExampleApp {
     if (!individual) {
       return;
     }
+    reviewDecision = reviewDecision === true
+      ? "ok"
+      : reviewDecision === false
+        ? "not_ok"
+        : reviewDecision;
     const existingState = this.getIndividualReviewState(individual);
     const comment = (
       this.individualReviewQueue.commentDrafts.has(individual)
@@ -6766,7 +7228,7 @@ class MovementExampleApp {
     const nextIndividual = position.page[currentIndex + 1] || "";
     this.individualReviewQueue.stagedDecisions.set(individual, {
       individual,
-      review_ok: reviewOk,
+      review_decision: reviewDecision,
       comment,
     });
     this.individualReviewQueue.skippedIndividuals.delete(individual);
@@ -6853,6 +7315,7 @@ class MovementExampleApp {
           body: JSON.stringify({
             dataset_id: this.currentDatasetId,
             expected_current_dataset_id: this.expectedCurrentDatasetId(),
+            expected_review_revision: this.expectedReviewRevision(),
             logical_name: this.currentArtifact,
             decisions,
             user: this.getUser() || "reviewer",
@@ -7060,7 +7523,8 @@ class MovementExampleApp {
       const coverage = this.data.coverageByIndividual[individual] || {};
       const isSelected = this.data.selectedIndividuals.has(individual);
       const card = document.createElement("div");
-      card.className = "movement-card interactive";
+      const unresolvedCount = Number(stats.unresolvedSuspectedCount) || 0;
+      card.className = `movement-card interactive${unresolvedCount ? " has-unresolved-issues" : ""}`;
       card.style.opacity = isSelected ? "1" : "0.34";
 
       const header = document.createElement("div");
@@ -7092,7 +7556,7 @@ class MovementExampleApp {
       const flagButton = document.createElement("button");
       flagButton.type = "button";
       flagButton.className = "movement-fix-remove";
-      flagButton.textContent = "Flag for review";
+      flagButton.textContent = "Add issue";
       flagButton.disabled = !this.canPersistEdits();
       flagButton.addEventListener("click", event => {
         event.stopPropagation();
@@ -7107,10 +7571,17 @@ class MovementExampleApp {
       statsRow.append(
         statChip(`median step ${formatMaybeNumber(stats.medianStepM, "m")}`),
         statChip(`median speed ${formatMaybeNumber(stats.medianSpeedMps, "m/s")}`),
-        statChip(`suspected ${formatCount(stats.suspectedCount)}`),
+        statChip(`unresolved ${formatCount(unresolvedCount)}`),
         statChip(`confirmed ${formatCount(stats.confirmedCount)}`),
       );
       card.appendChild(statsRow);
+      if (unresolvedCount) {
+        const origins = Array.isArray(stats.unresolvedIssueOrigins) ? stats.unresolvedIssueOrigins : [];
+        const notice = document.createElement("div");
+        notice.className = "movement-fix-note";
+        notice.textContent = `Unresolved issues: ${formatCount(unresolvedCount)}${origins.length ? ` • ${origins.join(", ")}` : ""}`;
+        card.appendChild(notice);
+      }
 
       const track = document.createElement("div");
       track.className = "movement-track";
@@ -7204,16 +7675,22 @@ class MovementExampleApp {
         ? queue.commentDrafts.get(individual)
         : reviewState.comment || "";
       const card = document.createElement("div");
-      card.className = `movement-card queue-card interactive${isActive ? " queue-active" : ""}`;
+      const unresolvedCount = Number(stats.unresolvedSuspectedCount) || 0;
+      const origins = Array.isArray(stats.unresolvedIssueOrigins) ? stats.unresolvedIssueOrigins : [];
+      card.className = `movement-card queue-card interactive${isActive ? " queue-active" : ""}${unresolvedCount ? " has-unresolved-issues" : ""}`;
       const stateLabel = reviewState.reviewed
-        ? reviewState.reviewOk
+        ? reviewState.reviewDecision === "ok"
           ? "Reviewed—OK"
-          : "Reviewed—issues"
-        : queue.skippedIndividuals.has(individual)
-          ? "Skipped"
-          : "Unreviewed";
+          : reviewState.reviewDecision === "second_opinion"
+            ? "Reviewed—second opinion"
+            : "Reviewed—issues"
+        : reviewState.priorSecondOpinion
+          ? "Needs review—prior second opinion"
+          : queue.skippedIndividuals.has(individual)
+            ? "Skipped"
+            : "Unreviewed";
       const stateClass = reviewState.reviewed
-        ? reviewState.reviewOk ? " ok" : " issues"
+        ? reviewState.reviewDecision === "ok" ? " ok" : " issues"
         : "";
       card.innerHTML = `
         <div class="movement-row">
@@ -7230,13 +7707,16 @@ class MovementExampleApp {
           ${escapeHtml(this.data.speciesByIndividual[individual] || "")}
           ${this.data.speciesByIndividual[individual] ? " • " : ""}
           ${escapeHtml(formatCount(stats.rowCount))} fixes
-          • ${escapeHtml(formatCount(stats.suspectedCount))} suspected
+          • ${escapeHtml(formatCount(unresolvedCount))} unresolved
           • ${escapeHtml(formatCount(stats.confirmedCount))} confirmed
         </div>
+        ${unresolvedCount ? `<div class="movement-fix-note"><strong>Unresolved issues:</strong> ${escapeHtml(formatCount(unresolvedCount))}${origins.length ? ` • ${escapeHtml(origins.join(", "))}` : ""}</div>` : ""}
         ${isActive ? `
           <div class="movement-queue-card-actions">
-            <button type="button" data-review-ok="true" data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Reviewed—OK</button>
-            <button type="button" data-review-ok="false" data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Issues found</button>
+            <button type="button" data-review-decision="ok" data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Reviewed—OK</button>
+            <button type="button" data-review-decision="not_ok" data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Issues found</button>
+            <button type="button" data-add-individual-issue data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Add issue</button>
+            <button type="button" data-review-decision="second_opinion" data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Second opinion</button>
             <button type="button" data-queue-skip data-individual="${escapeHtml(individual)}">Skip</button>
           </div>
         ` : ""}
@@ -7308,7 +7788,7 @@ class MovementExampleApp {
     const fixesToShow = selectedFixes.slice(0, MAX_SELECTED_FIXES_SHOWN);
     for (const fix of fixesToShow) {
       const card = document.createElement("div");
-      card.className = "movement-card";
+      card.className = `movement-card${fix.review.status === "suspected" ? " is-suspected" : ""}`;
 
       const header = document.createElement("div");
       header.className = "movement-row";
@@ -7327,7 +7807,19 @@ class MovementExampleApp {
       removeButton.addEventListener("click", () => {
         this.toggleFixSelection(fix.fixKey);
       });
-      header.append(left, removeButton);
+      const cardActions = document.createElement("div");
+      cardActions.className = "movement-row-left";
+      if (fix.review.status === "suspected") {
+        const dismissButton = document.createElement("button");
+        dismissButton.type = "button";
+        dismissButton.className = "movement-fix-dismiss";
+        dismissButton.textContent = "Not suspicious";
+        dismissButton.disabled = !this.canPersistEdits();
+        dismissButton.addEventListener("click", () => this.openDismissModal([fix]));
+        cardActions.appendChild(dismissButton);
+      }
+      cardActions.appendChild(removeButton);
+      header.append(left, cardActions);
       card.appendChild(header);
 
       const meta = document.createElement("div");
@@ -7348,6 +7840,22 @@ class MovementExampleApp {
         const issueTypes = reportIssueTypes(fix);
         note.textContent = `${issueTypes.join(", ") || "Issue"}: ${fix.review.issueNote || fix.review.ownerQuestion || ""}`;
         card.appendChild(note);
+      }
+      const unresolvedIssues = (fix.review.effectiveIssues || [])
+        .filter(issue => issue.status === "suspected");
+      if (unresolvedIssues.length) {
+        const provenance = document.createElement("div");
+        provenance.className = "movement-fix-note";
+        provenance.innerHTML = `<strong>${escapeHtml(formatCount(unresolvedIssues.length))} unresolved suspicion(s)</strong><br>${unresolvedIssues.map(issue => {
+          const origin = [
+            issue.issueType || "Unspecified issue",
+            issue.origin || "manual",
+            issue.sourceAnalysisId ? `analysis ${issue.sourceAnalysisId}` : "",
+            issue.stepId ? `step ${issue.stepId}` : "",
+          ].filter(Boolean).join(" • ");
+          return escapeHtml(origin);
+        }).join("<br>")}`;
+        card.appendChild(provenance);
       }
 
       this.refs.selectedFixes.appendChild(card);
@@ -7884,7 +8392,7 @@ class MovementExampleApp {
           <tbody>
             ${bursts.map(burst => `
               <tr class="is-auto-burst-row" data-burst-id="${escapeHtml(burst.burstId)}">
-                <td><span class="movement-burst-swatch" style="background: ${escapeHtml(rgbaCss(autoBurstColor(burst, 215)))}"></span></td>
+                <td><span class="movement-burst-swatch" style="background: ${escapeHtml(rgbaCss(burstPathColor(this.data?.individualPalette, burst, 215)))}"></span></td>
                 <td>${escapeHtml(burst.individual)}</td>
                 <td>${escapeHtml(burst.setName)}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(String(burst.burstIdx))}</td>
@@ -8278,11 +8786,11 @@ class MovementExampleApp {
     }
     const visibleSegments = this.getVisibleSegments();
     const visibleAutoBursts = this.getVisibleAutoBursts();
+    const drawableAutoBursts = visibleAutoBursts.filter(burst => burst.path.length >= 2);
     const suppressedBaseTrackKeys = new Set(
-      visibleAutoBursts.map(burst => movementTrackKey(burst.individual, burst.setName)),
+      drawableAutoBursts.map(burst => movementTrackKey(burst.individual, burst.setName)),
     );
-    const visibleAutoBurstPaths = visibleAutoBursts
-      .filter(burst => burst.path.length >= 2)
+    const visibleAutoBurstPaths = drawableAutoBursts
       .map(burst => this.data.autoBurstRenderCache.get(burst.burstId)?.pathItem)
       .filter(Boolean);
     const visibleAutoBurstMarkers = visibleAutoBursts
@@ -8303,30 +8811,38 @@ class MovementExampleApp {
     const thresholdMatchKeys = showPoints ? this.getActiveThresholdMatchKeys() : new Set();
     const candidateMatchKeys = showPoints ? this.getCandidateQueryMatchKeys() : new Set();
     const focusedRankingBurstFixes = this.getFocusedRankingBurstFixes();
-    const focusedRankingBurstPath = focusedRankingBurstFixes
-      .map(fix => fix.position)
-      .filter(position => Array.isArray(position) && position.length >= 2);
     const focusedRankingBurstPoints = focusedRankingBurstFixes.map(fix => ({
       fixKey: fix.fixKey,
       position: fix.position,
     }));
     const hasFocusedRankingBurst = focusedRankingBurstFixes.length > 0;
-    const focusedRankingBurstMarkers = [];
-    if (focusedRankingBurstFixes.length) {
-      const startFix = focusedRankingBurstFixes[0];
-      const endFix = focusedRankingBurstFixes[focusedRankingBurstFixes.length - 1];
-      focusedRankingBurstMarkers.push({
-        markerRole: "start",
-        fixKey: startFix.fixKey,
-        position: startFix.position,
-        fillColor: [34, 211, 238, 245],
-      });
-      if (endFix.fixKey !== startFix.fixKey) {
-        focusedRankingBurstMarkers.push({
-          markerRole: "end",
-          fixKey: endFix.fixKey,
-          position: endFix.position,
-          fillColor: [244, 114, 182, 245],
+    const focusedBurstId = hasFocusedRankingBurst
+      ? String(this.focusedRankingBurst?.burstId || "")
+      : "";
+    // Layers with identity-stable data skip attribute recomputation unless an
+    // update trigger changes. Queue dimming and burst focus both depend on
+    // state outside the data array, so they must be declared as triggers or
+    // their colors freeze when the active individual or focused burst changes.
+    const queueDimKey = this.individualReviewQueue.mode === "queue"
+      ? `queue:${this.queueActiveIndividual()}`
+      : "browse";
+    const focusDimKey = `${focusedBurstId}|${hasFocusedRankingBurst ? 1 : 0}`;
+
+    if (showSuspectedOutlines) {
+      const seenSuspected = new Set();
+      for (const fix of this.data.suspiciousFixes || []) {
+        if (
+          fix.review?.status !== "suspected"
+          || !visibleSetNames.has(fix.setName)
+          || seenSuspected.has(fix.fixKey)
+        ) {
+          continue;
+        }
+        seenSuspected.add(fix.fixKey);
+        suspectedPointData.push({
+          fixKey: fix.fixKey,
+          individual: fix.individual,
+          position: fix.position,
         });
       }
     }
@@ -8386,13 +8902,6 @@ class MovementExampleApp {
           position: fix.position,
           color: this.colorForFix(fix),
         };
-        if (showSuspectedOutlines && fix.review?.status === "suspected") {
-          suspectedPointData.push({
-            fixKey: fix.fixKey,
-            individual: fix.individual,
-            position: fix.position,
-          });
-        }
         if (this.data.selectedFixKeys.has(fix.fixKey)) {
           selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
           if (thresholdMatchKeys.has(fix.fixKey)) {
@@ -8463,6 +8972,9 @@ class MovementExampleApp {
         getColor: item => this.queueMapColor(item.color, item.individual),
         getWidth: 1.5,
         widthMinPixels: 1,
+        updateTriggers: {
+          getColor: queueDimKey,
+        },
         pickable: false,
       }),
     );
@@ -8480,6 +8992,9 @@ class MovementExampleApp {
         ),
         getWidth: 2.5,
         widthMinPixels: 2,
+        updateTriggers: {
+          getColor: [queueDimKey, focusDimKey],
+        },
         pickable: false,
       }),
     );
@@ -8487,21 +9002,33 @@ class MovementExampleApp {
     if (visibleAutoBurstPaths.length) {
       layers.push(
         new deck.PathLayer({
-          id: "movement-auto-bursts",
+          id: "movement-burst-casing",
           data: visibleAutoBurstPaths,
           dataComparator: sameArrayItems,
           getPath: item => item.path,
-          getColor: item => this.queueMapColor(
-            hasFocusedRankingBurst
-              ? this.mutedRankingContextColor(item.color, 36)
-              : item.sourceFlagged
-                ? this.mutedRankingContextColor(item.color, 58)
-                : item.color,
-            item.burst?.individual,
-          ),
-          getWidth: item => item.sourceFlagged ? 2 : 5,
+          getColor: item => this.burstCasingColor(item, focusedBurstId),
+          getWidth: item => this.burstCasingWidth(item, focusedBurstId),
+          widthMinPixels: 2,
+          updateTriggers: {
+            getColor: [focusedBurstId, queueDimKey],
+            getWidth: focusedBurstId,
+          },
+          pickable: false,
+        }),
+      );
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-bursts",
+          data: visibleAutoBurstPaths,
+          dataComparator: sameArrayItems,
+          getPath: item => item.path,
+          getColor: item => this.burstFillColor(item, focusedBurstId),
+          getWidth: item => this.burstFillWidth(item),
           widthMinPixels: 1,
-          pickable: Boolean(this.burstFeatureSpace?.points?.length),
+          updateTriggers: {
+            getColor: [focusedBurstId, queueDimKey],
+          },
+          pickable: true,
         }),
       );
     }
@@ -8513,14 +9040,7 @@ class MovementExampleApp {
           data: visibleAutoBurstMarkers,
           dataComparator: sameArrayItems,
           getPosition: item => item.position,
-          getFillColor: item => this.queueMapColor(
-            hasFocusedRankingBurst
-              ? this.mutedRankingContextColor(item.fillColor, 42)
-              : item.sourceFlagged
-                ? this.mutedRankingContextColor(item.fillColor, 92)
-                : item.fillColor,
-            item.burst?.individual,
-          ),
+          getFillColor: item => this.burstEndpointColor(item, focusedBurstId),
           getLineColor: item => this.queueMapColor(
             [15, 23, 42, 220],
             item.burst?.individual,
@@ -8531,7 +9051,11 @@ class MovementExampleApp {
           getRadius: 76,
           radiusMinPixels: 4,
           radiusMaxPixels: 9,
-          pickable: false,
+          updateTriggers: {
+            getFillColor: [focusedBurstId, queueDimKey],
+            getLineColor: queueDimKey,
+          },
+          pickable: true,
         }),
       );
     }
@@ -8609,15 +9133,15 @@ class MovementExampleApp {
           data: suspectedPointData,
           getPosition: item => item.position,
           getLineColor: item => this.queueMapColor(
-            [245, 181, 54, 235],
+            [255, 204, 40, 255],
             item.individual,
           ),
           filled: false,
           stroked: true,
-          lineWidthMinPixels: 2,
-          getRadius: 102,
-          radiusMinPixels: 6,
-          radiusMaxPixels: 12,
+          lineWidthMinPixels: 4,
+          getRadius: 125,
+          radiusMinPixels: 9,
+          radiusMaxPixels: 17,
           pickable: false,
         }),
       );
@@ -8739,64 +9263,19 @@ class MovementExampleApp {
       );
     }
 
-    if (focusedRankingBurstPath.length >= 2) {
-      layers.push(
-        new deck.PathLayer({
-          id: "movement-focused-ranking-burst-path-outline",
-          data: [{ path: focusedRankingBurstPath }],
-          getPath: item => item.path,
-          getColor: [15, 23, 42, 235],
-          getWidth: 10,
-          widthMinPixels: 5,
-          pickable: false,
-        }),
-      );
-      layers.push(
-        new deck.PathLayer({
-          id: "movement-focused-ranking-burst-path",
-          data: [{ path: focusedRankingBurstPath }],
-          getPath: item => item.path,
-          getColor: [216, 180, 254, 245],
-          getWidth: 6,
-          widthMinPixels: 3,
-          pickable: false,
-        }),
-      );
-    }
-
     if (focusedRankingBurstPoints.length) {
       layers.push(
         new deck.ScatterplotLayer({
-          id: "movement-focused-ranking-burst-points",
+          id: "movement-burst-focus-ring",
           data: focusedRankingBurstPoints,
           getPosition: item => item.position,
-          getFillColor: [168, 85, 247, 220],
-          getLineColor: [15, 23, 42, 245],
-          filled: true,
+          getLineColor: BURST_FOCUS_RING_COLOR,
+          filled: false,
           stroked: true,
           lineWidthMinPixels: 2,
           getRadius: 146,
           radiusMinPixels: 7,
           radiusMaxPixels: 16,
-          pickable: false,
-        }),
-      );
-    }
-
-    if (focusedRankingBurstMarkers.length) {
-      layers.push(
-        new deck.ScatterplotLayer({
-          id: "movement-focused-ranking-burst-markers",
-          data: focusedRankingBurstMarkers,
-          getPosition: item => item.position,
-          getFillColor: item => item.fillColor,
-          getLineColor: [255, 255, 255, 245],
-          filled: true,
-          stroked: true,
-          lineWidthMinPixels: 2.5,
-          getRadius: 220,
-          radiusMinPixels: 12,
-          radiusMaxPixels: 24,
           pickable: false,
         }),
       );
@@ -8938,6 +9417,31 @@ class MovementExampleApp {
     return null;
   }
 
+  focusMapBurst(burstId) {
+    const burst = this.data?.autoBurstById?.get(String(burstId || ""));
+    if (!burst) {
+      return false;
+    }
+    if (this.focusedRankingBurst?.burstId === burst.burstId) {
+      this.focusedRankingBurst = null;
+      this.renderLayers();
+      this.setStatus(`Cleared focus on burst ${burst.burstId}.`);
+      return true;
+    }
+    this.setFocusedRankingBurst({
+      burst_id: burst.burstId,
+      individual: burst.individual,
+      set_name: burst.setName,
+      start_time_ms: burst.startTimeMs,
+      end_time_ms: burst.endTimeMs,
+      n_fixes: burst.fixCount,
+      fix_keys: burst.fixKeys,
+    });
+    this.renderLayers();
+    this.setStatus(`Focused burst ${burst.burstId}.`);
+    return true;
+  }
+
   selectMapBurstInFeatureSpace(burst) {
     if (!burst?.burstId) {
       return false;
@@ -8979,6 +9483,13 @@ class MovementExampleApp {
       })
       : null;
     if (!picked?.object?.fixKey) {
+      // Burst paths and endpoint markers carry a burst but no fix key. Fix
+      // layers render above them, so this only fires when the click missed
+      // every fix.
+      const pickedBurstId = String(picked?.object?.burst?.burstId || "");
+      if (pickedBurstId) {
+        this.focusMapBurst(pickedBurstId);
+      }
       return;
     }
     const fixKey = picked.object.fixKey;
@@ -10024,15 +10535,21 @@ class MovementExampleApp {
     }
   }
 
-  async loadSuspiciousFixes() {
+  async loadSuspiciousFixes({ focus = true } = {}) {
     if (!this.data || !this.currentArtifact) {
       return;
     }
-    this.cancelRequest("detail");
+    if (focus) {
+      this.cancelRequest("detail");
+    }
     this.data.suspiciousState = "loading";
-    this.refs.selectSuspicious.textContent = "Loading suspicious fixes...";
+    this.refs.selectSuspicious.textContent = focus
+      ? "Loading suspicious fixes..."
+      : "Loading suspicious overlay...";
     this.updateActionButtons();
-    this.setStatus(`Loading suspicious fixes from ${this.currentArtifact}...`);
+    if (focus) {
+      this.setStatus(`Loading suspicious fixes from ${this.currentArtifact}...`);
+    }
 
     const familyName = this.currentFamily;
     const studyName = this.currentStudy;
@@ -10063,8 +10580,6 @@ class MovementExampleApp {
 
       const suspiciousFixes = parseMovementFixes(payload.fixes || [])
         .filter(fix => fix.review.status === "suspected");
-      this.clearThresholdState();
-      this.setTableSelection();
       this.data.suspiciousFixes = suspiciousFixes;
       this.data.suspiciousState = "loaded";
       this.data.suspiciousLimit = payload.detail_scope?.limit ?? null;
@@ -10072,12 +10587,16 @@ class MovementExampleApp {
       this.data.suspiciousReturnedFixCount = Number(payload.returned_fix_count) || suspiciousFixes.length;
       this.data.suspiciousTruncated = Boolean(payload.truncated);
       refreshMovementFixCollections(this.data);
-      this.data.selectedFixKeys = new Set(suspiciousFixes.map(fix => fix.fixKey));
-      this.data.selectedIndividuals = new Set(suspiciousFixes.map(fix => fix.individual));
-      this.refs.showTrain.checked = true;
-      this.refs.showTest.checked = true;
-      this.refs.showPoints.checked = true;
-      this.saveUiState();
+      if (focus) {
+        this.clearThresholdState();
+        this.setTableSelection();
+        this.data.selectedFixKeys = new Set(suspiciousFixes.map(fix => fix.fixKey));
+        this.data.selectedIndividuals = new Set(suspiciousFixes.map(fix => fix.individual));
+        this.refs.showTrain.checked = true;
+        this.refs.showTest.checked = true;
+        this.refs.showPoints.checked = true;
+        this.saveUiState();
+      }
       this.renderIndividuals();
       this.renderSelectedFixes();
       this.renderThresholdPane();
@@ -10086,18 +10605,22 @@ class MovementExampleApp {
       this.updateActionButtons();
 
       if (!suspiciousFixes.length) {
-        this.setStatus(`No suspicious fixes were found in ${artifactName}.`);
+        if (focus) {
+          this.setStatus(`No unresolved suspicious fixes were found in ${artifactName}.`);
+        }
         return;
       }
-      this.zoomToPath(suspiciousFixes.map(fix => fix.position));
+      if (focus) {
+        this.zoomToPath(suspiciousFixes.map(fix => fix.position));
+      }
       if (this.data.suspiciousTruncated) {
         this.setStatus(
           `Loaded ${formatCount(suspiciousFixes.length)} of ${formatCount(this.data.suspiciousMatchingFixCount)} suspicious fixes due to the ${formatCount(this.data.suspiciousLimit)}-fix cap.`,
           true,
         );
-      } else {
+      } else if (focus) {
         this.setStatus(
-          `Loaded and checked ${formatCount(suspiciousFixes.length)} suspicious fixes across ${formatCount(this.data.selectedIndividuals.size)} individuals.`,
+          `Focused ${formatCount(suspiciousFixes.length)} suspicious fixes across ${formatCount(this.data.selectedIndividuals.size)} individuals.`,
         );
       }
     } catch (error) {
@@ -10109,7 +10632,10 @@ class MovementExampleApp {
       this.updateActionButtons();
     } finally {
       if (this.data && this.data.suspiciousState !== "loading") {
-        this.refs.selectSuspicious.textContent = "Load suspicious fixes";
+        const count = Number(this.data.suspiciousMatchingFixCount) || this.data.suspiciousFixes.length;
+        this.refs.selectSuspicious.textContent = count
+          ? `Review suspicious fixes (${formatCount(count)})`
+          : "Review suspicious fixes";
       }
     }
   }
@@ -10992,6 +11518,7 @@ class MovementExampleApp {
     for (const button of [
       this.refs.selectSuspicious,
       this.refs.clearFixes,
+      this.refs.dismissSuspected,
       this.refs.runCandidateQuery,
       this.refs.checkCandidates,
       this.refs.clearCandidates,
@@ -11030,11 +11557,16 @@ class MovementExampleApp {
       || !hasData
       || !canConfirmSelectedFixes
     );
+    this.refs.dismissSuspected.disabled = (
+      !canPersistEdits
+      || !hasData
+      || this.getUnresolvedSuspectedIssueGroups(selectedFixes).length === 0
+    );
     this.refs.generateReport.disabled = !hasData || !(this.data?.individuals || []).length;
     this.refs.exportReviewedCsv.disabled = !hasData;
     this.refs.selectSuspicious.disabled = !hasData || !this.currentArtifact || suspiciousLoading;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
-    this.refs.runCandidateQuery.disabled = !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
+    this.refs.runCandidateQuery.disabled = !canPersistEdits || !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
     this.refs.runAnomalyRanking.disabled = !hasData || !this.currentArtifact || anomalyRankingLoading || burstFeatureSpaceLoading;
     this.refs.runBurstFeatureSpace.disabled = !hasData || !this.currentArtifact || burstFeatureSpaceLoading || anomalyRankingLoading;
     if (this.refs.anomalyFeatureSet) {
@@ -11051,7 +11583,11 @@ class MovementExampleApp {
   updateUndoButton() {
     const currentHeadDatasetId = this.graph?.current_dataset_id || "";
     const selectedIsCurrentHead = Boolean(currentHeadDatasetId) && this.currentDatasetId === currentHeadDatasetId;
-    const canUndo = selectedIsCurrentHead && Boolean(this.currentDataset?.parent_dataset_id);
+    const workflowAllowsUndo = !this.editLockProfile?.capabilities
+      || this.editLockProfile.capabilities.can_undo === true;
+    const canUndo = selectedIsCurrentHead
+      && Boolean(this.currentDataset?.parent_dataset_id)
+      && workflowAllowsUndo;
     this.refs.undo.disabled = !canUndo;
   }
 
@@ -11061,20 +11597,18 @@ class MovementExampleApp {
       if (!fix?.fixKey) {
         continue;
       }
-      const issues = Array.isArray(fix.review?.issues) ? fix.review.issues : [];
-      const confirmedParentIds = new Set(
-        issues
-          .filter(issue => issue.status === "confirmed" && issue.parentAnnotationId)
-          .map(issue => issue.parentAnnotationId),
-      );
+      const issues = Array.isArray(fix.review?.effectiveIssues) && fix.review.effectiveIssues.length
+        ? fix.review.effectiveIssues
+        : Array.isArray(fix.review?.issues) ? fix.review.issues : [];
       for (const issue of issues) {
-        if (issue.status !== "suspected" || !issue.issueId || confirmedParentIds.has(issue.issueId)) {
+        const parentIssueId = issue.parentIssueId || issue.issueId;
+        if (issue.status !== "suspected" || !parentIssueId) {
           continue;
         }
-        let group = groups.get(issue.issueId);
+        let group = groups.get(parentIssueId);
         if (!group) {
           group = {
-            parentAnnotationId: issue.issueId,
+            parentAnnotationId: parentIssueId,
             issueType: issue.issueType || "Unspecified issue",
             origin: issue.origin || (issue.issueField || issue.issueThreshold ? "threshold" : "manual"),
             stepId: issue.stepId || "",
@@ -11083,7 +11617,7 @@ class MovementExampleApp {
             reviewUser: issue.reviewUser || "",
             fixes: [],
           };
-          groups.set(issue.issueId, group);
+          groups.set(parentIssueId, group);
         }
         if (!group.fixes.some(item => item.fixKey === fix.fixKey)) {
           group.fixes.push(fix);
@@ -11196,6 +11730,7 @@ class MovementExampleApp {
           body: JSON.stringify({
             dataset_id: this.currentDatasetId,
             expected_current_dataset_id: this.expectedCurrentDatasetId(),
+            expected_review_revision: this.expectedReviewRevision(),
             logical_name: this.currentArtifact,
             confirmations: selectedGroups.map(group => ({
               parent_annotation_id: group.parentAnnotationId,
@@ -11217,6 +11752,111 @@ class MovementExampleApp {
       this.refs.confirmStatus.classList.add("error");
       this.refs.confirmSubmit.disabled = false;
       this.refs.confirmClose.disabled = false;
+      this.setStatus(error.message, true);
+    }
+  }
+
+  openDismissModal(fixes = this.getSelectedFixes()) {
+    if (this.rejectLockedEdit()) {
+      return;
+    }
+    const selectedFixes = Array.isArray(fixes) ? fixes.filter(Boolean) : [];
+    const groups = this.getUnresolvedSuspectedIssueGroups(selectedFixes);
+    if (!selectedFixes.length || !groups.length) {
+      this.setStatus("Select fixes with unresolved suspected issues before dismissing them.", true);
+      return;
+    }
+    this.pendingDismissalGroups = groups;
+    this.refs.dismissMeta.innerHTML = `
+      <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
+      <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
+      <div><strong>Selected fixes:</strong> ${escapeHtml(formatCount(selectedFixes.length))}</div>
+      <div><strong>Originating suspicions:</strong> ${escapeHtml(formatCount(groups.length))}</div>
+    `;
+    this.refs.dismissGroups.innerHTML = groups.map((group, index) => {
+      const provenance = [
+        group.origin,
+        group.stepId ? `step ${group.stepId}` : "",
+        group.sourceAnalysisId ? `analysis ${group.sourceAnalysisId}` : "",
+      ].filter(Boolean).join(" • ");
+      return `
+        <label class="movement-inline-check">
+          <input type="checkbox" data-dismiss-group-index="${index}" checked>
+          <span>
+            <strong>${escapeHtml(group.issueType)}</strong><br>
+            ${escapeHtml(formatCount(group.fixes.length))} selected fix(es)<br>
+            <span class="movement-subtle">${escapeHtml(provenance || group.parentAnnotationId)}</span>
+          </span>
+        </label>
+      `;
+    }).join("");
+    this.refs.dismissUser.value = this.getUser();
+    this.refs.dismissNote.value = "";
+    this.refs.dismissStatus.textContent = "";
+    this.refs.dismissStatus.classList.remove("error");
+    this.refs.dismissSubmit.disabled = false;
+    this.refs.dismissClose.disabled = false;
+    this.refs.dismissModal.classList.remove("hidden");
+  }
+
+  async submitDismissIssues() {
+    if (this.rejectLockedEdit()) {
+      this.refs.dismissModal.classList.add("hidden");
+      return;
+    }
+    const selectedGroups = [...this.refs.dismissGroups.querySelectorAll("input[data-dismiss-group-index]:checked")]
+      .map(input => this.pendingDismissalGroups[Number(input.dataset.dismissGroupIndex)])
+      .filter(Boolean);
+    const user = this.refs.dismissUser.value.trim();
+    if (!selectedGroups.length) {
+      this.refs.dismissStatus.textContent = "Choose at least one originating suspicion.";
+      this.refs.dismissStatus.classList.add("error");
+      return;
+    }
+    if (!user) {
+      this.refs.dismissStatus.textContent = "User is required.";
+      this.refs.dismissStatus.classList.add("error");
+      return;
+    }
+    if (!(await this.flushIndividualReviewDecisions())) {
+      this.refs.dismissStatus.textContent = "Save the staged individual reviews before dismissing issues.";
+      this.refs.dismissStatus.classList.add("error");
+      return;
+    }
+    this.refs.dismissSubmit.disabled = true;
+    this.refs.dismissClose.disabled = true;
+    this.refs.dismissStatus.textContent = `Dismissing ${formatCount(selectedGroups.length)} suspicion group(s)...`;
+    this.refs.dismissStatus.classList.remove("error");
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/dismiss-issues`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            expected_current_dataset_id: this.expectedCurrentDatasetId(),
+            expected_review_revision: this.expectedReviewRevision(),
+            logical_name: this.currentArtifact,
+            dismissals: selectedGroups.map(group => ({
+              parent_annotation_id: group.parentAnnotationId,
+              fix_keys: group.fixes.map(fix => fix.fixKey),
+            })),
+            note: this.refs.dismissNote.value.trim(),
+            user,
+          }),
+        },
+      );
+      this.setUser(user);
+      this.pendingDismissalGroups = [];
+      this.refs.dismissModal.classList.add("hidden");
+      await this.loadStudyAtDataset(result.dataset.dataset_id);
+      this.setStatus(`Recorded not-suspicious decisions in ${result.dataset.dataset_id}.`);
+    } catch (error) {
+      await this.handleEditRequestError(error);
+      this.refs.dismissStatus.textContent = error.message;
+      this.refs.dismissStatus.classList.add("error");
+      this.refs.dismissSubmit.disabled = false;
+      this.refs.dismissClose.disabled = false;
       this.setStatus(error.message, true);
     }
   }
@@ -11437,7 +12077,7 @@ class MovementExampleApp {
             <polyline
               points="${previewSvgPoints(selectedPath)}"
               fill="none"
-              stroke="${rgbaCss(autoBurstColor(selected, 235))}"
+              stroke="${rgbaCss(burstPathColor(this.data?.individualPalette, selected, 235))}"
               stroke-width="3.8"
               stroke-linecap="round"
               stroke-linejoin="round"
@@ -11807,7 +12447,7 @@ class MovementExampleApp {
       ))}</div>
       <div><strong>Origin:</strong> ${escapeHtml(context.origin || "manual")}</div>
       ${context.sourceAnalysisId ? `<div><strong>Source analysis:</strong> ${escapeHtml(context.sourceAnalysisId)}</div>` : ""}
-      <div><strong>Review result:</strong> Reviewed—issues after this flag is created</div>
+      <div><strong>Individual decision:</strong> remains independent from this issue</div>
     `;
     if (useBurst) {
       this.refs.issueSelection.hidden = true;
@@ -11850,6 +12490,19 @@ class MovementExampleApp {
     const candidateGenerated = Boolean(this.candidateQueryPreview?.analysisId)
       && selectedFixes.every(fix => candidateKeys.has(fix.fixKey));
     const origin = issueThreshold ? "threshold" : (candidateGenerated ? "algorithm" : "manual");
+    const thresholdFilter = issueThreshold
+      ? {
+          field_key: field?.key || "",
+          field_kind: field?.kind || "",
+          operator: this.thresholdState.reverse === true ? "lt" : "gt",
+          threshold_value: typeof this.thresholdState.value === "number"
+            ? this.thresholdState.value
+            : null,
+          selected_levels: Array.isArray(this.thresholdState.selectedLevels)
+            ? [...this.thresholdState.selectedLevels]
+            : [],
+        }
+      : null;
     this.pendingIssueStatus = status;
     this.pendingIssueContext = {
       mode: "fixes",
@@ -11858,6 +12511,7 @@ class MovementExampleApp {
       sourceAnalysisId: candidateGenerated ? this.candidateQueryPreview.analysisId : "",
       issueField: field?.key || "",
       issueThreshold,
+      thresholdFilter,
     };
     this.refs.issueTitle.textContent = `Mark fixes as ${status}`;
     this.refs.issueMeta.innerHTML = `
@@ -11865,7 +12519,8 @@ class MovementExampleApp {
       <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
-      <div><strong>Checked fixes:</strong> ${escapeHtml(formatCount(selectedFixes.length))}</div>
+      <div><strong>${issueThreshold ? "Checked preview fixes" : "Checked fixes"}:</strong> ${escapeHtml(formatCount(selectedFixes.length))}</div>
+      <div><strong>Flag scope:</strong> ${issueThreshold ? "all matching fixes in the full dataset" : "checked fixes"}</div>
       <div><strong>Issue variable:</strong> ${escapeHtml(field?.label || "Not set")}</div>
       <div><strong>Issue threshold:</strong> ${escapeHtml(issueThreshold || "Not set")}</div>
       <div><strong>Origin:</strong> ${escapeHtml(origin)}</div>
@@ -11958,7 +12613,7 @@ class MovementExampleApp {
     };
     this.refs.issueTitle.textContent = queueReview
       ? "Flag issues found"
-      : "Flag individual for review";
+      : "Add issue";
     this.refs.issueMeta.innerHTML = `
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
@@ -12069,6 +12724,9 @@ class MovementExampleApp {
     if (modal === this.refs.confirmModal) {
       this.pendingConfirmationGroups = [];
     }
+    if (modal === this.refs.dismissModal) {
+      this.pendingDismissalGroups = [];
+    }
     modal.classList.add("hidden");
   }
 
@@ -12130,7 +12788,12 @@ class MovementExampleApp {
     try {
       const endpoint = `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/annotate-scope`;
       let scope;
-      if (context.mode === "segment") {
+      if (context.thresholdFilter) {
+        scope = {
+          kind: "filter",
+          filter: context.thresholdFilter,
+        };
+      } else if (context.mode === "segment") {
         scope = {
           kind: "segment",
           fix_keys: context.selectedFixKeys,
@@ -12157,6 +12820,7 @@ class MovementExampleApp {
       const body = {
         dataset_id: this.currentDatasetId,
         expected_current_dataset_id: this.expectedCurrentDatasetId(),
+        expected_review_revision: this.expectedReviewRevision(),
         logical_name: this.currentArtifact,
         scope,
         status: this.pendingIssueStatus,
@@ -12439,6 +13103,7 @@ class MovementExampleApp {
           body: JSON.stringify({
             dataset_id: this.currentDatasetId,
             expected_current_dataset_id: profile.current_dataset_id,
+            expected_review_revision: this.expectedReviewRevision(),
             resume_token: resume.token,
             user,
           }),
@@ -12482,6 +13147,7 @@ class MovementExampleApp {
           method: "POST",
           body: JSON.stringify({
             expected_current_dataset_id: this.expectedCurrentDatasetId(),
+            expected_review_revision: this.expectedReviewRevision(),
           }),
         },
       );
@@ -12543,8 +13209,16 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
       p95StepM: finiteOrNull(item?.p95_step_m),
       p95SpeedMps: finiteOrNull(item?.p95_speed_mps),
       suspectedCount: Number(item?.suspected_count) || 0,
+      unresolvedSuspectedCount: Number(item?.unresolved_suspected_count) || 0,
       confirmedCount: Number(item?.confirmed_count) || 0,
+      unresolvedIssueTypes: Array.isArray(item?.unresolved_issue_types)
+        ? item.unresolved_issue_types.map(value => String(value || "")).filter(Boolean)
+        : [],
+      unresolvedIssueOrigins: Array.isArray(item?.unresolved_issue_origins)
+        ? item.unresolved_issue_origins.map(value => String(value || "")).filter(Boolean)
+        : [],
       reviewed: item?.reviewed === true,
+      reviewDecision: String(item?.review_decision || ""),
       reviewOk: item?.review_ok === true,
       reviewUser: String(item?.review_user || ""),
       reviewedAt: String(item?.reviewed_at || ""),
@@ -12573,8 +13247,12 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
         p95StepM: null,
         p95SpeedMps: null,
         suspectedCount: 0,
+        unresolvedSuspectedCount: 0,
         confirmedCount: 0,
+        unresolvedIssueTypes: [],
+        unresolvedIssueOrigins: [],
         reviewed: false,
+        reviewDecision: "",
         reviewOk: false,
         reviewUser: "",
         reviewedAt: "",
@@ -12797,6 +13475,7 @@ function parseMovementFixes(items) {
       issueField: String(item?.review?.issue_field || ""),
       issueThreshold: String(item?.review?.issue_threshold || ""),
       issues: normalizeReviewIssues(item?.review),
+      effectiveIssues: normalizeReviewIssues({ issues: item?.review?.effective_issues || [] }),
       issueNote: String(item?.review?.issue_note || ""),
       ownerQuestion: String(item?.review?.owner_question || ""),
       reviewUser: String(item?.review?.review_user || ""),
@@ -13089,6 +13768,12 @@ function normalizeReviewIssues(review) {
       scopeBurstId: String(item.scope_burst_id || item.scopeBurstId || "").trim(),
       parentAnnotationId: String(item.parent_annotation_id || item.parentAnnotationId || "").trim(),
       annotationKind: String(item.annotation_kind || item.annotationKind || "issue").trim(),
+      parentIssueId: String(item.parent_issue_id || item.parentIssueId || "").trim(),
+      resolutionIssueId: String(item.resolution_issue_id || item.resolutionIssueId || "").trim(),
+      resolutionStepId: String(item.resolution_step_id || item.resolutionStepId || "").trim(),
+      resolutionUser: String(item.resolution_user || item.resolutionUser || "").trim(),
+      resolutionNote: String(item.resolution_note || item.resolutionNote || "").trim(),
+      resolvedAt: String(item.resolved_at || item.resolvedAt || "").trim(),
     }))
     .filter(item => item.issueId || item.issueType);
   if (cleaned.length) {
@@ -13175,7 +13860,7 @@ function refreshMovementFixCollections(data) {
         pathItem: {
           burst,
           path: burst.path,
-          color: autoBurstColor(burst, 185),
+          color: burstPathColor(data.individualPalette, burst, 185),
           sourceFlagged,
         },
         markerItems: buildAutoBurstEndpointMarkers(burst, sourceFlagged),
@@ -13859,7 +14544,12 @@ function arraysEqual(left, right) {
 }
 
 function reportIssueTypes(fix) {
-  const issues = Array.isArray(fix?.review?.issues) ? fix.review.issues : [];
+  const effectiveIssues = Array.isArray(fix?.review?.effectiveIssues)
+    ? fix.review.effectiveIssues.filter(issue => issue.status !== "dismissed")
+    : [];
+  const issues = effectiveIssues.length
+    ? effectiveIssues
+    : Array.isArray(fix?.review?.issues) ? fix.review.issues : [];
   const issueTypes = uniqueNonEmpty(issues.map(issue => issue.issueType || ""));
   if (issueTypes.length) {
     return issueTypes.map(issueType => issueType || "Unspecified issue");
@@ -13873,8 +14563,13 @@ function reportIssueType(fix) {
 }
 
 function reportIssueIds(fix) {
-  const issues = Array.isArray(fix?.review?.issues) ? fix.review.issues : [];
-  const issueIds = uniqueNonEmpty(issues.map(issue => issue.issueId || ""));
+  const effectiveIssues = Array.isArray(fix?.review?.effectiveIssues)
+    ? fix.review.effectiveIssues.filter(issue => issue.status !== "dismissed")
+    : [];
+  const issues = effectiveIssues.length
+    ? effectiveIssues
+    : Array.isArray(fix?.review?.issues) ? fix.review.issues : [];
+  const issueIds = uniqueNonEmpty(issues.map(issue => issue.parentIssueId || issue.issueId || ""));
   if (issueIds.length) {
     return issueIds;
   }
@@ -14456,9 +15151,8 @@ function rgbaCss(color) {
   return `rgba(${r}, ${g}, ${b}, ${(a / 255).toFixed(3)})`;
 }
 
-function autoBurstColor(burst, alpha = 200) {
-  const burstIdx = Number(burst?.burstIdx) || 0;
-  const rgb = hslToRgb((burstIdx * 47 + 28) % 360, 0.86, 0.58);
+function burstPathColor(individualPalette, burst, alpha = 200) {
+  const rgb = individualPalette?.[burst?.individual] || [124, 210, 255];
   return splitColor(rgb, burst?.setName || "train", alpha);
 }
 

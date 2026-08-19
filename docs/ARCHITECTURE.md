@@ -14,6 +14,10 @@ Dependency rule:
 - `app/` should not import the starter app or examples.
 - The starter app and examples may call or compose the core.
 
+The shared authentication and review-coordination architecture used by the
+movement applications is specified in
+[`multi-user-movement-review-design.md`](multi-user-movement-review-design.md).
+
 Generic routes:
 
 - `GET /api/projects`

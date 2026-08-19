@@ -30,51 +30,42 @@ uv run python examples/slim_movement/server.py
 
 The default address is `http://127.0.0.1:8421`.
 
-At startup, the terminal prints a generated temporary login:
-
-```text
-Slim Movement temporary login
-Username: reviewer
-Password: <generated-random-password>
-```
-
-Open the app and enter those values in the Vibecleaning login page. The
-credential is kept only in JavaScript memory for that browser tab and attached
-to protected requests. It is not written to cookies, browser storage, files, or
-the data graph. Refreshing or closing the tab, logging out, or receiving an
-authentication failure requires another login.
-
-The login page and static JavaScript/style assets are public. Dataset, review,
-analysis, report, and export routes all require the credential. Reports and CSV
-exports are retrieved through authenticated browser requests; captured report
-images are embedded in HTML reports so the fetched report remains viewable.
-
-For a stable shared credential, set either optional override before startup:
+Before first startup, bootstrap an editor and add reviewer accounts. Passwords
+are prompted without echo and stored only as salted scrypt hashes:
 
 ```bash
-export SLIM_MOVEMENT_USERNAME=reviewer
-read -r -s -p "Slim movement password: " SLIM_MOVEMENT_PASSWORD
-echo
-export SLIM_MOVEMENT_PASSWORD
-uv run python examples/slim_movement/server.py
+uv run python -m app.auth_cli bootstrap admin --display-name "Review Administrator"
+uv run python -m app.auth_cli add reviewer1 --display-name "Taylor Reviewer" --role reviewer
 ```
 
-An override password must contain at least 12 characters and is never printed.
-This temporary gate does not yet provide reviewer/editor accounts, dataset
-assignments, or editing locks.
+Additional operator commands are `list`, `enable`, `disable`, and
+`reset-password`; pass `--data-root` before the command when using a data folder
+other than `data/`. Restart the app after changing accounts because the registry
+is intentionally loaded only once at startup.
+
+Login creates an opaque in-memory session represented by an `HttpOnly`,
+`SameSite=Strict` cookie. Restarting the server logs everyone out. The login page
+and static assets are public; datasets and all review, analysis, report, and
+export routes require authentication.
+
+Editors assign studies from the study header. The assigned reviewer can edit the
+active review; editors take explicit control before intervening and release it
+when finished. Full role rules and concurrency semantics are documented in
+[`docs/multi-user-movement-review-design.md`](../../docs/multi-user-movement-review-design.md).
 
 ## Sharing securely
 
-The credential is sent in an Authorization header; that header is not encrypted
-by plain HTTP. For internet or institution-wide sharing, put the app behind a
+For internet or institution-wide sharing, put the app behind a
 Cloudflare Tunnel, another HTTPS reverse proxy, or the institution's
 authenticated TLS ingress. Prefer keeping the application bound to `127.0.0.1`
 and letting that proxy connect to port 8421.
+
+Set `VIBECLEANING_SECURE_COOKIE=1` when users access the public app over HTTPS.
 
 Do not expose `http://<host>:8421` directly to the public internet. If the local
 deployment requires `HOST=0.0.0.0`, firewall the port so only the HTTPS proxy
 can reach it.
 
-Credentials exist only in server process memory. To rotate them, stop and
-restart the server (and change any override). Do not commit passwords or store
-them in repository files.
+Sessions exist only in server process memory. Account hashes live in
+`data/.vibecleaning/users.json`; keep that operator-owned file private and do not
+commit it.

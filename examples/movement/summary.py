@@ -1,8 +1,10 @@
 import csv
+from collections import OrderedDict
 from datetime import datetime
 from functools import lru_cache
 from math import isfinite
 from pathlib import Path
+from threading import RLock
 
 from .bursts import (
     DEFAULT_BURST_GAP_MODE,
@@ -49,6 +51,67 @@ MAX_SERIES_POINTS = 1500
 DEFAULT_OVERVIEW_FIX_LIMIT = 25000
 DEFAULT_FIX_LIMIT = 1000000
 COMPACT_OVERVIEW_CACHE_SIZE = 4
+DETAIL_SCHEMA_CACHE_SIZE = 16
+_detail_schema_cache: OrderedDict[
+    tuple[str, int, int],
+    tuple[dict[str, str | None], list[dict]],
+] = OrderedDict()
+_detail_schema_cache_lock = RLock()
+
+
+def _cached_detail_schema(path_str: str, mtime_ns: int, size: int):
+    key = (path_str, mtime_ns, size)
+    with _detail_schema_cache_lock:
+        cached = _detail_schema_cache.get(key)
+        if cached is None:
+            return None
+        _detail_schema_cache.move_to_end(key)
+        columns, color_fields = cached
+        return dict(columns), [dict(item) for item in color_fields]
+
+
+def _remember_detail_schema(
+    path_str: str,
+    mtime_ns: int,
+    size: int,
+    columns: dict[str, str | None],
+    color_fields: list[dict],
+) -> None:
+    key = (path_str, mtime_ns, size)
+    with _detail_schema_cache_lock:
+        _detail_schema_cache[key] = (
+            dict(columns),
+            [dict(item) for item in color_fields],
+        )
+        _detail_schema_cache.move_to_end(key)
+        while len(_detail_schema_cache) > DETAIL_SCHEMA_CACHE_SIZE:
+            _detail_schema_cache.popitem(last=False)
+
+
+def list_movement_individuals(path: Path) -> list[str]:
+    """Read only the identity column used to establish assignment coverage."""
+    path_str, mtime_ns, size = _cache_metadata(path)
+    return list(_list_movement_individuals_cached(path_str, mtime_ns, size))
+
+
+@lru_cache(maxsize=16)
+def _list_movement_individuals_cached(
+    path_str: str,
+    _mtime_ns: int,
+    _size: int,
+) -> tuple[str, ...]:
+    path = Path(path_str)
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        columns = detect_columns(list(reader.fieldnames or []))
+        individual_column = columns.get("individual")
+        if not individual_column:
+            raise ValueError("CSV is missing an individual column")
+        return tuple(sorted({
+            str(row.get(individual_column) or "").strip()
+            for row in reader
+            if str(row.get(individual_column) or "").strip()
+        }))
 
 
 def normalize_header(header: str | None) -> str:
@@ -989,6 +1052,14 @@ def _build_movement_overview(
                 "column_name": fieldname,
             }
         )
+    overview_stat = path.stat()
+    _remember_detail_schema(
+        path_str,
+        overview_stat.st_mtime_ns,
+        overview_stat.st_size,
+        columns,
+        color_fields,
+    )
 
     overview_fixes = [
         _build_fix_record(
@@ -1195,8 +1266,13 @@ def _build_movement_fixes(
     burst_gap_effective_seconds: float | None,
 ) -> dict:
     path = Path(path_str)
-    fieldnames, columns, field_stats = _prepare_scan_context_cached(path_str, mtime_ns, size)
-    color_fields = _build_color_fields(fieldnames, columns, field_stats)
+    cached_schema = _cached_detail_schema(path_str, mtime_ns, size)
+    if cached_schema is None:
+        fieldnames, columns, field_stats = _prepare_scan_context_cached(path_str, mtime_ns, size)
+        color_fields = _build_color_fields(fieldnames, columns, field_stats)
+        _remember_detail_schema(path_str, mtime_ns, size, columns, color_fields)
+    else:
+        columns, color_fields = cached_schema
     fixes: list[dict] = []
     segments_by_id: dict[str, dict] = {}
     auto_burst_records: list[dict] = []

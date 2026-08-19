@@ -52,3 +52,7 @@ Head semantics:
 - `current_dataset_id` is only the active head pointer.
 - Older datasets remain in the DAG.
 - `undo` moves the head to the parent dataset. It does not delete descendants.
+
+Movement review assignments, role state, editor control, and update-aware review
+coverage are additive workflow state documented in
+[`multi-user-movement-review-design.md`](multi-user-movement-review-design.md).

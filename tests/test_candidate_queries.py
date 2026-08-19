@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.query_library import get_query, list_queries, query_library_path, save_query
-from app.state import ProjectStateError, load_project_state, project_paths
+from app.state import ProjectStateError, get_dataset_artifact, load_project_state, project_paths
 from app.web import create_app, get_project_dir
 from examples.movement import candidate_queries
 from examples.movement.catalog import get_study_dir, validate_catalog_part
@@ -1066,6 +1066,7 @@ def test_run_candidate_query_route_creates_analysis_artifact(tmp_path):
     summary = payload["summary"]
     assert summary["run_status"] == "success"
     assert summary["candidate_count"] == 1
+    assert summary["match_row_ranges"] == [[2, 2]]
     assert summary["run_digest"]
     assert summary["execution_scope"]["resolved"]["type"] == "whole_study"
     assert summary["scope_results"][0]["scope_id"] == "whole_study"
@@ -1073,6 +1074,21 @@ def test_run_candidate_query_route_creates_analysis_artifact(tmp_path):
     assert analysis["parameters"]["action"] == "run_candidate_query"
     assert analysis["parameters"]["execution_scope"] is None
     assert analysis["output_artifacts"] == ["candidate_query_results.json"]
+    assert payload["step"]["parameters"]["action"] == "annotate_scope"
+    assert payload["step"]["parameters"]["source_analysis_id"] == analysis["analysis_id"]
+    assert payload["step"]["parameters"]["scope"]["row_ranges"] == [[2, 2]]
+    assert payload["dataset"]["parent_dataset_id"] == dataset_id
+    assert load_project_state(study_dir)["current_dataset_id"] == payload["dataset"]["dataset_id"]
+    _, sidecar_path = get_dataset_artifact(
+        study_dir,
+        payload["dataset"]["dataset_id"],
+        "movement_review_annotations.json",
+    )
+    annotation = json.loads(sidecar_path.read_text(encoding="utf-8"))["annotations"][-1]
+    assert annotation["status"] == "suspected"
+    assert annotation["source_analysis_id"] == analysis["analysis_id"]
+    assert annotation["scope"]["row_ranges"] == [[2, 2]]
+    assert (study_dir / "movement.csv").read_text(encoding="utf-8") == FAST_MOVEMENT_CSV
     output_path = (
         project_paths(study_dir)["analyses"]
         / analysis["analysis_id"]
@@ -1085,6 +1101,132 @@ def test_run_candidate_query_route_creates_analysis_artifact(tmp_path):
     assert output_payload["run_digest"] == summary["run_digest"]
     assert output_payload["execution_scope"]["resolved"]["type"] == "whole_study"
     assert output_payload["scope_results"][0]["scope_id"] == "whole_study"
+
+
+def test_identical_candidate_query_reruns_create_distinct_steps_and_undo_as_units(tmp_path):
+    client, study_dir, dataset_id = create_candidate_query_client(tmp_path)
+    url = "/api/apps/movement/family/movement_clean/study/test_study/actions/run-candidate-query"
+
+    first = client.post(url, json={
+        "dataset_id": dataset_id,
+        "logical_name": "movement.csv",
+        "user": "reviewer",
+        "query_definition": numeric_query_definition(),
+        "expected_current_dataset_id": dataset_id,
+    })
+    assert first.status_code == 200
+    first_payload = first.json()
+    first_dataset_id = first_payload["dataset"]["dataset_id"]
+
+    second = client.post(url, json={
+        "dataset_id": first_dataset_id,
+        "logical_name": "movement.csv",
+        "user": "reviewer",
+        "query_definition": numeric_query_definition(),
+        "expected_current_dataset_id": first_dataset_id,
+    })
+    assert second.status_code == 200
+    second_payload = second.json()
+    assert second_payload["analysis"]["analysis_id"] != first_payload["analysis"]["analysis_id"]
+    assert second_payload["step"]["step_id"] != first_payload["step"]["step_id"]
+    assert second_payload["dataset"]["parent_dataset_id"] == first_dataset_id
+
+    _, sidecar_path = get_dataset_artifact(
+        study_dir,
+        second_payload["dataset"]["dataset_id"],
+        "movement_review_annotations.json",
+    )
+    annotations = json.loads(sidecar_path.read_text(encoding="utf-8"))["annotations"]
+    assert [item["source_analysis_id"] for item in annotations] == [
+        first_payload["analysis"]["analysis_id"],
+        second_payload["analysis"]["analysis_id"],
+    ]
+
+    undone = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/undo",
+        json={"expected_current_dataset_id": second_payload["dataset"]["dataset_id"]},
+    )
+    assert undone.status_code == 200
+    assert undone.json()["dataset"]["dataset_id"] == first_dataset_id
+
+
+def test_candidate_query_preview_cap_does_not_truncate_persisted_match_ranges(tmp_path):
+    client, _study_dir, dataset_id = create_candidate_query_client(tmp_path)
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/run-candidate-query",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "user": "reviewer",
+            "preview_limit": 1,
+            "query_definition": numeric_query_definition(threshold=0),
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["candidate_count"] == 3
+    assert payload["summary"]["returned_count"] == 1
+    assert payload["summary"]["match_row_ranges"] == [[2, 3], [5, 5]]
+    assert payload["step"]["parameters"]["scope"]["row_ranges"] == [[2, 3], [5, 5]]
+
+
+def test_empty_candidate_query_creates_analysis_without_advancing_head(tmp_path):
+    client, study_dir, dataset_id = create_candidate_query_client(tmp_path)
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/run-candidate-query",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "user": "reviewer",
+            "query_definition": numeric_query_definition(threshold=1_000_000),
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["run_status"] == "success"
+    assert payload["summary"]["candidate_count"] == 0
+    assert "step" not in payload
+    assert "dataset" not in payload
+    assert load_project_state(study_dir)["current_dataset_id"] == dataset_id
+
+
+def test_candidate_query_stale_head_keeps_analysis_without_creating_step(tmp_path):
+    client, study_dir, dataset_id = create_candidate_query_client(tmp_path)
+    url = "/api/apps/movement/family/movement_clean/study/test_study/actions/run-candidate-query"
+    first = client.post(url, json={
+        "dataset_id": dataset_id,
+        "logical_name": "movement.csv",
+        "user": "reviewer",
+        "query_definition": numeric_query_definition(),
+    })
+    assert first.status_code == 200
+    head_id = first.json()["dataset"]["dataset_id"]
+    history_before = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/graph"
+    ).json()
+    analyses_before = len(list(project_paths(study_dir)["analyses"].iterdir()))
+
+    stale = client.post(url, json={
+        "dataset_id": head_id,
+        "logical_name": "movement.csv",
+        "user": "reviewer",
+        "query_definition": numeric_query_definition(),
+        "expected_current_dataset_id": dataset_id,
+    })
+
+    assert stale.status_code == 409
+    payload = stale.json()
+    assert payload["code"] == "edit_conflict"
+    assert payload["analysis"]["analysis_id"]
+    assert payload["summary"]["candidate_count"] == 1
+    assert load_project_state(study_dir)["current_dataset_id"] == head_id
+    history_after = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/graph"
+    ).json()
+    assert len(history_after["steps"]) == len(history_before["steps"])
+    assert len(list(project_paths(study_dir)["analyses"].iterdir())) == analyses_before + 1
 
 
 def test_run_candidate_query_route_unknown_individual_creates_unresolved_analysis(tmp_path):
@@ -1181,7 +1323,7 @@ def test_run_candidate_query_unresolved_fields_still_create_analysis(tmp_path):
     assert json.loads(output_path.read_text())["run_status"] == "unresolved"
 
 
-def test_frontend_candidate_preview_reuses_selected_fix_flow():
+def test_frontend_filter_run_flags_matches_and_reloads_created_dataset():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
     assert "candidateQueryPreview" in source
@@ -1202,10 +1344,15 @@ def test_frontend_candidate_preview_reuses_selected_fix_flow():
     assert 'data-param-name="${escapeHtml(descriptor.name)}"' in source
     assert "getCandidateQueryParameterValues(selectedQuery)" in source
     assert "runSelectedCandidateQuery" in source
+    assert 'data-role="run-candidate-query">Run filter and flag</button>' in source
     assert "query_id: selectedQuery.query_id" in source
     assert "query_version: selectedQuery.version" in source
     assert "query_parameters:" in source
     assert "execution_scope:" in source
+    assert "expected_current_dataset_id: this.expectedCurrentDatasetId()" in source
+    assert "expected_review_revision: this.expectedReviewRevision()" in source
+    assert "const createdDatasetId = String(result?.dataset?.dataset_id" in source
+    assert "await this.loadStudyAtDataset(createdDatasetId" in source
     assert "run-candidate-query" in source
     assert "movement-candidate-query-points" in source
     assert "movement-selected-candidate-query-points" in source

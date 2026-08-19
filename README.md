@@ -50,12 +50,13 @@ python examples/trajectory/server.py
 Slim movement review:
 
 ```bash
+uv run python -m app.auth_cli bootstrap admin --display-name "Review Administrator"
+uv run python -m app.auth_cli add reviewer1 --display-name "Taylor Reviewer" --role reviewer
 uv run python examples/slim_movement/server.py
 ```
 
 See [examples/slim_movement/README.md](examples/slim_movement/README.md) for
-temporary login credentials, optional overrides, and secure HTTPS deployment
-guidance.
+account management, reviewer/editor workflow, and secure HTTPS deployment guidance.
 
 SQLite movement viewer:
 
@@ -70,3 +71,4 @@ Contracts:
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/STATE_MODEL.md](docs/STATE_MODEL.md)
 - [docs/EXECUTION_CONTRACT.md](docs/EXECUTION_CONTRACT.md)
+- [docs/multi-user-movement-review-design.md](docs/multi-user-movement-review-design.md)

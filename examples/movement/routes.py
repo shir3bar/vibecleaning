@@ -1,5 +1,6 @@
 import base64
 import binascii
+import asyncio
 from collections.abc import Callable
 import json
 from math import isfinite
@@ -9,8 +10,10 @@ from time import monotonic
 
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from app.auth import Actor, actor_payload, apply_actor, request_actor
 from app.edit_locks import (
     EditConflictError,
     EditLockedError,
@@ -20,10 +23,31 @@ from app.edit_locks import (
     undo_guarded,
 )
 from app.execution import create_analysis
+from app.events import StudyEventBroker
+from app.reviews import (
+    ReviewConflictError,
+    ReviewForbiddenError,
+    ReviewLockedError,
+    ReviewStateError,
+    active_review,
+    assign_review,
+    authorize_analysis,
+    authorize_persistent_change,
+    can_read_study,
+    carryover_second_opinions,
+    cancel_review,
+    complete_review,
+    finish_editor_control,
+    load_review_state,
+    review_profile,
+    start_editor_control,
+    valid_review_decisions,
+)
 from app.state import (
     ProjectStateError,
     get_dataset_artifact,
     graph_payload,
+    list_history,
     load_dataset,
     load_json,
     load_project_state,
@@ -39,6 +63,7 @@ from app.web import get_project_dir, json_error, parse_json_body, validate_path_
 from .analysis_history import build_movement_analysis_history
 from .catalog import get_study_dir, list_families, list_studies
 from .review_annotations import (
+    apply_review_annotation_counts,
     apply_review_annotations,
     compress_fix_keys,
     confirmed_exclusion_scopes,
@@ -54,6 +79,7 @@ from .summary import (
     build_movement_fixes,
     build_movement_overview,
     build_movement_summary,
+    list_movement_individuals,
 )
 
 
@@ -82,6 +108,19 @@ def _edit_conflict_response(exc: EditConflictError) -> JSONResponse:
         },
         status_code=409,
     )
+
+
+def _review_error_response(exc: Exception) -> JSONResponse:
+    if isinstance(exc, ReviewForbiddenError):
+        return json_error(str(exc), 403)
+    if isinstance(exc, ReviewConflictError):
+        return JSONResponse({"error": str(exc), "code": "review_conflict"}, status_code=409)
+    if isinstance(exc, ReviewLockedError):
+        return JSONResponse(
+            {"error": str(exc), "code": exc.code},
+            status_code=423,
+        )
+    return json_error(str(exc), 400)
 
 
 def _build_initial_study_payload(
@@ -236,6 +275,12 @@ CONFIRM_ISSUES_SCRIPT = build_self_contained_script(
     MOVEMENT_REVIEW_MODULES,
 )
 
+DISMISS_ISSUES_TEMPLATE_PATH = Path(__file__).with_name("dismiss_issues_step_template.py")
+DISMISS_ISSUES_SCRIPT = build_self_contained_script(
+    DISMISS_ISSUES_TEMPLATE_PATH,
+    MOVEMENT_REVIEW_MODULES,
+)
+
 REVIEW_INDIVIDUALS_TEMPLATE_PATH = Path(__file__).with_name(
     "review_individuals_step_template.py"
 )
@@ -291,6 +336,14 @@ def _validate_confirmations(value: object) -> list[dict]:
     return confirmations
 
 
+def _validate_dismissals(value: object) -> list[dict]:
+    try:
+        return _validate_confirmations(value)
+    except ValueError as exc:
+        message = str(exc).replace("confirmation", "dismissal").replace("Confirm", "Dismiss")
+        raise ValueError(message) from exc
+
+
 def _validate_individual_review_decisions(value: object) -> list[dict]:
     if not isinstance(value, list) or not value:
         raise ValueError("Review at least one individual")
@@ -305,13 +358,19 @@ def _validate_individual_review_decisions(value: object) -> list[dict]:
         if individual in seen:
             raise ValueError(f"Duplicate review decision for {individual}")
         seen.add(individual)
+        raw_decision = str(item.get("review_decision") or "").strip().lower()
         review_ok = item.get("review_ok")
-        if not isinstance(review_ok, bool):
-            raise ValueError("Individual review decisions require review_ok to be true or false")
+        if not raw_decision and isinstance(review_ok, bool):
+            raw_decision = "ok" if review_ok else "not_ok"
+        if raw_decision not in {"ok", "not_ok", "second_opinion"}:
+            raise ValueError(
+                "Individual review decisions require ok, not_ok, or second_opinion"
+            )
         decisions.append(
             {
                 "individual": individual,
-                "review_ok": review_ok,
+                "review_decision": raw_decision,
+                "review_ok": raw_decision == "ok",
                 "comment": _validate_optional_text(
                     item.get("comment"),
                     label="Review comment",
@@ -349,6 +408,51 @@ def _validate_status(value: object) -> str:
     if status not in {"suspected", "confirmed"}:
         raise ValueError("Status must be suspected or confirmed")
     return status
+
+
+def _validate_filter_scope(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("Filter definition is required")
+    field_key = _validate_required_text(
+        value.get("field_key"),
+        label="Filter field",
+        max_length=240,
+    )
+    field_kind = str(value.get("field_kind") or "").strip().lower()
+    if field_kind not in {"numeric", "boolean", "categorical"}:
+        raise ValueError("Invalid filter field kind")
+    result: dict[str, object] = {
+        "field_key": field_key,
+        "field_kind": field_kind,
+    }
+    if field_kind == "numeric":
+        raw_threshold = value.get("threshold_value")
+        if isinstance(raw_threshold, bool):
+            raise ValueError("Filter threshold must be numeric")
+        try:
+            threshold = float(raw_threshold)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Filter threshold must be numeric") from exc
+        if not isfinite(threshold):
+            raise ValueError("Filter threshold must be finite")
+        operator = str(value.get("operator") or "gt").strip().lower()
+        if operator not in {"gt", "lt"}:
+            raise ValueError("Invalid numeric filter operator")
+        result.update({"operator": operator, "threshold_value": threshold})
+    else:
+        raw_levels = value.get("selected_levels")
+        if not isinstance(raw_levels, list):
+            raise ValueError("Filter levels must be a list")
+        levels = list(
+            dict.fromkeys(
+                _validate_required_text(item, label="Filter level", max_length=240)
+                for item in raw_levels
+            )
+        )
+        if not levels or len(levels) > 100:
+            raise ValueError("Choose between 1 and 100 filter levels")
+        result["selected_levels"] = levels
+    return result
 
 
 def _validate_required_text(value: object, *, label: str, max_length: int) -> str:
@@ -591,6 +695,8 @@ def register_movement_routes(
     )
     analysis_jobs: dict[str, dict] = {}
     analysis_jobs_lock = Lock()
+    event_broker = StudyEventBroker()
+    authentication_enabled = getattr(app.state, "auth_manager", None) is not None
 
     def prune_analysis_jobs() -> None:
         with analysis_jobs_lock:
@@ -649,6 +755,299 @@ def register_movement_routes(
         logical_name = str(artifact.get("logical_name") or "")
         is_csv = logical_name.lower().endswith(".csv")
         return is_csv and (artifact_filter is None or artifact_filter(artifact))
+
+    def current_actor(request: Request) -> Actor | None:
+        return request_actor(request) if authentication_enabled else None
+
+    def effective_user(request: Request, body: dict) -> str:
+        actor = current_actor(request)
+        return actor.display_name if actor is not None else normalize_user(body.get("user"))
+
+    def require_read(request: Request, study_dir: Path) -> Actor | None:
+        actor = current_actor(request)
+        if actor is not None and not can_read_study(study_dir, actor):
+            # A reviewer must not be able to enumerate unassigned study names.
+            raise ReviewForbiddenError("Unknown study")
+        return actor
+
+    def study_event_key(family_name: str, study_name: str) -> str:
+        return f"{family_name}/{study_name}"
+
+    def state_event_payload(study_dir: Path, *, reason: str, actor: Actor | None) -> dict:
+        state = load_review_state(study_dir)
+        return {
+            "event": "study_state_changed",
+            "reason": reason,
+            "review_revision": int(state.get("revision") or 0),
+            "current_dataset_id": str(load_project_state(study_dir)["current_dataset_id"]),
+            "actor": actor_payload(actor),
+        }
+
+    def publish_state_event(
+        family_name: str,
+        study_name: str,
+        study_dir: Path,
+        *,
+        reason: str,
+        actor: Actor | None,
+    ) -> None:
+        event_broker.publish(
+            study_event_key(family_name, study_name),
+            state_event_payload(study_dir, reason=reason, actor=actor),
+        )
+
+    def active_annotations(study_dir: Path) -> list[dict]:
+        dataset_id = str(load_project_state(study_dir)["current_dataset_id"])
+        return _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+
+    def display_annotations(
+        study_dir: Path,
+        dataset_id: str,
+        annotations: list[dict],
+    ) -> list[dict]:
+        review = active_review(load_review_state(study_dir))
+        if review is None:
+            return annotations
+        try:
+            valid = valid_review_decisions(
+                study_dir,
+                review,
+                annotations,
+                current_dataset_id=dataset_id,
+            )
+        except ReviewStateError:
+            valid = {}
+        allowed = {
+            str(item.get("annotation_id") or "") for item in valid.values()
+        }
+        return [
+            item
+            for item in annotations
+            if item.get("annotation_kind") != "individual_review"
+            or str(item.get("annotation_id") or "") in allowed
+        ]
+
+    def prepare_analysis_payload(
+        request: Request,
+        study_dir: Path,
+        payload: dict,
+    ) -> dict:
+        actor = current_actor(request)
+        if actor is None:
+            return payload
+        review = authorize_analysis(study_dir, actor)
+        updated = apply_actor(
+            payload,
+            actor,
+            review_id=str((review or {}).get("review_id") or ""),
+        )
+        if review:
+            review_annotations = active_annotations(study_dir)
+            valid = valid_review_decisions(study_dir, review, review_annotations)
+            parameters = dict(updated.get("parameters") or {})
+            parameters["valid_individual_review_annotation_ids"] = sorted(
+                str(item.get("annotation_id") or "") for item in valid.values()
+            )
+            parameters["second_opinion_individuals"] = sorted(
+                {
+                    individual
+                    for individual, item in valid.items()
+                    if item.get("review_decision") == "second_opinion"
+                }
+                | set(carryover_second_opinions(study_dir, review, review_annotations))
+            )
+            parameters["individual_review_decisions"] = {
+                individual: str(item.get("review_decision") or "")
+                for individual, item in sorted(valid.items())
+            }
+            updated["parameters"] = parameters
+        return updated
+
+    def prepare_step_payload(
+        request: Request,
+        study_dir: Path,
+        body: dict,
+        payload: dict,
+        *,
+        review_effect: str,
+        review_impact: dict | None = None,
+    ) -> tuple[dict, Callable[[], None] | None, Actor | None]:
+        actor = current_actor(request)
+        if actor is None:
+            return payload, None, None
+        expected_revision = body.get("expected_review_revision")
+        review = authorize_persistent_change(
+            study_dir,
+            actor,
+            expected_review_revision=expected_revision,
+            review_effect=review_effect,
+        )
+        updated = apply_actor(
+            payload,
+            actor,
+            review_id=str((review or {}).get("review_id") or ""),
+        )
+        parameters = dict(updated.get("parameters") or {})
+        workflow = dict(parameters.get("workflow") or {})
+        impact = dict(review_impact or {"scope": "none"})
+        impact["actor"] = actor.as_dict()
+        workflow.update(
+            {
+                "review_effect": review_effect,
+                "review_impact": impact,
+            }
+        )
+        parameters["workflow"] = workflow
+        updated["parameters"] = parameters
+
+        def preflight() -> None:
+            authorize_persistent_change(
+                study_dir,
+                actor,
+                expected_review_revision=expected_revision,
+                review_effect=review_effect,
+            )
+
+        return updated, preflight, actor
+
+    def combined_edit_profile(
+        study_dir: Path,
+        dataset_id: str,
+        actor: Actor | None,
+    ) -> dict:
+        if actor is None:
+            return build_edit_lock_profile(study_dir, dataset_id)
+        workflow_profile = review_profile(
+            study_dir,
+            actor,
+            active_annotations(study_dir),
+        )
+        blockers = []
+        if not workflow_profile["capabilities"]["can_review"]:
+            control = workflow_profile.get("editor_control")
+            review = workflow_profile.get("review")
+            if control:
+                blockers.append(
+                    {
+                        "code": "editor_control",
+                        "scope": "study",
+                        "message": f"Editor control is held by {control.get('owner_display_name') or 'an editor'}.",
+                        "owner": control.get("owner_display_name"),
+                        "acquired_at": control.get("started_at"),
+                        "expires_at": None,
+                    }
+                )
+            elif actor.role == "editor" and review:
+                blockers.append(
+                    {
+                        "code": "editor_control_required",
+                        "scope": "study",
+                        "message": "Take editor control before changing this active review.",
+                        "owner": None,
+                        "acquired_at": None,
+                        "expires_at": None,
+                    }
+                )
+            else:
+                blockers.append(
+                    {
+                        "code": "assignment_required",
+                        "scope": "study",
+                        "message": "This study is not an active assignment for this reviewer.",
+                        "owner": None,
+                        "acquired_at": None,
+                        "expires_at": None,
+                    }
+                )
+        profile = build_edit_lock_profile(
+            study_dir,
+            dataset_id,
+            additional_blockers=blockers,
+        )
+        profile.update(workflow_profile)
+        if actor.role == "reviewer":
+            try:
+                require_history_change(
+                    study_dir,
+                    actor,
+                    expected_review_revision=workflow_profile["review_revision"],
+                )
+            except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError):
+                profile["capabilities"]["can_undo"] = False
+            resume = dict(profile.get("resume") or {})
+            if resume.get("allowed"):
+                try:
+                    require_history_change(
+                        study_dir,
+                        actor,
+                        expected_review_revision=workflow_profile["review_revision"],
+                        selected_dataset_id=dataset_id,
+                    )
+                except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+                    resume["allowed"] = False
+                    resume["blocker_message"] = str(exc)
+                profile["resume"] = resume
+        # Core lineage blockers remain authoritative alongside workflow capabilities.
+        profile["editable"] = bool(
+            not profile.get("blockers")
+            and workflow_profile["capabilities"]["can_review"]
+        )
+        return profile
+
+    def require_history_change(
+        study_dir: Path,
+        actor: Actor,
+        *,
+        expected_review_revision: object,
+        selected_dataset_id: str | None = None,
+    ) -> None:
+        review = authorize_persistent_change(
+            study_dir,
+            actor,
+            expected_review_revision=expected_review_revision,
+            review_effect="annotation_only",
+        )
+        if actor.role == "editor":
+            return
+        if review is None:
+            raise ReviewForbiddenError("The reviewer has no active assignment")
+        current_id = str(load_project_state(study_dir)["current_dataset_id"])
+        baseline_id = str(review.get("baseline_dataset_id") or "")
+        lineage = []
+        cursor = current_id
+        while cursor:
+            lineage.append(cursor)
+            if cursor == baseline_id:
+                break
+            cursor = str(load_dataset(study_dir, cursor).get("parent_dataset_id") or "")
+        if not lineage or lineage[-1] != baseline_id:
+            raise ReviewForbiddenError("Current history is outside the assigned review")
+        lineage.reverse()
+        target_id = selected_dataset_id or str(
+            load_dataset(study_dir, current_id).get("parent_dataset_id") or ""
+        )
+        if target_id not in lineage or target_id == current_id and selected_dataset_id is None:
+            raise ReviewForbiddenError("Reviewers cannot move before the assignment baseline")
+        if selected_dataset_id is None and current_id == baseline_id:
+            raise ReviewForbiddenError("Reviewers cannot undo before the assignment baseline")
+        target_index = lineage.index(target_id)
+        forward_ids = set(lineage[target_index + 1 :])
+        steps = [
+            step
+            for step in list_history(study_dir)["steps"]
+            if str(step.get("output_dataset_id") or "") in forward_ids
+        ]
+        for step in steps:
+            actor_snapshot = step.get("actor") or {}
+            workflow = (step.get("parameters") or {}).get("workflow") or {}
+            if (
+                actor_snapshot.get("user_id") != actor.user_id
+                or workflow.get("review_id") != review.get("review_id")
+                or workflow.get("review_effect") != "annotation_only"
+            ):
+                raise ReviewForbiddenError(
+                    "An editor must change history containing editor, update, or earlier-review steps"
+                )
 
     def parse_optional_int(raw_value: object, *, label: str) -> int | None:
         if raw_value in (None, ""):
@@ -728,38 +1127,84 @@ def register_movement_routes(
         return normalized
 
     @app.get("/api/apps/movement/families")
-    async def get_movement_families():
+    async def get_movement_families(request: Request):
         families = list_families(data_root)
         if configured_families:
             families = [item for item in families if item.get("name") in configured_families]
+        actor = current_actor(request)
+        if actor is not None and actor.role == "reviewer":
+            visible = []
+            for family in families:
+                try:
+                    studies = list_studies(data_root, str(family["name"]))
+                except (ValueError, ProjectStateError):
+                    continue
+                count = sum(
+                    1
+                    for study in studies
+                    if can_read_study(
+                        configured_study_dir(str(family["name"]), str(study["name"])),
+                        actor,
+                    )
+                )
+                if count:
+                    visible.append({**family, "study_count": count})
+            families = visible
         return JSONResponse({"families": families})
 
     @app.get("/api/apps/movement/family/{family_name}/studies")
-    async def get_movement_studies(family_name: str):
+    async def get_movement_studies(family_name: str, request: Request):
         try:
             family = require_configured_family(family_name)
+            actor = current_actor(request)
+            studies = []
+            for study in list_studies(data_root, family):
+                study_dir = configured_study_dir(family, str(study["name"]))
+                if actor is not None and not can_read_study(study_dir, actor):
+                    continue
+                review_state = load_review_state(study_dir)
+                review = active_review(review_state)
+                studies.append(
+                    {
+                        **study,
+                        "review_revision": int(review_state.get("revision") or 0),
+                        "review": {
+                            "review_id": review.get("review_id"),
+                            "status": review.get("status"),
+                            "reviewer": review.get("reviewer"),
+                        }
+                        if review
+                        else None,
+                    }
+                )
             return JSONResponse(
                 {
                     "family": family,
-                    "studies": list_studies(data_root, family),
+                    "studies": studies,
                 }
             )
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/state")
-    async def get_movement_study_state(family_name: str, study_name: str):
+    async def get_movement_study_state(family_name: str, study_name: str, request: Request):
         try:
             study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
             return JSONResponse(project_state_payload(study_dir))
+        except ReviewForbiddenError as exc:
+            return json_error(str(exc), 404)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/graph")
-    async def get_movement_study_graph(family_name: str, study_name: str):
+    async def get_movement_study_graph(family_name: str, study_name: str, request: Request):
         try:
             study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
             return JSONResponse(graph_payload(study_dir))
+        except ReviewForbiddenError as exc:
+            return json_error(str(exc), 404)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
@@ -770,35 +1215,51 @@ def register_movement_routes(
         family_name: str,
         study_name: str,
         dataset_id: str,
+        request: Request,
     ):
         try:
             study_dir = configured_study_dir(family_name, study_name)
+            actor = require_read(request, study_dir)
             normalized_dataset_id = validate_path_part(dataset_id, label="dataset")
             return JSONResponse(
-                build_edit_lock_profile(study_dir, normalized_dataset_id)
+                combined_edit_profile(study_dir, normalized_dataset_id, actor)
             )
+        except ReviewForbiddenError as exc:
+            return json_error(str(exc), 404)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/load")
-    async def get_movement_study_load(family_name: str, study_name: str):
+    async def get_movement_study_load(family_name: str, study_name: str, request: Request):
         try:
             study_dir = configured_study_dir(family_name, study_name)
-            return JSONResponse(
-                await run_in_threadpool(
-                    _build_initial_study_payload,
-                    study_dir,
-                    configured_artifact_filter,
-                )
+            actor = require_read(request, study_dir)
+            payload = await run_in_threadpool(
+                _build_initial_study_payload,
+                study_dir,
+                configured_artifact_filter,
             )
+            payload["edit_profile"] = combined_edit_profile(
+                study_dir,
+                str(payload["dataset_id"]),
+                actor,
+            )
+            return JSONResponse(payload)
+        except ReviewForbiddenError as exc:
+            return json_error(str(exc), 404)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}")
-    async def get_movement_study_dataset(family_name: str, study_name: str, dataset_id: str):
+    async def get_movement_study_dataset(
+        family_name: str, study_name: str, dataset_id: str, request: Request
+    ):
         try:
             study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
             return JSONResponse(load_dataset(study_dir, dataset_id))
+        except ReviewForbiddenError as exc:
+            return json_error(str(exc), 404)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
@@ -808,12 +1269,14 @@ def register_movement_routes(
         study_name: str,
         dataset_id: str,
         logical_name: str,
+        request: Request,
         burst_gap_mode: str | None = None,
         burst_gap_seconds: float | None = None,
         burst_gap_quantile: float | None = None,
     ):
         try:
             study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
             annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
             confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
@@ -831,8 +1294,19 @@ def register_movement_routes(
                 overview_fix_limit=configured_overview_fix_limit,
                 max_series_points=configured_overview_series_points,
             )
+            visible_annotations = display_annotations(study_dir, dataset_id, annotations)
+            payload = apply_review_annotations(
+                payload,
+                visible_annotations,
+                source_artifact=logical_name,
+            )
             return JSONResponse(
-                apply_review_annotations(payload, annotations, source_artifact=logical_name)
+                apply_review_annotation_counts(
+                    payload,
+                    artifact_path,
+                    visible_annotations,
+                    source_artifact=logical_name,
+                )
             )
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
@@ -856,6 +1330,7 @@ def register_movement_routes(
     ):
         try:
             study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
             individuals = parse_optional_individuals(request.query_params.getlist("individuals"))
             if not individuals:
@@ -894,7 +1369,18 @@ def register_movement_routes(
                     burst_gap_effective_seconds
                 ),
             )
-            payload = apply_review_annotations(payload, annotations, source_artifact=logical_name)
+            visible_annotations = display_annotations(study_dir, dataset_id, annotations)
+            payload = apply_review_annotations(
+                payload,
+                visible_annotations,
+                source_artifact=logical_name,
+            )
+            payload = apply_review_annotation_counts(
+                payload,
+                artifact_path,
+                visible_annotations,
+                source_artifact=logical_name,
+            )
             if normalized_review_status:
                 payload = _filter_review_status_payload(
                     payload,
@@ -906,9 +1392,16 @@ def register_movement_routes(
             return json_error(str(exc), 404)
 
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}/summary")
-    async def get_movement_study_summary(family_name: str, study_name: str, dataset_id: str, logical_name: str):
+    async def get_movement_study_summary(
+        family_name: str,
+        study_name: str,
+        dataset_id: str,
+        logical_name: str,
+        request: Request,
+    ):
         try:
             study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
             annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
             confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
@@ -921,8 +1414,19 @@ def register_movement_routes(
                 confirmed_fix_keys=confirmed_fix_keys,
                 confirmed_individual_tracks=confirmed_individual_tracks,
             )
+            visible_annotations = display_annotations(study_dir, dataset_id, annotations)
+            payload = apply_review_annotations(
+                payload,
+                visible_annotations,
+                source_artifact=logical_name,
+            )
             return JSONResponse(
-                apply_review_annotations(payload, annotations, source_artifact=logical_name)
+                apply_review_annotation_counts(
+                    payload,
+                    artifact_path,
+                    visible_annotations,
+                    source_artifact=logical_name,
+                )
             )
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
@@ -933,6 +1437,7 @@ def register_movement_routes(
         study_name: str,
         dataset_id: str,
         logical_name: str,
+        request: Request,
         burst_gap_mode: str | None = None,
         burst_gap_seconds: float | None = None,
         burst_gap_quantile: float | None = None,
@@ -940,6 +1445,7 @@ def register_movement_routes(
     ):
         try:
             study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
             normalized_dataset_id = validate_path_part(dataset_id, label="dataset")
             normalized_logical_name = validate_path_part(logical_name, label="artifact")
             get_dataset_artifact(study_dir, normalized_dataset_id, normalized_logical_name)
@@ -964,9 +1470,11 @@ def register_movement_routes(
         study_name: str,
         analysis_id: str,
         logical_name: str,
+        request: Request,
     ):
         try:
             study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
             analysis_dir = project_paths(study_dir)["analyses"] / validate_path_part(analysis_id, label="analysis")
             artifact_name = validate_path_part(logical_name, label="artifact")
             artifact_path = (analysis_dir / "outputs" / artifact_name).resolve()
@@ -1000,7 +1508,7 @@ def register_movement_routes(
                 if feature_set == "movement_plus_context"
                 else "movement only"
             )
-            user = normalize_user(body.get("user"))
+            user = effective_user(request, body)
             payload = {
                 "user": user,
                 "title": f"Rank automatic movement bursts ({feature_set_label}) for {logical_name}",
@@ -1021,6 +1529,7 @@ def register_movement_routes(
                     "user": user,
                 },
             }
+            payload = prepare_analysis_payload(request, study_dir, payload)
             if background_anomaly_ranking:
                 prune_analysis_jobs()
                 job_id = make_id("analysis_job")
@@ -1030,6 +1539,8 @@ def register_movement_routes(
                     "study_name": study_name,
                     "status": "queued",
                     "created_at": now_iso(),
+                    "actor": dict(payload.get("actor") or {}),
+                    "review_id": str((payload.get("parameters") or {}).get("review_id") or ""),
                     "_updated_monotonic": monotonic(),
                 }
                 with analysis_jobs_lock:
@@ -1049,6 +1560,8 @@ def register_movement_routes(
                     status_code=202,
                 )
             return JSONResponse(create_analysis(study_dir, payload))
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1059,10 +1572,11 @@ def register_movement_routes(
         family_name: str,
         study_name: str,
         job_id: str,
+        request: Request,
     ):
         try:
-            require_configured_family(family_name)
-            validate_path_part(study_name, label="study")
+            study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
             normalized_job_id = validate_path_part(job_id, label="analysis job")
             with analysis_jobs_lock:
                 job = dict(analysis_jobs.get(normalized_job_id) or {})
@@ -1082,6 +1596,288 @@ def register_movement_routes(
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
+    @app.get("/api/apps/movement/reviewers")
+    async def get_movement_reviewers(request: Request):
+        actor = current_actor(request)
+        if actor is None or actor.role != "editor":
+            return json_error("Only editors can list reviewers", 403)
+        return JSONResponse(
+            {"reviewers": app.state.auth_manager.list_reviewers()},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/review/assign"
+    )
+    async def post_movement_assign_review(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            actor = current_actor(request)
+            if actor is None:
+                raise ReviewForbiddenError("Authentication is required")
+            study_dir = configured_study_dir(family_name, study_name)
+            reviewer = app.state.auth_manager.actor_by_id(str(body.get("reviewer_user_id") or ""))
+            if reviewer is None:
+                raise ReviewStateError("Unknown reviewer")
+            current_id = str(load_project_state(study_dir)["current_dataset_id"])
+            dataset = load_dataset(study_dir, current_id)
+            logical_name = str(body.get("logical_name") or "").strip()
+            if logical_name:
+                logical_name = validate_path_part(logical_name, label="artifact")
+                artifact, artifact_path = get_dataset_artifact(study_dir, current_id, logical_name)
+                if not configured_artifact_filter(artifact):
+                    raise ReviewStateError("Artifact is not reviewable")
+            else:
+                candidates = [
+                    item for item in dataset.get("artifacts") or [] if configured_artifact_filter(item)
+                ]
+                if not candidates:
+                    raise ReviewStateError("Selected dataset has no reviewable movement artifact")
+                logical_name = str(candidates[0]["logical_name"])
+                _, artifact_path = get_dataset_artifact(study_dir, current_id, logical_name)
+            individuals = await run_in_threadpool(list_movement_individuals, artifact_path)
+            result = assign_review(
+                study_dir,
+                editor=actor,
+                reviewer=reviewer,
+                expected_current_dataset_id=str(body.get("expected_current_dataset_id") or ""),
+                expected_review_revision=body.get("expected_review_revision"),
+                individuals=individuals,
+            )
+            publish_state_event(
+                family_name,
+                study_name,
+                study_dir,
+                reason="review_assigned",
+                actor=actor,
+            )
+            result["edit_profile"] = combined_edit_profile(study_dir, current_id, actor)
+            return JSONResponse(result)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/review/complete"
+    )
+    async def post_movement_complete_review(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            actor = current_actor(request)
+            if actor is None:
+                raise ReviewForbiddenError("Authentication is required")
+            study_dir = configured_study_dir(family_name, study_name)
+            result = complete_review(
+                study_dir,
+                actor=actor,
+                expected_current_dataset_id=str(body.get("expected_current_dataset_id") or ""),
+                expected_review_revision=body.get("expected_review_revision"),
+                annotations=active_annotations(study_dir),
+                reason=str(body.get("reason") or ""),
+            )
+            publish_state_event(
+                family_name,
+                study_name,
+                study_dir,
+                reason="review_completed",
+                actor=actor,
+            )
+            return JSONResponse(result)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+
+    @app.post(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/review/cancel"
+    )
+    async def post_movement_cancel_review(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            actor = current_actor(request)
+            if actor is None:
+                raise ReviewForbiddenError("Authentication is required")
+            study_dir = configured_study_dir(family_name, study_name)
+            result = cancel_review(
+                study_dir,
+                editor=actor,
+                expected_current_dataset_id=str(body.get("expected_current_dataset_id") or ""),
+                expected_review_revision=body.get("expected_review_revision"),
+                reason=str(body.get("reason") or ""),
+            )
+            publish_state_event(
+                family_name,
+                study_name,
+                study_dir,
+                reason="review_cancelled",
+                actor=actor,
+            )
+            return JSONResponse(result)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+
+    @app.post(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/editor-control/start"
+    )
+    async def post_movement_start_editor_control(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            actor = current_actor(request)
+            if actor is None:
+                raise ReviewForbiddenError("Authentication is required")
+            study_dir = configured_study_dir(family_name, study_name)
+            result = start_editor_control(
+                study_dir,
+                editor=actor,
+                expected_current_dataset_id=str(body.get("expected_current_dataset_id") or ""),
+                expected_review_revision=body.get("expected_review_revision"),
+                reason=str(body.get("reason") or ""),
+            )
+            publish_state_event(
+                family_name,
+                study_name,
+                study_dir,
+                reason="editor_control_started",
+                actor=actor,
+            )
+            return JSONResponse(result)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+
+    @app.post(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/editor-control/takeover"
+    )
+    async def post_movement_takeover_editor_control(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            actor = current_actor(request)
+            if actor is None:
+                raise ReviewForbiddenError("Authentication is required")
+            study_dir = configured_study_dir(family_name, study_name)
+            result = start_editor_control(
+                study_dir,
+                editor=actor,
+                expected_current_dataset_id=str(body.get("expected_current_dataset_id") or ""),
+                expected_review_revision=body.get("expected_review_revision"),
+                reason=str(body.get("reason") or ""),
+                takeover=True,
+            )
+            publish_state_event(
+                family_name,
+                study_name,
+                study_dir,
+                reason="editor_control_taken_over",
+                actor=actor,
+            )
+            return JSONResponse(result)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+
+    @app.post(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/editor-control/finish"
+    )
+    async def post_movement_finish_editor_control(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            actor = current_actor(request)
+            if actor is None:
+                raise ReviewForbiddenError("Authentication is required")
+            study_dir = configured_study_dir(family_name, study_name)
+            result = finish_editor_control(
+                study_dir,
+                editor=actor,
+                expected_current_dataset_id=str(body.get("expected_current_dataset_id") or ""),
+                expected_review_revision=body.get("expected_review_revision"),
+                reason=str(body.get("reason") or ""),
+            )
+            publish_state_event(
+                family_name,
+                study_name,
+                study_dir,
+                reason="editor_control_released",
+                actor=actor,
+            )
+            return JSONResponse(result)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+
+    @app.get(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/events"
+    )
+    async def get_movement_study_events(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            actor = require_read(request, study_dir)
+        except ReviewForbiddenError as exc:
+            return json_error(str(exc), 404)
+
+        async def stream():
+            key = study_event_key(family_name, study_name)
+            async with event_broker.subscribe(key) as queue:
+                snapshot = state_event_payload(
+                    study_dir,
+                    reason="connected",
+                    actor=actor,
+                )
+                yield f"event: study_state_changed\ndata: {json.dumps(snapshot)}\n\n"
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=60)
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    yield f"event: study_state_changed\ndata: {json.dumps(event)}\n\n"
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/undo")
     async def post_movement_study_undo(
         family_name: str,
@@ -1099,14 +1895,35 @@ def register_movement_routes(
                 if body
                 else str(load_project_state(study_dir)["current_dataset_id"])
             )
-            return JSONResponse(
-                undo_guarded(
-                    study_dir,
-                    expected_current_dataset_id=expected_current_dataset_id,
-                )
+            actor = current_actor(request)
+            preflight = None
+            if actor is not None:
+                expected_review_revision = (body or {}).get("expected_review_revision")
+
+                def preflight() -> None:
+                    require_history_change(
+                        study_dir,
+                        actor,
+                        expected_review_revision=expected_review_revision,
+                    )
+
+            result = undo_guarded(
+                study_dir,
+                expected_current_dataset_id=expected_current_dataset_id,
+                preflight=preflight,
             )
+            publish_state_event(
+                family_name,
+                study_name,
+                study_dir,
+                reason="dataset_head_undone",
+                actor=actor,
+            )
+            return JSONResponse(result)
         except EditConflictError as exc:
             return _edit_conflict_response(exc)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1129,17 +1946,39 @@ def register_movement_routes(
             resume_token = str(body.get("resume_token") or "").strip()
             if not resume_token:
                 raise ValueError("Resume token is required")
-            return JSONResponse(
-                resume_from_dataset(
-                    study_dir,
-                    selected_dataset_id=dataset_id,
-                    expected_current_dataset_id=expected_current_dataset_id,
-                    resume_token=resume_token,
-                    user=body.get("user"),
-                )
+            actor = current_actor(request)
+            preflight = None
+            if actor is not None:
+                expected_review_revision = body.get("expected_review_revision")
+
+                def preflight() -> None:
+                    require_history_change(
+                        study_dir,
+                        actor,
+                        expected_review_revision=expected_review_revision,
+                        selected_dataset_id=dataset_id,
+                    )
+
+            result = resume_from_dataset(
+                study_dir,
+                selected_dataset_id=dataset_id,
+                expected_current_dataset_id=expected_current_dataset_id,
+                resume_token=resume_token,
+                user=actor.display_name if actor is not None else body.get("user"),
+                preflight=preflight,
             )
+            publish_state_event(
+                family_name,
+                study_name,
+                study_dir,
+                reason="dataset_history_resumed",
+                actor=actor,
+            )
+            return JSONResponse(result)
         except EditConflictError as exc:
             return _edit_conflict_response(exc)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1158,7 +1997,7 @@ def register_movement_routes(
             if not isinstance(raw_scope, dict):
                 raise ValueError("Review scope is required")
             scope_kind = str(raw_scope.get("kind") or "").strip().lower()
-            if scope_kind not in {"fix", "segment", "burst", "bursts", "individual"}:
+            if scope_kind not in {"fix", "segment", "burst", "bursts", "individual", "filter"}:
                 raise ValueError("Invalid review scope")
             scope: dict[str, object] = {"kind": scope_kind}
             if scope_kind in {"fix", "segment"}:
@@ -1181,6 +2020,8 @@ def register_movement_routes(
                     label="Set name",
                     max_length=40,
                 )
+            elif scope_kind == "filter":
+                scope["filter"] = _validate_filter_scope(raw_scope.get("filter"))
             elif scope_kind == "burst":
                 scope["burst_id"] = _validate_required_text(
                     raw_scope.get("burst_id"),
@@ -1229,7 +2070,9 @@ def register_movement_routes(
                 raw_origin = "threshold" if body.get("issue_field") or body.get("issue_threshold") else "manual"
             if raw_origin not in {"manual", "threshold", "algorithm"}:
                 raise ValueError("Invalid annotation origin")
-            user = body.get("user")
+            if scope_kind == "filter":
+                raw_origin = "threshold"
+            user = effective_user(request, body)
             input_artifacts = [logical_name]
             if any(
                 artifact.get("logical_name") == "movement_review_annotations.json"
@@ -1239,6 +2082,8 @@ def register_movement_routes(
             scope_title = (
                 f"{len(scope['burst_ids'])} bursts"
                 if scope_kind == "bursts"
+                else "dataset filter"
+                if scope_kind == "filter"
                 else scope_kind
             )
             payload = {
@@ -1255,6 +2100,16 @@ def register_movement_routes(
                     "status": status,
                     "origin": raw_origin,
                     "issue_type": issue_type,
+                    "issue_field": _validate_optional_text(
+                        body.get("issue_field"),
+                        label="Issue field",
+                        max_length=240,
+                    ),
+                    "issue_threshold": _validate_optional_text(
+                        body.get("issue_threshold"),
+                        label="Issue threshold",
+                        max_length=600,
+                    ),
                     "comment": comment,
                     "owner_question": owner_question,
                     "source_analysis_id": source_analysis_id,
@@ -1268,21 +2123,33 @@ def register_movement_routes(
                 "output_artifacts": ["movement_review_annotations.json"],
                 "set_as_head": True,
             }
-            return JSONResponse(
-                create_guarded_step(
-                    study_dir,
-                    payload,
-                    selected_dataset_id=dataset_id,
-                    expected_current_dataset_id=str(
-                        body.get("expected_current_dataset_id")
-                        or load_project_state(study_dir)["current_dataset_id"]
-                    ),
-                )
+            payload, preflight, actor = prepare_step_payload(
+                request,
+                study_dir,
+                body,
+                payload,
+                review_effect="annotation_only",
             )
+            result = create_guarded_step(
+                study_dir,
+                payload,
+                selected_dataset_id=dataset_id,
+                expected_current_dataset_id=str(
+                    body.get("expected_current_dataset_id")
+                    or load_project_state(study_dir)["current_dataset_id"]
+                ),
+                preflight=preflight,
+            )
+            publish_state_event(
+                family_name, study_name, study_dir, reason="dataset_head_changed", actor=actor
+            )
+            return JSONResponse(result)
         except EditLockedError as exc:
             return _edit_locked_response(exc)
         except EditConflictError as exc:
             return _edit_conflict_response(exc)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1309,8 +2176,9 @@ def register_movement_routes(
                 for artifact in dataset.get("artifacts", [])
             ):
                 input_artifacts.append("movement_review_annotations.json")
+            user = effective_user(request, body)
             payload = {
-                "user": body.get("user"),
+                "user": user,
                 "title": f"Confirm {sum(item['fix_count'] for item in confirmations)} suspected fix(es) in {logical_name}",
                 "kind": "python",
                 "script": CONFIRM_ISSUES_SCRIPT,
@@ -1321,28 +2189,114 @@ def register_movement_routes(
                     "dataset_id": dataset_id,
                     "confirmations": confirmations,
                     "note": note,
-                    "user": body.get("user"),
+                    "user": user,
                 },
                 "parent_dataset_id": dataset_id,
                 "input_artifacts": input_artifacts,
                 "output_artifacts": ["movement_review_annotations.json"],
                 "set_as_head": True,
             }
-            return JSONResponse(
-                create_guarded_step(
-                    study_dir,
-                    payload,
-                    selected_dataset_id=dataset_id,
-                    expected_current_dataset_id=str(
-                        body.get("expected_current_dataset_id")
-                        or load_project_state(study_dir)["current_dataset_id"]
-                    ),
-                )
+            payload, preflight, actor = prepare_step_payload(
+                request,
+                study_dir,
+                body,
+                payload,
+                review_effect="annotation_only",
             )
+            result = create_guarded_step(
+                study_dir,
+                payload,
+                selected_dataset_id=dataset_id,
+                expected_current_dataset_id=str(
+                    body.get("expected_current_dataset_id")
+                    or load_project_state(study_dir)["current_dataset_id"]
+                ),
+                preflight=preflight,
+            )
+            publish_state_event(
+                family_name, study_name, study_dir, reason="dataset_head_changed", actor=actor
+            )
+            return JSONResponse(result)
         except EditLockedError as exc:
             return _edit_locked_response(exc)
         except EditConflictError as exc:
             return _edit_conflict_response(exc)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/dismiss-issues")
+    async def post_movement_dismiss_issues(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            dataset = load_dataset(study_dir, dataset_id)
+            get_dataset_artifact(study_dir, dataset_id, logical_name)
+            dismissals = _validate_dismissals(body.get("dismissals"))
+            note = _validate_optional_text(
+                body.get("note"),
+                label="Dismissal note",
+                max_length=1200,
+            )
+            input_artifacts = [logical_name]
+            if any(
+                artifact.get("logical_name") == "movement_review_annotations.json"
+                for artifact in dataset.get("artifacts", [])
+            ):
+                input_artifacts.append("movement_review_annotations.json")
+            user = effective_user(request, body)
+            dismissed_fix_count = sum(item["fix_count"] for item in dismissals)
+            payload = {
+                "user": user,
+                "title": f"Dismiss suspicion for {dismissed_fix_count} fix(es) in {logical_name}",
+                "kind": "python",
+                "script": DISMISS_ISSUES_SCRIPT,
+                "parameters": {
+                    "app": "movement",
+                    "action": "dismiss_issues",
+                    "target_artifact": logical_name,
+                    "dataset_id": dataset_id,
+                    "dismissals": dismissals,
+                    "note": note,
+                    "user": user,
+                },
+                "parent_dataset_id": dataset_id,
+                "input_artifacts": input_artifacts,
+                "output_artifacts": ["movement_review_annotations.json"],
+                "set_as_head": True,
+            }
+            payload, preflight, actor = prepare_step_payload(
+                request,
+                study_dir,
+                body,
+                payload,
+                review_effect="annotation_only",
+            )
+            result = create_guarded_step(
+                study_dir,
+                payload,
+                selected_dataset_id=dataset_id,
+                expected_current_dataset_id=str(
+                    body.get("expected_current_dataset_id")
+                    or load_project_state(study_dir)["current_dataset_id"]
+                ),
+                preflight=preflight,
+            )
+            publish_state_event(
+                family_name, study_name, study_dir, reason="dataset_head_changed", actor=actor
+            )
+            return JSONResponse(result)
+        except EditLockedError as exc:
+            return _edit_locked_response(exc)
+        except EditConflictError as exc:
+            return _edit_conflict_response(exc)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1364,7 +2318,7 @@ def register_movement_routes(
             dataset = load_dataset(study_dir, dataset_id)
             get_dataset_artifact(study_dir, dataset_id, logical_name)
             decisions = _validate_individual_review_decisions(body.get("decisions"))
-            user = normalize_user(body.get("user"))
+            user = effective_user(request, body)
             input_artifacts = [logical_name]
             if any(
                 artifact.get("logical_name") == "movement_review_annotations.json"
@@ -1392,21 +2346,33 @@ def register_movement_routes(
                 "output_artifacts": ["movement_review_annotations.json"],
                 "set_as_head": True,
             }
-            return JSONResponse(
-                create_guarded_step(
-                    study_dir,
-                    payload,
-                    selected_dataset_id=dataset_id,
-                    expected_current_dataset_id=str(
-                        body.get("expected_current_dataset_id")
-                        or load_project_state(study_dir)["current_dataset_id"]
-                    ),
-                )
+            payload, preflight, actor = prepare_step_payload(
+                request,
+                study_dir,
+                body,
+                payload,
+                review_effect="annotation_only",
             )
+            result = create_guarded_step(
+                study_dir,
+                payload,
+                selected_dataset_id=dataset_id,
+                expected_current_dataset_id=str(
+                    body.get("expected_current_dataset_id")
+                    or load_project_state(study_dir)["current_dataset_id"]
+                ),
+                preflight=preflight,
+            )
+            publish_state_event(
+                family_name, study_name, study_dir, reason="dataset_head_changed", actor=actor
+            )
+            return JSONResponse(result)
         except EditLockedError as exc:
             return _edit_locked_response(exc)
         except EditConflictError as exc:
             return _edit_conflict_response(exc)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1440,7 +2406,7 @@ def register_movement_routes(
             screenshot_mode = _validate_screenshot_mode(body.get("screenshot_mode"))
             snapshots = _validate_snapshots(body.get("snapshots"))
             snapshot_parameters, snapshot_attachments = _report_snapshot_inputs(snapshots)
-            user = body.get("user")
+            user = effective_user(request, body)
             individual_report_artifacts = _build_individual_report_artifacts(individuals)
             effective_output_mode = output_mode if len(individuals) > 1 else "combined"
             if report_type == "issue_first":
@@ -1492,7 +2458,10 @@ def register_movement_routes(
                     "user": user,
                 },
             }
+            payload = prepare_analysis_payload(request, study_dir, payload)
             return JSONResponse(create_analysis(study_dir, payload))
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1514,7 +2483,7 @@ def register_movement_routes(
             ):
                 input_artifacts.append("movement_review_annotations.json")
             output_artifact = _reviewed_csv_artifact_name(logical_name)
-            user = body.get("user")
+            user = effective_user(request, body)
             payload = {
                 "user": user,
                 "title": f"Export reviewed movement CSV for {logical_name}",
@@ -1532,13 +2501,24 @@ def register_movement_routes(
                     "user": user,
                 },
             }
+            payload = prepare_analysis_payload(request, study_dir, payload)
             return JSONResponse(create_analysis(study_dir, payload))
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
     @app.get("/api/project/{project_name}/apps/movement/dataset/{dataset_id}/summary")
-    async def get_movement_summary(project_name: str, dataset_id: str, logical_name: str):
+    async def get_movement_summary(
+        project_name: str,
+        dataset_id: str,
+        logical_name: str,
+        request: Request,
+    ):
         try:
+            actor = current_actor(request)
+            if actor is not None and actor.role != "editor":
+                raise ReviewForbiddenError("Editor role required")
             project_dir = get_project_dir(data_root, project_name)
             _, artifact_path = get_dataset_artifact(project_dir, dataset_id, logical_name)
             return JSONResponse(await run_in_threadpool(build_movement_summary, artifact_path))
@@ -1551,6 +2531,9 @@ def register_movement_routes(
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
+            actor = current_actor(request)
+            if actor is not None and actor.role != "editor":
+                raise ReviewForbiddenError("Editor role required")
             project_dir = get_project_dir(data_root, project_name)
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
@@ -1575,7 +2558,7 @@ def register_movement_routes(
             screenshot_mode = _validate_screenshot_mode(body.get("screenshot_mode"))
             snapshots = _validate_snapshots(body.get("snapshots"))
             snapshot_parameters, snapshot_attachments = _report_snapshot_inputs(snapshots)
-            user = body.get("user")
+            user = actor.display_name if actor is not None else body.get("user")
             individual_report_artifacts = _build_individual_report_artifacts(individuals)
             effective_output_mode = output_mode if len(individuals) > 1 else "combined"
             if report_type == "issue_first":
@@ -1627,7 +2610,11 @@ def register_movement_routes(
                     "user": user,
                 },
             }
+            if actor is not None:
+                payload = apply_actor(payload, actor)
             return JSONResponse(create_analysis(project_dir, payload))
+        except ReviewForbiddenError as exc:
+            return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -1641,4 +2628,12 @@ def register_movement_routes(
             default_burst_gap_mode=DEFAULT_BURST_GAP_MODE,
             default_burst_gap_seconds=DEFAULT_BURST_GAP_SECONDS,
             default_burst_gap_quantile=DEFAULT_BURST_GAP_QUANTILE,
+            annotate_scope_script=ANNOTATE_SCOPE_SCRIPT,
+            publish_event=lambda family, study, directory, reason, actor: publish_state_event(
+                family,
+                study,
+                directory,
+                reason=reason,
+                actor=actor,
+            ),
         )

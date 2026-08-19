@@ -16,6 +16,7 @@
   html, body {
     height: 100%;
   }
+  [hidden] { display: none !important; }
   body {
     background:
       radial-gradient(circle at top left, rgba(116, 212, 255, 0.12), transparent 28%),
@@ -30,6 +31,15 @@
     display: flex;
     flex-direction: column;
   }
+  #login-view { min-height: 100%; display: grid; place-items: center; padding: 24px; }
+  .login-card { width: min(100%, 390px); padding: 30px; border: 1px solid var(--border); border-radius: 18px; background: var(--panel); box-shadow: 0 24px 70px rgba(0,0,0,.38); }
+  .login-brand { font: 700 22px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+  .login-kicker { margin-top: 7px; color: #74d4ff; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; }
+  .login-copy { margin: 22px 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
+  .login-field { display: grid; gap: 7px; margin-top: 14px; color: var(--muted); font-size: 12px; font-weight: 650; text-transform: uppercase; }
+  .login-field input { padding: 11px 12px; border: 1px solid rgba(148,163,184,.28); border-radius: 8px; background: rgba(2,8,15,.76); color: var(--text); }
+  .login-submit { width: 100%; margin-top: 20px; padding: 11px 14px; border: 0; border-radius: 8px; background: #74d4ff; color: #061821; cursor: pointer; font-weight: 750; }
+  .login-status { min-height: 20px; margin-top: 12px; color: #ff9b9b; font-size: 13px; }
   .topbar {
     display: flex;
     align-items: center;
@@ -71,6 +81,10 @@
   .topbar .movement-edit-lock.hidden {
     display: none;
   }
+  .review-controls { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+  .review-controls button, .logout-button { padding: 6px 9px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--text); cursor: pointer; }
+  .review-controls button[hidden] { display: none; }
+  .auth-identity, .review-progress { color: var(--muted); font-size: 12px; }
   #app {
     flex: 1;
     min-height: 0;
@@ -78,22 +92,43 @@
 </style>
 </head>
 <body>
-<div id="app-shell">
+<section id="login-view" aria-labelledby="login-title">
+  <form id="login-form" class="login-card">
+    <h1 id="login-title" class="login-brand">vibecleaning</h1>
+    <div class="login-kicker">movement review</div>
+    <p class="login-copy">Log in with the account provided by the application operator.</p>
+    <label class="login-field">Username<input id="login-username" name="username" autocomplete="username" required></label>
+    <label class="login-field">Password<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
+    <button id="login-submit" class="login-submit" type="submit">Log in</button>
+    <p id="login-status" class="login-status" role="alert" aria-live="polite"></p>
+  </form>
+</section>
+<div id="app-shell" hidden>
   <header class="topbar">
     <div class="brand">
       <h1>vibecleaning</h1>
       <span>movement outlier review example</span>
     </div>
     <div class="topbar-actions">
+      <div class="review-controls">
+        <span class="auth-identity" data-role="auth-identity"></span>
+        <span class="review-progress" data-role="review-progress"></span>
+        <button type="button" data-role="assign-review" hidden>Assign review</button>
+        <button type="button" data-role="complete-review" hidden>Complete review</button>
+        <button type="button" data-role="cancel-review" hidden>Cancel review</button>
+        <button type="button" data-role="editor-control-start" hidden>Start editor control</button>
+        <button type="button" data-role="editor-control-finish" hidden>Finish editor control</button>
+      </div>
       <div class="movement-edit-lock hidden" data-role="edit-lock-profile">
         <span class="movement-edit-lock-badge">Read-only</span>
         <span class="movement-edit-lock-message" data-role="edit-lock-message"></span>
         <button type="button" data-role="resume-history">Resume</button>
       </div>
+      <button id="logout-button" class="logout-button" type="button">Log out</button>
     </div>
   </header>
   <main id="app"></main>
 </div>
-<script type="module" src="/static/app.js"></script>
+<script type="module" src="/static/login.js"></script>
 </body>
 </html>

@@ -65,6 +65,24 @@ def validate_parameters(payload: object) -> dict:
     return payload
 
 
+def validate_actor(payload: object) -> dict | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ProjectStateError("Invalid actor")
+    actor = {
+        "user_id": str(payload.get("user_id") or "").strip(),
+        "username": str(payload.get("username") or "").strip(),
+        "display_name": str(payload.get("display_name") or "").strip(),
+        "role": str(payload.get("role") or "").strip(),
+    }
+    if not actor["user_id"] or not actor["username"] or not actor["display_name"]:
+        raise ProjectStateError("Invalid actor")
+    if actor["role"] not in {"reviewer", "editor"}:
+        raise ProjectStateError("Invalid actor")
+    return actor
+
+
 def validate_artifact_names(raw_names: object, *, allow_empty: bool = False) -> list[str]:
     if raw_names is None and allow_empty:
         return []
@@ -174,6 +192,7 @@ def create_analysis(project_dir: Path, payload: dict) -> dict:
     kind = validate_script_kind(payload.get("kind"))
     script = validate_script(payload.get("script"))
     parameters = validate_parameters(payload.get("parameters"))
+    actor = validate_actor(payload.get("actor"))
     requested_inputs = validate_artifact_names(payload.get("input_artifacts", []), allow_empty=True)
     requested_outputs = validate_artifact_names(payload.get("output_artifacts", []), allow_empty=True)
 
@@ -216,6 +235,7 @@ def create_analysis(project_dir: Path, payload: dict) -> dict:
             "title": title,
             "user": user,
             "parameters": parameters,
+            "actor": actor,
         },
     }
     save_json(spec_path, spec)
@@ -255,6 +275,8 @@ def create_analysis(project_dir: Path, payload: dict) -> dict:
         "output_artifacts": requested_outputs,
         "realized_output_artifacts": realized_outputs,
     }
+    if actor is not None:
+        record["actor"] = actor
     save_json(analysis_dir / "analysis.json", record)
     return {"analysis": record, "summary": summary}
 
@@ -266,6 +288,7 @@ def create_step(project_dir: Path, payload: dict) -> dict:
     kind = validate_script_kind(payload.get("kind"))
     script = validate_script(payload.get("script"))
     parameters = validate_parameters(payload.get("parameters"))
+    actor = validate_actor(payload.get("actor"))
     set_as_head = validate_optional_bool(payload.get("set_as_head"), default=True)
 
     project_state = load_project_state(project_dir)
@@ -333,6 +356,7 @@ def create_step(project_dir: Path, payload: dict) -> dict:
             "user": user,
             "parameters": parameters,
             "remove_artifacts": removed_artifacts,
+            "actor": actor,
         },
     }
     save_json(spec_path, spec)
@@ -354,6 +378,8 @@ def create_step(project_dir: Path, payload: dict) -> dict:
         "note": title,
         "artifacts": sorted(next_artifacts.values(), key=lambda item: item["logical_name"]),
     }
+    if actor is not None:
+        dataset["actor"] = actor
     save_dataset(project_dir, dataset)
     if set_as_head:
         update_project_state(project_dir, {"current_dataset_id": dataset_id})
@@ -376,6 +402,8 @@ def create_step(project_dir: Path, payload: dict) -> dict:
         "set_as_head": set_as_head,
         "summary": summary,
     }
+    if actor is not None:
+        step_record["actor"] = actor
     save_json(step_dir / "step.json", step_record)
     return {
         "step": step_record,

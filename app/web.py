@@ -1,13 +1,14 @@
 from pathlib import Path
 import re
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
+from .auth import AuthManager, add_authentication, apply_actor, request_actor
 from .execution import create_analysis, create_step, set_current_head, undo_to_parent
 from .osm import OSMFetchError, OSMValidationError, fetch_osm_features, normalize_osm_request
 from .preview import preview_artifact
@@ -64,7 +65,13 @@ async def parse_json_body(request: Request) -> dict | None:
     return body
 
 
-def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = None) -> FastAPI:
+def create_app(
+    *,
+    data_root: Path,
+    static_root: Path,
+    index_path: Path | None = None,
+    auth_manager: AuthManager | None = None,
+) -> FastAPI:
     data_root = data_root.resolve()
     static_root = static_root.resolve()
     resolved_index_path = (index_path or (static_root / "index.html")).resolve()
@@ -72,6 +79,13 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
     app = FastAPI()
     app.state.data_root = data_root
     app.state.static_root = static_root
+
+    def require_editor_when_authenticated(request: Request) -> None:
+        if auth_manager is None:
+            return
+        actor = request_actor(request)
+        if actor is None or actor.role != "editor":
+            raise HTTPException(status_code=403, detail="Editor role required")
 
     app.add_middleware(
         CORSMiddleware,
@@ -123,7 +137,8 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
         return FileResponse(resolved_index_path)
 
     @app.get("/api/projects")
-    async def get_projects():
+    async def get_projects(request: Request):
+        require_editor_when_authenticated(request)
         return JSONResponse({"projects": list_projects(data_root)})
 
     @app.get("/api/query-library/queries")
@@ -142,6 +157,7 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
 
     @app.post("/api/query-library/queries")
     async def post_query_library_query(request: Request):
+        require_editor_when_authenticated(request)
         body = await parse_json_body(request)
         if body is None:
             return json_error("Invalid JSON body", 400)
@@ -164,7 +180,8 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
             return json_error(str(exc), 502)
 
     @app.get("/api/project/{project_name}/state")
-    async def get_project_state(project_name: str):
+    async def get_project_state(project_name: str, request: Request):
+        require_editor_when_authenticated(request)
         try:
             project_dir = get_project_dir(data_root, project_name)
             return JSONResponse(project_state_payload(project_dir))
@@ -172,7 +189,8 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
             return json_error(str(exc), 404)
 
     @app.get("/api/project/{project_name}/graph")
-    async def get_project_graph(project_name: str):
+    async def get_project_graph(project_name: str, request: Request):
+        require_editor_when_authenticated(request)
         try:
             project_dir = get_project_dir(data_root, project_name)
             return JSONResponse(graph_payload(project_dir))
@@ -180,7 +198,8 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
             return json_error(str(exc), 404)
 
     @app.get("/api/project/{project_name}/dataset/{dataset_id}")
-    async def get_project_dataset(project_name: str, dataset_id: str):
+    async def get_project_dataset(project_name: str, dataset_id: str, request: Request):
+        require_editor_when_authenticated(request)
         try:
             project_dir = get_project_dir(data_root, project_name)
             return JSONResponse(load_dataset(project_dir, dataset_id))
@@ -188,7 +207,10 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
             return json_error(str(exc), 404)
 
     @app.get("/api/project/{project_name}/artifact/{dataset_id}/{logical_name}")
-    async def get_project_artifact(project_name: str, dataset_id: str, logical_name: str):
+    async def get_project_artifact(
+        project_name: str, dataset_id: str, logical_name: str, request: Request
+    ):
+        require_editor_when_authenticated(request)
         try:
             project_dir = get_project_dir(data_root, project_name)
             _, artifact_path = get_dataset_artifact(project_dir, dataset_id, logical_name)
@@ -197,7 +219,10 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
         return FileResponse(artifact_path, media_type=media_type_for_path(artifact_path))
 
     @app.get("/api/project/{project_name}/artifact/{dataset_id}/{logical_name}/meta")
-    async def get_project_artifact_meta(project_name: str, dataset_id: str, logical_name: str):
+    async def get_project_artifact_meta(
+        project_name: str, dataset_id: str, logical_name: str, request: Request
+    ):
+        require_editor_when_authenticated(request)
         try:
             project_dir = get_project_dir(data_root, project_name)
             artifact, artifact_path = get_dataset_artifact(project_dir, dataset_id, logical_name)
@@ -208,7 +233,14 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
         return JSONResponse(payload)
 
     @app.get("/api/project/{project_name}/artifact/{dataset_id}/{logical_name}/preview")
-    async def get_project_artifact_preview(project_name: str, dataset_id: str, logical_name: str, limit_bytes: int = 65536):
+    async def get_project_artifact_preview(
+        project_name: str,
+        dataset_id: str,
+        logical_name: str,
+        request: Request,
+        limit_bytes: int = 65536,
+    ):
+        require_editor_when_authenticated(request)
         try:
             project_dir = get_project_dir(data_root, project_name)
             _, artifact_path = get_dataset_artifact(project_dir, dataset_id, logical_name)
@@ -217,7 +249,8 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
             return json_error(str(exc), 404)
 
     @app.get("/api/project/{project_name}/analysis/{analysis_id}")
-    async def get_project_analysis(project_name: str, analysis_id: str):
+    async def get_project_analysis(project_name: str, analysis_id: str, request: Request):
+        require_editor_when_authenticated(request)
         try:
             project_dir = get_project_dir(data_root, project_name)
             analysis_dir = project_paths(project_dir)["analyses"] / validate_path_part(analysis_id, label="analysis")
@@ -226,7 +259,10 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
             return json_error(str(exc), 404)
 
     @app.get("/api/project/{project_name}/analysis/{analysis_id}/artifact/{logical_name}")
-    async def get_project_analysis_artifact(project_name: str, analysis_id: str, logical_name: str):
+    async def get_project_analysis_artifact(
+        project_name: str, analysis_id: str, logical_name: str, request: Request
+    ):
+        require_editor_when_authenticated(request)
         try:
             project_dir = get_project_dir(data_root, project_name)
             analysis_dir = project_paths(project_dir)["analyses"] / validate_path_part(analysis_id, label="analysis")
@@ -242,28 +278,37 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
 
     @app.post("/api/project/{project_name}/analyses")
     async def post_project_analysis(project_name: str, request: Request):
+        require_editor_when_authenticated(request)
         body = await parse_json_body(request)
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
             project_dir = get_project_dir(data_root, project_name)
+            actor = request_actor(request)
+            if actor is not None:
+                body = apply_actor(body, actor)
             return JSONResponse(create_analysis(project_dir, body))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
     @app.post("/api/project/{project_name}/steps")
     async def post_project_step(project_name: str, request: Request):
+        require_editor_when_authenticated(request)
         body = await parse_json_body(request)
         if body is None:
             return json_error("Invalid JSON body", 400)
         try:
             project_dir = get_project_dir(data_root, project_name)
+            actor = request_actor(request)
+            if actor is not None:
+                body = apply_actor(body, actor)
             return JSONResponse(create_step(project_dir, body))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
     @app.post("/api/project/{project_name}/head")
     async def post_project_head(project_name: str, request: Request):
+        require_editor_when_authenticated(request)
         body = await parse_json_body(request)
         if body is None:
             return json_error("Invalid JSON body", 400)
@@ -275,11 +320,15 @@ def create_app(*, data_root: Path, static_root: Path, index_path: Path | None = 
             return json_error(str(exc), 400)
 
     @app.post("/api/project/{project_name}/undo")
-    async def post_project_undo(project_name: str):
+    async def post_project_undo(project_name: str, request: Request):
+        require_editor_when_authenticated(request)
         try:
             project_dir = get_project_dir(data_root, project_name)
             return JSONResponse(undo_to_parent(project_dir))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
+
+    if auth_manager is not None:
+        add_authentication(app, auth_manager)
 
     return app

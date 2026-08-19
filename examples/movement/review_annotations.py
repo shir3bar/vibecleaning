@@ -5,11 +5,15 @@ from pathlib import Path
 from .summary import (
     _make_fix_key,
     _normalize_review_status,
+    _row_is_analytically_excluded,
+    _valid_movement_row,
     detect_columns,
     is_valid_coordinate,
+    parse_bool,
     parse_time_ms,
     try_float,
 )
+from .movement_features import haversine_meters
 
 
 REVIEW_SIDECAR_NAME = "movement_review_annotations.json"
@@ -19,6 +23,7 @@ EXPORT_COLUMNS = [
     "algorithm-marked-outlier",
     "individual-reviewed",
     "individual-review-ok",
+    "individual-review-decision",
     "outlier_status",
     "outlier_issue_type",
     "outlier_comments",
@@ -30,6 +35,7 @@ DEPRECATED_EXPORT_COLUMNS = {
     "outlier_annotation_ids",
 }
 VALID_ORIGINS = {"manual", "threshold", "algorithm"}
+DERIVED_FILTER_FIELDS = {"step_length_m", "speed_mps", "time_delta_s"}
 
 
 def fix_key_row_number(fix_key: object) -> int:
@@ -91,6 +97,179 @@ def row_number_in_ranges(row_number: int, row_ranges: list[list[int]]) -> bool:
     return False
 
 
+def _compress_row_numbers(row_numbers: list[int]) -> list[list[int]]:
+    ranges: list[list[int]] = []
+    for row_number in sorted(set(row_numbers)):
+        if ranges and row_number == ranges[-1][1] + 1:
+            ranges[-1][1] = row_number
+        else:
+            ranges.append([row_number, row_number])
+    return ranges
+
+
+def _filter_value_matches(value: object, filter_spec: dict) -> bool:
+    field_kind = str(filter_spec.get("field_kind") or "").strip().lower()
+    if field_kind == "numeric":
+        numeric = try_float(value)
+        threshold = try_float(filter_spec.get("threshold_value"))
+        if numeric is None or threshold is None:
+            return False
+        operator = str(filter_spec.get("operator") or "gt").strip().lower()
+        return numeric < threshold if operator == "lt" else numeric > threshold
+
+    selected_levels = {
+        str(item).strip()
+        for item in filter_spec.get("selected_levels") or []
+        if str(item).strip()
+    }
+    if not selected_levels:
+        return False
+    if field_kind == "boolean":
+        parsed = parse_bool(value)
+        label = "True" if parsed is True else "False" if parsed is False else "Missing"
+    else:
+        label = str(value or "").strip() or "Missing"
+    return label in selected_levels
+
+
+def _derived_filter_value(previous: tuple | None, current: tuple, field_key: str):
+    if previous is None or current[1] <= previous[1]:
+        return None
+    time_delta_s = (current[1] - previous[1]) / 1000.0
+    if field_key == "time_delta_s":
+        return time_delta_s
+    step_length_m = haversine_meters(previous[2], previous[3], current[2], current[3])
+    if field_key == "step_length_m":
+        return step_length_m
+    return step_length_m / time_delta_s if time_delta_s > 0 else None
+
+
+def resolve_filter_row_ranges(
+    path: Path,
+    filter_spec: dict,
+    *,
+    confirmed_fix_keys: set[str] | None = None,
+    confirmed_individual_tracks: set[tuple[str, str]] | None = None,
+) -> tuple[list[list[int]], int]:
+    """Evaluate a persisted issue filter over every valid movement row exactly once.
+
+    Derived step fields use a streaming pass when each track is already in time
+    order. A second, lean grouped pass is used only for files with track-order
+    regressions so the result retains the app's chronological step semantics.
+    """
+    field_key = str(filter_spec.get("field_key") or "").strip()
+    if not field_key:
+        raise ValueError("Filter field is required")
+    confirmed_fix_key_set = set(confirmed_fix_keys or set())
+    confirmed_individual_track_set = set(confirmed_individual_tracks or set())
+
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        columns = detect_columns(fieldnames)
+        if not columns["individual"] or not columns["time"] or not columns["lon"] or not columns["lat"]:
+            raise ValueError("CSV is missing required columns for movement filtering")
+        if field_key not in DERIVED_FILTER_FIELDS and field_key not in fieldnames:
+            raise ValueError("Filter field is not present in the movement CSV")
+
+        matched_rows: list[int] = []
+        if field_key not in DERIVED_FILTER_FIELDS:
+            for row_index, raw in enumerate(reader, start=1):
+                valid = _valid_movement_row(raw, columns)
+                if valid is None:
+                    continue
+                fix_key = _make_fix_key(
+                    row_index,
+                    valid["fix_id"],
+                    valid["individual"],
+                    valid["time_ms"],
+                )
+                if _row_is_analytically_excluded(
+                    raw,
+                    fix_key=fix_key,
+                    individual=valid["individual"],
+                    set_name=valid["set_name"],
+                    confirmed_fix_keys=confirmed_fix_key_set,
+                    confirmed_individual_tracks=confirmed_individual_track_set,
+                ):
+                    continue
+                if _filter_value_matches(raw.get(field_key), filter_spec):
+                    matched_rows.append(row_index)
+            return _compress_row_numbers(matched_rows), len(matched_rows)
+
+        previous_by_track: dict[tuple[str, str], tuple] = {}
+        file_order_regressed = False
+        for row_index, raw in enumerate(reader, start=1):
+            valid = _valid_movement_row(raw, columns)
+            if valid is None:
+                continue
+            fix_key = _make_fix_key(
+                row_index,
+                valid["fix_id"],
+                valid["individual"],
+                valid["time_ms"],
+            )
+            if _row_is_analytically_excluded(
+                raw,
+                fix_key=fix_key,
+                individual=valid["individual"],
+                set_name=valid["set_name"],
+                confirmed_fix_keys=confirmed_fix_key_set,
+                confirmed_individual_tracks=confirmed_individual_track_set,
+            ):
+                continue
+            track_key = (valid["individual"], valid["set_name"])
+            current = (row_index, valid["time_ms"], valid["lon"], valid["lat"])
+            previous = previous_by_track.get(track_key)
+            if previous is not None and current[1] < previous[1]:
+                file_order_regressed = True
+            value = _derived_filter_value(previous, current, field_key)
+            if _filter_value_matches(value, filter_spec):
+                matched_rows.append(row_index)
+            previous_by_track[track_key] = current
+
+    if not file_order_regressed:
+        return _compress_row_numbers(matched_rows), len(matched_rows)
+
+    records_by_track: dict[tuple[str, str], list[tuple]] = {}
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        columns = detect_columns(list(reader.fieldnames or []))
+        for row_index, raw in enumerate(reader, start=1):
+            valid = _valid_movement_row(raw, columns)
+            if valid is None:
+                continue
+            fix_key = _make_fix_key(
+                row_index,
+                valid["fix_id"],
+                valid["individual"],
+                valid["time_ms"],
+            )
+            if _row_is_analytically_excluded(
+                raw,
+                fix_key=fix_key,
+                individual=valid["individual"],
+                set_name=valid["set_name"],
+                confirmed_fix_keys=confirmed_fix_key_set,
+                confirmed_individual_tracks=confirmed_individual_track_set,
+            ):
+                continue
+            records_by_track.setdefault(
+                (valid["individual"], valid["set_name"]),
+                [],
+            ).append((row_index, valid["time_ms"], valid["lon"], valid["lat"]))
+
+    matched_rows = []
+    for records in records_by_track.values():
+        previous = None
+        for current in sorted(records, key=lambda item: (item[1], item[0])):
+            value = _derived_filter_value(previous, current, field_key)
+            if _filter_value_matches(value, filter_spec):
+                matched_rows.append(current[0])
+            previous = current
+    return _compress_row_numbers(matched_rows), len(matched_rows)
+
+
 def row_tokens_for_scope(scope: dict) -> set[str]:
     tokens = set()
     for start, end in normalize_row_ranges(scope.get("row_ranges") or []):
@@ -116,7 +295,9 @@ def normalize_annotation(raw: dict) -> dict:
     origin = str(raw.get("origin") or "manual").strip().lower()
     if origin not in VALID_ORIGINS:
         origin = "manual"
-    status = _normalize_review_status(raw.get("status"))
+    annotation_kind = str(raw.get("annotation_kind") or "issue").strip().lower()
+    raw_status = str(raw.get("status") or "").strip().lower()
+    status = "dismissed" if annotation_kind == "dismissal" or raw_status == "dismissed" else _normalize_review_status(raw_status)
     fix_keys = sorted({str(item).strip() for item in scope.get("fix_keys", []) if str(item).strip()})
     row_ranges = normalize_row_ranges(scope.get("row_ranges") or [])
     if not row_ranges and fix_keys:
@@ -140,18 +321,26 @@ def normalize_annotation(raw: dict) -> dict:
         if raw_review_ok not in (None, "")
         else None
     )
+    raw_decision = str(raw.get("review_decision") or "").strip().lower()
+    if raw_decision not in {"ok", "not_ok", "second_opinion"}:
+        raw_decision = "ok" if review_ok is True else "not_ok" if reviewed else ""
     return {
         "annotation_id": str(raw.get("annotation_id") or "").strip(),
         "step_id": str(raw.get("step_id") or "").strip(),
         "parent_annotation_id": str(raw.get("parent_annotation_id") or "").strip(),
-        "annotation_kind": str(raw.get("annotation_kind") or "issue").strip().lower(),
+        "annotation_kind": annotation_kind,
         "reviewed": reviewed,
         "review_ok": review_ok if reviewed else None,
+        "review_decision": raw_decision if reviewed else "",
+        "review_id": str(raw.get("review_id") or "").strip(),
+        "actor": dict(raw.get("actor") or {}) if isinstance(raw.get("actor"), dict) else {},
         "source_artifact": str(raw.get("source_artifact") or "").strip(),
         "source_dataset_id": str(raw.get("source_dataset_id") or "").strip(),
         "status": status,
         "origin": origin,
         "issue_type": str(raw.get("issue_type") or "").strip(),
+        "issue_field": str(raw.get("issue_field") or "").strip(),
+        "issue_threshold": str(raw.get("issue_threshold") or "").strip(),
         "comment": str(raw.get("comment") or raw.get("issue_note") or "").strip(),
         "owner_question": str(raw.get("owner_question") or "").strip(),
         "user": str(raw.get("user") or raw.get("review_user") or "").strip(),
@@ -161,6 +350,7 @@ def normalize_annotation(raw: dict) -> dict:
         "scope": {
             "kind": str(scope.get("kind") or "fix").strip().lower(),
             "row_ranges": row_ranges,
+            "filter": dict(scope.get("filter") or {}) if isinstance(scope.get("filter"), dict) else {},
             "burst_id": str(scope.get("burst_id") or "").strip(),
             "individual": str(scope.get("individual") or "").strip(),
             "set_name": str(scope.get("set_name") or "").strip(),
@@ -228,6 +418,207 @@ def annotation_applies(annotation: dict, *, fix_key: str, individual: str, set_n
     return fix_key in set(scope.get("fix_keys") or [])
 
 
+def _issue_payload(item: dict) -> dict:
+    scope = item.get("scope") or {}
+    return {
+        "status": str(item.get("status") or ""),
+        "issue_id": str(item.get("annotation_id") or item.get("issue_id") or ""),
+        "issue_type": str(item.get("issue_type") or ""),
+        "issue_field": str(item.get("issue_field") or ""),
+        "issue_threshold": str(item.get("issue_threshold") or ""),
+        "issue_note": str(item.get("comment") or item.get("issue_note") or ""),
+        "owner_question": str(item.get("owner_question") or ""),
+        "review_user": str(item.get("user") or item.get("review_user") or ""),
+        "reviewed_at": str(item.get("created_at") or item.get("reviewed_at") or ""),
+        "origin": str(item.get("origin") or "manual"),
+        "step_id": str(item.get("step_id") or ""),
+        "source_analysis_id": str(item.get("source_analysis_id") or ""),
+        "scope_kind": str(scope.get("kind") or item.get("scope_kind") or "fix"),
+        "scope_burst_id": str(scope.get("burst_id") or item.get("scope_burst_id") or ""),
+        "parent_annotation_id": str(item.get("parent_annotation_id") or ""),
+        "annotation_kind": str(item.get("annotation_kind") or "issue"),
+    }
+
+
+def effective_issues_for_fix(
+    annotations: list[dict],
+    *,
+    fix_key: str,
+    individual: str,
+    set_name: str,
+    existing_issues: list[dict] | None = None,
+) -> list[dict]:
+    """Return one effective record per parent suspicion for a movement fix."""
+    matching = [
+        item
+        for item in annotations
+        if item.get("status")
+        and annotation_applies(
+            item,
+            fix_key=fix_key,
+            individual=individual,
+            set_name=set_name,
+        )
+    ]
+    parents: dict[str, dict] = {}
+    resolutions: dict[str, list[dict]] = {}
+    for raw_issue in existing_issues or []:
+        issue = _issue_payload(raw_issue)
+        issue_id = issue["issue_id"]
+        parent_id = issue["parent_annotation_id"]
+        if issue["status"] == "suspected" and issue_id and not parent_id:
+            parents.setdefault(issue_id, issue)
+        elif issue["status"] == "confirmed" and not parent_id and issue_id:
+            parents.setdefault(issue_id, issue)
+    for item in matching:
+        issue = _issue_payload(item)
+        issue_id = issue["issue_id"]
+        parent_id = issue["parent_annotation_id"]
+        if parent_id:
+            resolutions.setdefault(parent_id, []).append(issue)
+        elif issue["status"] in {"suspected", "confirmed"} and issue_id:
+            parents.setdefault(issue_id, issue)
+
+    effective = []
+    for parent_id, parent in parents.items():
+        child_records = resolutions.get(parent_id, [])
+        confirmation = next(
+            (item for item in reversed(child_records) if item["status"] == "confirmed"),
+            None,
+        )
+        dismissal = next(
+            (item for item in reversed(child_records) if item["status"] == "dismissed"),
+            None,
+        )
+        resolution = confirmation or dismissal
+        status = (
+            "confirmed"
+            if confirmation or parent.get("status") == "confirmed"
+            else "dismissed"
+            if dismissal
+            else "suspected"
+        )
+        record = dict(parent)
+        record.update(
+            {
+                "status": status,
+                "parent_issue_id": parent_id,
+                "resolution_issue_id": str((resolution or {}).get("issue_id") or ""),
+                "resolution_step_id": str((resolution or {}).get("step_id") or ""),
+                "resolution_user": str((resolution or {}).get("review_user") or ""),
+                "resolution_note": str((resolution or {}).get("issue_note") or ""),
+                "resolved_at": str((resolution or {}).get("reviewed_at") or ""),
+            }
+        )
+        effective.append(record)
+    return effective
+
+
+def effective_review_status(effective_issues: list[dict]) -> str:
+    if any(item.get("status") == "confirmed" for item in effective_issues):
+        return "confirmed"
+    if any(item.get("status") == "suspected" for item in effective_issues):
+        return "suspected"
+    return ""
+
+
+def apply_review_annotation_counts(
+    summary: dict,
+    source_path: Path,
+    annotations: list[dict],
+    *,
+    source_artifact: str,
+) -> dict:
+    """Attach reliable effective review counts even when overview fixes are capped."""
+    relevant = [
+        item
+        for item in annotations
+        if item.get("status")
+        and (not item.get("source_artifact") or item.get("source_artifact") == source_artifact)
+    ]
+    counts = {"suspected": 0, "confirmed": 0}
+    by_individual: dict[str, dict] = {}
+    with source_path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        columns = detect_columns(list(reader.fieldnames or []))
+        for row_index, raw in enumerate(reader, start=1):
+            valid = _valid_movement_row(raw, columns)
+            if valid is None:
+                continue
+            fix_key = _make_fix_key(
+                row_index,
+                valid["fix_id"],
+                valid["individual"],
+                valid["time_ms"],
+            )
+            source_issue = source_row_annotation(
+                raw,
+                fix_key=fix_key,
+                source_artifact=source_artifact,
+            )
+            effective = effective_issues_for_fix(
+                relevant,
+                fix_key=fix_key,
+                individual=valid["individual"],
+                set_name=valid["set_name"],
+                existing_issues=[source_issue] if source_issue else [],
+            )
+            status = effective_review_status(effective)
+            if status not in counts:
+                continue
+            counts[status] += 1
+            individual_counts = by_individual.setdefault(
+                valid["individual"],
+                {
+                    "suspected": 0,
+                    "confirmed": 0,
+                    "issue_types": set(),
+                    "origins": set(),
+                },
+            )
+            individual_counts[status] += 1
+            for issue in effective:
+                if issue.get("status") != "suspected":
+                    continue
+                if issue.get("issue_type"):
+                    individual_counts["issue_types"].add(str(issue["issue_type"]))
+                if issue.get("origin"):
+                    individual_counts["origins"].add(str(issue["origin"]))
+
+    result = dict(summary)
+    result["review_counts"] = counts
+    result["unresolved_suspected_count"] = counts["suspected"]
+    stats_by_individual = {
+        individual: dict(stats)
+        for individual, stats in (summary.get("stats") or {}).items()
+    }
+    for individual in sorted(set(stats_by_individual) | set(by_individual)):
+        stats = stats_by_individual.setdefault(individual, {})
+        individual_counts = by_individual.get(individual, {})
+        stats["suspected_count"] = int(individual_counts.get("suspected", 0))
+        stats["unresolved_suspected_count"] = stats["suspected_count"]
+        stats["confirmed_count"] = int(individual_counts.get("confirmed", 0))
+        stats["unresolved_issue_types"] = sorted(individual_counts.get("issue_types", set()))
+        stats["unresolved_issue_origins"] = sorted(individual_counts.get("origins", set()))
+    result["stats"] = stats_by_individual
+    return result
+
+
+def unresolved_suspicion_pairs(annotations: list[dict]) -> set[tuple[str, str]]:
+    """Return unresolved (parent id, row token) pairs for guarded resolutions."""
+    parents: set[tuple[str, str]] = set()
+    resolved: set[tuple[str, str]] = set()
+    for item in annotations:
+        parent_id = str(item.get("parent_annotation_id") or "")
+        tokens = row_tokens_for_scope(item.get("scope") or {})
+        if item.get("status") == "suspected" and not parent_id:
+            issue_id = str(item.get("annotation_id") or "")
+            parents.update((issue_id, token) for token in tokens if issue_id)
+        elif parent_id and item.get("status") in {"confirmed", "dismissed"}:
+            resolved.update((parent_id, token) for token in tokens)
+    return parents - resolved
+
+
 def confirmed_exclusion_scopes(
     annotations: list[dict],
     *,
@@ -273,41 +664,38 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
             for item in relevant_issues
             if annotation_applies(item, fix_key=fix_key, individual=individual, set_name=set_name)
         ]
-        if not matches:
+        existing_review = dict(fix.get("review") or {})
+        existing_issues = list(existing_review.get("issues") or [])
+        if not matches and not existing_issues:
             continue
         fix = dict(fix)
-        review = dict(fix.get("review") or {})
-        issues = list(review.get("issues") or [])
+        review = existing_review
+        issues = existing_issues
         for item in matches:
-            issues.append(
-                {
-                    "status": item["status"],
-                    "issue_id": item["annotation_id"],
-                    "issue_type": item["issue_type"],
-                    "issue_note": item["comment"],
-                    "owner_question": item["owner_question"],
-                    "review_user": item["user"],
-                    "reviewed_at": item["created_at"],
-                    "origin": item["origin"],
-                    "step_id": item["step_id"],
-                    "source_analysis_id": item["source_analysis_id"],
-                    "scope_kind": item["scope"].get("kind"),
-                    "scope_burst_id": item["scope"].get("burst_id"),
-                    "parent_annotation_id": item["parent_annotation_id"],
-                    "annotation_kind": item["annotation_kind"],
-                }
-            )
-        latest = matches[-1]
+            issues.append(_issue_payload(item))
+        effective_issues = effective_issues_for_fix(
+            relevant_issues,
+            fix_key=fix_key,
+            individual=individual,
+            set_name=set_name,
+            existing_issues=existing_issues,
+        )
+        status = effective_review_status(effective_issues)
+        visible_issues = [item for item in effective_issues if item.get("status") != "dismissed"]
+        latest = (visible_issues or effective_issues or issues)[-1]
         review.update(
             {
-                "status": "confirmed" if any(item.get("status") == "confirmed" for item in issues) else "suspected",
-                "issue_id": latest["annotation_id"],
-                "issue_type": latest["issue_type"],
-                "issue_note": latest["comment"],
-                "owner_question": latest["owner_question"],
-                "review_user": latest["user"],
-                "reviewed_at": latest["created_at"],
+                "status": status,
+                "issue_id": latest.get("parent_issue_id") or latest.get("issue_id") or "",
+                "issue_type": latest.get("issue_type") or "",
+                "issue_field": latest.get("issue_field") or "",
+                "issue_threshold": latest.get("issue_threshold") or "",
+                "issue_note": latest.get("issue_note") or "",
+                "owner_question": latest.get("owner_question") or "",
+                "review_user": latest.get("review_user") or "",
+                "reviewed_at": latest.get("reviewed_at") or "",
                 "issues": issues,
+                "effective_issues": effective_issues,
             }
         )
         fix["review"] = review
@@ -347,7 +735,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
                 "start_time_ms": int(segment_fixes[0].get("time_ms") or 0),
                 "end_time_ms": int(segment_fixes[-1].get("time_ms") or 0),
                 "fix_count": len(segment_fixes),
-                "status": item["status"],
+                "status": str((fix_by_key.get(str(segment_fixes[0].get("fix_key") or ""), {}).get("review") or {}).get("status") or item["status"]),
                 "issue_type": item["issue_type"],
                 "issue_note": item["comment"],
                 "owner_question": item["owner_question"],
@@ -370,6 +758,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
         individual: {
             "reviewed": True,
             "review_ok": bool(item.get("review_ok")),
+            "review_decision": str(item.get("review_decision") or ""),
             "review_user": item.get("user") or "",
             "reviewed_at": item.get("created_at") or "",
             "review_comment": item.get("comment") or "",
@@ -387,6 +776,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
             {
                 "reviewed": bool(decision),
                 "review_ok": bool(decision.get("review_ok")) if decision else False,
+                "review_decision": str(decision.get("review_decision") or "") if decision else "",
                 "review_user": str(decision.get("user") or "") if decision else "",
                 "reviewed_at": str(decision.get("created_at") or "") if decision else "",
                 "review_comment": str(decision.get("comment") or "") if decision else "",
@@ -441,41 +831,37 @@ def apply_annotations_to_report_records(
                 set_name=str(record.get("set_name") or "train"),
             )
         ]
-        if not matches:
-            continue
         review = dict(record.get("review") or {})
-        issues = list(review.get("issues") or [])
+        existing_issues = list(review.get("issues") or [])
+        if not matches and not existing_issues:
+            continue
+        issues = existing_issues
         for item in matches:
-            issues.append(
-                {
-                    "status": item["status"],
-                    "issue_id": item["annotation_id"],
-                    "issue_type": item["issue_type"],
-                    "issue_note": item["comment"],
-                    "owner_question": item["owner_question"],
-                    "review_user": item["user"],
-                    "reviewed_at": item["created_at"],
-                    "origin": item["origin"],
-                    "step_id": item["step_id"],
-                    "scope_kind": item["scope"].get("kind"),
-                    "scope_burst_id": item["scope"].get("burst_id"),
-                    "parent_annotation_id": item["parent_annotation_id"],
-                    "annotation_kind": item["annotation_kind"],
-                }
-            )
-        latest = matches[-1]
+            issues.append(_issue_payload(item))
+        fix_key = str(record.get("fix_key") or "")
+        effective_issues = effective_issues_for_fix(
+            relevant,
+            fix_key=fix_key,
+            individual=str(record.get("individual") or ""),
+            set_name=str(record.get("set_name") or "train"),
+            existing_issues=existing_issues,
+        )
+        status = effective_review_status(effective_issues)
+        visible_issues = [item for item in effective_issues if item.get("status") != "dismissed"]
+        latest = (visible_issues or effective_issues or issues)[-1]
         review.update(
             {
-                "status": "confirmed"
-                if any(item.get("status") == "confirmed" for item in issues)
-                else "suspected",
-                "issue_id": latest["annotation_id"],
-                "issue_type": latest["issue_type"],
-                "issue_note": latest["comment"],
-                "owner_question": latest["owner_question"],
-                "review_user": latest["user"],
-                "reviewed_at": latest["created_at"],
+                "status": status,
+                "issue_id": latest.get("parent_issue_id") or latest.get("issue_id") or "",
+                "issue_type": latest.get("issue_type") or "",
+                "issue_field": latest.get("issue_field") or "",
+                "issue_threshold": latest.get("issue_threshold") or "",
+                "issue_note": latest.get("issue_note") or "",
+                "owner_question": latest.get("owner_question") or "",
+                "review_user": latest.get("review_user") or "",
+                "reviewed_at": latest.get("reviewed_at") or "",
                 "issues": issues,
+                "effective_issues": effective_issues,
             }
         )
         record["review"] = review
@@ -498,8 +884,16 @@ def export_reviewed_csv(
     source_artifact: str,
     sidecar_path: Path | None = None,
     annotation_step_ids: dict[str, str] | None = None,
+    allowed_individual_review_annotation_ids: set[str] | None = None,
 ) -> dict:
     annotations = load_review_annotations(sidecar_path)
+    if allowed_individual_review_annotation_ids is not None:
+        annotations = [
+            item
+            for item in annotations
+            if item.get("annotation_kind") != "individual_review"
+            or item.get("annotation_id") in allowed_individual_review_annotation_ids
+        ]
     reviews_by_individual = individual_review_decisions(
         annotations,
         source_artifact=source_artifact,
@@ -541,42 +935,53 @@ def export_reviewed_csv(
                 set_name = "train"
             valid = bool(individual and time_ms is not None and is_valid_coordinate(lon, lat))
             fix_key = _make_fix_key(row_index, fix_id, individual, time_ms) if valid else ""
-            active = []
+            source_annotation = None
+            matching_annotations = []
             if valid:
                 source_annotation = source_row_annotation(
                     raw,
                     fix_key=fix_key,
                     source_artifact=source_artifact,
                 )
-                if source_annotation:
-                    active.append(source_annotation)
-                active.extend(
+                matching_annotations.extend(
                     item
                     for item in annotations
                     if (not item["source_artifact"] or item["source_artifact"] == source_artifact)
                     and item["status"]
                     and annotation_applies(item, fix_key=fix_key, individual=individual, set_name=set_name)
                 )
-            source_manual = _flag_is_true(raw.get("manually-marked-outlier"))
-            source_algorithm = _flag_is_true(raw.get("algorithm-marked-outlier"))
+            effective_issues = effective_issues_for_fix(
+                matching_annotations,
+                fix_key=fix_key,
+                individual=individual,
+                set_name=set_name,
+                existing_issues=[source_annotation] if source_annotation else [],
+            ) if valid else []
+            active = [item for item in effective_issues if item.get("status") != "dismissed"]
+            source_dismissed = bool(source_annotation) and not any(
+                item.get("parent_issue_id") == source_annotation.get("annotation_id")
+                and item.get("status") != "dismissed"
+                for item in effective_issues
+            )
+            source_manual = _flag_is_true(raw.get("manually-marked-outlier")) and not source_dismissed
+            source_algorithm = _flag_is_true(raw.get("algorithm-marked-outlier")) and not source_dismissed
             manual = source_manual or any(item["origin"] == "manual" for item in active)
             algorithm = source_algorithm or any(item["origin"] in {"threshold", "algorithm"} for item in active)
-            source_status = _normalize_review_status(raw.get("outlier_status"))
-            confirmed = source_status == "confirmed" or any(item["status"] == "confirmed" for item in active)
+            confirmed = any(item["status"] == "confirmed" for item in active)
             flagged = manual or algorithm or bool(active)
-            suspected = source_status == "suspected" or any(item["status"] == "suspected" for item in active)
+            suspected = any(item["status"] == "suspected" for item in active)
             status = "confirmed" if confirmed else "suspected" if suspected else ""
             issue_types = [
                 item.strip()
                 for item in str(raw.get("outlier_issue_type") or "").split(";")
-                if item.strip()
+                if item.strip() and not source_dismissed
             ]
             for item in active:
                 issue_type = str(item.get("issue_type") or "").strip()
                 if issue_type and issue_type not in issue_types:
                     issue_types.append(issue_type)
             comments = []
-            existing_comment = str(raw.get("outlier_comments") or "").strip()
+            existing_comment = str(raw.get("outlier_comments") or "").strip() if not source_dismissed else ""
             for comment in existing_comment.split(";"):
                 comment = comment.strip()
                 if comment and comment not in comments:
@@ -595,12 +1000,15 @@ def export_reviewed_csv(
                 if item.strip()
             ]
             for item in active:
-                annotation_id = str(item.get("annotation_id") or "").strip()
+                annotation_id = str(item.get("annotation_id") or item.get("issue_id") or "").strip()
                 step_id = str(item.get("step_id") or step_id_by_annotation.get(annotation_id) or "").strip()
                 if not step_id and annotation_id.startswith("step_"):
                     step_id = annotation_id
                 if step_id and step_id not in flag_step_ids:
                     flag_step_ids.append(step_id)
+                resolution_step_id = str(item.get("resolution_step_id") or "").strip()
+                if resolution_step_id and resolution_step_id not in flag_step_ids:
+                    flag_step_ids.append(resolution_step_id)
             output_row = {name: raw.get(name, "") for name in output_fields}
             output_row["visible"] = "true" if _original_visible(raw.get("visible")) and not confirmed else "false"
             output_row["manually-marked-outlier"] = "true" if manual else "false"
@@ -611,6 +1019,11 @@ def export_reviewed_csv(
                 "true"
                 if individual_review and individual_review.get("review_ok")
                 else "false"
+            )
+            output_row["individual-review-decision"] = (
+                str(individual_review.get("review_decision") or "")
+                if individual_review
+                else ""
             )
             output_row["outlier_status"] = status
             output_row["outlier_issue_type"] = "; ".join(issue_types)

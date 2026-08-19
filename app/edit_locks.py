@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
-from typing import Iterator
+from typing import Callable, Iterator
 
 from .execution import create_step, undo_to_parent
 from .state import (
@@ -238,6 +238,7 @@ def create_guarded_step(
     selected_dataset_id: str,
     expected_current_dataset_id: str,
     additional_blockers: list[dict] | None = None,
+    preflight: Callable[[], None] | None = None,
 ) -> dict:
     project_dir = project_dir.resolve()
     with project_mutation_lock(project_dir):
@@ -245,6 +246,8 @@ def create_guarded_step(
         current_dataset_id = str(state["current_dataset_id"])
         if current_dataset_id != str(expected_current_dataset_id or ""):
             raise EditConflictError("Current dataset changed; reload before editing")
+        if preflight is not None:
+            preflight()
         require_editable_dataset(
             project_dir,
             selected_dataset_id,
@@ -259,6 +262,7 @@ def undo_guarded(
     project_dir: Path,
     *,
     expected_current_dataset_id: str,
+    preflight: Callable[[], None] | None = None,
 ) -> dict:
     project_dir = project_dir.resolve()
     with project_mutation_lock(project_dir):
@@ -266,6 +270,8 @@ def undo_guarded(
         current_dataset_id = str(state["current_dataset_id"])
         if current_dataset_id != str(expected_current_dataset_id or ""):
             raise EditConflictError("Current dataset changed; reload before undoing")
+        if preflight is not None:
+            preflight()
         return undo_to_parent(project_dir)
 
 
@@ -299,6 +305,7 @@ def resume_from_dataset(
     expected_current_dataset_id: str,
     resume_token: str,
     user: str,
+    preflight: Callable[[], None] | None = None,
 ) -> dict:
     project_dir = project_dir.resolve()
     normalized_user = normalize_user(user)
@@ -307,6 +314,8 @@ def resume_from_dataset(
         current_dataset_id = str(state["current_dataset_id"])
         if current_dataset_id != str(expected_current_dataset_id or ""):
             raise EditConflictError("Current dataset changed; reopen the Resume confirmation")
+        if preflight is not None:
+            preflight()
         plan = _resume_plan(project_dir, selected_dataset_id)
         if not plan["discard_dataset_ids"]:
             raise ProjectStateError("Selected dataset has no forward history to discard")

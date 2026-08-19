@@ -27,6 +27,9 @@ def main():
         Path(output["path"]),
         source_artifact=target_artifact,
         sidecar_path=Path(sidecar["path"]) if sidecar else None,
+        allowed_individual_review_annotation_ids=set(
+            params.get("valid_individual_review_annotation_ids") or []
+        ) if params.get("review_id") else None,
     )
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 

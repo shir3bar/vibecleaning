@@ -39,9 +39,12 @@ def main():
             "status": "",
             "origin": "manual",
             "reviewed": True,
-            "review_ok": bool(decision.get("review_ok")),
+            "review_decision": str(decision.get("review_decision") or "").strip(),
+            "review_ok": str(decision.get("review_decision") or "").strip() == "ok",
             "comment": str(decision.get("comment") or "").strip(),
             "user": str(params.get("user") or "").strip(),
+            "actor": dict(params.get("actor") or {}),
+            "review_id": str(params.get("review_id") or "").strip(),
             "created_at": created_at,
             "scope": {
                 "kind": "individual",
@@ -57,7 +60,7 @@ def main():
     output_path = Path(output["path"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        json.dumps({"schema_version": 4, "annotations": annotations}, indent=2, sort_keys=True) + "\n",
+        json.dumps({"schema_version": 5, "annotations": annotations}, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     summary_path.write_text(
@@ -67,6 +70,9 @@ def main():
                 "action": "review_individuals",
                 "reviewed_individual_count": len(appended),
                 "reviewed_ok_count": sum(1 for item in appended if item["review_ok"]),
+                "second_opinion_count": sum(
+                    1 for item in appended if item["review_decision"] == "second_opinion"
+                ),
                 "source_artifact": target_artifact,
             },
             indent=2,
