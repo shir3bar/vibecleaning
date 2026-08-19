@@ -305,6 +305,9 @@ class MovementExampleApp {
     this.osmContextError = "";
     this.osmContextStatus = "idle";
     this.currentTimeMs = 0;
+    this.temporalFocusRenderFrame = null;
+    this.lastThresholdMatchKeys = new Set();
+    this.lastCandidateMatchKeys = new Set();
     this.loadRequestId = 0;
     this.studyLoadId = 0;
     this.datasetLoadId = 0;
@@ -3711,7 +3714,7 @@ class MovementExampleApp {
     this.refs.slider.addEventListener("input", () => {
       this.currentTimeMs = Number(this.refs.slider.value) || 0;
       this.updateTimeLabel();
-      this.renderLayers();
+      this.scheduleTemporalFocusRender();
     });
     this.refs.thresholdPane.addEventListener("click", event => this.handleThresholdPaneClick(event));
     this.refs.thresholdPane.addEventListener("change", event => this.handleThresholdPaneChange(event));
@@ -9067,7 +9070,85 @@ class MovementExampleApp {
     this.refs.mapAttribution.classList.add("hidden");
   }
 
-  renderLayers() {
+  scheduleTemporalFocusRender() {
+    if (this.temporalFocusRenderFrame !== null) return;
+    this.temporalFocusRenderFrame = window.requestAnimationFrame(() => {
+      this.temporalFocusRenderFrame = null;
+      this.renderLayers({ temporalOnly: true });
+    });
+  }
+
+  getTemporalBackgroundPoints(visibleIndividuals, visibleSetNames) {
+    const cacheKey = [
+      [...visibleIndividuals].sort().join("|"),
+      [...visibleSetNames].sort().join("|"),
+    ].join("::");
+    const cache = this.data.temporalBackgroundPointCache;
+    if (cache.has(cacheKey)) return cache.get(cacheKey);
+    const points = [];
+    for (const [trackKey, fixes] of this.data.eligibleFixesByTrack || []) {
+      const first = fixes[0];
+      if (
+        !first
+        || !visibleIndividuals.has(first.individual)
+        || !visibleSetNames.has(first.setName)
+      ) {
+        continue;
+      }
+      for (const fix of fixes) {
+        points.push({
+          fixKey: fix.fixKey,
+          individual: fix.individual,
+          setName: fix.setName,
+          trackKey,
+          position: fix.position,
+        });
+      }
+    }
+    cache.set(cacheKey, points);
+    return points;
+  }
+
+  buildTemporalFocalData(visibleIndividuals, visibleSetNames) {
+    const points = [];
+    const steps = [];
+    for (const fixes of this.data.eligibleFixesByTrack?.values() || []) {
+      const first = fixes[0];
+      if (
+        !first
+        || !visibleIndividuals.has(first.individual)
+        || !visibleSetNames.has(first.setName)
+      ) {
+        continue;
+      }
+      const focusIndex = nearestTrackFixIndex(fixes, this.currentTimeMs);
+      if (focusIndex < 0) continue;
+      const startIndex = Math.max(0, focusIndex - 1);
+      const endIndex = Math.min(fixes.length - 1, focusIndex + 1);
+      for (let index = startIndex; index <= endIndex; index += 1) {
+        const fix = fixes[index];
+        points.push({
+          fixKey: fix.fixKey,
+          individual: fix.individual,
+          position: fix.position,
+          color: this.colorForFix(fix),
+          focal: index === focusIndex,
+        });
+        if (index > startIndex) {
+          const previous = fixes[index - 1];
+          steps.push({
+            stepKey: `${previous.fixKey}->${fix.fixKey}`,
+            individual: fix.individual,
+            path: [previous.position, fix.position],
+            color: this.colorForFix(fix),
+          });
+        }
+      }
+    }
+    return { points, steps };
+  }
+
+  renderLayers({ temporalOnly = false } = {}) {
     this.renderBurstCountIndicator();
     this.syncFixPopupVisibility();
     if (!this.data || !this.overlay || !this.mapLoaded) {
@@ -9082,9 +9163,15 @@ class MovementExampleApp {
 
     const visibleIndividuals = new Set(this.data.selectedIndividuals);
     const visibleSetNames = this.getVisibleSetNames();
+    const showPoints = this.refs.showPoints.checked;
     const pathData = [];
     const sourceFlaggedPathData = [];
-    const pointData = [];
+    const pointData = showPoints
+      ? this.getTemporalBackgroundPoints(visibleIndividuals, visibleSetNames)
+      : [];
+    const temporalFocalData = showPoints
+      ? this.buildTemporalFocalData(visibleIndividuals, visibleSetNames)
+      : { points: [], steps: [] };
     const thresholdPointData = [];
     const selectedThresholdPointData = [];
     const candidatePointData = [];
@@ -9092,12 +9179,10 @@ class MovementExampleApp {
     const selectedPointData = [];
     const suspectedPointData = [];
     const confirmedPointData = [];
-    const cursorData = [];
-    const showPoints = this.refs.showPoints.checked;
     const showSuspectedOutlines = this.data.suspiciousState === "loaded";
     if (this.refs.showConfirmed.checked) {
       const seenConfirmed = new Set();
-      for (const fix of this.data.fixes || []) {
+      for (const fix of this.data.confirmedPointFixes || []) {
         if (
           fix.review?.status !== "confirmed"
           || !visibleIndividuals.has(fix.individual)
@@ -9154,8 +9239,16 @@ class MovementExampleApp {
           : []),
       ]
       : [];
-    const thresholdMatchKeys = showPoints ? this.getActiveThresholdMatchKeys() : new Set();
-    const candidateMatchKeys = showPoints ? this.getCandidateQueryMatchKeys() : new Set();
+    const thresholdMatchKeys = showPoints
+      ? temporalOnly ? this.lastThresholdMatchKeys : this.getActiveThresholdMatchKeys()
+      : new Set();
+    const candidateMatchKeys = showPoints
+      ? temporalOnly ? this.lastCandidateMatchKeys : this.getCandidateQueryMatchKeys()
+      : new Set();
+    if (!temporalOnly) {
+      this.lastThresholdMatchKeys = thresholdMatchKeys;
+      this.lastCandidateMatchKeys = candidateMatchKeys;
+    }
     const focusedRankingBurstFixes = this.getFocusedRankingBurstFixes();
     const focusedRankingBurstPoints = focusedRankingBurstFixes.map(fix => ({
       fixKey: fix.fixKey,
@@ -9172,8 +9265,6 @@ class MovementExampleApp {
     const queueDimKey = this.individualReviewQueue.mode === "queue"
       ? `queue:${this.queueActiveIndividual()}`
       : "browse";
-    const focusDimKey = `${focusedBurstId}|${hasFocusedRankingBurst ? 1 : 0}`;
-
     if (showSuspectedOutlines) {
       const seenSuspected = new Set();
       for (const fix of this.data.suspiciousFixes || []) {
@@ -9199,48 +9290,49 @@ class MovementExampleApp {
       }
       for (const setName of visibleSetNames) {
         const suppressBaseTrack = suppressedBaseTrackKeys.has(movementTrackKey(individual, setName));
-        const exactFixes = this.getExactVisibleTrackFixes(individual, setName);
-        const series = this.buildVisibleTrackSeries(individual, setName, exactFixes);
-        if (!series) {
+        if (suppressBaseTrack) {
           continue;
         }
-        if (!suppressBaseTrack && series.positions.length >= 2) {
-          const trackKey = movementTrackKey(individual, setName);
-          let cachedPaths = this.data.baseTrackPathCache.get(trackKey);
-          if (!cachedPaths) {
-            const trackColor = splitColor(this.data.individualPalette[individual], setName, PATH_ALPHA);
-            cachedPaths = exactFixes.length >= 2
-              ? buildSourceAwareTrackPaths(exactFixes, trackColor)
-                .map(path => ({ ...path, individual }))
-              : [{
-                path: series.positions,
-                color: trackColor,
-                sourceFlagged: false,
-                individual,
-              }];
-            this.data.baseTrackPathCache.set(trackKey, cachedPaths);
+        const trackKey = movementTrackKey(individual, setName);
+        let cachedPaths = this.data.baseTrackPathCache.get(trackKey);
+        if (!cachedPaths) {
+          const exactFixes = this.getExactVisibleTrackFixes(individual, setName);
+          const series = this.buildVisibleTrackSeries(individual, setName, exactFixes);
+          if (!series || series.positions.length < 2) {
+            continue;
           }
-          for (const path of cachedPaths) {
-            (path.sourceFlagged ? sourceFlaggedPathData : pathData).push(path);
-          }
+          const trackColor = splitColor(this.data.individualPalette[individual], setName, PATH_ALPHA);
+          cachedPaths = exactFixes.length >= 2
+            ? buildSourceAwareTrackPaths(exactFixes, trackColor)
+              .map(path => ({ ...path, individual }))
+            : [{
+              path: series.positions,
+              color: trackColor,
+              sourceFlagged: false,
+              individual,
+            }];
+          this.data.baseTrackPathCache.set(trackKey, cachedPaths);
         }
-        const cursorPosition = interpolateSeriesPosition(series, this.currentTimeMs);
-        if (cursorPosition) {
-          cursorData.push({ position: cursorPosition });
+        for (const path of cachedPaths) {
+          (path.sourceFlagged ? sourceFlaggedPathData : pathData).push(path);
         }
       }
     }
 
     if (showPoints) {
-      for (const fix of this.data.fixes) {
-        if (
-          fix.analyticallyExcluded
-          || fix.review?.status === "confirmed"
-          || !visibleIndividuals.has(fix.individual)
-          || !visibleSetNames.has(fix.setName)
-        ) {
-          continue;
-        }
+      const visibleFix = fixKey => {
+        const fix = this.data.fixByKey.get(fixKey);
+        return fix
+          && !fix.analyticallyExcluded
+          && fix.review?.status !== "confirmed"
+          && visibleIndividuals.has(fix.individual)
+          && visibleSetNames.has(fix.setName)
+          ? fix
+          : null;
+      };
+      for (const fixKey of this.data.selectedFixKeys) {
+        const fix = visibleFix(fixKey);
+        if (!fix) continue;
         const point = {
           fixKey: fix.fixKey,
           individual: fix.individual,
@@ -9248,39 +9340,23 @@ class MovementExampleApp {
           position: fix.position,
           color: this.colorForFix(fix),
         };
-        if (this.data.selectedFixKeys.has(fix.fixKey)) {
-          selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
-          if (thresholdMatchKeys.has(fix.fixKey)) {
-            selectedThresholdPointData.push({
-              fixKey: fix.fixKey,
-              individual: fix.individual,
-              position: fix.position,
-            });
-          }
-          if (candidateMatchKeys.has(fix.fixKey)) {
-            selectedCandidatePointData.push({
-              fixKey: fix.fixKey,
-              individual: fix.individual,
-              position: fix.position,
-            });
-          }
-        } else {
-          pointData.push(point);
-          if (thresholdMatchKeys.has(fix.fixKey)) {
-            thresholdPointData.push({
-              fixKey: fix.fixKey,
-              individual: fix.individual,
-              position: fix.position,
-            });
-          }
-          if (candidateMatchKeys.has(fix.fixKey)) {
-            candidatePointData.push({
-              fixKey: fix.fixKey,
-              individual: fix.individual,
-              position: fix.position,
-            });
-          }
-        }
+        selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
+      }
+      for (const fixKey of thresholdMatchKeys) {
+        const fix = visibleFix(fixKey);
+        if (!fix) continue;
+        const target = this.data.selectedFixKeys.has(fixKey)
+          ? selectedThresholdPointData
+          : thresholdPointData;
+        target.push({ fixKey, individual: fix.individual, position: fix.position });
+      }
+      for (const fixKey of candidateMatchKeys) {
+        const fix = visibleFix(fixKey);
+        if (!fix) continue;
+        const target = this.data.selectedFixKeys.has(fixKey)
+          ? selectedCandidatePointData
+          : candidatePointData;
+        target.push({ fixKey, individual: fix.individual, position: fix.position });
       }
     }
 
@@ -9315,12 +9391,9 @@ class MovementExampleApp {
         data: sourceFlaggedPathData,
         dataComparator: sameArrayItems,
         getPath: item => item.path,
-        getColor: item => this.queueMapColor(item.color, item.individual),
+        getColor: [126, 134, 143, 16],
         getWidth: 1.5,
         widthMinPixels: 1,
-        updateTriggers: {
-          getColor: queueDimKey,
-        },
         pickable: false,
       }),
     );
@@ -9330,20 +9403,26 @@ class MovementExampleApp {
         data: pathData,
         dataComparator: sameArrayItems,
         getPath: item => item.path,
-        getColor: item => this.queueMapColor(
-          hasFocusedRankingBurst
-            ? this.mutedRankingContextColor(item.color, 34)
-            : item.color,
-          item.individual,
-        ),
+        getColor: [126, 134, 143, 28],
         getWidth: 2.5,
         widthMinPixels: 2,
-        updateTriggers: {
-          getColor: [queueDimKey, focusDimKey],
-        },
         pickable: false,
       }),
     );
+
+    if (temporalFocalData.steps.length) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-temporal-focal-steps",
+          data: temporalFocalData.steps,
+          getPath: item => item.path,
+          getColor: item => item.color,
+          getWidth: 4.5,
+          widthMinPixels: 3,
+          pickable: false,
+        }),
+      );
+    }
 
     if (visibleFlaggedSteps.length) {
       layers.push(
@@ -9472,45 +9551,40 @@ class MovementExampleApp {
       );
     }
 
-    if (tableSelectionEndpointData.length) {
-      layers.push(
-        new deck.ScatterplotLayer({
-          id: "movement-table-selection-endpoints",
-          data: tableSelectionEndpointData,
-          getPosition: item => item.position,
-          getFillColor: item => item.role === "start"
-            ? [87, 218, 174, 245]
-            : [244, 114, 182, 245],
-          getLineColor: [255, 255, 255, 245],
-          filled: true,
-          stroked: true,
-          lineWidthMinPixels: 2,
-          getRadius: 118,
-          radiusMinPixels: 7,
-          radiusMaxPixels: 14,
-          pickable: false,
-        }),
-      );
-    }
-
     if (showPoints) {
       layers.push(
         new deck.ScatterplotLayer({
           id: "movement-points",
           data: pointData,
+          dataComparator: sameArrayItems,
           getPosition: item => item.position,
-          getFillColor: item => this.queueMapColor(
-            hasFocusedRankingBurst
-              ? this.mutedRankingContextColor(item.color, 42)
-              : item.color,
-            item.individual,
-          ),
-          getRadius: 80,
-          radiusMinPixels: 4,
-          radiusMaxPixels: 10,
+          getFillColor: [132, 140, 149, 34],
+          getRadius: 68,
+          radiusMinPixels: 3,
+          radiusMaxPixels: 8,
           pickable: true,
         }),
       );
+      if (temporalFocalData.points.length) {
+        layers.push(
+          new deck.ScatterplotLayer({
+            id: "movement-temporal-focal-points",
+            data: temporalFocalData.points,
+            getPosition: item => item.position,
+            getFillColor: item => item.color,
+            getLineColor: item => item.focal
+              ? [255, 255, 255, 250]
+              : [255, 255, 255, 105],
+            filled: true,
+            stroked: true,
+            lineWidthMinPixels: 1.5,
+            getRadius: item => item.focal ? 122 : 96,
+            radiusMinPixels: 6,
+            radiusMaxPixels: 15,
+            pickable: true,
+          }),
+        );
+      }
       layers.push(
         new deck.ScatterplotLayer({
           id: "movement-suspected-outline",
@@ -9628,6 +9702,27 @@ class MovementExampleApp {
       );
     }
 
+    if (tableSelectionEndpointData.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-table-selection-endpoints",
+          data: tableSelectionEndpointData,
+          getPosition: item => item.position,
+          getFillColor: item => item.role === "start"
+            ? [87, 218, 174, 245]
+            : [244, 114, 182, 245],
+          getLineColor: [255, 255, 255, 245],
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 2,
+          getRadius: 118,
+          radiusMinPixels: 7,
+          radiusMaxPixels: 14,
+          pickable: false,
+        }),
+      );
+    }
+
     if (tableSelectedPointData.length) {
       layers.push(
         new deck.ScatterplotLayer({
@@ -9660,25 +9755,6 @@ class MovementExampleApp {
           getRadius: 146,
           radiusMinPixels: 7,
           radiusMaxPixels: 16,
-          pickable: false,
-        }),
-      );
-    }
-
-    if (cursorData.length) {
-      layers.push(
-        new deck.ScatterplotLayer({
-          id: "movement-cursor",
-          data: cursorData,
-          getPosition: item => item.position,
-          getFillColor: [10, 10, 10, 255],
-          getLineColor: [255, 255, 255, 235],
-          stroked: true,
-          filled: true,
-          getRadius: 68,
-          radiusMinPixels: 4,
-          radiusMaxPixels: 8,
-          lineWidthMinPixels: 1.5,
           pickable: false,
         }),
       );
@@ -14221,6 +14297,7 @@ function refreshMovementFixCollections(data) {
   data.fixes = Array.from(merged.values())
     .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
   data.fixByKey = new Map(data.fixes.map(fix => [fix.fixKey, fix]));
+  data.confirmedPointFixes = data.fixes.filter(fix => fix.review?.status === "confirmed");
   data.overviewFixesByTrack = buildMovementFixTrackIndex(data.overviewFixes || []);
   data.detailFixesByTrack = buildMovementFixTrackIndex(data.detailFixes || []);
   data.eligibleFixesByTrack = buildMovementFixTrackIndex(data.fixes);
@@ -14229,6 +14306,7 @@ function refreshMovementFixCollections(data) {
   data.allTrackPositionByFixKey = buildMovementTrackPositionLookup(data.allFixesByTrack);
   data.flaggedStepOverlays = buildFlaggedStepOverlays(data);
   data.baseTrackPathCache = new Map();
+  data.temporalBackgroundPointCache = new Map();
   const mergedSegments = new Map();
   for (const segment of [...(data.overviewSegments || []), ...(data.detailSegments || [])]) {
     mergedSegments.set(segment.segmentId, segment);
@@ -15621,36 +15699,27 @@ function visibleSets(showTrain, showTest) {
   return sets.length ? sets : ["train"];
 }
 
-function interpolateSeriesPosition(series, currentTimeMs) {
-  if (!series || !Array.isArray(series.times) || !Array.isArray(series.positions) || !series.times.length) {
-    return null;
-  }
-  if (currentTimeMs <= series.times[0]) {
-    return series.positions[0];
-  }
-  const lastIndex = series.times.length - 1;
-  if (currentTimeMs >= series.times[lastIndex]) {
-    return series.positions[lastIndex];
-  }
-  for (let index = 1; index < series.times.length; index += 1) {
-    const leftTime = series.times[index - 1];
-    const rightTime = series.times[index];
-    if (currentTimeMs > rightTime) {
-      continue;
+function nearestTrackFixIndex(fixes, currentTimeMs) {
+  if (!Array.isArray(fixes) || !fixes.length) return -1;
+  if (currentTimeMs <= fixes[0].timeMs) return 0;
+  const lastIndex = fixes.length - 1;
+  if (currentTimeMs >= fixes[lastIndex].timeMs) return lastIndex;
+  let low = 0;
+  let high = lastIndex;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (fixes[middle].timeMs < currentTimeMs) {
+      low = middle + 1;
+    } else {
+      high = middle;
     }
-    const leftPos = series.positions[index - 1];
-    const rightPos = series.positions[index];
-    const span = rightTime - leftTime;
-    if (span <= 0) {
-      return rightPos;
-    }
-    const ratio = (currentTimeMs - leftTime) / span;
-    return [
-      leftPos[0] + (rightPos[0] - leftPos[0]) * ratio,
-      leftPos[1] + (rightPos[1] - leftPos[1]) * ratio,
-    ];
   }
-  return series.positions[lastIndex];
+  const rightIndex = low;
+  const leftIndex = rightIndex - 1;
+  return currentTimeMs - fixes[leftIndex].timeMs
+    <= fixes[rightIndex].timeMs - currentTimeMs
+    ? leftIndex
+    : rightIndex;
 }
 
 function stepTouchesArtifact(step, logicalName) {

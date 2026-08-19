@@ -893,7 +893,7 @@ def test_movement_frontend_includes_auto_burst_controls():
 def test_movement_frontend_uses_canonical_track_paths_with_burst_suppression():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     renderer = source[
-        source.index("  renderLayers() {"):
+        source.index("  renderLayers({ temporalOnly = false } = {}) {"):
         source.index("  buildVisibleTrackSeries(")
     ]
 
@@ -904,11 +904,10 @@ def test_movement_frontend_uses_canonical_track_paths_with_burst_suppression():
     assert "suppressedBaseTrackKeys" in source
     assert "movementTrackKey(burst.individual, burst.setName)" in source
     assert "const suppressBaseTrack = suppressedBaseTrackKeys.has" in renderer
-    assert "if (!suppressBaseTrack && series.positions.length >= 2)" in renderer
-    assert renderer.index("const cursorPosition = interpolateSeriesPosition") > renderer.index(
-        "if (!suppressBaseTrack && series.positions.length >= 2)"
-    )
-    assert "if (suppressBaseTrack) {\n          continue;" not in renderer
+    assert "let cachedPaths = this.data.baseTrackPathCache.get(trackKey);" in renderer
+    assert "if (!cachedPaths)" in renderer
+    assert "interpolateSeriesPosition" not in source
+    assert 'id: "movement-cursor"' not in source
 
 
 def test_movement_frontend_distinguishes_source_flags_from_review_status():
@@ -950,7 +949,7 @@ def test_movement_frontend_uses_on_demand_individual_loading_for_truncated_overv
     assert "initialMovementVisibleIndividuals(this.data)" in source
     assert "if (data.overviewTruncated) {" in source
     assert "getActiveThresholdMatchKeys()" in source
-    assert "showPoints ? this.getActiveThresholdMatchKeys() : new Set()" in source
+    assert "temporalOnly ? this.lastThresholdMatchKeys : this.getActiveThresholdMatchKeys()" in source
 
 
 def test_movement_frontend_map_click_does_not_force_table_reveal():
@@ -988,6 +987,28 @@ def test_movement_frontend_precomputes_inbound_flagged_steps():
     assert 'id: "movement-flagged-fix-steps"' in source
     assert "data: visibleFlaggedSteps" in source
     assert 'item.status === "confirmed"' in source
+
+
+def test_movement_frontend_uses_cached_binary_searched_temporal_focus():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    renderer = source[
+        source.index("  renderLayers({ temporalOnly = false } = {}) {"):
+        source.index("  buildVisibleTrackSeries(")
+    ]
+
+    assert "scheduleTemporalFocusRender()" in source
+    assert "window.requestAnimationFrame" in source
+    assert "function nearestTrackFixIndex(fixes, currentTimeMs)" in source
+    assert "while (low < high)" in source
+    assert "temporalBackgroundPointCache" in source
+    assert "getTemporalBackgroundPoints(visibleIndividuals, visibleSetNames)" in renderer
+    assert "buildTemporalFocalData(visibleIndividuals, visibleSetNames)" in renderer
+    assert 'id: "movement-temporal-focal-steps"' in renderer
+    assert 'id: "movement-temporal-focal-points"' in renderer
+    assert "Math.max(0, focusIndex - 1)" in source
+    assert "Math.min(fixes.length - 1, focusIndex + 1)" in source
+    assert "for (const fix of this.data.fixes)" not in renderer
+    assert "temporalOnly ? this.lastThresholdMatchKeys" in renderer
 
 
 def test_movement_frontend_loads_ephemeral_osm_helpers_only_in_dev_mode():
@@ -3594,7 +3615,7 @@ def test_movement_frontend_burst_counter_counts_only_drawn_bursts():
 def test_movement_frontend_refreshes_queue_dimming_when_active_individual_changes():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     renderer = source[
-        source.index("  renderLayers() {"):
+        source.index("  renderLayers({ temporalOnly = false } = {}) {"):
         source.index("  buildVisibleTrackSeries(")
     ]
 
