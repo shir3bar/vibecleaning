@@ -881,31 +881,26 @@ def test_movement_frontend_includes_auto_burst_controls():
     assert "movement-burst-casing" in source
     assert "movement-bursts" in source
     assert "movement-auto-burst-points" not in source
-    assert "movement-auto-burst-endpoints" in source
-    assert "buildAutoBurstEndpointMarkers" in source
-    assert 'markerRole: "start"' in source
-    assert 'markerRole: "end"' in source
+    assert "movement-auto-burst-endpoints" not in source
+    assert "buildAutoBurstEndpointMarkers" not in source
     assert "burstPathColor" in source
     assert "renderBurstCountIndicator" in source
     assert "getVisibleAutoBursts({ requireOverlay: false })" in source
 
 
-def test_movement_frontend_uses_canonical_track_paths_with_burst_suppression():
+def test_movement_frontend_colors_inbound_steps_above_burst_casing():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     renderer = source[
         source.index("  renderLayers({ temporalOnly = false } = {}) {"):
-        source.index("  buildVisibleTrackSeries(")
+        source.index("  isSourceOnlyFlaggedBurst(")
     ]
 
-    assert "buildVisibleTrackSeries(individual, setName, exactFixes)" in source
-    assert "getExactVisibleTrackFixes(individual, setName)" in source
-    assert 'source: "exact-detail"' in source
-    assert 'source: "sampled-overview"' in source
-    assert "suppressedBaseTrackKeys" in source
-    assert "movementTrackKey(burst.individual, burst.setName)" in source
-    assert "const suppressBaseTrack = suppressedBaseTrackKeys.has" in renderer
-    assert "let cachedPaths = this.data.baseTrackPathCache.get(trackKey);" in renderer
-    assert "if (!cachedPaths)" in renderer
+    assert "buildMovementTrackStepSegments(data.eligibleFixesByTrack)" in source
+    assert "destinationFix" in source
+    assert "this.colorForFix(item.destinationFix)" in renderer
+    assert "getVisibleTrackSteps(visibleIndividuals, visibleSetNames)" in renderer
+    assert "suppressedBaseTrackKeys" not in source
+    assert renderer.index('id: "movement-bursts"') < renderer.index('id: "movement-paths"')
     assert "interpolateSeriesPosition" not in source
     assert 'id: "movement-cursor"' not in source
 
@@ -915,8 +910,8 @@ def test_movement_frontend_distinguishes_source_flags_from_review_status():
 
     assert "sourceFlags:" in source
     assert "function isSourceOnlyFlaggedFix(fix)" in source
-    assert "function buildSourceAwareTrackPaths(fixes, trackColor)" in source
-    assert 'id: "movement-source-flagged-paths"' in source
+    assert "sourceFlagged: isSourceOnlyFlaggedFix(previous) || isSourceOnlyFlaggedFix(destinationFix)" in source
+    assert "item.sourceFlagged ? 52 : 185" in source
     assert 'id: "movement-source-flagged-points"' not in source
     assert 'id: "movement-suspected-outline"' in source
     assert 'const showSuspectedOutlines = this.data.suspiciousState === "loaded";' in source
@@ -966,15 +961,17 @@ def test_movement_frontend_map_click_does_not_force_table_reveal():
 def test_movement_frontend_has_shared_endpoint_range_selection():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
-    assert 'data-role="range-select-mode">Select track range</button>' in source
-    assert 'data-role="table-range-select-mode">Select track range</button>' in source
-    assert "applyExplicitRangeSelection(fixKey)" in source
+    assert 'data-role="range-select-mode"' not in source
+    assert 'data-role="table-range-select-mode"' not in source
+    assert 'this.map.on("dblclick", event => this.handleMapDoubleClick(event));' in source
+    assert "applyMapRangeEndpoint(fixKey)" in source
+    assert "this.map.doubleClickZoom?.disable?.();" in source
     assert "eligibleTrackPositionByFixKey" in source
     assert "track.slice(startIndex, endIndex + 1)" in source
     assert "contiguousRange: true" in source
     assert 'event.key === "Escape"' in source
-    assert 'id: "movement-table-selection-endpoints"' in source
-    assert "if (!this.rangeSelectionModeActive)" in source
+    assert 'id: "movement-table-selection-endpoints"' not in source
+    assert "range: event.shiftKey" in source
 
 
 def test_movement_frontend_precomputes_inbound_flagged_steps():
@@ -993,18 +990,23 @@ def test_movement_frontend_uses_cached_binary_searched_temporal_focus():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     renderer = source[
         source.index("  renderLayers({ temporalOnly = false } = {}) {"):
-        source.index("  buildVisibleTrackSeries(")
+        source.index("  isSourceOnlyFlaggedBurst(")
     ]
 
     assert "scheduleTemporalFocusRender()" in source
     assert "window.requestAnimationFrame" in source
     assert "function nearestTrackFixIndex(fixes, currentTimeMs)" in source
     assert "while (low < high)" in source
-    assert "temporalBackgroundPointCache" in source
-    assert "getTemporalBackgroundPoints(visibleIndividuals, visibleSetNames)" in renderer
+    assert "visiblePointCache" in source
+    assert "getVisibleMovementPoints(visibleIndividuals, visibleSetNames)" in renderer
+    assert "showPoints && this.temporalSliderEngaged" in renderer
     assert "buildTemporalFocalData(visibleIndividuals, visibleSetNames)" in renderer
-    assert 'id: "movement-temporal-focal-steps"' in renderer
+    assert 'id: "movement-temporal-focal-steps"' not in renderer
+    assert 'id: "movement-temporal-focal-halos"' in renderer
     assert 'id: "movement-temporal-focal-points"' in renderer
+    assert 'this.refs.slider.addEventListener("pointerdown"' in source
+    assert 'this.refs.slider.addEventListener("pointerup"' in source
+    assert "this.colorForFix(item.fix)" in renderer
     assert "Math.max(0, focusIndex - 1)" in source
     assert "Math.min(fixes.length - 1, focusIndex + 1)" in source
     assert "for (const fix of this.data.fixes)" not in renderer
@@ -3546,7 +3548,7 @@ def test_movement_frontend_expresses_burst_focus_as_a_style_predicate():
     assert "isFocusedBurstItem(item, focusedBurstId)" in source
     assert "burstCasingColor(item, focusedBurstId)" in source
     assert "burstFillColor(item, focusedBurstId)" in source
-    assert "burstEndpointColor(item, focusedBurstId)" in source
+    assert "burstEndpointColor(item, focusedBurstId)" not in source
     # The casing layer must refresh on focus change; it also carries the queue
     # dimming key, so assert the trigger contains focusedBurstId rather than
     # matching an exact literal.
@@ -3572,19 +3574,16 @@ def test_movement_frontend_keeps_source_flag_distinction_under_focus():
     assert "item?.sourceFlagged ? 40 : 70" in source
 
 
-def test_movement_frontend_draws_tracks_whose_bursts_are_single_fixes():
+def test_movement_frontend_never_suppresses_tracks_for_burst_overlays():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
-    # Base-track suppression must derive from the drawable (>= 2 position)
-    # burst list, otherwise a single-fix burst erases its own track.
+    # Bursts are an optional casing below the variable-colored track. They
+    # must never erase the base track, including when a burst has one fix.
     assert (
         "const drawableAutoBursts = visibleAutoBursts.filter(burst => burst.path.length >= 2);"
         in source
     )
-    assert (
-        "drawableAutoBursts.map(burst => movementTrackKey(burst.individual, burst.setName))"
-        in source
-    )
+    assert "suppressedBaseTrackKeys" not in source
 
 
 def test_movement_frontend_burst_picking_does_not_depend_on_feature_space():
@@ -3616,7 +3615,7 @@ def test_movement_frontend_refreshes_queue_dimming_when_active_individual_change
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     renderer = source[
         source.index("  renderLayers({ temporalOnly = false } = {}) {"):
-        source.index("  buildVisibleTrackSeries(")
+        source.index("  isSourceOnlyFlaggedBurst(")
     ]
 
     # Queue dimming depends on state outside the data array, so every layer
@@ -3641,7 +3640,6 @@ def test_movement_frontend_refreshes_queue_dimming_when_active_individual_change
         "queueMapColor",
         "burstFillColor",
         "burstCasingColor",
-        "burstEndpointColor",
     )
     frozen = []
     for match in re.finditer(r'id: "([^"]+)"', renderer):

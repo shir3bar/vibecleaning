@@ -443,7 +443,7 @@ def test_large_movement_views_reuse_geometry_without_capping_color_by_points():
     assert "MAX_ORDINARY_MAP_POINTS" not in source
     assert "MAX_SOURCE_FLAGGED_MAP_POINTS" not in source
     assert 'id: "movement-source-flagged-points"' not in source
-    assert 'id: "movement-source-flagged-paths"' in source
+    assert "item.sourceFlagged ? 52 : 185" in source
     assert 'id: "movement-suspected-outline"' in source
     assert "useDevicePixels:" in source
     assert "dataComparator: sameArrayItems" in source

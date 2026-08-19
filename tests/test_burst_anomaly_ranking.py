@@ -756,13 +756,12 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert 'id: "movement-bursts"' in source
     assert 'id: "movement-burst-focus-ring"' in source
     assert "movement-focused-ranking-burst" not in source
-    assert 'markerRole: "start"' in source
-    assert 'markerRole: "end"' in source
+    assert "movement-auto-burst-endpoints" not in source
     assert "focusedRankingBurstPoints" in source
     assert "hasFocusedRankingBurst = focusedRankingBurstFixes.length > 0" in source
     assert "focusedBurstId = hasFocusedRankingBurst" in source
     assert "mutedRankingContextColor" in source
-    assert 'id: "movement-temporal-focal-steps"' in source
+    assert 'id: "movement-temporal-focal-halos"' in source
     assert 'id: "movement-temporal-focal-points"' in source
     # Context bursts mute while another burst is focused, and source-flagged
     # context stays distinguishable from clean context.

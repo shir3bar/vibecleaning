@@ -178,7 +178,6 @@ const BASEMAP_PRESETS = {
   },
 };
 
-const PATH_ALPHA = 110;
 const POINT_ALPHA = 215;
 const BURST_CASING_RGB = [8, 15, 26];
 const BURST_FOCUS_CASING_COLOR = [216, 180, 254, 255];
@@ -306,6 +305,8 @@ class MovementExampleApp {
     this.osmContextStatus = "idle";
     this.currentTimeMs = 0;
     this.temporalFocusRenderFrame = null;
+    this.temporalSliderEngaged = false;
+    this.pendingMapSingleClickTimer = null;
     this.lastThresholdMatchKeys = new Set();
     this.lastCandidateMatchKeys = new Set();
     this.loadRequestId = 0;
@@ -379,8 +380,7 @@ class MovementExampleApp {
       selectedFixKeys: new Set(),
       contiguousRange: false,
     };
-    this.rangeSelectionModeActive = false;
-    this.rangeSelectionAwaitingEnd = false;
+    this.mapRangeAwaitingEnd = false;
     this.tableRenderState = {
       signature: "",
       rowLimit: TABLE_INITIAL_ROW_LIMIT,
@@ -2803,7 +2803,6 @@ class MovementExampleApp {
           <button type="button" data-role="select-none">No individuals</button>
           <button type="button" data-role="select-suspicious">Review suspicious fixes</button>
           <button type="button" data-role="clear-fixes">Clear checked fixes</button>
-          <button type="button" data-role="range-select-mode">Select track range</button>
           <div class="movement-candidate-query-control" data-role="candidate-query-control">
             <label>Candidate query <select data-role="candidate-query-select"></select></label>
             <label>Scope
@@ -2945,7 +2944,6 @@ class MovementExampleApp {
                     <button type="button" data-role="table-sort-direction" data-direction="asc">Ascending</button>
                   </div>
                   <div class="movement-table-toolbar-row">
-                    <button type="button" data-role="table-range-select-mode">Select track range</button>
                     <button type="button" data-role="segment-clear">Clear range</button>
                     <button type="button" class="movement-emphasis" data-role="segment-suspected">Mark segment suspected</button>
                     <button type="button" class="movement-emphasis" data-role="segment-confirmed">Mark segment confirmed</button>
@@ -3205,7 +3203,6 @@ class MovementExampleApp {
       selectNone: this.mountEl.querySelector('[data-role="select-none"]'),
       selectSuspicious: this.mountEl.querySelector('[data-role="select-suspicious"]'),
       clearFixes: this.mountEl.querySelector('[data-role="clear-fixes"]'),
-      rangeSelectMode: this.mountEl.querySelector('[data-role="range-select-mode"]'),
       candidateQueryControl: this.mountEl.querySelector('[data-role="candidate-query-control"]'),
       candidateQuerySelect: this.mountEl.querySelector('[data-role="candidate-query-select"]'),
       candidateQueryScope: this.mountEl.querySelector('[data-role="candidate-query-scope"]'),
@@ -3272,7 +3269,6 @@ class MovementExampleApp {
       tableMeta: this.mountEl.querySelector('[data-role="table-meta"]'),
       tableWrap: this.mountEl.querySelector('[data-role="table-wrap"]'),
       segmentClear: this.mountEl.querySelector('[data-role="segment-clear"]'),
-      tableRangeSelectMode: this.mountEl.querySelector('[data-role="table-range-select-mode"]'),
       segmentSuspected: this.mountEl.querySelector('[data-role="segment-suspected"]'),
       segmentConfirmed: this.mountEl.querySelector('[data-role="segment-confirmed"]'),
       slider: this.mountEl.querySelector('[data-role="slider"]'),
@@ -3674,8 +3670,6 @@ class MovementExampleApp {
       this.renderLayers();
       this.updateActionButtons();
     });
-    this.refs.rangeSelectMode.addEventListener("click", () => this.toggleRangeSelectionMode());
-    this.refs.tableRangeSelectMode.addEventListener("click", () => this.toggleRangeSelectionMode());
     this.refs.candidateQuerySelect.addEventListener("change", () => this.selectCandidateQuery(this.refs.candidateQuerySelect.value));
     this.refs.candidateQueryScope.addEventListener("change", () => this.selectCandidateQueryExecutionScope(this.refs.candidateQueryScope.value));
     this.refs.candidateQueryParams.addEventListener("input", event => this.handleCandidateQueryParameterInput(event));
@@ -3711,11 +3705,25 @@ class MovementExampleApp {
       await this.undoCurrentHead();
     });
     this.refs.resumeHistory.addEventListener("click", () => this.openResumeModal());
+    this.refs.slider.addEventListener("pointerdown", () => {
+      this.temporalSliderEngaged = true;
+      this.scheduleTemporalFocusRender();
+    });
     this.refs.slider.addEventListener("input", () => {
       this.currentTimeMs = Number(this.refs.slider.value) || 0;
       this.updateTimeLabel();
-      this.scheduleTemporalFocusRender();
+      if (this.temporalSliderEngaged) {
+        this.scheduleTemporalFocusRender();
+      }
     });
+    const finishTemporalSliderInteraction = () => {
+      if (!this.temporalSliderEngaged) return;
+      this.temporalSliderEngaged = false;
+      this.scheduleTemporalFocusRender();
+    };
+    this.refs.slider.addEventListener("pointerup", finishTemporalSliderInteraction);
+    this.refs.slider.addEventListener("pointercancel", finishTemporalSliderInteraction);
+    this.refs.slider.addEventListener("blur", finishTemporalSliderInteraction);
     this.refs.thresholdPane.addEventListener("click", event => this.handleThresholdPaneClick(event));
     this.refs.thresholdPane.addEventListener("change", event => this.handleThresholdPaneChange(event));
     this.refs.thresholdPane.addEventListener("focusin", event => this.handleThresholdPaneFocusIn(event));
@@ -3747,7 +3755,7 @@ class MovementExampleApp {
     this.refs.tableWrap.addEventListener("click", event => this.handleTableWrapClick(event));
     this.refs.tableWrap.addEventListener("scroll", () => this.handleTableWrapScroll());
     document.addEventListener("keydown", event => {
-      if (event.key === "Escape" && this.rangeSelectionModeActive) {
+      if (event.key === "Escape" && this.mapRangeAwaitingEnd) {
         this.clearTableSelection();
         this.setStatus("Track range selection cancelled.");
       }
@@ -5489,24 +5497,6 @@ class MovementExampleApp {
     return this.queueMapColor([...BURST_CASING_RGB, alpha], individual);
   }
 
-  burstEndpointColor(item, focusedBurstId) {
-    const individual = item?.burst?.individual;
-    const fillColor = Array.isArray(item?.fillColor) ? item.fillColor : [196, 181, 253, 220];
-    if (this.isFocusedBurstItem(item, focusedBurstId)) {
-      return this.queueMapColor([fillColor[0], fillColor[1], fillColor[2], 245], individual);
-    }
-    if (focusedBurstId) {
-      return this.queueMapColor(
-        this.mutedRankingContextColor(fillColor, item?.sourceFlagged ? 30 : 42),
-        individual,
-      );
-    }
-    if (item?.sourceFlagged) {
-      return this.queueMapColor(this.mutedRankingContextColor(fillColor, 92), individual);
-    }
-    return this.queueMapColor(fillColor, individual);
-  }
-
   queueActiveIndividual() {
     if (this.individualReviewQueue.mode !== "queue") {
       return "";
@@ -6490,6 +6480,8 @@ class MovementExampleApp {
     if (!this.data) {
       return new Set();
     }
+    this.setTableSelection();
+    this.mapRangeAwaitingEnd = false;
     const preservedFixKeys = viewContext?.selectedFixKeys instanceof Set
       ? new Set(viewContext.selectedFixKeys)
       : new Set();
@@ -6541,9 +6533,12 @@ class MovementExampleApp {
       selectedFixKeys: new Set(),
       contiguousRange: false,
     };
-    this.rangeSelectionModeActive = false;
-    this.rangeSelectionAwaitingEnd = false;
-    this.syncRangeSelectionModeButtons();
+    this.mapRangeAwaitingEnd = false;
+    this.temporalSliderEngaged = false;
+    if (this.pendingMapSingleClickTimer !== null) {
+      window.clearTimeout(this.pendingMapSingleClickTimer);
+      this.pendingMapSingleClickTimer = null;
+    }
     this.tableRenderState = {
       signature: "",
       rowLimit: TABLE_INITIAL_ROW_LIMIT,
@@ -8392,44 +8387,19 @@ class MovementExampleApp {
     };
   }
 
-  syncRangeSelectionModeButtons() {
-    for (const button of [this.refs?.rangeSelectMode, this.refs?.tableRangeSelectMode]) {
-      if (!button) continue;
-      button.classList.toggle("is-active", this.rangeSelectionModeActive);
-      button.setAttribute("aria-pressed", this.rangeSelectionModeActive ? "true" : "false");
-      button.textContent = this.rangeSelectionModeActive
-        ? (this.rangeSelectionAwaitingEnd ? "Choose range end" : "Choose range start")
-        : "Select track range";
-    }
-  }
-
-  toggleRangeSelectionMode() {
-    this.rangeSelectionModeActive = !this.rangeSelectionModeActive;
-    this.rangeSelectionAwaitingEnd = false;
-    this.setTableSelection();
-    this.syncRangeSelectionModeButtons();
-    this.renderTableSheet();
-    this.renderLayers();
-    this.updateActionButtons();
-    this.setStatus(this.rangeSelectionModeActive
-      ? "Track range mode active. Choose the start fix on the map or in the table."
-      : "Track range selection cancelled.");
-  }
-
-  applyExplicitRangeSelection(fixKey) {
+  applyMapRangeEndpoint(fixKey) {
     if (!this.data?.eligibleTrackPositionByFixKey?.has(fixKey)) {
       this.setStatus("That fix is not part of the current analytical track.", true);
       return;
     }
-    if (!this.rangeSelectionAwaitingEnd || !this.tableSelection.anchorFixKey) {
+    if (!this.mapRangeAwaitingEnd || !this.tableSelection.anchorFixKey) {
       this.setTableSelection({
         anchorFixKey: fixKey,
         focusFixKey: fixKey,
         contiguousRange: true,
       });
-      this.rangeSelectionAwaitingEnd = true;
-      this.syncRangeSelectionModeButtons();
-      this.setStatus("Range start selected. Choose the end fix on the same track.");
+      this.mapRangeAwaitingEnd = true;
+      this.setStatus("Range start selected. Double-click the end fix on the same track.");
       return;
     }
     const selection = this.resolveSegmentSelection(this.tableSelection.anchorFixKey, fixKey);
@@ -8439,8 +8409,7 @@ class MovementExampleApp {
         focusFixKey: fixKey,
         contiguousRange: true,
       });
-      this.rangeSelectionAwaitingEnd = true;
-      this.syncRangeSelectionModeButtons();
+      this.mapRangeAwaitingEnd = true;
       this.setStatus("The track changed, so this fix is now the new range start.", true);
       return;
     }
@@ -8449,17 +8418,12 @@ class MovementExampleApp {
       focusFixKey: fixKey,
       contiguousRange: true,
     });
-    this.rangeSelectionAwaitingEnd = false;
-    this.syncRangeSelectionModeButtons();
-    this.setStatus(`Selected ${formatCount(selection.fixes.length)} fixes. Use a segment review action or choose another start.`);
+    this.mapRangeAwaitingEnd = false;
+    this.setStatus(`Selected ${formatCount(selection.fixes.length)} fixes. Use a segment review action or double-click another start.`);
   }
 
   applyTableSelectionInteraction(fixKey, { additive = false, range = false } = {}) {
     if (!this.data?.fixByKey?.has(fixKey)) {
-      return;
-    }
-    if (this.rangeSelectionModeActive) {
-      this.applyExplicitRangeSelection(fixKey);
       return;
     }
     if (range && this.tableSelection.anchorFixKey) {
@@ -8498,9 +8462,7 @@ class MovementExampleApp {
 
   clearTableSelection() {
     this.setTableSelection();
-    this.rangeSelectionModeActive = false;
-    this.rangeSelectionAwaitingEnd = false;
-    this.syncRangeSelectionModeButtons();
+    this.mapRangeAwaitingEnd = false;
     this.renderTableSheet();
     this.renderLayers();
     this.updateActionButtons();
@@ -8651,7 +8613,7 @@ class MovementExampleApp {
     const hasDetail = this.hasLoadedDetailSelection() || this.data.overviewHasAllFixes;
     const rows = mode === "fixes" ? this.getFilteredTableFixRows() : [];
     const selection = this.getCurrentSegmentSelection();
-    this.refs.segmentClear.disabled = !this.hasTableSelection() && !this.rangeSelectionModeActive;
+    this.refs.segmentClear.disabled = !this.hasTableSelection();
     const segmentActionDisabled = (
       !this.canPersistEdits()
       || mode !== "fixes"
@@ -8976,6 +8938,7 @@ class MovementExampleApp {
     });
     this.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     this.map.addControl(new maplibregl.ScaleControl({ unit: "metric", maxWidth: 120 }), "top-right");
+    this.map.doubleClickZoom?.disable?.();
     this.map.on("load", () => {
       this.mapLoaded = true;
       this.renderLayers();
@@ -8991,12 +8954,17 @@ class MovementExampleApp {
     });
     this.ensureOverlayAttached();
     this.map.on("click", event => this.handleMapClick(event));
+    this.map.on("dblclick", event => this.handleMapDoubleClick(event));
     this.map.on("contextmenu", event => this.handleMapContextMenu(event));
   }
 
   destroyMapInstance() {
     this.mapLoaded = false;
     this.activeFixPopup = null;
+    if (this.pendingMapSingleClickTimer !== null) {
+      window.clearTimeout(this.pendingMapSingleClickTimer);
+      this.pendingMapSingleClickTimer = null;
+    }
     if (this.overlay) {
       try {
         this.overlay.finalize();
@@ -9078,12 +9046,12 @@ class MovementExampleApp {
     });
   }
 
-  getTemporalBackgroundPoints(visibleIndividuals, visibleSetNames) {
+  getVisibleMovementPoints(visibleIndividuals, visibleSetNames) {
     const cacheKey = [
       [...visibleIndividuals].sort().join("|"),
       [...visibleSetNames].sort().join("|"),
     ].join("::");
-    const cache = this.data.temporalBackgroundPointCache;
+    const cache = this.data.visiblePointCache;
     if (cache.has(cacheKey)) return cache.get(cacheKey);
     const points = [];
     for (const [trackKey, fixes] of this.data.eligibleFixesByTrack || []) {
@@ -9097,6 +9065,7 @@ class MovementExampleApp {
       }
       for (const fix of fixes) {
         points.push({
+          fix,
           fixKey: fix.fixKey,
           individual: fix.individual,
           setName: fix.setName,
@@ -9109,9 +9078,23 @@ class MovementExampleApp {
     return points;
   }
 
+  getVisibleTrackSteps(visibleIndividuals, visibleSetNames) {
+    const cacheKey = [
+      [...visibleIndividuals].sort().join("|"),
+      [...visibleSetNames].sort().join("|"),
+    ].join("::");
+    const cache = this.data.visibleTrackStepCache;
+    if (cache.has(cacheKey)) return cache.get(cacheKey);
+    const steps = (this.data.trackStepSegments || []).filter(step => (
+      visibleIndividuals.has(step.individual)
+      && visibleSetNames.has(step.setName)
+    ));
+    cache.set(cacheKey, steps);
+    return steps;
+  }
+
   buildTemporalFocalData(visibleIndividuals, visibleSetNames) {
     const points = [];
-    const steps = [];
     for (const fixes of this.data.eligibleFixesByTrack?.values() || []) {
       const first = fixes[0];
       if (
@@ -9134,18 +9117,9 @@ class MovementExampleApp {
           color: this.colorForFix(fix),
           focal: index === focusIndex,
         });
-        if (index > startIndex) {
-          const previous = fixes[index - 1];
-          steps.push({
-            stepKey: `${previous.fixKey}->${fix.fixKey}`,
-            individual: fix.individual,
-            path: [previous.position, fix.position],
-            color: this.colorForFix(fix),
-          });
-        }
       }
     }
-    return { points, steps };
+    return { points };
   }
 
   renderLayers({ temporalOnly = false } = {}) {
@@ -9164,14 +9138,13 @@ class MovementExampleApp {
     const visibleIndividuals = new Set(this.data.selectedIndividuals);
     const visibleSetNames = this.getVisibleSetNames();
     const showPoints = this.refs.showPoints.checked;
-    const pathData = [];
-    const sourceFlaggedPathData = [];
+    const pathData = this.getVisibleTrackSteps(visibleIndividuals, visibleSetNames);
     const pointData = showPoints
-      ? this.getTemporalBackgroundPoints(visibleIndividuals, visibleSetNames)
+      ? this.getVisibleMovementPoints(visibleIndividuals, visibleSetNames)
       : [];
-    const temporalFocalData = showPoints
+    const temporalFocalData = showPoints && this.temporalSliderEngaged
       ? this.buildTemporalFocalData(visibleIndividuals, visibleSetNames)
-      : { points: [], steps: [] };
+      : { points: [] };
     const thresholdPointData = [];
     const selectedThresholdPointData = [];
     const candidatePointData = [];
@@ -9210,35 +9183,24 @@ class MovementExampleApp {
     ));
     const visibleAutoBursts = this.getVisibleAutoBursts();
     const drawableAutoBursts = visibleAutoBursts.filter(burst => burst.path.length >= 2);
-    const suppressedBaseTrackKeys = new Set(
-      drawableAutoBursts.map(burst => movementTrackKey(burst.individual, burst.setName)),
-    );
     const visibleAutoBurstPaths = drawableAutoBursts
       .map(burst => this.data.autoBurstRenderCache.get(burst.burstId)?.pathItem)
       .filter(Boolean);
-    const visibleAutoBurstMarkers = visibleAutoBursts
-      .flatMap(burst => this.data.autoBurstRenderCache.get(burst.burstId)?.markerItems || []);
     const visibleTableSelection = this.getVisibleTableSelectionFixes();
     const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
-    const tableSelectedPointData = visibleTableSelection.map(fix => ({
-      fixKey: fix.fixKey,
-      position: fix.position,
-      color: [87, 218, 174, 220],
-    }));
+    const tableSelectedPointData = visibleTableSelection
+      .filter((fix, index, fixes) => index === 0 || index === fixes.length - 1)
+      .map(fix => ({
+        fixKey: fix.fixKey,
+        position: fix.position,
+        color: [87, 218, 174, 220],
+      }));
     const segmentSelection = this.hasTableSelection()
       ? this.getCurrentSegmentSelection()
       : null;
     const tableSelectionPath = segmentSelection?.fixes
       ?.filter(fix => visibleTableSelectionKeys.has(fix.fixKey))
       .map(fix => fix.position) || [];
-    const tableSelectionEndpointData = segmentSelection?.fixes?.length
-      ? [
-        { role: "start", position: segmentSelection.fixes[0].position },
-        ...(segmentSelection.fixes.length > 1
-          ? [{ role: "end", position: segmentSelection.fixes[segmentSelection.fixes.length - 1].position }]
-          : []),
-      ]
-      : [];
     const thresholdMatchKeys = showPoints
       ? temporalOnly ? this.lastThresholdMatchKeys : this.getActiveThresholdMatchKeys()
       : new Set();
@@ -9281,41 +9243,6 @@ class MovementExampleApp {
           individual: fix.individual,
           position: fix.position,
         });
-      }
-    }
-
-    for (const individual of this.data.individuals) {
-      if (!visibleIndividuals.has(individual)) {
-        continue;
-      }
-      for (const setName of visibleSetNames) {
-        const suppressBaseTrack = suppressedBaseTrackKeys.has(movementTrackKey(individual, setName));
-        if (suppressBaseTrack) {
-          continue;
-        }
-        const trackKey = movementTrackKey(individual, setName);
-        let cachedPaths = this.data.baseTrackPathCache.get(trackKey);
-        if (!cachedPaths) {
-          const exactFixes = this.getExactVisibleTrackFixes(individual, setName);
-          const series = this.buildVisibleTrackSeries(individual, setName, exactFixes);
-          if (!series || series.positions.length < 2) {
-            continue;
-          }
-          const trackColor = splitColor(this.data.individualPalette[individual], setName, PATH_ALPHA);
-          cachedPaths = exactFixes.length >= 2
-            ? buildSourceAwareTrackPaths(exactFixes, trackColor)
-              .map(path => ({ ...path, individual }))
-            : [{
-              path: series.positions,
-              color: trackColor,
-              sourceFlagged: false,
-              individual,
-            }];
-          this.data.baseTrackPathCache.set(trackKey, cachedPaths);
-        }
-        for (const path of cachedPaths) {
-          (path.sourceFlagged ? sourceFlaggedPathData : pathData).push(path);
-        }
       }
     }
 
@@ -9385,62 +9312,6 @@ class MovementExampleApp {
         }),
       );
     }
-    layers.push(
-      new deck.PathLayer({
-        id: "movement-source-flagged-paths",
-        data: sourceFlaggedPathData,
-        dataComparator: sameArrayItems,
-        getPath: item => item.path,
-        getColor: [126, 134, 143, 16],
-        getWidth: 1.5,
-        widthMinPixels: 1,
-        pickable: false,
-      }),
-    );
-    layers.push(
-      new deck.PathLayer({
-        id: "movement-paths",
-        data: pathData,
-        dataComparator: sameArrayItems,
-        getPath: item => item.path,
-        getColor: [126, 134, 143, 28],
-        getWidth: 2.5,
-        widthMinPixels: 2,
-        pickable: false,
-      }),
-    );
-
-    if (temporalFocalData.steps.length) {
-      layers.push(
-        new deck.PathLayer({
-          id: "movement-temporal-focal-steps",
-          data: temporalFocalData.steps,
-          getPath: item => item.path,
-          getColor: item => item.color,
-          getWidth: 4.5,
-          widthMinPixels: 3,
-          pickable: false,
-        }),
-      );
-    }
-
-    if (visibleFlaggedSteps.length) {
-      layers.push(
-        new deck.PathLayer({
-          id: "movement-flagged-fix-steps",
-          data: visibleFlaggedSteps,
-          dataComparator: sameArrayItems,
-          getPath: item => item.path,
-          getColor: item => item.status === "confirmed"
-            ? [92, 101, 110, 115]
-            : [255, 204, 40, 235],
-          getWidth: item => item.status === "confirmed" ? 3 : 5,
-          widthMinPixels: 2,
-          pickable: false,
-        }),
-      );
-    }
-
     if (visibleAutoBurstPaths.length) {
       layers.push(
         new deck.PathLayer({
@@ -9475,29 +9346,44 @@ class MovementExampleApp {
       );
     }
 
-    if (visibleAutoBurstMarkers.length) {
+    // Each derived step value belongs to its destination fix, so the inbound
+    // segment uses that fix's selected-variable color. Drawing it above the
+    // optional burst casing keeps speed and other step fields legible.
+    layers.push(
+      new deck.PathLayer({
+        id: "movement-paths",
+        data: pathData,
+        dataComparator: sameArrayItems,
+        getPath: item => item.path,
+        getColor: item => {
+          const color = this.colorForFix(item.destinationFix);
+          return this.queueMapColor(
+            [color[0], color[1], color[2], item.sourceFlagged ? 52 : 185],
+            item.individual,
+          );
+        },
+        getWidth: item => item.sourceFlagged ? 1.5 : 3,
+        widthMinPixels: 2,
+        updateTriggers: {
+          getColor: [this.refs.colorBy.value, queueDimKey],
+        },
+        pickable: false,
+      }),
+    );
+
+    if (visibleFlaggedSteps.length) {
       layers.push(
-        new deck.ScatterplotLayer({
-          id: "movement-auto-burst-endpoints",
-          data: visibleAutoBurstMarkers,
+        new deck.PathLayer({
+          id: "movement-flagged-fix-steps",
+          data: visibleFlaggedSteps,
           dataComparator: sameArrayItems,
-          getPosition: item => item.position,
-          getFillColor: item => this.burstEndpointColor(item, focusedBurstId),
-          getLineColor: item => this.queueMapColor(
-            [15, 23, 42, 220],
-            item.burst?.individual,
-          ),
-          filled: true,
-          stroked: true,
-          lineWidthMinPixels: 1.5,
-          getRadius: 76,
-          radiusMinPixels: 4,
-          radiusMaxPixels: 9,
-          updateTriggers: {
-            getFillColor: [focusedBurstId, queueDimKey],
-            getLineColor: queueDimKey,
-          },
-          pickable: true,
+          getPath: item => item.path,
+          getColor: item => item.status === "confirmed"
+            ? [92, 101, 110, 115]
+            : [255, 204, 40, 235],
+          getWidth: item => item.status === "confirmed" ? 3 : 5,
+          widthMinPixels: 2,
+          pickable: false,
         }),
       );
     }
@@ -9558,14 +9444,37 @@ class MovementExampleApp {
           data: pointData,
           dataComparator: sameArrayItems,
           getPosition: item => item.position,
-          getFillColor: [132, 140, 149, 34],
+          getFillColor: item => this.queueMapColor(
+            this.colorForFix(item.fix),
+            item.individual,
+          ),
           getRadius: 68,
           radiusMinPixels: 3,
           radiusMaxPixels: 8,
+          updateTriggers: {
+            getFillColor: [this.refs.colorBy.value, queueDimKey],
+          },
           pickable: true,
         }),
       );
       if (temporalFocalData.points.length) {
+        layers.push(
+          new deck.ScatterplotLayer({
+            id: "movement-temporal-focal-halos",
+            data: temporalFocalData.points,
+            getPosition: item => item.position,
+            getLineColor: item => item.focal
+              ? [255, 238, 153, 245]
+              : [255, 255, 255, 190],
+            filled: false,
+            stroked: true,
+            lineWidthMinPixels: 4,
+            getRadius: item => item.focal ? 260 : 190,
+            radiusMinPixels: 12,
+            radiusMaxPixels: 34,
+            pickable: false,
+          }),
+        );
         layers.push(
           new deck.ScatterplotLayer({
             id: "movement-temporal-focal-points",
@@ -9577,10 +9486,10 @@ class MovementExampleApp {
               : [255, 255, 255, 105],
             filled: true,
             stroked: true,
-            lineWidthMinPixels: 1.5,
-            getRadius: item => item.focal ? 122 : 96,
-            radiusMinPixels: 6,
-            radiusMaxPixels: 15,
+            lineWidthMinPixels: 2,
+            getRadius: item => item.focal ? 180 : 130,
+            radiusMinPixels: 9,
+            radiusMaxPixels: 24,
             pickable: true,
           }),
         );
@@ -9702,27 +9611,6 @@ class MovementExampleApp {
       );
     }
 
-    if (tableSelectionEndpointData.length) {
-      layers.push(
-        new deck.ScatterplotLayer({
-          id: "movement-table-selection-endpoints",
-          data: tableSelectionEndpointData,
-          getPosition: item => item.position,
-          getFillColor: item => item.role === "start"
-            ? [87, 218, 174, 245]
-            : [244, 114, 182, 245],
-          getLineColor: [255, 255, 255, 245],
-          filled: true,
-          stroked: true,
-          lineWidthMinPixels: 2,
-          getRadius: 118,
-          radiusMinPixels: 7,
-          radiusMaxPixels: 14,
-          pickable: false,
-        }),
-      );
-    }
-
     if (tableSelectedPointData.length) {
       layers.push(
         new deck.ScatterplotLayer({
@@ -9771,35 +9659,6 @@ class MovementExampleApp {
       this.setStatus(`Map warning: ${error.message}`, true);
     }
     this.renderFixPopup();
-  }
-
-  buildVisibleTrackSeries(individual, setName, exactFixes = this.getExactVisibleTrackFixes(individual, setName)) {
-    if (exactFixes.length) {
-      return {
-        source: "exact-detail",
-        times: exactFixes.map(fix => fix.timeMs),
-        positions: exactFixes.map(fix => fix.position),
-      };
-    }
-    const series = this.data?.seriesByIndividual?.[individual]?.[setName] || null;
-    if (!series) {
-      return null;
-    }
-    return {
-      source: "sampled-overview",
-      times: Array.isArray(series.times) ? series.times : [],
-      positions: Array.isArray(series.positions) ? series.positions : [],
-    };
-  }
-
-  getExactVisibleTrackFixes(individual, setName) {
-    if (!this.data || (!this.hasLoadedDetailSelection() && !this.data.overviewHasAllFixes)) {
-      return [];
-    }
-    const byTrack = this.hasLoadedDetailSelection() && (this.data.detailFixes || []).length
-      ? this.data.detailFixesByTrack
-      : this.data.overviewFixesByTrack;
-    return byTrack?.get(movementTrackKey(individual, setName)) || [];
   }
 
   isSourceOnlyFlaggedBurst(burst) {
@@ -9934,18 +9793,10 @@ class MovementExampleApp {
     if (pickedBurst && this.selectMapBurstInFeatureSpace(pickedBurst)) {
       return;
     }
-    const point = event?.point;
-    const picked = point && Number.isFinite(point.x) && Number.isFinite(point.y)
-      ? this.overlay.pickObject({
-        x: Number(point.x),
-        y: Number(point.y),
-        radius: 6,
-      })
-      : null;
+    const picked = this.getMapPickedObject(event);
     if (!picked?.object?.fixKey) {
-      // Burst paths and endpoint markers carry a burst but no fix key. Fix
-      // layers render above them, so this only fires when the click missed
-      // every fix.
+      // Burst paths carry a burst but no fix key. Fix layers render above
+      // them, so this only fires when the click missed every fix.
       const pickedBurstId = String(picked?.object?.burst?.burstId || "");
       if (pickedBurstId) {
         this.focusMapBurst(pickedBurstId);
@@ -9953,19 +9804,62 @@ class MovementExampleApp {
       return;
     }
     const fixKey = picked.object.fixKey;
-    if (!this.rangeSelectionModeActive) {
-      if (this.data.selectedFixKeys.has(fixKey)) {
-        this.data.selectedFixKeys.delete(fixKey);
-      } else {
-        this.data.selectedFixKeys.add(fixKey);
-      }
+    const modifiers = {
+      additive: Boolean(event?.originalEvent?.metaKey || event?.originalEvent?.ctrlKey),
+      range: Boolean(event?.originalEvent?.shiftKey),
+    };
+    if (this.pendingMapSingleClickTimer !== null) {
+      window.clearTimeout(this.pendingMapSingleClickTimer);
+    }
+    this.pendingMapSingleClickTimer = window.setTimeout(() => {
+      this.pendingMapSingleClickTimer = null;
+      this.applyMapSingleFixClick(fixKey, modifiers);
+    }, 220);
+  }
+
+  getMapPickedObject(event) {
+    const point = event?.point;
+    return point && Number.isFinite(point.x) && Number.isFinite(point.y)
+      ? this.overlay?.pickObject({
+        x: Number(point.x),
+        y: Number(point.y),
+        radius: 6,
+      })
+      : null;
+  }
+
+  applyMapSingleFixClick(fixKey, modifiers = {}) {
+    if (!this.data?.fixByKey?.has(fixKey)) return;
+    if (this.data.selectedFixKeys.has(fixKey)) {
+      this.data.selectedFixKeys.delete(fixKey);
+    } else {
+      this.data.selectedFixKeys.add(fixKey);
     }
     this.applyTableSelectionInteraction(fixKey, {
-      additive: event?.originalEvent?.metaKey || event?.originalEvent?.ctrlKey,
-      range: event?.originalEvent?.shiftKey,
+      additive: Boolean(modifiers.additive),
+      range: Boolean(modifiers.range),
     });
     this.renderThresholdPane();
     this.renderSelectedFixes();
+    if (this.refs?.sideSheetTabs?.dataset.activeSheet === "table") {
+      this.renderTableSheet();
+    }
+    this.renderLayers();
+    this.updateActionButtons();
+  }
+
+  handleMapDoubleClick(event) {
+    event?.preventDefault?.();
+    event?.originalEvent?.preventDefault?.();
+    if (this.pendingMapSingleClickTimer !== null) {
+      window.clearTimeout(this.pendingMapSingleClickTimer);
+      this.pendingMapSingleClickTimer = null;
+    }
+    if (!this.overlay || !this.data) return;
+    const picked = this.getMapPickedObject(event);
+    const fixKey = String(picked?.object?.fixKey || "");
+    if (!fixKey) return;
+    this.applyMapRangeEndpoint(fixKey);
     if (this.refs?.sideSheetTabs?.dataset.activeSheet === "table") {
       this.renderTableSheet();
     }
@@ -13736,9 +13630,9 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     stats,
     fixes: [],
     fixByKey: new Map(),
-    overviewFixesByTrack: new Map(),
-    detailFixesByTrack: new Map(),
-    baseTrackPathCache: new Map(),
+    trackStepSegments: [],
+    visiblePointCache: new Map(),
+    visibleTrackStepCache: new Map(),
     autoBurstRenderCache: new Map(),
     segments: [],
     segmentById: new Map(),
@@ -13817,29 +13711,6 @@ function isSourceOnlyFlaggedFix(fix) {
     && status !== "suspected"
     && status !== "confirmed";
 }
-
-function buildSourceAwareTrackPaths(fixes, trackColor) {
-  const paths = [];
-  for (let index = 1; index < fixes.length; index += 1) {
-    const previous = fixes[index - 1];
-    const current = fixes[index];
-    const sourceFlagged = isSourceOnlyFlaggedFix(previous) || isSourceOnlyFlaggedFix(current);
-    const last = paths[paths.length - 1];
-    if (last && last.sourceFlagged === sourceFlagged) {
-      last.path.push(current.position);
-      continue;
-    }
-    paths.push({
-      path: [previous.position, current.position],
-      color: sourceFlagged
-        ? [trackColor[0], trackColor[1], trackColor[2], 52]
-        : trackColor,
-      sourceFlagged,
-    });
-  }
-  return paths;
-}
-
 
 function parseMovementBurstGap(summary) {
   const nested = summary?.burst_gap || {};
@@ -14298,15 +14169,14 @@ function refreshMovementFixCollections(data) {
     .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
   data.fixByKey = new Map(data.fixes.map(fix => [fix.fixKey, fix]));
   data.confirmedPointFixes = data.fixes.filter(fix => fix.review?.status === "confirmed");
-  data.overviewFixesByTrack = buildMovementFixTrackIndex(data.overviewFixes || []);
-  data.detailFixesByTrack = buildMovementFixTrackIndex(data.detailFixes || []);
   data.eligibleFixesByTrack = buildMovementFixTrackIndex(data.fixes);
   data.allFixesByTrack = buildMovementFixTrackIndex(data.fixes, { includeExcluded: true });
   data.eligibleTrackPositionByFixKey = buildMovementTrackPositionLookup(data.eligibleFixesByTrack);
   data.allTrackPositionByFixKey = buildMovementTrackPositionLookup(data.allFixesByTrack);
   data.flaggedStepOverlays = buildFlaggedStepOverlays(data);
-  data.baseTrackPathCache = new Map();
-  data.temporalBackgroundPointCache = new Map();
+  data.trackStepSegments = buildMovementTrackStepSegments(data.eligibleFixesByTrack);
+  data.visiblePointCache = new Map();
+  data.visibleTrackStepCache = new Map();
   const mergedSegments = new Map();
   for (const segment of [...(data.overviewSegments || []), ...(data.detailSegments || [])]) {
     mergedSegments.set(segment.segmentId, segment);
@@ -14332,7 +14202,6 @@ function refreshMovementFixCollections(data) {
           color: burstPathColor(data.individualPalette, burst, 185),
           sourceFlagged,
         },
-        markerItems: buildAutoBurstEndpointMarkers(burst, sourceFlagged),
       },
     ];
   }));
@@ -14342,38 +14211,6 @@ function refreshMovementFixCollections(data) {
       !fix.analyticallyExcluded && fix.review?.status !== "confirmed"
     )),
   );
-}
-
-function buildAutoBurstEndpointMarkers(burst, sourceFlagged = false) {
-  const path = Array.isArray(burst?.path) ? burst.path : [];
-  if (!path.length) {
-    return [];
-  }
-  if (path.length === 1) {
-    return [{
-      burst,
-      markerRole: "start_end",
-      position: path[0],
-      fillColor: [196, 181, 253, 220],
-      sourceFlagged,
-    }];
-  }
-  return [
-    {
-      burst,
-      markerRole: "start",
-      position: path[0],
-      fillColor: [34, 211, 238, 220],
-      sourceFlagged,
-    },
-    {
-      burst,
-      markerRole: "end",
-      position: path[path.length - 1],
-      fillColor: [244, 114, 182, 220],
-      sourceFlagged,
-    },
-  ];
 }
 
 function buildMovementFixTrackIndex(fixes, { includeExcluded = false } = {}) {
@@ -14391,6 +14228,26 @@ function buildMovementFixTrackIndex(fixes, { includeExcluded = false } = {}) {
     trackFixes.sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
   }
   return byTrack;
+}
+
+function buildMovementTrackStepSegments(byTrack) {
+  const steps = [];
+  for (const [trackKey, fixes] of byTrack || []) {
+    for (let index = 1; index < fixes.length; index += 1) {
+      const previous = fixes[index - 1];
+      const destinationFix = fixes[index];
+      steps.push({
+        stepKey: `${previous.fixKey}->${destinationFix.fixKey}`,
+        trackKey,
+        individual: destinationFix.individual,
+        setName: destinationFix.setName,
+        destinationFix,
+        sourceFlagged: isSourceOnlyFlaggedFix(previous) || isSourceOnlyFlaggedFix(destinationFix),
+        path: [previous.position, destinationFix.position],
+      });
+    }
+  }
+  return steps;
 }
 
 function buildMovementTrackPositionLookup(byTrack) {
