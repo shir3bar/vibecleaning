@@ -9815,12 +9815,6 @@ class MovementExampleApp {
     }
     const picked = this.getMapPickedObject(event);
     if (!picked?.object?.fixKey) {
-      // Burst paths carry a burst but no fix key. Fix layers render above
-      // them, so this only fires when the click missed every fix.
-      const pickedBurstId = String(picked?.object?.burst?.burstId || "");
-      if (pickedBurstId) {
-        this.focusMapBurst(pickedBurstId);
-      }
       return;
     }
     const fixKey = picked.object.fixKey;

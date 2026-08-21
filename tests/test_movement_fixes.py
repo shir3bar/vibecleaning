@@ -3689,7 +3689,10 @@ def test_movement_frontend_burst_picking_does_not_depend_on_feature_space():
     # Bursts are pickable regardless of whether a feature-space analysis ran.
     assert "pickable: Boolean(this.burstFeatureSpace?.points?.length)" not in source
     assert "focusMapBurst(burstId)" in source
-    assert "this.focusMapBurst(pickedBurstId)" in source
+    click_start = source.index("handleMapClick(event) {")
+    click_block = source[click_start:click_start + 1600]
+    assert "focusMapBurst" not in click_block
+    assert "setBurstVisible" not in click_block
 
     # Feature-space selection keeps its own independent guards and still runs
     # first in the click handler.
