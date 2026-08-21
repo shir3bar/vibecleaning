@@ -25,6 +25,7 @@ EXPORT_COLUMNS = [
     "individual-reviewed",
     "individual-review-ok",
     "individual-review-decision",
+    "individual-needs-check",
     "outlier_status",
     "outlier_issue_type",
     "outlier_comments",
@@ -313,25 +314,16 @@ def normalize_annotation(raw: dict) -> dict:
         )
     except (TypeError, ValueError):
         resolved_fix_count = sum(end - start + 1 for start, end in row_ranges)
-    reviewed = raw.get("reviewed") is True or _flag_is_true(raw.get("reviewed"))
-    raw_review_ok = raw.get("review_ok")
-    review_ok = (
-        raw_review_ok
-        if isinstance(raw_review_ok, bool)
-        else _flag_is_true(raw_review_ok)
-        if raw_review_ok not in (None, "")
-        else None
-    )
     raw_decision = str(raw.get("review_decision") or "").strip().lower()
-    if raw_decision not in {"ok", "not_ok", "second_opinion"}:
-        raw_decision = "ok" if review_ok is True else "not_ok" if reviewed else ""
+    if raw_decision not in {"ok", "not_ok"}:
+        raw_decision = ""
+    reviewed = (raw.get("reviewed") is True or _flag_is_true(raw.get("reviewed"))) and bool(raw_decision)
     return {
         "annotation_id": str(raw.get("annotation_id") or "").strip(),
         "step_id": str(raw.get("step_id") or "").strip(),
         "parent_annotation_id": str(raw.get("parent_annotation_id") or "").strip(),
         "annotation_kind": annotation_kind,
         "reviewed": reviewed,
-        "review_ok": review_ok if reviewed else None,
         "review_decision": raw_decision if reviewed else "",
         "needs_check": raw.get("needs_check") is True if reviewed else False,
         "review_id": str(raw.get("review_id") or "").strip(),
@@ -786,8 +778,8 @@ def build_review_projection(
         "individual_reviews": {
             individual: {
                 "reviewed": True,
-                "review_ok": bool(item.get("review_ok")),
                 "review_decision": str(item.get("review_decision") or ""),
+                "needs_check": item.get("needs_check") is True,
                 "review_user": str(item.get("user") or ""),
                 "reviewed_at": str(item.get("created_at") or ""),
                 "review_comment": str(item.get("comment") or ""),
@@ -1018,8 +1010,8 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
     result["individual_reviews"] = {
         individual: {
             "reviewed": True,
-            "review_ok": bool(item.get("review_ok")),
             "review_decision": str(item.get("review_decision") or ""),
+            "needs_check": item.get("needs_check") is True,
             "review_user": item.get("user") or "",
             "reviewed_at": item.get("created_at") or "",
             "review_comment": item.get("comment") or "",
@@ -1036,8 +1028,8 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
         stats.update(
             {
                 "reviewed": bool(decision),
-                "review_ok": bool(decision.get("review_ok")) if decision else False,
                 "review_decision": str(decision.get("review_decision") or "") if decision else "",
+                "needs_check": decision.get("needs_check") is True if decision else False,
                 "review_user": str(decision.get("user") or "") if decision else "",
                 "reviewed_at": str(decision.get("created_at") or "") if decision else "",
                 "review_comment": str(decision.get("comment") or "") if decision else "",
@@ -1278,13 +1270,18 @@ def export_reviewed_csv(
             output_row["individual-reviewed"] = "true" if individual_review else "false"
             output_row["individual-review-ok"] = (
                 "true"
-                if individual_review and individual_review.get("review_ok")
+                if individual_review and individual_review.get("review_decision") == "ok"
                 else "false"
             )
             output_row["individual-review-decision"] = (
                 str(individual_review.get("review_decision") or "")
                 if individual_review
                 else ""
+            )
+            output_row["individual-needs-check"] = (
+                "true"
+                if individual_review and individual_review.get("needs_check") is True
+                else "false"
             )
             output_row["outlier_status"] = status
             output_row["outlier_issue_type"] = "; ".join(issue_types)

@@ -34,7 +34,7 @@ from app.reviews import (
     authorize_analysis,
     authorize_persistent_change,
     can_read_study,
-    carryover_second_opinions,
+    carryover_needs_checks,
     cancel_review,
     complete_review,
     finish_editor_control,
@@ -894,7 +894,7 @@ def register_movement_routes(
                     "undecided": 0,
                     "ok": 0,
                     "not_ok": 0,
-                    "second_opinion": 0,
+                    "needs_check": 0,
                 },
                 **({"individuals": []} if include_individuals else {}),
             }
@@ -916,11 +916,13 @@ def register_movement_routes(
             annotations,
             current_dataset_id=dataset_id,
         )
-        decision_counts = {"ok": 0, "not_ok": 0, "second_opinion": 0}
+        decision_counts = {"ok": 0, "not_ok": 0, "needs_check": 0}
         for annotation in valid.values():
             decision = str(annotation.get("review_decision") or "")
-            if decision in decision_counts:
+            if decision in {"ok", "not_ok"}:
                 decision_counts[decision] += 1
+            if annotation.get("needs_check") is True:
+                decision_counts["needs_check"] += 1
         result = {
             "family": family_name,
             "study": study_name,
@@ -947,6 +949,7 @@ def register_movement_routes(
                     "review_decision": str(
                         (valid.get(individual) or {}).get("review_decision") or ""
                     ),
+                    "needs_check": (valid.get(individual) or {}).get("needs_check") is True,
                     "reviewed_at": str(
                         (valid.get(individual) or {}).get("created_at")
                         or (valid.get(individual) or {}).get("reviewed_at")
@@ -1005,13 +1008,13 @@ def register_movement_routes(
             parameters["valid_individual_review_annotation_ids"] = sorted(
                 str(item.get("annotation_id") or "") for item in valid.values()
             )
-            parameters["second_opinion_individuals"] = sorted(
+            parameters["needs_check_individuals"] = sorted(
                 {
                     individual
                     for individual, item in valid.items()
-                    if item.get("review_decision") == "second_opinion"
+                    if item.get("needs_check") is True
                 }
-                | set(carryover_second_opinions(study_dir, review, review_annotations))
+                | set(carryover_needs_checks(study_dir, review, review_annotations))
             )
             parameters["individual_review_decisions"] = {
                 individual: str(item.get("review_decision") or "")

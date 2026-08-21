@@ -2231,7 +2231,7 @@ class MovementExampleApp {
           font-weight: 700;
         }
         .movement-prior-decision-badge.issues,
-        .movement-prior-decision-badge.second-opinion {
+        .movement-prior-decision-badge.needs-check {
           border-color: rgba(255, 193, 77, 0.7);
           color: #ffe1a1;
           background: rgba(255, 193, 77, 0.14);
@@ -3032,7 +3032,7 @@ class MovementExampleApp {
                       <select data-role="individual-queue-filter">
                         <option value="all">All individuals</option>
                         <option value="unresolved">Unresolved issues</option>
-                        <option value="second_opinion">Second opinion</option>
+                        <option value="needs_check">Needs check</option>
                       </select>
                     </label>
                     <div class="movement-queue-ranking-state" data-role="individual-queue-ranking-state"></div>
@@ -3597,7 +3597,7 @@ class MovementExampleApp {
     });
     this.refs.individualQueueFilter.addEventListener("change", () => {
       const filterMode = this.refs.individualQueueFilter.value;
-      this.individualReviewQueue.filterMode = ["second_opinion", "unresolved"].includes(filterMode)
+      this.individualReviewQueue.filterMode = ["needs_check", "unresolved"].includes(filterMode)
         ? filterMode
         : "all";
       this.individualReviewQueue.pageIndex = 0;
@@ -6159,12 +6159,12 @@ class MovementExampleApp {
       if (!review) {
         this.refs.reviewProgress.textContent = this.currentStudy ? "No active review" : "";
       } else if (coverage) {
-        const second = Number(coverage.second_opinion_count || 0);
-        const priorSecond = Number(coverage.prior_second_opinion_count || 0);
+        const needsCheck = Number(coverage.needs_check_count || 0);
+        const priorNeedsCheck = Number(coverage.prior_needs_check_count || 0);
         this.refs.reviewProgress.textContent = (
           `${coverage.reviewed_count || 0}/${coverage.required_count || 0} reviewed`
-          + (second ? ` · ${second} second opinion` : "")
-          + (priorSecond ? ` · ${priorSecond} carried forward` : "")
+          + (needsCheck ? ` · ${needsCheck} needs check` : "")
+          + (priorNeedsCheck ? ` · ${priorNeedsCheck} carried forward` : "")
         );
       }
     }
@@ -6228,7 +6228,7 @@ class MovementExampleApp {
       <table class="movement-admin-dashboard-table">
         <thead><tr>
           <th>Study</th><th>Review</th><th>Reviewer</th><th>Progress</th>
-          <th>OK</th><th>Issues</th><th>Second opinion</th><th>Undecided</th><th>Actions</th>
+          <th>OK</th><th>Issues</th><th>Needs check</th><th>Undecided</th><th>Actions</th>
         </tr></thead>
         <tbody>
           ${studies.map(item => {
@@ -6243,7 +6243,7 @@ class MovementExampleApp {
                 <td>${escapeHtml(formatCount(counts.reviewed || 0))}/${escapeHtml(formatCount(counts.required || 0))}</td>
                 <td>${escapeHtml(formatCount(counts.ok || 0))}</td>
                 <td>${escapeHtml(formatCount(counts.not_ok || 0))}</td>
-                <td>${escapeHtml(formatCount(counts.second_opinion || 0))}</td>
+                <td>${escapeHtml(formatCount(counts.needs_check || 0))}</td>
                 <td>${escapeHtml(formatCount(counts.undecided || 0))}</td>
                 <td><div class="movement-admin-dashboard-actions">
                   <button type="button" data-admin-action="expand">Individuals</button>
@@ -6305,7 +6305,7 @@ class MovementExampleApp {
       const individuals = payload?.studies?.[0]?.individuals || [];
       detailRow.querySelector(".movement-admin-individuals").innerHTML = individuals.length
         ? individuals.map(item => (
-          `<div><strong>${escapeHtml(item.individual || "")}</strong><br>${escapeHtml(item.review_decision || "Undecided")}</div>`
+          `<div><strong>${escapeHtml(item.individual || "")}</strong><br>${escapeHtml(item.review_decision || "Undecided")}${item.needs_check ? " • Needs check" : ""}</div>`
         )).join("")
         : '<div class="movement-empty">No individual decisions.</div>';
       detailRow.dataset.loaded = "true";
@@ -6350,7 +6350,7 @@ class MovementExampleApp {
 
   async completeCurrentReview() {
     const coverage = this.editLockProfile?.coverage || {};
-    const second = Number(coverage.second_opinion_count || 0);
+    const needsCheck = Number(coverage.needs_check_count || 0);
     const actor = this.editLockProfile?.actor || window.vibecleaningActor || {};
     let reason = "";
     if (actor.role === "editor" && this.editLockProfile?.review?.reviewer_user_id !== actor.user_id) {
@@ -6362,8 +6362,8 @@ class MovementExampleApp {
       0,
     );
     const warningParts = [];
-    if (second) {
-      warningParts.push(`${second} individual(s) still queued for a second opinion`);
+    if (needsCheck) {
+      warningParts.push(`${needsCheck} individual(s) marked Needs check`);
     }
     if (unresolved) {
       warningParts.push(`${unresolved} unresolved suspicious issue occurrence(s)`);
@@ -7342,11 +7342,11 @@ class MovementExampleApp {
     const stats = this.data?.stats?.[individual] || {};
     return {
       reviewed: stats.reviewed === true,
-      reviewDecision: stats.reviewDecision || (stats.reviewed ? (stats.reviewOk ? "ok" : "not_ok") : ""),
-      reviewOk: stats.reviewOk === true,
+      reviewDecision: stats.reviewDecision || "",
+      reviewOk: stats.reviewDecision === "ok",
       needsCheck: stats.needsCheck === true,
       priorDecision,
-      priorSecondOpinion: priorDecision?.review_decision === "second_opinion",
+      priorNeedsCheck: priorDecision?.needs_check === true,
       comment: stats.reviewComment || "",
       staged: false,
     };
@@ -7410,9 +7410,9 @@ class MovementExampleApp {
       if (this.individualReviewQueue.filterMode === "unresolved") {
         return Number(this.data?.stats?.[individual]?.unresolvedSuspectedCount) > 0;
       }
-      return this.individualReviewQueue.filterMode !== "second_opinion"
-        || state.reviewDecision === "second_opinion"
-        || state.priorSecondOpinion;
+      return this.individualReviewQueue.filterMode !== "needs_check"
+        || state.needsCheck
+        || state.priorNeedsCheck;
     });
     const datasetIndex = new Map(this.data?.individuals?.map((individual, index) => [individual, index]) || []);
     const rankingIndex = new Map(
@@ -8264,9 +8264,8 @@ class MovementExampleApp {
       const isSelected = this.data.selectedIndividuals.has(individual);
       const card = document.createElement("div");
       const unresolvedCount = Number(stats.unresolvedSuspectedCount) || 0;
-      const priorDecision = String(
-        this.getIndividualReviewState(individual).priorDecision?.review_decision || "",
-      );
+      const priorReview = this.getIndividualReviewState(individual).priorDecision || null;
+      const priorDecision = String(priorReview?.review_decision || "");
       card.className = `movement-card interactive${unresolvedCount ? " has-unresolved-issues" : ""}`;
       card.style.opacity = isSelected ? "1" : "0.34";
 
@@ -8315,12 +8314,11 @@ class MovementExampleApp {
       }
       if (priorDecision) {
         const badge = document.createElement("div");
-        badge.className = `movement-prior-decision-badge ${priorDecision === "not_ok" ? "issues" : priorDecision === "second_opinion" ? "second-opinion" : "ok"}`;
+        badge.className = `movement-prior-decision-badge ${priorDecision === "not_ok" ? "issues" : priorReview?.needs_check ? "needs-check" : "ok"}`;
         badge.textContent = priorDecision === "not_ok"
           ? "Prior review: Issues found"
-          : priorDecision === "second_opinion"
-            ? "Prior review: Second opinion"
-            : "Prior review: OK";
+          : "Prior review: OK";
+        if (priorReview?.needs_check) badge.textContent += " • Needs check";
         card.appendChild(badge);
       }
 
@@ -8412,27 +8410,22 @@ class MovementExampleApp {
       const unresolvedCount = Number(stats.unresolvedSuspectedCount) || 0;
       const origins = Array.isArray(stats.unresolvedIssueOrigins) ? stats.unresolvedIssueOrigins : [];
       const priorDecision = String(reviewState.priorDecision?.review_decision || "");
+      const priorNeedsCheck = reviewState.priorDecision?.needs_check === true;
       const priorLabel = priorDecision === "not_ok"
         ? "Prior review: Issues found"
-        : priorDecision === "second_opinion"
-          ? "Prior review: Second opinion"
-          : priorDecision === "ok"
-            ? "Prior review: OK"
-            : "";
+        : priorDecision === "ok"
+          ? "Prior review: OK"
+          : "";
       const priorClass = priorDecision === "not_ok"
         ? "issues"
-        : priorDecision === "second_opinion" ? "second-opinion" : "ok";
+        : priorNeedsCheck ? "needs-check" : "ok";
       card.className = `movement-card queue-card interactive${isActive ? " queue-active" : ""}${unresolvedCount ? " has-unresolved-issues" : ""}`;
       const stateLabel = reviewState.reviewed
         ? reviewState.reviewDecision === "ok"
           ? "OK"
-          : reviewState.reviewDecision === "second_opinion"
-            ? "Second opinion"
-            : "Issues found"
-        : priorDecision === "second_opinion"
-          ? "Needs review—prior second opinion"
-          : priorDecision === "not_ok"
-            ? "Needs review—prior issues"
+          : "Issues found"
+        : priorDecision === "not_ok"
+          ? "Needs review—prior issues"
           : queue.skippedIndividuals.has(individual)
             ? "Skipped"
             : "Unreviewed";
@@ -8451,7 +8444,7 @@ class MovementExampleApp {
             <button type="button" data-queue-table data-individual="${escapeHtml(individual)}">Table</button>
           </div>
         </div>
-        ${priorLabel ? `<div class="movement-prior-decision-badge ${priorClass}">${escapeHtml(priorLabel)}</div>` : ""}
+        ${priorLabel ? `<div class="movement-prior-decision-badge ${priorClass}">${escapeHtml(priorLabel)}${priorNeedsCheck ? " • Needs check" : ""}</div>` : ""}
         <div class="movement-queue-card-meta">
           ${escapeHtml(this.data.speciesByIndividual[individual] || "")}
           ${this.data.speciesByIndividual[individual] ? " • " : ""}
@@ -14453,7 +14446,8 @@ class MovementExampleApp {
         : [];
       stats.reviewed = decision.reviewed === true;
       stats.reviewDecision = String(decision.review_decision || "");
-      stats.reviewOk = decision.review_ok === true;
+      stats.reviewOk = stats.reviewDecision === "ok";
+      stats.needsCheck = decision.needs_check === true;
       stats.reviewUser = String(decision.review_user || "");
       stats.reviewedAt = String(decision.reviewed_at || "");
       stats.reviewComment = String(decision.review_comment || "");
@@ -14771,7 +14765,8 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
         : [],
       reviewed: item?.reviewed === true,
       reviewDecision: String(item?.review_decision || ""),
-      reviewOk: item?.review_ok === true,
+      reviewOk: String(item?.review_decision || "") === "ok",
+      needsCheck: item?.needs_check === true,
       reviewUser: String(item?.review_user || ""),
       reviewedAt: String(item?.reviewed_at || ""),
       reviewComment: String(item?.review_comment || ""),

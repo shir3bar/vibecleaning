@@ -22,7 +22,7 @@ REVIEW_STATE_SCHEMA_VERSION = 1
 VALID_REVIEW_EFFECTS = frozenset(
     {"annotation_only", "preserves_individual_scope", "changes_individual_scope"}
 )
-VALID_REVIEW_DECISIONS = frozenset({"ok", "not_ok", "second_opinion"})
+VALID_REVIEW_DECISIONS = frozenset({"ok", "not_ok"})
 
 
 class ReviewStateError(ProjectStateError):
@@ -351,12 +351,10 @@ def finish_editor_control(
         return {"editor_control": None, "state": state}
 
 
-def normalize_review_decision(value: object, *, review_ok: object = None) -> str:
+def normalize_review_decision(value: object) -> str:
     decision = str(value or "").strip().lower()
-    if not decision and isinstance(review_ok, bool):
-        decision = "ok" if review_ok else "not_ok"
     if decision not in VALID_REVIEW_DECISIONS:
-        raise ReviewStateError("Review decision must be ok, not_ok, or second_opinion")
+        raise ReviewStateError("Review decision must be ok or not_ok")
     return decision
 
 
@@ -434,18 +432,18 @@ def review_coverage(
     latest = _valid_review_decisions(review, annotations, scope)
     required = scope["required_individuals"]
     remaining = [individual for individual in required if individual not in latest]
-    second_opinion = [
+    needs_check = [
         individual
         for individual in required
-        if individual in latest and latest[individual]["review_decision"] == "second_opinion"
+        if individual in latest and latest[individual].get("needs_check") is True
     ]
     return {
         "required_count": len(required),
         "reviewed_count": len(required) - len(remaining),
         "remaining_count": len(remaining),
         "remaining_individuals": remaining,
-        "second_opinion_count": len(second_opinion),
-        "second_opinion_individuals": second_opinion,
+        "needs_check_count": len(needs_check),
+        "needs_check_individuals": needs_check,
         "complete_allowed": not remaining,
     }
 
@@ -469,10 +467,7 @@ def _valid_review_decisions(
             continue
         if dataset_position < scope["required_since"][individual]:
             continue
-        decision = normalize_review_decision(
-            annotation.get("review_decision"),
-            review_ok=annotation.get("review_ok"),
-        )
+        decision = normalize_review_decision(annotation.get("review_decision"))
         latest[individual] = (dataset_position, {**annotation, "review_decision": decision})
     return {individual: item[1] for individual, item in latest.items()}
 
@@ -488,7 +483,7 @@ def valid_review_decisions(
     return _valid_review_decisions(review, annotations, scope)
 
 
-def carryover_second_opinions(
+def carryover_needs_checks(
     project_dir: Path,
     review: dict,
     annotations: Iterable[dict],
@@ -507,7 +502,7 @@ def carryover_second_opinions(
     return sorted(
         individual
         for individual, item in previous_latest.items()
-        if individual not in current and item["review_decision"] == "second_opinion"
+        if individual not in current and item.get("needs_check") is True
     )
 
 
@@ -549,6 +544,7 @@ def prior_review_decisions(
             continue
         result[individual] = {
             "review_decision": str(annotation.get("review_decision") or ""),
+            "needs_check": annotation.get("needs_check") is True,
             "review_id": str(prior_review.get("review_id") or ""),
             "reviewer": reviewer,
             "reviewed_at": str(
@@ -669,10 +665,10 @@ def review_profile(project_dir: Path, actor: Actor, annotations: Iterable[dict] 
         carryover = sorted(
             individual
             for individual, item in prior_decisions.items()
-            if item.get("review_decision") == "second_opinion"
+            if item.get("needs_check") is True
         )
-        coverage["prior_second_opinion_count"] = len(carryover)
-        coverage["prior_second_opinion_individuals"] = carryover
+        coverage["prior_needs_check_count"] = len(carryover)
+        coverage["prior_needs_check_individuals"] = carryover
     return {
         "actor": actor.as_dict(),
         "review_revision": int(state.get("revision") or 0),

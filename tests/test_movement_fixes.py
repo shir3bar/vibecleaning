@@ -1496,12 +1496,16 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
             },
         ),
         client.post(
-            f"{base_url}/actions/review-individuals",
+            f"{base_url}/actions/review-individual",
             json={
                 "dataset_id": root_id,
                 "expected_current_dataset_id": confirmed_dataset_id,
                 "logical_name": "movement.csv",
-                "decisions": [{"individual": "alpha", "review_ok": True}],
+                "decision": {
+                    "individual": "alpha",
+                    "review_decision": "ok",
+                    "needs_check": False,
+                },
                 "user": "reviewer",
             },
         ),
@@ -1555,12 +1559,16 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     assert rewound_profile["blockers"][0]["code"] == "forward_history_pending"
 
     blocked_rewound_edit = client.post(
-        f"{base_url}/actions/review-individuals",
+        f"{base_url}/actions/review-individual",
         json={
             "dataset_id": suspected_dataset_id,
             "expected_current_dataset_id": suspected_dataset_id,
             "logical_name": "movement.csv",
-            "decisions": [{"individual": "alpha", "review_ok": True}],
+            "decision": {
+                "individual": "alpha",
+                "review_decision": "ok",
+                "needs_check": False,
+            },
             "user": "reviewer",
         },
     )
@@ -2347,7 +2355,8 @@ fix_3,gamma,2024-01-01T02:00:00Z,-72,42,train,false,,,false,true,
                         "annotation_kind": "individual_review",
                         "source_artifact": "movement.csv",
                         "reviewed": True,
-                        "review_ok": True,
+                        "review_decision": "ok",
+                        "needs_check": False,
                         "comment": "Track looks plausible",
                         "user": "reviewer",
                         "created_at": "2026-07-30T12:00:00+00:00",
@@ -2489,9 +2498,11 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0
     assert root_overview.json()["stats"]["alpha"].get("reviewed") is not True
     reviewed_stats = reviewed_overview.json()["stats"]
     assert reviewed_stats["alpha"]["reviewed"] is True
-    assert reviewed_stats["alpha"]["review_ok"] is True
+    assert reviewed_stats["alpha"]["review_decision"] == "ok"
+    assert reviewed_stats["alpha"]["needs_check"] is True
     assert reviewed_stats["beta"]["reviewed"] is True
-    assert reviewed_stats["beta"]["review_ok"] is False
+    assert reviewed_stats["beta"]["review_decision"] == "not_ok"
+    assert reviewed_stats["beta"]["needs_check"] is False
     assert reviewed_stats["beta"]["review_comment"] == "Issues were marked separately"
 
     export_response = client.post(
@@ -2512,6 +2523,7 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0
     rows = list(csv.DictReader(io.StringIO(download.text)))
     assert [row["individual-reviewed"] for row in rows] == ["true", "true", "true"]
     assert [row["individual-review-ok"] for row in rows] == ["true", "true", "false"]
+    assert [row["individual-needs-check"] for row in rows] == ["true", "true", "false"]
     assert all(row["manually-marked-outlier"] == "false" for row in rows)
     assert all(row["algorithm-marked-outlier"] == "false" for row in rows)
 

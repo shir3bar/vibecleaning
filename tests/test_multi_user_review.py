@@ -64,13 +64,21 @@ def _project(tmp_path: Path):
     return project, state["current_dataset_id"]
 
 
-def _decision(review_id: str, dataset_id: str, individual: str, decision: str):
+def _decision(
+    review_id: str,
+    dataset_id: str,
+    individual: str,
+    decision: str,
+    *,
+    needs_check: bool = False,
+):
     return {
         "annotation_kind": "individual_review",
         "reviewed": True,
         "review_id": review_id,
         "source_dataset_id": dataset_id,
         "review_decision": decision,
+        "needs_check": needs_check,
         "scope": {"kind": "individual", "individual": individual},
     }
 
@@ -157,15 +165,15 @@ def test_review_coverage_follows_dataset_update_and_undo(tmp_path):
     review_id = review["review_id"]
     original = [
         _decision(review_id, baseline, "alpha", "ok"),
-        _decision(review_id, baseline, "beta", "second_opinion"),
+        _decision(review_id, baseline, "beta", "ok", needs_check=True),
     ]
     assert review_coverage(project, review, original) == {
         "required_count": 2,
         "reviewed_count": 2,
         "remaining_count": 0,
         "remaining_individuals": [],
-        "second_opinion_count": 1,
-        "second_opinion_individuals": ["beta"],
+        "needs_check_count": 1,
+        "needs_check_individuals": ["beta"],
         "complete_allowed": True,
     }
 
@@ -206,11 +214,11 @@ def test_review_coverage_follows_dataset_update_and_undo(tmp_path):
     updated_id = updated["dataset"]["dataset_id"]
     coverage = review_coverage(project, review, original)
     assert coverage["remaining_individuals"] == ["alpha", "gamma"]
-    assert coverage["second_opinion_count"] == 0
+    assert coverage["needs_check_count"] == 0
 
     current = original + [
         _decision(review_id, updated_id, "alpha", "not_ok"),
-        _decision(review_id, updated_id, "gamma", "second_opinion"),
+        _decision(review_id, updated_id, "gamma", "not_ok", needs_check=True),
     ]
     assert review_coverage(project, review, current)["complete_allowed"] is True
     profile = review_profile(project, reviewer, current)
@@ -225,7 +233,7 @@ def test_review_coverage_follows_dataset_update_and_undo(tmp_path):
     undo_to_parent(project)
     restored = review_coverage(project, review, original)
     assert restored["required_count"] == 2
-    assert restored["second_opinion_individuals"] == ["beta"]
+    assert restored["needs_check_individuals"] == ["beta"]
     with pytest.raises(ReviewConflictError):
         start_editor_control(
             project,
@@ -346,8 +354,8 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
         "/api/apps/movement/family/movement_raw/study/study_one/load"
     ).json()
     assert reviewer_load["edit_profile"]["editable"] is True
-    result = reviewer_client.post(
-        "/api/apps/movement/family/movement_raw/study/study_one/actions/review-individuals",
+    first_result = reviewer_client.post(
+        "/api/apps/movement/family/movement_raw/study/study_one/actions/review-individual",
         json={
             "dataset_id": reviewer_load["dataset_id"],
             "logical_name": "movement.csv",
@@ -355,10 +363,29 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
             "expected_review_revision": reviewer_load["edit_profile"]["review_revision"],
             "user": "Forged Browser Name",
             "actor": {"user_id": "forged"},
-            "decisions": [
-                {"individual": "alpha", "review_decision": "ok", "comment": ""},
-                {"individual": "beta", "review_decision": "second_opinion", "comment": "check"},
-            ],
+            "decision": {
+                "individual": "alpha",
+                "review_decision": "ok",
+                "needs_check": False,
+                "comment": "",
+            },
+        },
+    )
+    assert first_result.status_code == 200, first_result.text
+    first_output_id = first_result.json()["dataset"]["dataset_id"]
+    result = reviewer_client.post(
+        "/api/apps/movement/family/movement_raw/study/study_one/actions/review-individual",
+        json={
+            "dataset_id": first_output_id,
+            "logical_name": "movement.csv",
+            "expected_current_dataset_id": first_output_id,
+            "expected_review_revision": reviewer_load["edit_profile"]["review_revision"],
+            "decision": {
+                "individual": "beta",
+                "review_decision": "not_ok",
+                "needs_check": True,
+                "comment": "check",
+            },
         },
     )
     assert result.status_code == 200, result.text
@@ -369,7 +396,8 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
         study, output_id, "movement_review_annotations.json"
     )
     annotations = json.loads(annotations_path.read_text())["annotations"]
-    assert {item["review_decision"] for item in annotations} == {"ok", "second_opinion"}
+    assert {item["review_decision"] for item in annotations} == {"ok", "not_ok"}
+    assert [item["scope"]["individual"] for item in annotations if item["needs_check"]] == ["beta"]
     assert all(item["user"] == "Rae Reviewer" for item in annotations)
     assert all(item["actor"]["user_id"] == "user_reviewer" for item in annotations)
     assert all(item["review_id"] == assigned.json()["review"]["review_id"] for item in annotations)
@@ -379,7 +407,7 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
         params={"dataset_id": output_id},
     ).json()
     assert current["coverage"]["complete_allowed"] is True
-    assert current["coverage"]["second_opinion_individuals"] == ["beta"]
+    assert current["coverage"]["needs_check_individuals"] == ["beta"]
 
     completed = reviewer_client.post(
         "/api/apps/movement/family/movement_raw/study/study_one/review/complete",
@@ -394,7 +422,8 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
     completed_row = completed_dashboard.json()["studies"][0]
     assert completed_row["review"]["status"] == "completed"
     assert completed_row["counts"]["ok"] == 1
-    assert completed_row["counts"]["second_opinion"] == 1
+    assert completed_row["counts"]["not_ok"] == 1
+    assert completed_row["counts"]["needs_check"] == 1
     assert completed_row["counts"]["undecided"] == 0
     reassigned = editor_client.post(
         "/api/apps/movement/family/movement_raw/study/study_one/review/assign",
@@ -418,9 +447,10 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
         params={"dataset_id": output_id},
     ).json()
     assert fresh_profile["coverage"]["reviewed_count"] == 0
-    assert fresh_profile["coverage"]["prior_second_opinion_individuals"] == ["beta"]
+    assert fresh_profile["coverage"]["prior_needs_check_individuals"] == ["beta"]
     assert fresh_profile["coverage"]["prior_decisions_by_individual"]["alpha"]["review_decision"] == "ok"
-    assert fresh_profile["coverage"]["prior_decisions_by_individual"]["beta"]["review_decision"] == "second_opinion"
+    assert fresh_profile["coverage"]["prior_decisions_by_individual"]["beta"]["review_decision"] == "not_ok"
+    assert fresh_profile["coverage"]["prior_decisions_by_individual"]["beta"]["needs_check"] is True
 
     forbidden_dashboard = reviewer_client.get("/api/apps/movement/admin/review-summary")
     assert forbidden_dashboard.status_code == 403
@@ -437,7 +467,7 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
         "undecided": 2,
         "ok": 0,
         "not_ok": 0,
-        "second_opinion": 0,
+        "needs_check": 0,
     }
 
     dashboard_detail = editor_client.get(
@@ -450,6 +480,6 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
     )
     assert dashboard_detail.status_code == 200
     assert dashboard_detail.json()["studies"][0]["individuals"] == [
-        {"individual": "alpha", "review_decision": "", "reviewed_at": ""},
-        {"individual": "beta", "review_decision": "", "reviewed_at": ""},
+        {"individual": "alpha", "review_decision": "", "needs_check": False, "reviewed_at": ""},
+        {"individual": "beta", "review_decision": "", "needs_check": False, "reviewed_at": ""},
     ]

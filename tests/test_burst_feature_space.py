@@ -380,7 +380,8 @@ def test_frontend_exposes_read_only_burst_feature_space_with_bidirectional_focus
         source.index("  handleMapContextMenu(event) {")
     ]
     assert click_handler.index("getMapPickedFeatureSpaceBurst") < click_handler.index("pickObject")
-    assert click_handler.index("selectMapBurstInFeatureSpace") < click_handler.index("focusMapBurst")
+    assert click_handler.index("selectMapBurstInFeatureSpace") < click_handler.index("getMapPickedObject")
+    assert "focusMapBurst" not in click_handler
     assert "openIssueModal" not in feature_space_handler
     assert "openSegmentModal" not in feature_space_handler
     assert "run-candidate-query" not in feature_space_handler
