@@ -48,6 +48,7 @@ from examples.movement.review_annotations import (
 from examples.movement.bursts import build_auto_bursts
 from examples.movement.movement_features import STEP_FEATURE_FIELDS, compute_track_movement
 import examples.movement.summary as movement_summary
+import examples.movement.review_annotations as movement_review_annotations
 from examples.movement.summary import build_movement_fixes, build_movement_overview, diagnose_track_topology
 
 CSV_CONTENT = """eventid,individual,timestamp,longitude,latitude,set,outlier_status,outlier_issue_type,outlier_comments,visible,manually-marked-outlier,algorithm-marked-outlier
@@ -834,9 +835,10 @@ def test_hidden_output_links_do_not_leave_an_empty_root_grid_row():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
     assert ".movement-toolbar {\n          grid-row: 1;" in source
-    assert ".movement-status {\n          grid-row: 2;" in source
-    assert ".movement-output-links {\n          grid-row: 3;" in source
-    assert ".movement-main {\n          grid-row: 4;" in source
+    assert ".movement-release-notice {\n          grid-row: 2;" in source
+    assert ".movement-status {\n          grid-row: 3;" in source
+    assert ".movement-output-links {\n          grid-row: 4;" in source
+    assert ".movement-main {\n          grid-row: 5;" in source
 
 
 def test_movement_frontend_exposes_history_lock_and_resume_controls():
@@ -915,7 +917,7 @@ def test_movement_frontend_distinguishes_source_flags_from_review_status():
     assert 'id: "movement-source-flagged-points"' not in source
     assert 'id: "movement-suspected-outline"' in source
     assert 'const showSuspectedOutlines = this.data.suspiciousState === "loaded";' in source
-    assert "for (const fix of this.data.suspiciousFixes || [])" in source
+    assert "for (const fix of this.data.fixes || [])" in source
     assert 'fix.review?.status !== "suspected"' in source
     assert "they remain analytically included until confirmed in Vibecleaning" in source
     assert '"source_flags",\n      "Source flags"' in source
@@ -980,9 +982,13 @@ def test_movement_frontend_uses_one_scope_aware_flag_action():
     assert source.count('data-role="mark-suspected"') == 2  # markup and ref
     assert 'data-role="segment-suspected"' not in source
     assert "openActiveFlagModal()" in source
+    assert 'kind: "individual"' in source
+    assert 'kind: "bursts"' in source
     assert 'kind: "segment"' in source
     assert 'kind: "filter"' in source
     assert 'kind: "fixes"' in source
+    assert "Flag entire individual" in source
+    assert "selected burst(s)" in source
     assert "Flag selected segment" in source
     assert "Flag threshold matches" in source
     assert "Flag checked fixes" in source
@@ -995,6 +1001,15 @@ def test_movement_frontend_uses_one_scope_aware_flag_action():
     assert 'selectionMethod: "map_double_click"' in source
     assert 'selectionMethod: "table_shift_click"' in source
     assert "selection_method: context.selectionMethod" in source
+    assert 'data-queue-flag-individual' in source
+    assert 'data-queue-flag-burst=' in source
+    assert 'data-table-check-fix=' in source
+    assert 'data-table-check-burst=' in source
+    assert 'data-add-individual-issue' not in source
+    assert "Choose what to flag" in source
+    assert '[255, 204, 40, 210]' in source
+    assert source.index('id: "movement-manual-flag-target-outline"') < source.index('id: "movement-paths"')
+    assert source.index('id: "movement-table-selection-path"') < source.index('id: "movement-paths"')
 
 
 def test_movement_frontend_precomputes_inbound_flagged_steps():
@@ -1160,6 +1175,121 @@ def test_annotate_scope_records_167_fixes_as_one_row_range_annotation(tmp_path):
     payload = response.json()
     assert payload["step"]["summary"]["resolved_fix_count"] == 167
     assert payload["step"]["parameters"]["scope"]["row_ranges"] == [[1, 167]]
+
+
+def test_review_projection_reuses_tracks_for_suspicions_and_reports_visible_reviews(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+    root_overview = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/overview",
+        params={"logical_name": "movement.csv"},
+    ).json()
+
+    flagged = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "expected_current_dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "fix", "fix_keys": ["id:fix_a_2#row:2"]},
+            "status": "suspected",
+            "origin": "manual",
+            "issue_type": "manual check",
+            "comment": "Review this fix",
+            "user": "reviewer",
+        },
+    )
+    assert flagged.status_code == 200
+    flagged_dataset_id = flagged.json()["dataset"]["dataset_id"]
+
+    projection_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{flagged_dataset_id}/review-projection",
+        params=[("logical_name", "movement.csv"), ("individuals", "alpha")],
+    )
+    assert projection_response.status_code == 200
+    projection = projection_response.json()
+
+    assert projection["source_signature"] == root_overview["source_signature"]
+    assert projection["exclusion_signature"] == root_overview["exclusion_signature"]
+    assert projection["dataset"]["dataset_id"] == flagged_dataset_id
+    assert projection["review_counts"] == {"suspected": 3, "confirmed": 1}
+    projected_by_key = {item["fix_key"]: item for item in projection["fixes"]}
+    assert projected_by_key["id:fix_a_2#row:2"]["review"]["status"] == "suspected"
+    assert all(item["individual"] == "alpha" for item in projection["fixes"])
+
+
+def test_review_projection_marks_confirmations_as_track_changes(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+    flagged = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "expected_current_dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "fix", "fix_keys": ["id:fix_a_2#row:2"]},
+            "status": "suspected",
+            "origin": "manual",
+            "issue_type": "manual check",
+            "comment": "Review this fix",
+            "user": "reviewer",
+        },
+    ).json()
+    flagged_dataset_id = flagged["dataset"]["dataset_id"]
+    parent_annotation_id = flagged["step"]["summary"]["annotation_id"]
+    suspected_projection = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{flagged_dataset_id}/review-projection",
+        params={"logical_name": "movement.csv"},
+    ).json()
+
+    confirmed = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/confirm-issues",
+        json={
+            "dataset_id": flagged_dataset_id,
+            "expected_current_dataset_id": flagged_dataset_id,
+            "logical_name": "movement.csv",
+            "confirmations": [{
+                "parent_annotation_id": parent_annotation_id,
+                "fix_keys": ["id:fix_a_2#row:2"],
+            }],
+            "user": "reviewer",
+        },
+    )
+    assert confirmed.status_code == 200
+    confirmed_dataset_id = confirmed.json()["dataset"]["dataset_id"]
+    confirmed_projection = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{confirmed_dataset_id}/review-projection",
+        params={"logical_name": "movement.csv"},
+    ).json()
+
+    assert confirmed_projection["source_signature"] == suspected_projection["source_signature"]
+    assert confirmed_projection["exclusion_signature"] != suspected_projection["exclusion_signature"]
+
+
+def test_review_projection_reuses_the_overview_row_lookup(tmp_path, monkeypatch):
+    movement_review_annotations._review_row_contexts_cached.cache_clear()
+    client, dataset_id = create_movement_test_client(tmp_path)
+    movement_csv_opens = 0
+    original_open = Path.open
+
+    def tracked_open(path, *args, **kwargs):
+        nonlocal movement_csv_opens
+        if path.name == "movement.csv":
+            movement_csv_opens += 1
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+    overview = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/overview",
+        params={"logical_name": "movement.csv"},
+    )
+    assert overview.status_code == 200
+    opens_after_overview = movement_csv_opens
+
+    projection = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/review-projection",
+        params=[("logical_name", "movement.csv"), ("individuals", "alpha")],
+    )
+    assert projection.status_code == 200
+    assert movement_csv_opens == opens_after_overview
 
 
 def test_segment_annotation_persists_track_identity_and_selection_method(tmp_path):
@@ -1873,7 +2003,7 @@ def test_movement_frontend_restores_saved_burst_analyses():
     assert "Download ${escapeHtml(outputName)}" in source
     assert "/actions/annotate-scope" in source
     assert "openIndividualReviewModal" in source
-    assert "openBurstReviewModal" in source
+    assert "openSelectedBurstsModal" in source
     assert 'candidateGenerated ? "algorithm" : "manual"' in source
     assert "--movement-individual-list-height" in source
     assert 'data-role="individual-resize"' in source
@@ -1910,7 +2040,7 @@ def test_movement_frontend_limits_suspicious_halos_to_visible_individuals():
     collection_end = source.index("\n    if (showPoints) {", collection_start)
     collection = source[collection_start:collection_end]
 
-    assert "for (const fix of this.data.suspiciousFixes || [])" in collection
+    assert "for (const fix of this.data.fixes || [])" in collection
     assert "|| !visibleIndividuals.has(fix.individual)" in collection
     assert "|| !visibleSetNames.has(fix.setName)" in collection
 
@@ -1944,7 +2074,9 @@ def test_movement_frontend_preserves_view_context_across_dataset_nodes():
     assert "async loadDataset(viewContext = this.captureDatasetViewContext())" in source
     assert "const preservedFixKeys = this.initializeDatasetView(viewContext)" in source
     assert "this.restoreDatasetMapView(viewContext)" in source
-    assert "await this.loadStudy({ preferredDatasetId: datasetId, viewContext })" in source
+    assert "return this.transitionToDataset(datasetId" in source
+    load_dataset = source[source.index("  async loadDataset("):source.index("  async loadArtifact(")]
+    assert "this.clearLoadedStudyState();" not in load_dataset
 
 
 def test_movement_frontend_preserves_queue_context_across_annotation_steps():
@@ -1958,7 +2090,27 @@ def test_movement_frontend_preserves_queue_context_across_annotation_steps():
     assert "mapScope: queue.mapScope" in source
     assert "appliedRankingAnalysisId: queue.appliedRankingAnalysisId" in source
     assert "this.restoreAnnotationReloadContext(viewContext)" in source
-    assert "{ preserveAnnotationContext: true }" in source
+    assert "preserveAnnotationContext: true" in source
+
+
+def test_movement_frontend_updates_review_only_steps_without_reloading_tracks():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    transition = source[
+        source.index("  async transitionToDataset("):
+        source.index("\n  openResumeModal()", source.index("  async transitionToDataset("))
+    ]
+
+    assert "/review-projection?" in source
+    assert "this.data.sourceSignature === String(projection.source_signature" in transition
+    assert "this.data.exclusionSignature === String(projection.exclusion_signature" in transition
+    assert "this.applyReviewProjection(projection);" in transition
+    assert "await this.loadDataset(viewContext);" in transition
+    assert "without reloading movement tracks" in transition
+    assert "window.addEventListener(\"focus\"" not in source
+    assert 'String(update.reason || "") !== "editor_control_released"' in source
+    assert 'String(actor.role || "") !== "reviewer"' in source
+    assert 'data-role="release-notice" hidden' in source
+    assert 'data-role="load-editor-release"' in source
 
 
 def test_movement_frontend_exposes_lightweight_individual_review_queue():
@@ -1987,21 +2139,116 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert 'data-role="individual-queue-comment"' not in source
     assert "getIndividualQueueMapIndividuals()" in source
     assert "return position.group;" in source
-    assert "/actions/review-individuals" in source
-    assert "flushIndividualReviewDecisions()" in source
+    assert "/actions/review-individual" in source
+    assert "saveActiveIndividualReviewDecision()" in source
+    assert "flushIndividualReviewDecisions()" not in source
     assert 'id: "movement-active-individual-outline"' not in source
     assert "return 0.25;" in source
     assert "this.queueMapColor(" in source
-    assert 'data-role="issue-scope"' in source
-    assert 'data-role="issue-burst-list"' in source
-    assert "setupIndividualQueueIssueScope(individual)" in source
-    assert "this.openIndividualReviewModal(addIssueButton.dataset.individual" in source
-    assert 'data-add-individual-issue data-individual=' in source
-    assert "await this.stageIndividualReviewDecision(queueReviewIndividual, false)" in source
+    assert "queueFlagTargetControlsHtml(individual)" in source
+    assert 'data-queue-flag-individual' in source
+    assert 'data-queue-flag-burst=' in source
+    assert 'data-add-individual-issue' not in source
+    assert 'data-review-decision="not_ok"' in source
+    assert 'class="${selectedDecision === "not_ok" ? "is-selected" : ""}"' in source
+    assert 'queueReviewIndividual,' in source
+    assert 'stageIndividualReviewDecision(queueReviewIndividual, "not_ok")' in source
     assert "prior_decisions_by_individual" in source
     assert "movement-prior-decision-badge" in source
     assert "leftReviewGroup" not in source
-    assert 'data-review-decision="second_opinion"' in source
+    assert 'data-review-decision="second_opinion"' not in source
+    assert 'data-review-needs-check' in source
+    assert '>Save decision</button>' in source
+    assert 'role="tooltip"' in source
+    assert "Discard unsaved individual review decision(s)?" in source
+
+
+def test_manual_issue_preselection_stays_staged_and_does_not_reload_tracks():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    submit = source[
+        source.index("  async submitIssueAction() {"):
+        source.index("  async exportReviewedCsv() {")
+    ]
+    undo = source[
+        source.index("  async undoCurrentHead() {"):
+        source.index("\n}\n\nfunction buildDatasetFromSummary", source.index("  async undoCurrentHead() {"))
+    ]
+    transition = source[
+        source.index("  async transitionToDataset("):
+        source.index("  openResumeModal()", source.index("  async transitionToDataset("))
+    ]
+    issue_modal = source[
+        source.index("  openIssueModal(status, target = null) {"):
+        source.index("  openSegmentModal(status) {")
+    ]
+
+    assert "!isFilterTarget" in issue_modal
+    assert 'stageIndividualReviewDecision(queueReviewIndividual, "not_ok")' in submit
+    assert "flushIndividualReviewDecisions()" not in submit
+    assert "flushIndividualReviewDecisions()" not in undo
+    assert "applyReviewProjection" in transition
+    assert "without reloading movement tracks" in transition
+
+
+def test_burst_visibility_defaults_on_and_stays_independent_from_flag_selection():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    flag_method = source[
+        source.index("  setBurstFlagTargetIncluded("):
+        source.index("  setBurstVisible(")
+    ]
+    visibility_method = source[
+        source.index("  setBurstVisible("):
+        source.index("  clearFlagTargetForQueueIndividualChange(")
+    ]
+    ranking_handler = source[
+        source.index("  async handleAnomalyRankingClick(event) {"):
+        source.index("  renderAnomalyRanking() {")
+    ]
+
+    assert 'data-queue-burst-visible=' in source
+    assert 'data-queue-flag-burst=' in source
+    assert 'data-table-burst-visible=' in source
+    assert 'data-table-check-burst=' in source
+    assert "this.hiddenBurstIds = new Set();" in source
+    assert '${this.hiddenBurstIds.has(burst.burstId) ? "" : " checked"}' in source
+    assert 'id: "movement-inspected-burst-outline"' not in source
+    assert 'id: "movement-inspected-burst-endpoints"' not in source
+    assert ".filter(point => !hiddenBurstFixKeys.has(point.fix?.fixKey))" in source
+    assert "!hiddenBurstFixKeys.has(step.sourceFix?.fixKey)" in source
+    assert "!hiddenBurstFixKeys.has(step.destinationFix?.fixKey)" in source
+    assert "sourceFix: previous" in source
+    assert "for (const step of allPathData)" in source
+    assert "zoomToPath" not in flag_method
+    assert "zoomToPath" not in visibility_method
+    assert 'event.target.closest("button, input, label, select, textarea, [data-queue-burst-controls]")' in source
+    assert "|| individual === this.individualReviewQueue.activeIndividual" in source
+    assert "updateTime: false" in ranking_handler
+    assert "focus: false" in ranking_handler
+    assert "zoom: false" in ranking_handler
+
+
+def test_queue_burst_cards_refresh_after_detail_and_resume_interrupted_loads():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    detail_loader = source[
+        source.index("  async loadDetailForCurrentSelection("):
+        source.index("  buildFixesRequestUrl(", source.index("  async loadDetailForCurrentSelection("))
+    ]
+    transition = source[
+        source.index("  async transitionToDataset("):
+        source.index("  openResumeModal()", source.index("  async transitionToDataset("))
+    ]
+    queue_controls = source[
+        source.index("  queueFlagTargetControlsHtml(individual) {"):
+        source.index("  async setIndividualViewMode(", source.index("  queueFlagTargetControlsHtml(individual) {"))
+    ]
+
+    assert detail_loader.count("this.renderIndividuals();") >= 4
+    assert 'this.data.detailAutoBursts = parseMovementAutoBursts(payload.auto_bursts || []);' in detail_loader
+    assert 'this.data?.detailState === "loading"' in queue_controls
+    assert "Loading bursts for this individual…" in queue_controls
+    assert "const detailLoadWasInterrupted" in transition
+    assert "if (detailLoadWasInterrupted)" in transition
+    assert "void this.loadDetailForCurrentSelection" in transition
 
 
 def test_movement_frontend_has_lazy_editor_review_dashboard():
@@ -2031,14 +2278,13 @@ def test_movement_individual_queue_explains_burst_ranking_availability():
     assert "queue.pendingRankingAnalysisId = this.anomalyRanking.analysisId" in source
 
 
-def test_movement_issue_dialog_has_compact_burst_preview():
+def test_movement_issue_dialog_keeps_burst_context_preview_available():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
     assert 'data-role="issue-burst-preview"' in source
     assert 'data-role="issue-burst-preview-list"' in source
     assert "buildIssueBurstPreviewModel(burst)" in source
     assert "renderIssueBurstPreviews(selectedBursts)" in source
-    assert "initialBurstId: burstId" in source
     assert "this.hideIssueBurstPreview()" in source
     assert "item.individual === selected.individual" in source
     assert "item.setName === selected.setName" in source
@@ -2505,6 +2751,12 @@ fix_a_3,alpha,2024-01-01T02:00:00Z,-70.2,40.2,train
             "issue_type": "burst review",
             "comment": "These two bursts need review",
             "owner_question": "Are these bursts valid?",
+            "workflow_context": {
+                "entry_point": "individual_review_queue",
+                "active_individual": "alpha",
+                "scope_kind": "bursts",
+                "selection_methods": ["queue_burst_list", "map_burst_click"],
+            },
             "burst_gap_mode": "manual",
             "burst_gap_seconds": 1800,
             "user": "reviewer",
@@ -2541,6 +2793,15 @@ fix_a_3,alpha,2024-01-01T02:00:00Z,-70.2,40.2,train
         [[1, 1]],
         [[3, 3]],
     ]
+    assert all(
+        item["workflow_context"] == {
+            "entry_point": "individual_review_queue",
+            "active_individual": "alpha",
+            "scope_kind": "bursts",
+            "selection_methods": ["queue_burst_list", "map_burst_click"],
+        }
+        for item in annotations
+    )
     assert {item["step_id"] for item in annotations} == {payload["step"]["step_id"]}
 
     confirmed = client.post(
@@ -2593,6 +2854,33 @@ def test_annotate_scope_rejects_direct_confirmation(tmp_path):
 
     assert response.status_code == 400
     assert "confirm-issues" in response.json()["error"]
+
+
+def test_annotate_scope_rejects_unknown_issue_selection_method(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "fix", "fix_keys": ["id:fix_a_1#row:1"]},
+            "status": "suspected",
+            "origin": "manual",
+            "issue_type": "manual review",
+            "comment": "Check this fix",
+            "owner_question": "Is this fix valid?",
+            "workflow_context": {
+                "entry_point": "movement_map",
+                "scope_kind": "fix",
+                "selection_methods": ["untrusted_method"],
+            },
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "Invalid issue selection method"
 
 
 def test_confirm_issues_persists_sidecar_without_copying_csv(tmp_path):
@@ -3706,10 +3994,8 @@ def test_movement_frontend_burst_picking_does_not_depend_on_feature_space():
     # Bursts are pickable regardless of whether a feature-space analysis ran.
     assert "pickable: Boolean(this.burstFeatureSpace?.points?.length)" not in source
     assert "focusMapBurst(burstId)" in source
-    click_start = source.index("handleMapClick(event) {")
-    click_block = source[click_start:click_start + 1600]
-    assert "focusMapBurst" not in click_block
-    assert "setBurstVisible" not in click_block
+    assert "this.setBurstFlagTargetIncluded(" in source
+    assert "this.setBurstVisible(" in source
 
     # Feature-space selection keeps its own independent guards and still runs
     # first in the click handler.
@@ -3717,7 +4003,7 @@ def test_movement_frontend_burst_picking_does_not_depend_on_feature_space():
     click_start = source.index("handleMapClick(event) {")
     click_block = source[click_start:click_start + 1600]
     assert click_block.index("getMapPickedFeatureSpaceBurst") < click_block.index("pickObject")
-    assert click_block.index("getMapPickedFeatureSpaceBurst") < click_block.index("focusMapBurst")
+    assert "setBurstVisible" not in click_block
 
 
 def test_movement_frontend_burst_counter_counts_only_drawn_bursts():

@@ -1,4 +1,5 @@
 import csv
+from functools import lru_cache
 import json
 from pathlib import Path
 
@@ -347,6 +348,11 @@ def normalize_annotation(raw: dict) -> dict:
         "user": str(raw.get("user") or raw.get("review_user") or "").strip(),
         "created_at": str(raw.get("created_at") or raw.get("reviewed_at") or "").strip(),
         "source_analysis_id": str(raw.get("source_analysis_id") or "").strip(),
+        "workflow_context": (
+            dict(raw.get("workflow_context") or {})
+            if isinstance(raw.get("workflow_context"), dict)
+            else {}
+        ),
         "resolved_fix_count": resolved_fix_count,
         "scope": {
             "kind": str(scope.get("kind") or "fix").strip().lower(),
@@ -524,6 +530,274 @@ def effective_review_status(effective_issues: list[dict]) -> str:
     return ""
 
 
+@lru_cache(maxsize=1)
+def _review_row_contexts_cached(
+    path_str: str,
+    _mtime_ns: int,
+    _size: int,
+    source_artifact: str,
+) -> tuple[tuple[object, ...], ...]:
+    """Keep one compact source-row lookup so review-only updates do not rescan CSV."""
+    contexts: list[tuple[object, ...]] = []
+    source_path = Path(path_str)
+    with source_path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        columns = detect_columns(list(reader.fieldnames or []))
+        for row_index, raw in enumerate(reader, start=1):
+            valid = _valid_movement_row(raw, columns)
+            if valid is None:
+                continue
+            fix_key = _make_fix_key(
+                row_index,
+                valid["fix_id"],
+                valid["individual"],
+                valid["time_ms"],
+            )
+            contexts.append(
+                (
+                    fix_key,
+                    valid["individual"],
+                    valid["set_name"],
+                    valid["time_ms"],
+                    valid["lon"],
+                    valid["lat"],
+                    source_row_annotation(
+                        raw,
+                        fix_key=fix_key,
+                        source_artifact=source_artifact,
+                    ),
+                )
+            )
+    return tuple(contexts)
+
+
+def _review_row_contexts(source_path: Path, source_artifact: str) -> tuple[tuple[object, ...], ...]:
+    stat = source_path.stat()
+    return _review_row_contexts_cached(
+        str(source_path.resolve()),
+        stat.st_mtime_ns,
+        stat.st_size,
+        source_artifact,
+    )
+
+
+def _review_payload_for_context(
+    annotations: list[dict],
+    *,
+    fix_key: str,
+    individual: str,
+    set_name: str,
+    source_issue: dict | None,
+) -> dict:
+    matching = [
+        item
+        for item in annotations
+        if item.get("status")
+        and annotation_applies(
+            item,
+            fix_key=fix_key,
+            individual=individual,
+            set_name=set_name,
+        )
+    ]
+    existing_issues = [source_issue] if source_issue else []
+    if not matching and not existing_issues:
+        return {}
+    issues = [_issue_payload(item) for item in [*existing_issues, *matching]]
+    effective_issues = effective_issues_for_fix(
+        annotations,
+        fix_key=fix_key,
+        individual=individual,
+        set_name=set_name,
+        existing_issues=existing_issues,
+    )
+    visible_issues = [item for item in effective_issues if item.get("status") != "dismissed"]
+    latest = (visible_issues or effective_issues or issues)[-1]
+    return {
+        "status": effective_review_status(effective_issues),
+        "issue_id": latest.get("parent_issue_id") or latest.get("issue_id") or "",
+        "issue_type": latest.get("issue_type") or "",
+        "issue_field": latest.get("issue_field") or "",
+        "issue_threshold": latest.get("issue_threshold") or "",
+        "issue_note": latest.get("issue_note") or "",
+        "owner_question": latest.get("owner_question") or "",
+        "review_user": latest.get("review_user") or "",
+        "reviewed_at": latest.get("reviewed_at") or "",
+        "issues": issues,
+        "effective_issues": effective_issues,
+    }
+
+
+def build_review_projection(
+    source_path: Path,
+    annotations: list[dict],
+    *,
+    source_artifact: str,
+    individuals: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> dict:
+    """Build only the review information needed to update an already-loaded view."""
+    relevant = [
+        item
+        for item in annotations
+        if item.get("status")
+        and (not item.get("source_artifact") or item.get("source_artifact") == source_artifact)
+    ]
+    include_all_individuals = individuals is None
+    requested_individuals = {
+        str(item).strip() for item in (individuals or []) if str(item).strip()
+    }
+    counts = {"suspected": 0, "confirmed": 0}
+    by_individual: dict[str, dict] = {}
+    fixes: list[dict] = []
+    segment_rows: dict[str, list[dict]] = {
+        str(item.get("annotation_id") or ""): []
+        for item in relevant
+        if (item.get("scope") or {}).get("kind") == "segment"
+        and not item.get("parent_annotation_id")
+    }
+
+    for raw_context in _review_row_contexts(source_path, source_artifact):
+        fix_key, individual, set_name, time_ms, lon, lat, source_issue = raw_context
+        fix_key = str(fix_key)
+        individual = str(individual)
+        set_name = str(set_name)
+        review = _review_payload_for_context(
+            relevant,
+            fix_key=fix_key,
+            individual=individual,
+            set_name=set_name,
+            source_issue=source_issue if isinstance(source_issue, dict) else None,
+        )
+        status = str(review.get("status") or "")
+        if status in counts:
+            counts[status] += 1
+            individual_counts = by_individual.setdefault(
+                individual,
+                {
+                    "suspected": 0,
+                    "confirmed": 0,
+                    "issue_types": set(),
+                    "origins": set(),
+                },
+            )
+            individual_counts[status] += 1
+            for issue in review.get("effective_issues") or []:
+                if issue.get("status") != "suspected":
+                    continue
+                if issue.get("issue_type"):
+                    individual_counts["issue_types"].add(str(issue["issue_type"]))
+                if issue.get("origin"):
+                    individual_counts["origins"].add(str(issue["origin"]))
+
+        include_fix = bool(review) and (
+            include_all_individuals or individual in requested_individuals
+        )
+        if include_fix:
+            fix = {
+                "fix_key": fix_key,
+                "individual": individual,
+                "set": set_name,
+                "time_ms": int(time_ms),
+                "lon": float(lon),
+                "lat": float(lat),
+                "review": review,
+            }
+            if status == "confirmed":
+                fix["analytically_excluded"] = True
+            fixes.append(fix)
+
+        if not include_all_individuals and individual not in requested_individuals:
+            continue
+        for item in relevant:
+            annotation_id = str(item.get("annotation_id") or "")
+            if annotation_id not in segment_rows:
+                continue
+            if annotation_applies(
+                item,
+                fix_key=fix_key,
+                individual=individual,
+                set_name=set_name,
+            ):
+                segment_rows[annotation_id].append(
+                    {
+                        "fix_key": fix_key,
+                        "individual": individual,
+                        "set": set_name,
+                        "time_ms": int(time_ms),
+                        "lon": float(lon),
+                        "lat": float(lat),
+                        "review": review,
+                    }
+                )
+
+    review_by_fix_key = {str(item["fix_key"]): item.get("review") or {} for item in fixes}
+    parent_segments = {
+        str(item.get("annotation_id") or ""): item
+        for item in relevant
+        if str(item.get("annotation_id") or "") in segment_rows
+    }
+    segments = []
+    for annotation_id, rows in segment_rows.items():
+        if not rows:
+            continue
+        rows.sort(key=lambda item: (int(item["time_ms"]), str(item["fix_key"])))
+        item = parent_segments[annotation_id]
+        scope = item.get("scope") or {}
+        first_review = review_by_fix_key.get(str(rows[0]["fix_key"]), {})
+        segments.append(
+            {
+                "segment_id": annotation_id,
+                "individual": rows[0]["individual"],
+                "set_name": rows[0]["set"],
+                "start_fix_key": str(scope.get("start_fix_key") or rows[0]["fix_key"]),
+                "end_fix_key": str(scope.get("end_fix_key") or rows[-1]["fix_key"]),
+                "selection_method": str(scope.get("selection_method") or ""),
+                "start_time_ms": int(rows[0]["time_ms"]),
+                "end_time_ms": int(rows[-1]["time_ms"]),
+                "fix_count": len(rows),
+                "status": str(first_review.get("status") or item.get("status") or ""),
+                "issue_type": str(item.get("issue_type") or ""),
+                "issue_note": str(item.get("comment") or ""),
+                "owner_question": str(item.get("owner_question") or ""),
+                "review_user": str(item.get("user") or ""),
+                "reviewed_at": str(item.get("created_at") or ""),
+                "fix_keys": [str(row["fix_key"]) for row in rows],
+                "path": [[float(row["lon"]), float(row["lat"])] for row in rows],
+            }
+        )
+
+    decisions = individual_review_decisions(annotations, source_artifact=source_artifact)
+    return {
+        "projected_individuals": sorted(requested_individuals),
+        "fixes": fixes,
+        "segments": segments,
+        "review_counts": counts,
+        "unresolved_suspected_count": counts["suspected"],
+        "stats": {
+            individual: {
+                "suspected_count": int(item.get("suspected", 0)),
+                "unresolved_suspected_count": int(item.get("suspected", 0)),
+                "confirmed_count": int(item.get("confirmed", 0)),
+                "unresolved_issue_types": sorted(item.get("issue_types", set())),
+                "unresolved_issue_origins": sorted(item.get("origins", set())),
+            }
+            for individual, item in by_individual.items()
+        },
+        "individual_reviews": {
+            individual: {
+                "reviewed": True,
+                "review_ok": bool(item.get("review_ok")),
+                "review_decision": str(item.get("review_decision") or ""),
+                "review_user": str(item.get("user") or ""),
+                "reviewed_at": str(item.get("created_at") or ""),
+                "review_comment": str(item.get("comment") or ""),
+                "step_id": str(item.get("step_id") or ""),
+            }
+            for individual, item in decisions.items()
+        },
+    }
+
+
 def apply_review_annotation_counts(
     summary: dict,
     source_path: Path,
@@ -540,52 +814,36 @@ def apply_review_annotation_counts(
     ]
     counts = {"suspected": 0, "confirmed": 0}
     by_individual: dict[str, dict] = {}
-    with source_path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        columns = detect_columns(list(reader.fieldnames or []))
-        for row_index, raw in enumerate(reader, start=1):
-            valid = _valid_movement_row(raw, columns)
-            if valid is None:
+    for raw_context in _review_row_contexts(source_path, source_artifact):
+        fix_key, individual, set_name, _time_ms, _lon, _lat, source_issue = raw_context
+        effective = effective_issues_for_fix(
+            relevant,
+            fix_key=str(fix_key),
+            individual=str(individual),
+            set_name=str(set_name),
+            existing_issues=[source_issue] if source_issue else [],
+        )
+        status = effective_review_status(effective)
+        if status not in counts:
+            continue
+        counts[status] += 1
+        individual_counts = by_individual.setdefault(
+            str(individual),
+            {
+                "suspected": 0,
+                "confirmed": 0,
+                "issue_types": set(),
+                "origins": set(),
+            },
+        )
+        individual_counts[status] += 1
+        for issue in effective:
+            if issue.get("status") != "suspected":
                 continue
-            fix_key = _make_fix_key(
-                row_index,
-                valid["fix_id"],
-                valid["individual"],
-                valid["time_ms"],
-            )
-            source_issue = source_row_annotation(
-                raw,
-                fix_key=fix_key,
-                source_artifact=source_artifact,
-            )
-            effective = effective_issues_for_fix(
-                relevant,
-                fix_key=fix_key,
-                individual=valid["individual"],
-                set_name=valid["set_name"],
-                existing_issues=[source_issue] if source_issue else [],
-            )
-            status = effective_review_status(effective)
-            if status not in counts:
-                continue
-            counts[status] += 1
-            individual_counts = by_individual.setdefault(
-                valid["individual"],
-                {
-                    "suspected": 0,
-                    "confirmed": 0,
-                    "issue_types": set(),
-                    "origins": set(),
-                },
-            )
-            individual_counts[status] += 1
-            for issue in effective:
-                if issue.get("status") != "suspected":
-                    continue
-                if issue.get("issue_type"):
-                    individual_counts["issue_types"].add(str(issue["issue_type"]))
-                if issue.get("origin"):
-                    individual_counts["origins"].add(str(issue["origin"]))
+            if issue.get("issue_type"):
+                individual_counts["issue_types"].add(str(issue["issue_type"]))
+            if issue.get("origin"):
+                individual_counts["origins"].add(str(issue["origin"]))
 
     result = dict(summary)
     result["review_counts"] = counts

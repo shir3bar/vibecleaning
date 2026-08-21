@@ -37,6 +37,11 @@ def _artifact_signature(artifact: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def artifact_signature(artifact: dict) -> str:
+    """Return the stable identity used to decide whether movement data changed."""
+    return _artifact_signature(artifact)
+
+
 def _source_signature(project_dir: Path, dataset_id: str, logical_name: str) -> str:
     dataset = load_dataset(project_dir, dataset_id)
     return _artifact_signature(get_dataset_artifact_entry(dataset, logical_name))
@@ -73,6 +78,11 @@ def _review_exclusion_signature(project_dir: Path, dataset_id: str, logical_name
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def review_exclusion_signature(project_dir: Path, dataset_id: str, logical_name: str) -> str:
+    """Return a digest of confirmations that alter derived movement tracks."""
+    return _review_exclusion_signature(project_dir, dataset_id, logical_name)
 
 
 def _float_matches(left: object, right: object) -> bool:

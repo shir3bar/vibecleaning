@@ -61,11 +61,16 @@ from app.state import (
 )
 from app.web import get_project_dir, json_error, parse_json_body, validate_path_part
 
-from .analysis_history import build_movement_analysis_history
+from .analysis_history import (
+    artifact_signature,
+    build_movement_analysis_history,
+    review_exclusion_signature,
+)
 from .catalog import get_study_dir, list_families, list_studies
 from .review_annotations import (
     apply_review_annotation_counts,
     apply_review_annotations,
+    build_review_projection,
     compress_fix_keys,
     confirmed_exclusion_scopes,
     load_review_annotations,
@@ -463,6 +468,65 @@ def _validate_optional_text(value: object, *, label: str, max_length: int) -> st
     return normalized
 
 
+def _validate_issue_workflow_context(value: object) -> dict:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("Invalid issue workflow context")
+    entry_point = _validate_optional_text(
+        value.get("entry_point"),
+        label="Issue entry point",
+        max_length=60,
+    )
+    if entry_point and entry_point not in {"movement_map", "individual_review_queue"}:
+        raise ValueError("Invalid issue entry point")
+    scope_kind = _validate_optional_text(
+        value.get("scope_kind"),
+        label="Issue workflow scope",
+        max_length=40,
+    )
+    if scope_kind and scope_kind not in {
+        "fix", "segment", "burst", "bursts", "individual", "filter"
+    }:
+        raise ValueError("Invalid issue workflow scope")
+    active_individual = _validate_optional_text(
+        value.get("active_individual"),
+        label="Active individual",
+        max_length=240,
+    )
+    raw_methods = value.get("selection_methods")
+    if raw_methods is None:
+        raw_methods = []
+    if not isinstance(raw_methods, list):
+        raise ValueError("Invalid issue selection methods")
+    allowed_methods = {
+        "queue_individual_control",
+        "queue_burst_list",
+        "map_burst_click",
+        "table_burst_check",
+        "ranking_burst_result",
+        "map_check",
+        "table_check",
+        "checked_fix_card",
+        "map_double_click",
+        "table_shift_click",
+    }
+    methods = list(
+        dict.fromkeys(
+            _validate_required_text(item, label="Issue selection method", max_length=60)
+            for item in raw_methods
+        )
+    )
+    if any(method not in allowed_methods for method in methods):
+        raise ValueError("Invalid issue selection method")
+    return {
+        "entry_point": entry_point,
+        "active_individual": active_individual,
+        "scope_kind": scope_kind,
+        "selection_methods": methods,
+    }
+
+
 def _validate_screenshot_mode(value: object) -> str:
     if value is None:
         return "manual"
@@ -759,7 +823,13 @@ def register_movement_routes(
     def study_event_key(family_name: str, study_name: str) -> str:
         return f"{family_name}/{study_name}"
 
-    def state_event_payload(study_dir: Path, *, reason: str, actor: Actor | None) -> dict:
+    def state_event_payload(
+        study_dir: Path,
+        *,
+        reason: str,
+        actor: Actor | None,
+        target_user_id: str = "",
+    ) -> dict:
         state = load_review_state(study_dir)
         return {
             "event": "study_state_changed",
@@ -767,6 +837,7 @@ def register_movement_routes(
             "review_revision": int(state.get("revision") or 0),
             "current_dataset_id": str(load_project_state(study_dir)["current_dataset_id"]),
             "actor": actor_payload(actor),
+            "target_user_id": str(target_user_id or ""),
         }
 
     def publish_state_event(
@@ -776,10 +847,16 @@ def register_movement_routes(
         *,
         reason: str,
         actor: Actor | None,
+        target_user_id: str = "",
     ) -> None:
         event_broker.publish(
             study_event_key(family_name, study_name),
-            state_event_payload(study_dir, reason=reason, actor=actor),
+            state_event_payload(
+                study_dir,
+                reason=reason,
+                actor=actor,
+                target_user_id=target_user_id,
+            ),
         )
 
     def active_annotations(study_dir: Path) -> list[dict]:
@@ -1357,7 +1434,9 @@ def register_movement_routes(
         try:
             study_dir = configured_study_dir(family_name, study_name)
             require_read(request, study_dir)
-            _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
+            artifact_entry, artifact_path = get_dataset_artifact(
+                study_dir, dataset_id, logical_name
+            )
             annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
             confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
                 annotations,
@@ -1380,14 +1459,76 @@ def register_movement_routes(
                 visible_annotations,
                 source_artifact=logical_name,
             )
-            return JSONResponse(
-                apply_review_annotation_counts(
+            result = apply_review_annotation_counts(
                     payload,
                     artifact_path,
                     visible_annotations,
                     source_artifact=logical_name,
                 )
+            result["source_signature"] = artifact_signature(artifact_entry)
+            result["exclusion_signature"] = review_exclusion_signature(
+                study_dir,
+                dataset_id,
+                logical_name,
             )
+            return JSONResponse(result)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 404)
+
+    @app.get(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/"
+        "dataset/{dataset_id}/review-projection"
+    )
+    async def get_movement_review_projection(
+        family_name: str,
+        study_name: str,
+        dataset_id: str,
+        logical_name: str,
+        request: Request,
+    ):
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            actor = require_read(request, study_dir)
+            dataset = load_dataset(study_dir, dataset_id)
+            artifact_entry, artifact_path = get_dataset_artifact(
+                study_dir,
+                dataset_id,
+                logical_name,
+            )
+            annotations = _load_dataset_review_annotations(
+                study_dir,
+                dataset_id=dataset_id,
+            )
+            visible_annotations = display_annotations(study_dir, dataset_id, annotations)
+            individuals = parse_optional_individuals(
+                request.query_params.getlist("individuals")
+            )
+            projection = await run_in_threadpool(
+                build_review_projection,
+                artifact_path,
+                visible_annotations,
+                source_artifact=logical_name,
+                individuals=individuals,
+            )
+            projection.update(
+                {
+                    "dataset": dataset,
+                    "source_signature": artifact_signature(artifact_entry),
+                    "exclusion_signature": review_exclusion_signature(
+                        study_dir,
+                        dataset_id,
+                        logical_name,
+                    ),
+                    "edit_profile": combined_edit_profile(
+                        study_dir,
+                        dataset_id,
+                        actor,
+                    ),
+                }
+            )
+            return JSONResponse(projection)
+        except ReviewForbiddenError as exc:
+            return json_error(str(exc), 404)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
@@ -1954,12 +2095,14 @@ def register_movement_routes(
                 expected_review_revision=body.get("expected_review_revision"),
                 reason=str(body.get("reason") or ""),
             )
+            review = active_review(result.get("state") or {})
             publish_state_event(
                 family_name,
                 study_name,
                 study_dir,
                 reason="editor_control_released",
                 actor=actor,
+                target_user_id=str((review or {}).get("reviewer_user_id") or ""),
             )
             return JSONResponse(result)
         except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
@@ -1995,6 +2138,13 @@ def register_movement_routes(
                         event = await asyncio.wait_for(queue.get(), timeout=60)
                     except asyncio.TimeoutError:
                         yield ": keepalive\n\n"
+                        continue
+                    target_user_id = str(event.get("target_user_id") or "")
+                    if target_user_id and (
+                        actor is None
+                        or actor.role != "reviewer"
+                        or actor.user_id != target_user_id
+                    ):
                         continue
                     yield f"event: study_state_changed\ndata: {json.dumps(event)}\n\n"
 
@@ -2260,6 +2410,9 @@ def register_movement_routes(
                     "comment": comment,
                     "owner_question": owner_question,
                     "source_analysis_id": source_analysis_id,
+                    "workflow_context": _validate_issue_workflow_context(
+                        body.get("workflow_context")
+                    ),
                     "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),
                     "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
                     "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),

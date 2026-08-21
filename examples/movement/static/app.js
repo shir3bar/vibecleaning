@@ -312,12 +312,14 @@ class MovementExampleApp {
     this.loadRequestId = 0;
     this.studyLoadId = 0;
     this.datasetLoadId = 0;
+    this.viewTransitionId = 0;
     this.requestControllers = {
       families: null,
       studies: null,
       study: null,
       dataset: null,
       overview: null,
+      reviewProjection: null,
       detail: null,
       suspicious: null,
       confirmed: null,
@@ -334,7 +336,15 @@ class MovementExampleApp {
     this.mapLoaded = false;
     this.overlay = null;
     this.pendingIssueStatus = "suspected";
-    this.flagTargetKind = "fixes";
+    this.flagTargetKind = "none";
+    this.manualFlagTarget = {
+      individual: "",
+      burstIds: new Set(),
+      selectionMethods: new Set(),
+      origin: "manual",
+      sourceAnalysisId: "",
+    };
+    this.hiddenBurstIds = new Set();
     this.lastReportLinks = [];
     this.assetsLoaded = false;
     this.mapErrorMessage = "";
@@ -373,7 +383,7 @@ class MovementExampleApp {
     };
     this.studyEvents = null;
     this.studyEventsKey = "";
-    this.studyEventRefreshPending = false;
+    this.editorReleaseDatasetId = "";
     this.focusedRankingBurst = null;
     this.tableSelection = {
       anchorFixKey: "",
@@ -1052,7 +1062,7 @@ class MovementExampleApp {
       <style>
         .movement-root {
           display: grid;
-          grid-template-rows: auto auto auto minmax(0, 1fr);
+          grid-template-rows: auto auto auto auto minmax(0, 1fr);
           min-height: 100%;
           height: 100%;
           color: #e8eef7;
@@ -1066,14 +1076,28 @@ class MovementExampleApp {
           grid-row: 1;
         }
         .movement-status {
-          grid-row: 2;
+          grid-row: 3;
           min-width: 0;
         }
+        .movement-release-notice {
+          grid-row: 2;
+          margin: 8px 16px 0;
+          padding: 9px 11px;
+          border: 1px solid rgba(116, 212, 255, 0.34);
+          border-radius: 8px;
+          background: rgba(19, 72, 96, 0.34);
+          color: #d9f4ff;
+          font-size: 12px;
+        }
+        .movement-release-notice button {
+          margin-left: 8px;
+          padding: 4px 7px;
+        }
         .movement-output-links {
-          grid-row: 3;
+          grid-row: 4;
         }
         .movement-main {
-          grid-row: 4;
+          grid-row: 5;
         }
         .movement-root .movement-profile-hidden,
         .movement-root [hidden] {
@@ -2147,9 +2171,52 @@ class MovementExampleApp {
           color: #d8fff3;
         }
         .movement-queue-card-actions button[data-review-decision="not_ok"],
-        .movement-queue-card-actions button[data-review-decision="second_opinion"] {
+        .movement-review-needs-check {
           background: rgba(245, 181, 54, 0.16);
           color: #ffe7a6;
+        }
+        .movement-review-choice {
+          position: relative;
+          display: inline-flex;
+          align-items: center;
+        }
+        .movement-review-needs-check {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          padding: 5px 7px;
+          border: 1px solid rgba(245, 181, 54, 0.3);
+          border-radius: 6px;
+          cursor: pointer;
+          font-size: 11px;
+          font-weight: 700;
+        }
+        .movement-review-help {
+          position: absolute;
+          z-index: 20;
+          left: 0;
+          bottom: calc(100% + 7px);
+          width: min(280px, 70vw);
+          padding: 8px 9px;
+          border: 1px solid rgba(148, 163, 184, 0.5);
+          border-radius: 7px;
+          background: #172333;
+          color: #e8eef7;
+          box-shadow: 0 8px 20px rgba(0, 0, 0, 0.34);
+          font-size: 11px;
+          font-weight: 400;
+          line-height: 1.35;
+          pointer-events: none;
+          opacity: 0;
+          visibility: hidden;
+          transform: translateY(3px);
+          transition: opacity 100ms ease, transform 100ms ease;
+        }
+        .movement-review-choice:hover .movement-review-help,
+        .movement-review-choice:focus-within .movement-review-help {
+          opacity: 1;
+          visibility: visible;
+          transform: translateY(0);
         }
         .movement-prior-decision-badge {
           display: inline-flex;
@@ -2193,6 +2260,79 @@ class MovementExampleApp {
         }
         .movement-queue-card-actions {
           padding-top: 3px;
+        }
+        .movement-queue-flag-target {
+          display: grid;
+          gap: 6px;
+          margin-top: 7px;
+          padding: 8px;
+          border: 1px solid rgba(250, 204, 21, 0.18);
+          border-radius: 9px;
+          background: rgba(250, 204, 21, 0.045);
+          color: #cbd5e1;
+          font-size: 10px;
+        }
+        .movement-queue-flag-target-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+        .movement-queue-flag-target button.is-active {
+          border-color: rgba(250, 204, 21, 0.58);
+          background: rgba(250, 204, 21, 0.2);
+          color: #fff0b3;
+        }
+        .movement-queue-flag-bursts {
+          max-height: 150px;
+          overflow-y: auto;
+          display: grid;
+          gap: 3px;
+          padding: 3px 1px;
+        }
+        .movement-queue-flag-burst {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 6px;
+          padding: 4px 5px;
+          border-radius: 6px;
+        }
+        .movement-queue-flag-burst:hover {
+          background: rgba(255, 255, 255, 0.055);
+        }
+        .movement-queue-flag-burst.is-visible {
+          background: rgba(255, 255, 255, 0.045);
+        }
+        .movement-queue-flag-burst.is-hidden {
+          opacity: 0.5;
+        }
+        .movement-queue-flag-burst.is-selected {
+          box-shadow: inset -3px 0 0 rgba(250, 204, 21, 0.82);
+          background: rgba(250, 204, 21, 0.1);
+        }
+        .movement-queue-flag-burst.is-visible.is-selected {
+          box-shadow: inset -3px 0 0 rgba(250, 204, 21, 0.82);
+        }
+        .movement-queue-burst-show,
+        .movement-queue-burst-flag {
+          display: inline-flex;
+          align-items: flex-start;
+          gap: 5px;
+          min-width: 0;
+          cursor: pointer;
+        }
+        .movement-queue-burst-flag {
+          align-items: center;
+          padding: 3px 5px;
+          border: 1px solid rgba(250, 204, 21, 0.22);
+          border-radius: 6px;
+          color: #ffe7a6;
+          font-weight: 700;
+        }
+        .movement-queue-card-actions button.is-selected {
+          outline: 2px solid rgba(255, 224, 120, 0.72);
+          outline-offset: 1px;
         }
         .movement-queue-card-comment {
           width: 100%;
@@ -2835,6 +2975,10 @@ class MovementExampleApp {
           <button type="button" data-role="export-reviewed-csv">Export reviewed CSV</button>
           <button type="button" data-role="undo">Undo</button>
         </div>
+        <div class="movement-release-notice" data-role="release-notice" hidden>
+          The editor has finished making changes.
+          <button type="button" data-role="load-editor-release">Load latest</button>
+        </div>
         <div class="movement-status" data-role="status"></div>
         <div class="movement-output-links" data-role="output-links"></div>
         <div class="movement-main">
@@ -2905,7 +3049,7 @@ class MovementExampleApp {
                       <button type="button" data-queue-scope="group">Group view</button>
                     </div>
                     <div class="movement-queue-progress" data-role="individual-queue-progress"></div>
-                    <button type="button" data-role="individual-queue-save">Save page</button>
+                    <button type="button" data-role="individual-queue-save">Save decision</button>
                   </div>
                 </div>
                 <div class="movement-individuals" data-role="individuals"></div>
@@ -3234,6 +3378,8 @@ class MovementExampleApp {
       cancelReview: document.querySelector('[data-role="cancel-review"]'),
       editorControlStart: document.querySelector('[data-role="editor-control-start"]'),
       editorControlFinish: document.querySelector('[data-role="editor-control-finish"]'),
+      releaseNotice: this.mountEl.querySelector('[data-role="release-notice"]'),
+      loadEditorRelease: this.mountEl.querySelector('[data-role="load-editor-release"]'),
       status: this.mountEl.querySelector('[data-role="status"]'),
       outputLinks: this.mountEl.querySelector('[data-role="output-links"]'),
       sideSheetTabs: this.mountEl.querySelector('[data-role="side-sheet-tabs"]'),
@@ -3417,15 +3563,14 @@ class MovementExampleApp {
 
   bindEvents() {
     window.addEventListener("resize", this.handleWindowResize);
-    window.addEventListener("focus", () => void this.refreshOpenStudyState());
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") void this.refreshOpenStudyState();
-    });
     this.refs.assignReview?.addEventListener("click", () => void this.assignCurrentReview());
     this.refs.completeReview?.addEventListener("click", () => void this.completeCurrentReview());
     this.refs.cancelReview?.addEventListener("click", () => void this.cancelCurrentReview());
     this.refs.editorControlStart?.addEventListener("click", () => void this.startCurrentEditorControl());
     this.refs.editorControlFinish?.addEventListener("click", () => void this.finishCurrentEditorControl());
+    this.refs.loadEditorRelease?.addEventListener("click", () => {
+      void this.loadReleasedEditorChanges();
+    });
     this.refs.adminDashboard?.addEventListener("click", () => void this.openAdminDashboard());
     this.refs.adminDashboardClose?.addEventListener("click", () => {
       this.refs.adminDashboardModal.classList.add("hidden");
@@ -3458,6 +3603,9 @@ class MovementExampleApp {
       this.individualReviewQueue.pageIndex = 0;
       this.individualReviewQueue.groupIndex = 0;
       this.individualReviewQueue.activeIndividual = "";
+      this.hiddenBurstIds.clear();
+      this.resetManualFlagTarget();
+      this.flagTargetKind = "none";
       void this.applyIndividualQueueMapScope();
     });
     this.refs.individualQueueControls.addEventListener("click", event => {
@@ -3487,12 +3635,12 @@ class MovementExampleApp {
       if (reviewButton) {
         const individual = reviewButton.dataset.individual || "";
         const decision = reviewButton.dataset.reviewDecision || "";
-        void this.stageIndividualReviewDecision(individual, decision);
+        this.stageIndividualReviewDecision(individual, decision);
         return;
       }
-      const addIssueButton = event.target.closest("button[data-add-individual-issue]");
-      if (addIssueButton) {
-        this.openIndividualReviewModal(addIssueButton.dataset.individual || "");
+      const wholeIndividualButton = event.target.closest("button[data-queue-flag-individual]");
+      if (wholeIndividualButton) {
+        this.selectEntireIndividualFlagTarget(wholeIndividualButton.dataset.individual || "");
         return;
       }
       const skipButton = event.target.closest("button[data-queue-skip]");
@@ -3510,17 +3658,42 @@ class MovementExampleApp {
         void this.viewIndividualQueueTable(tableButton.dataset.individual || "");
       }
     });
+    this.refs.individuals.addEventListener("change", event => {
+      const needsCheckInput = event.target.closest("input[data-review-needs-check]");
+      if (needsCheckInput) {
+        this.stageIndividualNeedsCheck(
+          needsCheckInput.dataset.individual || "",
+          needsCheckInput.checked,
+        );
+        return;
+      }
+      const burstVisibilityInput = event.target.closest("input[data-queue-burst-visible]");
+      if (burstVisibilityInput) {
+        this.setBurstVisible(
+          burstVisibilityInput.dataset.queueBurstVisible || "",
+          burstVisibilityInput.checked,
+        );
+        return;
+      }
+      const burstInput = event.target.closest("input[data-queue-flag-burst]");
+      if (!burstInput) return;
+      this.setBurstFlagTargetIncluded(
+        burstInput.dataset.queueFlagBurst || "",
+        burstInput.checked,
+        { selectionMethod: "queue_burst_list" },
+      );
+    });
     this.refs.individuals.addEventListener("input", event => {
       const input = event.target.closest("input[data-queue-comment-input]");
       if (input) {
-        this.individualReviewQueue.commentDrafts.set(
+        this.updateIndividualReviewCommentDraft(
           input.dataset.individual || "",
           input.value,
         );
       }
     });
     this.refs.individualQueueSave.addEventListener("click", () => {
-      void this.flushIndividualReviewDecisions();
+      void this.saveActiveIndividualReviewDecision();
     });
     this.refs.sideResize.addEventListener("pointerdown", event => this.beginSidePaneResize(event));
     this.refs.individualResize.addEventListener("pointerdown", event => this.beginIndividualPaneResize(event));
@@ -3528,7 +3701,7 @@ class MovementExampleApp {
     this.refs.family.addEventListener("change", async () => {
       const nextFamily = this.refs.family.value;
       try {
-        if (!(await this.flushIndividualReviewDecisions())) {
+        if (!this.confirmDiscardIndividualReviewDrafts()) {
           this.refs.family.value = this.currentFamily;
           return;
         }
@@ -3542,7 +3715,7 @@ class MovementExampleApp {
     this.refs.study.addEventListener("change", async () => {
       const nextStudy = this.refs.study.value;
       try {
-        if (!(await this.flushIndividualReviewDecisions())) {
+        if (!this.confirmDiscardIndividualReviewDrafts()) {
           this.refs.study.value = this.currentStudy;
           return;
         }
@@ -3561,16 +3734,15 @@ class MovementExampleApp {
     });
     this.refs.dataset.addEventListener("change", async () => {
       const nextDatasetId = this.refs.dataset.value;
-      if (!(await this.flushIndividualReviewDecisions())) {
+      if (!this.confirmDiscardIndividualReviewDrafts()) {
         this.refs.dataset.value = this.currentDatasetId;
         return;
       }
-      this.currentDatasetId = nextDatasetId;
-      await this.loadDataset();
+      await this.transitionToDataset(nextDatasetId, { reason: "dataset_switch" });
     });
     this.refs.artifact.addEventListener("change", async () => {
       const nextArtifact = this.refs.artifact.value;
-      if (!(await this.flushIndividualReviewDecisions())) {
+      if (!this.confirmDiscardIndividualReviewDrafts()) {
         this.refs.artifact.value = this.currentArtifact;
         return;
       }
@@ -3666,7 +3838,7 @@ class MovementExampleApp {
     this.refs.clearFixes.addEventListener("click", () => {
       if (!this.data) return;
       this.data.selectedFixKeys = new Set();
-      this.flagTargetKind = "fixes";
+      this.flagTargetKind = "none";
       this.renderThresholdPane();
       this.renderSelectedFixes();
       this.renderLayers();
@@ -3933,6 +4105,7 @@ class MovementExampleApp {
       this.cancelRequest("study");
       this.cancelRequest("dataset");
       this.cancelRequest("overview");
+      this.cancelRequest("reviewProjection");
       this.cancelRequest("detail");
       this.cancelRequest("suspicious");
       this.cancelRequest("confirmed");
@@ -3949,6 +4122,7 @@ class MovementExampleApp {
       this.cancelRequest("study");
       this.cancelRequest("dataset");
       this.cancelRequest("overview");
+      this.cancelRequest("reviewProjection");
       this.cancelRequest("detail");
       this.cancelRequest("suspicious");
       this.cancelRequest("confirmed");
@@ -3964,6 +4138,7 @@ class MovementExampleApp {
     if (level === "dataset") {
       this.cancelRequest("dataset");
       this.cancelRequest("overview");
+      this.cancelRequest("reviewProjection");
       this.cancelRequest("detail");
       this.cancelRequest("suspicious");
       this.cancelRequest("confirmed");
@@ -3978,6 +4153,7 @@ class MovementExampleApp {
     }
     if (level === "artifact") {
       this.cancelRequest("overview");
+      this.cancelRequest("reviewProjection");
       this.cancelRequest("detail");
       this.cancelRequest("suspicious");
       this.cancelRequest("confirmed");
@@ -5358,7 +5534,7 @@ class MovementExampleApp {
               <div class="movement-anomaly-burst-actions">
                 <button type="button" data-action="zoom-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Zoom to burst</button>
                 <button type="button" data-action="check-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}">Check fixes</button>
-                <button type="button" data-action="flag-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}"${this.canPersistEdits() ? "" : " disabled"}>Flag result</button>
+                <button type="button" data-action="select-ranking-burst" data-burst-id="${escapeHtml(ref.burst_id)}"${this.canPersistEdits() ? "" : " disabled"}>Select for flagging</button>
               </div>
             </div>
           `;
@@ -5547,7 +5723,17 @@ class MovementExampleApp {
     await this.inspectBurstRef(ref, { checkFixes });
   }
 
-  async inspectBurstRef(ref, { checkFixes = false, isolateIndividual = false, preserveFeatureSpaceSelection = false } = {}) {
+  async inspectBurstRef(
+    ref,
+    {
+      checkFixes = false,
+      isolateIndividual = false,
+      preserveFeatureSpaceSelection = false,
+      updateTime = true,
+      focus = true,
+      zoom = true,
+    } = {},
+  ) {
     if (!this.data || !ref?.burst_id) {
       return;
     }
@@ -5564,7 +5750,7 @@ class MovementExampleApp {
       this.data.selectedIndividuals.add(ref.individual);
     }
     const startTimeMs = finiteOrNull(ref.start_time_ms);
-    if (startTimeMs !== null) {
+    if (updateTime && startTimeMs !== null) {
       this.currentTimeMs = startTimeMs;
       this.refs.slider.value = String(startTimeMs);
       this.updateTimeLabel();
@@ -5576,7 +5762,9 @@ class MovementExampleApp {
     const preservedFeatureSpaceBurstId = preserveFeatureSpaceSelection
       ? String(this.burstFeatureSpace?.selectedBurstId || "")
       : "";
-    this.setFocusedRankingBurst(ref);
+    if (focus) {
+      this.setFocusedRankingBurst(ref);
+    }
     if (preserveFeatureSpaceSelection && preservedFeatureSpaceBurstId) {
       this.burstFeatureSpace.selectedBurstId = preservedFeatureSpaceBurstId;
       this.renderBurstFeatureSpace();
@@ -5596,11 +5784,11 @@ class MovementExampleApp {
     this.renderLayers();
 
     const path = this.getRankingBurstPath(ref);
-    if (path.length) {
+    if (zoom && path.length) {
       this.zoomToPath(path);
       const action = checkFixes ? "checked and zoomed to" : "zoomed to";
       this.setStatus(`Selected ${ref.individual || "individual"} and ${action} burst ${ref.burst_id}.`);
-    } else {
+    } else if (zoom) {
       this.setStatus(`Selected ${ref.individual || "individual"}, but burst ${ref.burst_id} fixes are not loaded for zooming.`, true);
     }
   }
@@ -5619,12 +5807,22 @@ class MovementExampleApp {
       await this.inspectRankingBurst(actionButton.dataset.burstId || "", { checkFixes: false });
     } else if (action === "check-ranking-burst") {
       await this.inspectRankingBurst(actionButton.dataset.burstId || "", { checkFixes: true });
-    } else if (action === "flag-ranking-burst") {
+    } else if (action === "select-ranking-burst") {
       const ref = this.getRankingBurstRef(actionButton.dataset.burstId || "");
       if (ref) {
-        this.openBurstReviewModal(ref, {
+        if (!this.data?.autoBurstById?.has(ref.burst_id)) {
+          await this.inspectBurstRef(ref, {
+            checkFixes: false,
+            updateTime: false,
+            focus: false,
+            zoom: false,
+          });
+        }
+        this.setBurstFlagTargetIncluded(ref.burst_id, true, {
           origin: "algorithm",
           sourceAnalysisId: this.anomalyRanking?.analysisId || "",
+          selectionMethod: "ranking_burst_result",
+          replace: true,
         });
       }
     }
@@ -5822,7 +6020,11 @@ class MovementExampleApp {
       if (createdDatasetId) {
         const flaggedCount = this.candidateQueryPreview.candidateCount;
         const analysisId = this.candidateQueryPreview.analysisId;
-        await this.loadStudyAtDataset(createdDatasetId, { preserveAnnotationContext: true });
+        await this.loadStudyAtDataset(createdDatasetId, {
+          preserveAnnotationContext: true,
+          result,
+          clearTarget: "filter",
+        });
         this.setStatus(
           `Filter run ${analysisId || "completed"} flagged ${formatCount(flaggedCount)} fixes as suspicious in a new review step.`,
         );
@@ -5887,6 +6089,7 @@ class MovementExampleApp {
       }
     }
     this.data.selectedFixKeys = nextSelected;
+    this.resetManualFlagTarget({ resetKind: false });
     this.flagTargetKind = "fixes";
     this.saveUiState();
     this.setSideSheet("individuals");
@@ -6065,7 +6268,7 @@ class MovementExampleApp {
     const study = row?.dataset.study || "";
     if (!family || !study) return;
     if (button.dataset.adminAction === "open") {
-      if (!(await this.flushIndividualReviewDecisions())) return;
+      if (!this.confirmDiscardIndividualReviewDrafts()) return;
       this.refs.adminDashboardModal.classList.add("hidden");
       if (family !== this.currentFamily) {
         await this.switchFamily(family);
@@ -6237,6 +6440,11 @@ class MovementExampleApp {
 
   connectStudyEvents() {
     if (!this.currentFamily || !this.currentStudy || typeof EventSource === "undefined") return;
+    const actor = window.vibecleaningActor || this.editLockProfile?.actor || {};
+    if (String(actor.role || "") !== "reviewer") {
+      this.closeStudyEvents();
+      return;
+    }
     const key = `${this.currentFamily}/${this.currentStudy}`;
     if (this.studyEvents && this.studyEventsKey === key) return;
     this.studyEvents?.close();
@@ -6244,42 +6452,39 @@ class MovementExampleApp {
     const events = new EventSource(this.reviewActionUrl("events"));
     this.studyEvents = events;
     events.addEventListener("study_state_changed", event => {
-      if (events !== this.studyEvents || this.studyEventRefreshPending) return;
+      if (events !== this.studyEvents) return;
       let update;
       try { update = JSON.parse(event.data); } catch { return; }
-      const remoteRevision = Number(update.review_revision || 0);
+      if (String(update.reason || "") !== "editor_control_released") return;
+      const actor = window.vibecleaningActor || this.editLockProfile?.actor || {};
+      if (String(actor.role || "") !== "reviewer") return;
+      const targetUserId = String(update.target_user_id || "");
+      if (!targetUserId || targetUserId !== String(actor.user_id || "")) return;
       const remoteHead = String(update.current_dataset_id || "");
-      const localRevision = this.expectedReviewRevision();
-      const localHead = this.expectedCurrentDatasetId();
-      if (remoteRevision === localRevision && remoteHead === localHead) return;
-      this.studyEventRefreshPending = true;
-      const viewContext = this.captureDatasetViewContext();
-      const refresh = (async () => {
-        await this.loadEditLockProfile();
-        const validatedHead = this.expectedCurrentDatasetId();
-        if (validatedHead && validatedHead !== localHead) {
-          await this.loadStudy({ preferredDatasetId: validatedHead, viewContext });
-        }
-      })();
-      void refresh.finally(() => { this.studyEventRefreshPending = false; });
+      if (!remoteHead) return;
+      this.editorReleaseDatasetId = remoteHead;
+      if (this.refs.releaseNotice) this.refs.releaseNotice.hidden = false;
+      this.setStatus("The editor has finished making changes. Load the latest version when ready.");
     });
   }
 
-  async refreshOpenStudyState() {
-    if (!this.currentStudy || !this.currentDatasetId || this.studyEventRefreshPending) return;
-    const previousHead = this.expectedCurrentDatasetId();
-    const viewContext = this.captureDatasetViewContext();
-    await this.loadEditLockProfile();
-    const nextHead = this.expectedCurrentDatasetId();
-    if (nextHead && previousHead && nextHead !== previousHead) {
-      await this.loadStudy({ preferredDatasetId: nextHead, viewContext });
-    }
+  async loadReleasedEditorChanges() {
+    const datasetId = this.editorReleaseDatasetId;
+    if (!datasetId) return;
+    if (this.refs.releaseNotice) this.refs.releaseNotice.hidden = true;
+    this.editorReleaseDatasetId = "";
+    await this.transitionToDataset(datasetId, {
+      preserveAnnotationContext: true,
+      reason: "editor_release",
+    });
   }
 
   closeStudyEvents() {
     this.studyEvents?.close();
     this.studyEvents = null;
     this.studyEventsKey = "";
+    this.editorReleaseDatasetId = "";
+    if (this.refs?.releaseNotice) this.refs.releaseNotice.hidden = true;
   }
 
   renderEditLockProfile() {
@@ -6537,7 +6742,9 @@ class MovementExampleApp {
       contiguousRange: false,
       selectionMethod: "",
     };
-    this.flagTargetKind = "fixes";
+    this.resetManualFlagTarget({ resetKind: false });
+    this.hiddenBurstIds.clear();
+    this.flagTargetKind = "none";
     this.mapRangeAwaitingEnd = false;
     this.temporalSliderEngaged = false;
     if (this.pendingMapSingleClickTimer !== null) {
@@ -6823,7 +7030,11 @@ class MovementExampleApp {
       this.restoreDatasetMapView(viewContext);
       this.updateActionButtons();
       if (selectedIndividuals.length) {
-        this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`);
+        this.setStatus(
+          this.data.detailState === "loaded"
+            ? `Loaded ${formatCount(this.data.detailReturnedFixCount || this.data.detailFixes.length)} editable fixes for ${formatCount(selectedIndividuals.length)} visible individuals.`
+            : `Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Loading editable fixes for the visible individuals...`,
+        );
       } else {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
       }
@@ -6872,7 +7083,6 @@ class MovementExampleApp {
     const studyName = this.currentStudy;
     const datasetId = this.currentDatasetId;
     const datasetLoadId = ++this.datasetLoadId;
-    this.clearLoadedStudyState();
     this.currentDataset = null;
     this.currentArtifactEntry = null;
     this.resetSelect(this.refs.artifact, "No artifacts");
@@ -6978,7 +7188,40 @@ class MovementExampleApp {
       ) {
         return;
       }
-      this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
+      const nextData = buildDatasetFromSummary(summary, this.uiState.colorBy);
+      const availableIndividuals = new Set(nextData.individuals);
+      const transitionIndividuals = viewContext
+        ? (viewContext.selectedIndividuals || []).filter(individual => availableIndividuals.has(individual))
+        : initialMovementVisibleIndividuals(nextData);
+      if (nextData.overviewTruncated && transitionIndividuals.length) {
+        const detailPayload = await this.fetchJSON(
+          this.buildFixesRequestUrl({
+            familyName,
+            studyName,
+            datasetId,
+            artifactName,
+            individuals: transitionIndividuals,
+            data: nextData,
+          }),
+          { signal: controller.signal },
+        );
+        nextData.detailState = "loaded";
+        const payloadIndividuals = Array.isArray(detailPayload.detail_scope?.individuals)
+          ? detailPayload.detail_scope.individuals.map(value => String(value)).filter(Boolean)
+          : [];
+        nextData.detailIndividuals = payloadIndividuals.length
+          ? payloadIndividuals
+          : [...transitionIndividuals];
+        nextData.detailLimit = detailPayload.detail_scope?.limit ?? null;
+        nextData.detailMatchingFixCount = Number(detailPayload.matching_fix_count) || 0;
+        nextData.detailReturnedFixCount = Number(detailPayload.returned_fix_count) || 0;
+        nextData.detailTruncated = Boolean(detailPayload.truncated);
+        nextData.detailFixes = parseMovementFixes(detailPayload.fixes || []);
+        nextData.detailSegments = parseMovementSegments(detailPayload.segments || []);
+        nextData.detailAutoBursts = parseMovementAutoBursts(detailPayload.auto_bursts || []);
+        refreshMovementFixCollections(nextData);
+      }
+      this.data = nextData;
       this.restoreAnnotationReloadContext(viewContext);
       this.syncAnomalyFeatureSetOptions({ save: false });
       this.renderBurstCountIndicator();
@@ -7014,9 +7257,10 @@ class MovementExampleApp {
       if (this.isAbortError(error) || requestId !== this.loadRequestId) {
         return;
       }
-      this.clearLoadedStudyState();
       this.setStatus(error.message, true);
-      this.showOverlay(`Could not render ${this.currentArtifact}.`);
+      if (!this.data) {
+        this.showOverlay(`Could not render ${this.currentArtifact}.`);
+      }
     }
   }
 
@@ -7074,28 +7318,70 @@ class MovementExampleApp {
       this.editLockProfile?.coverage?.prior_decisions_by_individual?.[individual]
       || null
     );
-    const staged = this.individualReviewQueue.stagedDecisions.get(individual);
-    if (staged) {
+    const saved = this.getSavedIndividualReviewState(individual, priorDecision);
+    const draft = this.individualReviewQueue.stagedDecisions.get(individual);
+    if (draft) {
       return {
-        reviewed: true,
-        reviewDecision: staged.review_decision,
-        reviewOk: staged.review_decision === "ok",
-        comment: staged.comment || "",
+        ...saved,
+        reviewed: Boolean(draft.review_decision),
+        reviewDecision: draft.review_decision,
+        reviewOk: draft.review_decision === "ok",
+        needsCheck: draft.needs_check === true,
+        comment: draft.comment || "",
         staged: true,
-        priorDecision,
-        priorSecondOpinion: priorDecision?.review_decision === "second_opinion",
       };
     }
+    return saved;
+  }
+
+  getSavedIndividualReviewState(individual, priorDecision = null) {
+    priorDecision = priorDecision || (
+      this.editLockProfile?.coverage?.prior_decisions_by_individual?.[individual]
+      || null
+    );
     const stats = this.data?.stats?.[individual] || {};
     return {
       reviewed: stats.reviewed === true,
       reviewDecision: stats.reviewDecision || (stats.reviewed ? (stats.reviewOk ? "ok" : "not_ok") : ""),
       reviewOk: stats.reviewOk === true,
+      needsCheck: stats.needsCheck === true,
       priorDecision,
       priorSecondOpinion: priorDecision?.review_decision === "second_opinion",
       comment: stats.reviewComment || "",
       staged: false,
     };
+  }
+
+  individualReviewDraftDiffers(individual) {
+    const draft = this.individualReviewQueue.stagedDecisions.get(individual);
+    if (!draft) return false;
+    const saved = this.getSavedIndividualReviewState(individual);
+    return (
+      String(draft.review_decision || "") !== String(saved.reviewDecision || "")
+      || Boolean(draft.needs_check) !== Boolean(saved.needsCheck)
+      || String(draft.comment || "").trim() !== String(saved.comment || "").trim()
+    );
+  }
+
+  discardRedundantIndividualReviewDraft(individual) {
+    if (this.individualReviewDraftDiffers(individual)) return;
+    this.individualReviewQueue.stagedDecisions.delete(individual);
+    this.individualReviewQueue.commentDrafts.delete(individual);
+  }
+
+  hasUnsavedIndividualReviewDrafts() {
+    return [...this.individualReviewQueue.stagedDecisions.keys()]
+      .some(individual => this.individualReviewDraftDiffers(individual));
+  }
+
+  confirmDiscardIndividualReviewDrafts() {
+    if (!this.hasUnsavedIndividualReviewDrafts()) return true;
+    if (!window.confirm("Discard unsaved individual review decision(s)?")) return false;
+    this.individualReviewQueue.stagedDecisions.clear();
+    this.individualReviewQueue.commentDrafts.clear();
+    this.individualReviewQueue.commentEditingIndividual = "";
+    this.renderIndividuals();
+    return true;
   }
 
   hasCompatibleIndividualQueueRanking() {
@@ -7192,6 +7478,224 @@ class MovementExampleApp {
     };
   }
 
+  resetManualFlagTarget({ resetKind = true } = {}) {
+    this.manualFlagTarget = {
+      individual: "",
+      burstIds: new Set(),
+      selectionMethods: new Set(),
+      origin: "manual",
+      sourceAnalysisId: "",
+    };
+    if (resetKind && ["individual", "bursts"].includes(this.flagTargetKind)) {
+      this.flagTargetKind = "none";
+    }
+  }
+
+  flagTargetBursts() {
+    if (!this.data || this.flagTargetKind !== "bursts") return [];
+    return [...this.manualFlagTarget.burstIds]
+      .map(burstId => this.data.autoBurstById?.get(burstId))
+      .filter(Boolean)
+      .sort((left, right) => (
+        left.startTimeMs - right.startTimeMs
+        || left.burstIdx - right.burstIdx
+        || left.burstId.localeCompare(right.burstId)
+      ));
+  }
+
+  selectEntireIndividualFlagTarget(individual) {
+    individual = String(individual || "");
+    if (!this.data?.individuals?.includes(individual)) return;
+    this.resetManualFlagTarget({ resetKind: false });
+    this.data.selectedFixKeys = new Set();
+    this.setTableSelection();
+    this.mapRangeAwaitingEnd = false;
+    this.manualFlagTarget.individual = individual;
+    this.manualFlagTarget.selectionMethods.add("queue_individual_control");
+    this.flagTargetKind = "individual";
+    this.renderIndividuals();
+    this.renderLayers();
+    this.updateActionButtons();
+    this.setStatus(`Selected the entire individual ${individual} as the flag target.`);
+  }
+
+  setBurstFlagTargetIncluded(
+    burstId,
+    included,
+    {
+      selectionMethod = "map_burst_click",
+      origin = "manual",
+      sourceAnalysisId = "",
+      replace = false,
+    } = {},
+  ) {
+    const burst = this.data?.autoBurstById?.get(String(burstId || ""));
+    if (!burst) return;
+    const activeQueueIndividual = this.individualReviewQueue.mode === "queue"
+      ? this.individualReviewQueue.activeIndividual
+      : "";
+    if (activeQueueIndividual && burst.individual !== activeQueueIndividual) {
+      this.setStatus("Choose bursts belonging to the active queue individual.", true);
+      this.renderIndividuals();
+      return;
+    }
+    if (replace || this.flagTargetKind !== "bursts") {
+      this.resetManualFlagTarget({ resetKind: false });
+      this.data.selectedFixKeys = new Set();
+      this.setTableSelection();
+      this.mapRangeAwaitingEnd = false;
+    }
+    this.flagTargetKind = "bursts";
+    this.manualFlagTarget.individual = activeQueueIndividual || burst.individual;
+    this.manualFlagTarget.origin = origin;
+    this.manualFlagTarget.sourceAnalysisId = String(sourceAnalysisId || "");
+    this.manualFlagTarget.selectionMethods.add(selectionMethod);
+    if (included) {
+      this.manualFlagTarget.burstIds.add(burst.burstId);
+    } else {
+      this.manualFlagTarget.burstIds.delete(burst.burstId);
+    }
+    if (!this.manualFlagTarget.burstIds.size) {
+      this.resetManualFlagTarget();
+    }
+    if (this.individualReviewQueue.mode === "queue") {
+      this.renderIndividuals();
+    }
+    this.renderLayers();
+    this.updateActionButtons();
+    const count = this.manualFlagTarget.burstIds.size;
+    this.setStatus(count
+      ? `Selected ${formatCount(count)} burst(s) as the flag target.`
+      : "Cleared the burst flag target.");
+  }
+
+  setBurstVisible(burstId, visible) {
+    const burst = this.data?.autoBurstById?.get(String(burstId || ""));
+    if (!burst) return;
+    const activeQueueIndividual = this.individualReviewQueue.mode === "queue"
+      ? this.individualReviewQueue.activeIndividual
+      : "";
+    if (activeQueueIndividual && burst.individual !== activeQueueIndividual) {
+      this.setStatus("Change visibility only for bursts belonging to the active queue individual.", true);
+      return;
+    }
+    if (visible) {
+      this.hiddenBurstIds.delete(burst.burstId);
+    } else {
+      this.hiddenBurstIds.add(burst.burstId);
+    }
+    if (this.individualReviewQueue.mode === "queue") {
+      this.renderIndividuals();
+    }
+    if (this.refs?.sideSheetTabs?.dataset.activeSheet === "table") {
+      this.renderTableSheet();
+    }
+    this.renderLayers();
+    this.setStatus(
+      visible
+        ? `Restored burst ${burst.burstId} to the map.`
+        : `Hid the ordinary points and track steps for burst ${burst.burstId}.`,
+    );
+  }
+
+  clearFlagTargetForQueueIndividualChange(previousIndividual, nextIndividual) {
+    if (!previousIndividual || previousIndividual === nextIndividual) return;
+    this.hiddenBurstIds.clear();
+    this.focusedRankingBurst = null;
+    this.resetManualFlagTarget();
+    if (["fixes", "segment"].includes(this.flagTargetKind)) {
+      this.data.selectedFixKeys = new Set();
+      this.setTableSelection();
+      this.mapRangeAwaitingEnd = false;
+      this.flagTargetKind = "none";
+    }
+  }
+
+  queueFlagTargetControlsHtml(individual) {
+    const disabled = this.canPersistEdits() ? "" : " disabled";
+    const bursts = (this.data?.autoBursts || [])
+      .filter(burst => burst.individual === individual)
+      .sort((left, right) => (
+        left.startTimeMs - right.startTimeMs
+        || left.burstIdx - right.burstIdx
+        || left.burstId.localeCompare(right.burstId)
+      ));
+    const burstDetailsLoading = (
+      this.data?.detailState === "loading"
+      && (this.data?.detailIndividuals || []).includes(individual)
+    );
+    const entireSelected = (
+      this.flagTargetKind === "individual"
+      && this.manualFlagTarget.individual === individual
+    );
+    const selectedBurstIds = this.flagTargetKind === "bursts"
+      ? this.manualFlagTarget.burstIds
+      : new Set();
+    const currentTarget = entireSelected
+      ? "Entire individual selected"
+      : selectedBurstIds.size
+        ? `${formatCount(selectedBurstIds.size)} burst(s) selected`
+        : this.flagTargetKind === "segment"
+          ? "Track section selected"
+          : this.flagTargetKind === "fixes" && this.getSelectedFixes().length
+            ? `${formatCount(this.getSelectedFixes().length)} fix(es) checked`
+            : "Choose a target";
+    return `
+      <div class="movement-queue-flag-target">
+        <div class="movement-queue-flag-target-head">
+          <strong>Flag target</strong>
+          <span>${escapeHtml(currentTarget)}</span>
+        </div>
+        <div class="movement-queue-card-actions">
+          <button
+            type="button"
+            data-queue-flag-individual
+            data-individual="${escapeHtml(individual)}"
+            class="${entireSelected ? "is-active" : ""}"
+            ${disabled}
+          >Entire individual</button>
+          <span class="movement-subtle">Visible controls ordinary map points. Flag controls the next issue step.</span>
+        </div>
+        ${bursts.length ? `
+          <div class="movement-queue-flag-bursts">
+            ${bursts.map(burst => {
+              const selected = selectedBurstIds.has(burst.burstId);
+              const visible = !this.hiddenBurstIds.has(burst.burstId);
+              return `
+                <div class="movement-queue-flag-burst${visible ? " is-visible" : " is-hidden"}${selected ? " is-selected" : ""}" data-queue-burst-controls>
+                  <label class="movement-queue-burst-show">
+                    <input
+                      type="checkbox"
+                      data-queue-burst-visible="${escapeHtml(burst.burstId)}"
+                      ${visible ? "checked" : ""}
+                    >
+                    <span>
+                      <strong>Visible ${escapeHtml(`burst ${formatCount(burst.burstIdx + 1)}`)}</strong>
+                      • ${escapeHtml(burst.setName)}
+                      • ${escapeHtml(formatTimestamp(burst.startTimeMs))}
+                      • ${escapeHtml(`${formatCount(burst.fixCount)} fixes`)}
+                    </span>
+                  </label>
+                  <label class="movement-queue-burst-flag">
+                    <input
+                      type="checkbox"
+                      data-queue-flag-burst="${escapeHtml(burst.burstId)}"
+                      ${selected ? "checked" : ""}
+                      ${disabled}
+                    >
+                    <span>Flag</span>
+                  </label>
+                </div>
+              `;
+            }).join("")}
+          </div>
+        ` : burstDetailsLoading
+          ? '<span class="movement-subtle">Loading bursts for this individual…</span>'
+          : '<span class="movement-subtle">No bursts are available under the current burst definition.</span>'}
+      </div>
+    `;
+  }
+
   async setIndividualViewMode(mode) {
     const nextMode = mode === "queue" ? "queue" : "browse";
     const queue = this.individualReviewQueue;
@@ -7210,6 +7714,9 @@ class MovementExampleApp {
       queue.browseSideSheet = this.refs.sideSheetTabs?.dataset.activeSheet || "individuals";
       queue.mode = "queue";
       queue.activeIndividual = "";
+      this.hiddenBurstIds.clear();
+      this.resetManualFlagTarget();
+      this.flagTargetKind = "none";
       queue.mapScope = "group";
       this.setSideSheet("individuals", { save: false });
       this.renderIndividuals();
@@ -7223,6 +7730,9 @@ class MovementExampleApp {
     } else {
       queue.queueMapView = this.captureCurrentMapView();
       queue.mode = "browse";
+      this.hiddenBurstIds.clear();
+      this.resetManualFlagTarget();
+      this.flagTargetKind = this.data.selectedFixKeys.size ? "fixes" : "none";
       const context = queue.browseContext;
       if (context) {
         const available = new Set(this.data.individuals);
@@ -7318,6 +7828,7 @@ class MovementExampleApp {
     if (!this.data || !individual) {
       return;
     }
+    const previousIndividual = this.individualReviewQueue.activeIndividual;
     const previousGroup = this.getIndividualQueuePosition().group.join("\u0000");
     const ordered = this.getIndividualQueueOrder();
     const orderedIndex = ordered.indexOf(individual);
@@ -7332,6 +7843,7 @@ class MovementExampleApp {
       pageOffset / INDIVIDUAL_QUEUE_GROUP_SIZE,
     );
     this.individualReviewQueue.activeIndividual = individual;
+    this.clearFlagTargetForQueueIndividualChange(previousIndividual, individual);
     const position = this.getIndividualQueuePosition();
     const nextGroup = position.group.join("\u0000");
     if (
@@ -7363,9 +7875,6 @@ class MovementExampleApp {
       const targetIndividual = position.ordered[
         targetPageIndex * INDIVIDUAL_QUEUE_PAGE_SIZE
       ] || "";
-      if (!(await this.flushIndividualReviewDecisions())) {
-        return;
-      }
       if (targetIndividual && this.data?.individuals.includes(targetIndividual)) {
         await this.focusIndividualQueueItem(targetIndividual);
       } else {
@@ -7400,7 +7909,7 @@ class MovementExampleApp {
     await this.focusIndividualQueueItem(position.page[nextPageIndex]);
   }
 
-  async stageIndividualReviewDecision(individual, reviewDecision) {
+  stageIndividualReviewDecision(individual, reviewDecision) {
     if (this.rejectLockedEdit()) {
       return;
     }
@@ -7408,53 +7917,56 @@ class MovementExampleApp {
     if (!individual) {
       return;
     }
-    reviewDecision = reviewDecision === true
-      ? "ok"
-      : reviewDecision === false
-        ? "not_ok"
-        : reviewDecision;
+    if (!["ok", "not_ok"].includes(reviewDecision)) return;
     const existingState = this.getIndividualReviewState(individual);
     const comment = (
       this.individualReviewQueue.commentDrafts.has(individual)
         ? this.individualReviewQueue.commentDrafts.get(individual)
         : existingState.comment
     ).trim();
-    const batchIsFull = (
-      !this.individualReviewQueue.stagedDecisions.has(individual)
-      && this.individualReviewQueue.stagedDecisions.size >= INDIVIDUAL_QUEUE_PAGE_SIZE
-    );
-    if (batchIsFull) {
-      if (!(await this.flushIndividualReviewDecisions())) {
-        return;
-      }
-      const orderedIndex = this.getIndividualQueueOrder().indexOf(individual);
-      if (orderedIndex >= 0) {
-        this.individualReviewQueue.pageIndex = Math.floor(
-          orderedIndex / INDIVIDUAL_QUEUE_PAGE_SIZE,
-        );
-        this.individualReviewQueue.groupIndex = Math.floor(
-          (orderedIndex % INDIVIDUAL_QUEUE_PAGE_SIZE) / INDIVIDUAL_QUEUE_GROUP_SIZE,
-        );
-        this.individualReviewQueue.activeIndividual = individual;
-      }
-    }
-    const position = this.getIndividualQueuePosition();
-    const currentIndex = position.page.indexOf(individual);
-    const nextIndividual = position.page[currentIndex + 1] || "";
     this.individualReviewQueue.stagedDecisions.set(individual, {
       individual,
       review_decision: reviewDecision,
+      needs_check: existingState.needsCheck === true,
       comment,
     });
+    this.discardRedundantIndividualReviewDraft(individual);
     this.individualReviewQueue.skippedIndividuals.delete(individual);
-    this.individualReviewQueue.commentDrafts.delete(individual);
-    if (this.individualReviewQueue.commentEditingIndividual === individual) {
-      this.individualReviewQueue.commentEditingIndividual = "";
-    }
     this.renderIndividuals();
-    if (nextIndividual && nextIndividual !== individual) {
-      await this.focusIndividualQueueItem(nextIndividual);
-    }
+  }
+
+  stageIndividualNeedsCheck(individual, needsCheck) {
+    if (this.rejectLockedEdit()) return;
+    individual = individual || this.individualReviewQueue.activeIndividual;
+    if (!individual) return;
+    const existingState = this.getIndividualReviewState(individual);
+    const comment = (
+      this.individualReviewQueue.commentDrafts.has(individual)
+        ? this.individualReviewQueue.commentDrafts.get(individual)
+        : existingState.comment
+    ).trim();
+    this.individualReviewQueue.stagedDecisions.set(individual, {
+      individual,
+      review_decision: existingState.reviewDecision || "",
+      needs_check: needsCheck === true,
+      comment,
+    });
+    this.discardRedundantIndividualReviewDraft(individual);
+    this.renderIndividuals();
+  }
+
+  updateIndividualReviewCommentDraft(individual, comment) {
+    if (!individual) return;
+    this.individualReviewQueue.commentDrafts.set(individual, comment);
+    const existingState = this.getIndividualReviewState(individual);
+    this.individualReviewQueue.stagedDecisions.set(individual, {
+      individual,
+      review_decision: existingState.reviewDecision || "",
+      needs_check: existingState.needsCheck === true,
+      comment,
+    });
+    this.discardRedundantIndividualReviewDraft(individual);
+    this.updateIndividualDecisionSaveButton();
   }
 
   async skipIndividualQueueItem(individual) {
@@ -7508,11 +8020,12 @@ class MovementExampleApp {
     this.setSideSheet("table");
   }
 
-  async flushIndividualReviewDecisions() {
+  async saveActiveIndividualReviewDecision() {
     const queue = this.individualReviewQueue;
-    if (!queue.stagedDecisions.size) {
-      return true;
-    }
+    const individual = queue.activeIndividual;
+    const decision = queue.stagedDecisions.get(individual);
+    if (!individual || !decision || !decision.review_decision) return false;
+    if (!this.individualReviewDraftDiffers(individual)) return false;
     if (this.rejectLockedEdit()) {
       return false;
     }
@@ -7521,10 +8034,12 @@ class MovementExampleApp {
     }
     queue.saving = true;
     this.renderIndividuals();
-    const decisions = [...queue.stagedDecisions.values()];
+    const position = this.getIndividualQueuePosition();
+    const currentIndex = position.page.indexOf(individual);
+    const nextIndividual = position.page[currentIndex + 1] || "";
     try {
       const result = await this.requestJSON(
-        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/review-individuals`,
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/review-individual`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -7532,23 +8047,33 @@ class MovementExampleApp {
             expected_current_dataset_id: this.expectedCurrentDatasetId(),
             expected_review_revision: this.expectedReviewRevision(),
             logical_name: this.currentArtifact,
-            decisions,
+            decision: {
+              individual,
+              review_decision: decision.review_decision,
+              needs_check: decision.needs_check === true,
+              comment: String(decision.comment || "").trim(),
+            },
             user: this.getUser() || "reviewer",
           }),
         },
       );
-      queue.stagedDecisions.clear();
+      queue.stagedDecisions.delete(individual);
+      queue.commentDrafts.delete(individual);
+      if (queue.commentEditingIndividual === individual) {
+        queue.commentEditingIndividual = "";
+      }
       await this.loadStudyAtDataset(
         result.dataset.dataset_id,
-        { preserveAnnotationContext: true },
+        { preserveAnnotationContext: true, result },
       );
-      this.setStatus(
-        `Saved ${formatCount(decisions.length)} individual review decision(s) in one annotation step.`,
-      );
+      if (nextIndividual && nextIndividual !== individual) {
+        await this.focusIndividualQueueItem(nextIndividual, { zoom: false });
+      }
+      this.setStatus(`Saved the individual review decision for ${individual}.`);
       return true;
     } catch (error) {
       await this.handleEditRequestError(error);
-      this.setStatus(`Could not save individual reviews: ${error.message}`, true);
+      this.setStatus(`Could not save the individual review decision: ${error.message}`, true);
       return false;
     } finally {
       queue.saving = false;
@@ -7769,19 +8294,7 @@ class MovementExampleApp {
       const total = document.createElement("span");
       total.className = "movement-subtle";
       total.textContent = formatCount(stats.rowCount);
-      const actions = document.createElement("div");
-      actions.className = "movement-row-left";
-      const flagButton = document.createElement("button");
-      flagButton.type = "button";
-      flagButton.className = "movement-fix-remove";
-      flagButton.textContent = "Add issue";
-      flagButton.disabled = !this.canPersistEdits();
-      flagButton.addEventListener("click", event => {
-        event.stopPropagation();
-        this.openIndividualReviewModal(individual);
-      });
-      actions.append(total, flagButton);
-      header.append(left, actions);
+      header.append(left, total);
       card.appendChild(header);
 
       const statsRow = document.createElement("div");
@@ -7862,18 +8375,11 @@ class MovementExampleApp {
         `Individual ${formatCount(activeNumber)} of ${formatCount(position.ordered.length)}`
         + ` • page ${formatCount(queue.pageIndex + 1)} of ${formatCount(position.pageCount)}`
         + ` • ${formatCount(position.group.length)} detailed track(s) in this group`
-        + ` • ${formatCount(queue.stagedDecisions.size)} staged`
+        + ` • ${formatCount(queue.stagedDecisions.size)} unsaved`
       )
       : "No individuals are available.";
     const editsLocked = !this.canPersistEdits();
-    this.refs.individualQueueSave.disabled = (
-      editsLocked
-      || queue.saving
-      || !queue.stagedDecisions.size
-    );
-    this.refs.individualQueueSave.textContent = queue.saving
-      ? "Saving..."
-      : `Save page (${formatCount(queue.stagedDecisions.size)})`;
+    this.updateIndividualDecisionSaveButton(editsLocked);
     const activePageIndex = position.page.indexOf(queue.activeIndividual);
     const navDisabled = {
       "previous-page": queue.pageIndex <= 0,
@@ -7919,10 +8425,10 @@ class MovementExampleApp {
       card.className = `movement-card queue-card interactive${isActive ? " queue-active" : ""}${unresolvedCount ? " has-unresolved-issues" : ""}`;
       const stateLabel = reviewState.reviewed
         ? reviewState.reviewDecision === "ok"
-          ? "Reviewed—OK"
+          ? "OK"
           : reviewState.reviewDecision === "second_opinion"
-            ? "Reviewed—second opinion"
-            : "Reviewed—issues"
+            ? "Second opinion"
+            : "Issues found"
         : priorDecision === "second_opinion"
           ? "Needs review—prior second opinion"
           : priorDecision === "not_ok"
@@ -7933,11 +8439,12 @@ class MovementExampleApp {
       const stateClass = reviewState.reviewed
         ? reviewState.reviewDecision === "ok" ? " ok" : " issues"
         : "";
+      const selectedDecision = String(reviewState.reviewDecision || "");
       card.innerHTML = `
         <div class="movement-row">
           <div class="movement-row-left">
             <div class="movement-title">${escapeHtml(individual)}</div>
-            <span class="movement-review-state${stateClass}">${escapeHtml(stateLabel)}${reviewState.staged ? " • staged" : ""}</span>
+            <span class="movement-review-state${stateClass}">${escapeHtml(stateLabel)}${reviewState.needsCheck ? " • Needs check" : ""}${reviewState.staged ? " • unsaved" : ""}</span>
           </div>
           <div class="movement-queue-card-actions">
             <button type="button" data-queue-comment data-individual="${escapeHtml(individual)}">${comment ? "Note ✓" : "Note"}</button>
@@ -7955,12 +8462,24 @@ class MovementExampleApp {
         ${unresolvedCount ? `<div class="movement-fix-note"><strong>Unresolved issues:</strong> ${escapeHtml(formatCount(unresolvedCount))}${origins.length ? ` • ${escapeHtml(origins.join(", "))}` : ""}</div>` : ""}
         ${isActive ? `
           <div class="movement-queue-card-actions">
-            <button type="button" data-review-decision="ok" data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Reviewed—OK</button>
-            <button type="button" data-review-decision="not_ok" data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Issues found</button>
-            <button type="button" data-add-individual-issue data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Add issue</button>
-            <button type="button" data-review-decision="second_opinion" data-individual="${escapeHtml(individual)}"${editsLocked ? " disabled" : ""}>Second opinion</button>
+            <span class="movement-review-choice">
+              <button type="button" class="${selectedDecision === "ok" ? "is-selected" : ""}" data-review-decision="ok" data-individual="${escapeHtml(individual)}" aria-describedby="movement-review-help-ok"${editsLocked ? " disabled" : ""}>OK</button>
+              <span class="movement-review-help" id="movement-review-help-ok" role="tooltip">The individual looks acceptable overall. Fix-level flags remain separate and may still require attention.</span>
+            </span>
+            <span class="movement-review-choice">
+              <button type="button" class="${selectedDecision === "not_ok" ? "is-selected" : ""}" data-review-decision="not_ok" data-individual="${escapeHtml(individual)}" aria-describedby="movement-review-help-issues"${editsLocked ? " disabled" : ""}>Issues found</button>
+              <span class="movement-review-help" id="movement-review-help-issues" role="tooltip">You found a cleaning problem for this individual. Use Flag to record the affected individual, bursts, track section, or fixes.</span>
+            </span>
+            <span class="movement-review-choice">
+              <label class="movement-review-needs-check">
+                <input type="checkbox" data-review-needs-check data-individual="${escapeHtml(individual)}" aria-describedby="movement-review-help-needs-check"${reviewState.needsCheck ? " checked" : ""}${editsLocked ? " disabled" : ""}>
+                <span>Needs check</span>
+              </label>
+              <span class="movement-review-help" id="movement-review-help-needs-check" role="tooltip">Request another reviewer’s opinion in addition to your OK or Issues found decision.</span>
+            </span>
             <button type="button" data-queue-skip data-individual="${escapeHtml(individual)}">Skip</button>
           </div>
+          ${this.queueFlagTargetControlsHtml(individual)}
         ` : ""}
         ${isEditingComment ? `
           <input
@@ -7973,13 +8492,30 @@ class MovementExampleApp {
         ` : ""}
       `;
       card.addEventListener("click", event => {
-        if (event.target.closest("button, input")) {
+        if (
+          event.target.closest("button, input, label, select, textarea, [data-queue-burst-controls]")
+          || individual === this.individualReviewQueue.activeIndividual
+        ) {
           return;
         }
         void this.focusIndividualQueueItem(individual);
       });
       this.refs.individuals.appendChild(card);
     }
+  }
+
+  updateIndividualDecisionSaveButton(editsLocked = !this.canPersistEdits()) {
+    const queue = this.individualReviewQueue;
+    const activeDraft = queue.stagedDecisions.get(queue.activeIndividual);
+    this.refs.individualQueueSave.disabled = (
+      editsLocked
+      || queue.saving
+      || !activeDraft?.review_decision
+      || !this.individualReviewDraftDiffers(queue.activeIndividual)
+    );
+    this.refs.individualQueueSave.textContent = queue.saving
+      ? "Saving..."
+      : "Save decision";
   }
 
   toggleIndividual(individual, shouldSelect) {
@@ -8139,7 +8675,14 @@ class MovementExampleApp {
     const visibleIndividuals = new Set(this.getSelectedIndividuals());
     const visibleSetNames = this.getVisibleSetNames();
     return (this.data.autoBursts || []).filter(
-      burst => visibleIndividuals.has(burst.individual) && visibleSetNames.has(burst.setName),
+      burst => (
+        visibleIndividuals.has(burst.individual)
+        && visibleSetNames.has(burst.setName)
+        && (
+          !requireOverlay
+          || !this.hiddenBurstIds.has(burst.burstId)
+        )
+      ),
     );
   }
 
@@ -8400,6 +8943,10 @@ class MovementExampleApp {
       this.setStatus("That fix is not part of the current analytical track.", true);
       return;
     }
+    if (this.flagTargetKind !== "segment") {
+      this.resetManualFlagTarget();
+      this.data.selectedFixKeys = new Set();
+    }
     if (!this.mapRangeAwaitingEnd || !this.tableSelection.anchorFixKey) {
       this.setTableSelection({
         anchorFixKey: fixKey,
@@ -8479,7 +9026,9 @@ class MovementExampleApp {
     this.setTableSelection();
     this.mapRangeAwaitingEnd = false;
     if (this.flagTargetKind === "segment") {
-      this.flagTargetKind = this.getActiveThresholdMatchKeys().size ? "filter" : "fixes";
+      this.flagTargetKind = this.getActiveThresholdMatchKeys().size
+        ? "filter"
+        : this.data?.selectedFixKeys?.size ? "fixes" : "none";
     }
     this.renderTableSheet();
     this.renderLayers();
@@ -8558,6 +9107,32 @@ class MovementExampleApp {
   }
 
   handleTableWrapClick(event) {
+    const fixCheckbox = event.target.closest("input[data-table-check-fix]");
+    if (fixCheckbox) {
+      this.setCheckedFixIncluded(
+        fixCheckbox.dataset.tableCheckFix || "",
+        fixCheckbox.checked,
+        "table_check",
+      );
+      return;
+    }
+    const burstVisibilityCheckbox = event.target.closest("input[data-table-burst-visible]");
+    if (burstVisibilityCheckbox) {
+      this.setBurstVisible(
+        burstVisibilityCheckbox.dataset.tableBurstVisible || "",
+        burstVisibilityCheckbox.checked,
+      );
+      return;
+    }
+    const burstCheckbox = event.target.closest("input[data-table-check-burst]");
+    if (burstCheckbox) {
+      this.setBurstFlagTargetIncluded(
+        burstCheckbox.dataset.tableCheckBurst || "",
+        burstCheckbox.checked,
+        { selectionMethod: "table_burst_check" },
+      );
+      return;
+    }
     const actionButton = event.target.closest("button[data-action]");
     if (actionButton) {
       const action = actionButton.dataset.action || "";
@@ -8576,11 +9151,6 @@ class MovementExampleApp {
         if (burst) {
           this.zoomToPath(burst.path);
         }
-      } else if (action === "flag-auto-burst") {
-        const burst = this.data?.autoBurstById?.get(actionButton.dataset.burstId || "");
-        if (burst) {
-          this.openBurstReviewModal(burst);
-        }
       }
       return;
     }
@@ -8596,10 +9166,8 @@ class MovementExampleApp {
       return;
     }
     if (row.dataset.burstId && this.refs.tableMode.value === "auto_bursts") {
-      const burst = this.data?.autoBurstById?.get(row.dataset.burstId || "");
-      if (burst) {
-        this.zoomToPath(burst.path);
-      }
+      const burstId = row.dataset.burstId || "";
+      this.setBurstVisible(burstId, this.hiddenBurstIds.has(burstId));
       return;
     }
     if (this.refs.tableMode.value !== "fixes") {
@@ -8608,6 +9176,10 @@ class MovementExampleApp {
     const fixKey = row.dataset.fixKey || "";
     if (!fixKey) {
       return;
+    }
+    if (this.flagTargetKind !== "segment") {
+      this.resetManualFlagTarget();
+      this.data.selectedFixKeys = new Set();
     }
     this.flagTargetKind = "segment";
     this.applyTableSelectionInteraction(fixKey, {
@@ -8629,6 +9201,7 @@ class MovementExampleApp {
       return;
     }
     const mode = this.refs.tableMode.value || "fixes";
+    const flagCheckboxDisabled = this.canPersistEdits() ? "" : " disabled";
     const hasDetail = this.hasLoadedDetailSelection() || this.data.overviewHasAllFixes;
     const rows = mode === "fixes" ? this.getFilteredTableFixRows() : [];
     const selection = this.getCurrentSegmentSelection();
@@ -8684,8 +9257,10 @@ class MovementExampleApp {
 
     if (mode === "auto_bursts") {
       const bursts = this.getFilteredTableAutoBursts();
-      const overlayNote = this.refs.showBursts.checked ? "" : " Map overlay is hidden.";
-      this.refs.tableMeta.textContent = `${formatCount(bursts.length)} automatic bursts in the current visible scope at ${this.burstGapLabel() || `${formatCount(this.getBurstGapSeconds())} s`}. Click a row to zoom.${overlayNote}`;
+      const overlayNote = this.refs.showBursts.checked
+        ? ""
+        : " The burst-color overlay is hidden, but visibility checks still control ordinary points and tracks.";
+      this.refs.tableMeta.textContent = `${formatCount(bursts.length)} automatic bursts in the current visible scope at ${this.burstGapLabel() || `${formatCount(this.getBurstGapSeconds())} s`}. Bursts start visible; uncheck Visible to hide their ordinary points and track steps. Flag remains independent. Zoom is always explicit.${overlayNote}`;
       if (!bursts.length) {
         this.refs.tableWrap.innerHTML = '<div class="movement-table-empty">No automatic bursts are visible for the current selection.</div>';
         return;
@@ -8694,6 +9269,8 @@ class MovementExampleApp {
         <table class="movement-table">
           <thead>
             <tr>
+              <th>Visible</th>
+              <th>Flag</th>
               <th>Color</th>
               <th>Individual</th>
               <th>Track</th>
@@ -8707,6 +9284,8 @@ class MovementExampleApp {
           <tbody>
             ${bursts.map(burst => `
               <tr class="is-auto-burst-row" data-burst-id="${escapeHtml(burst.burstId)}">
+                <td><input type="checkbox" data-table-burst-visible="${escapeHtml(burst.burstId)}"${this.hiddenBurstIds.has(burst.burstId) ? "" : " checked"}></td>
+                <td><input type="checkbox" data-table-check-burst="${escapeHtml(burst.burstId)}"${this.flagTargetKind === "bursts" && this.manualFlagTarget.burstIds.has(burst.burstId) ? " checked" : ""}${flagCheckboxDisabled}></td>
                 <td><span class="movement-burst-swatch" style="background: ${escapeHtml(rgbaCss(burstPathColor(this.data?.individualPalette, burst, 215)))}"></span></td>
                 <td>${escapeHtml(burst.individual)}</td>
                 <td>${escapeHtml(burst.setName)}</td>
@@ -8716,7 +9295,6 @@ class MovementExampleApp {
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(burst.endTimeMs))}</td>
                 <td class="movement-table-cell-actions">
                   <button type="button" data-action="zoom-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}">Zoom</button>
-                  <button type="button" data-action="flag-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}"${this.canPersistEdits() ? "" : " disabled"}>Flag</button>
                 </td>
               </tr>
             `).join("")}
@@ -8773,6 +9351,7 @@ class MovementExampleApp {
       <table class="movement-table">
         <thead>
           <tr>
+            <th>Flag</th>
             <th>Individual</th>
             <th>Track</th>
             <th>Timestamp</th>
@@ -8797,6 +9376,7 @@ class MovementExampleApp {
             ].filter(Boolean).join(" ");
             return `
               <tr class="${rowClasses}" data-fix-key="${escapeHtml(fix.fixKey)}">
+                <td><input type="checkbox" data-table-check-fix="${escapeHtml(fix.fixKey)}"${this.data.selectedFixKeys.has(fix.fixKey) ? " checked" : ""}${flagCheckboxDisabled}></td>
                 <td>${escapeHtml(fix.individual)}</td>
                 <td>${escapeHtml(fix.setName)}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(fix.timeMs))}</td>
@@ -9156,13 +9736,29 @@ class MovementExampleApp {
     const visibleIndividuals = new Set(this.data.selectedIndividuals);
     const visibleSetNames = this.getVisibleSetNames();
     const showPoints = this.refs.showPoints.checked;
-    const pathData = this.getVisibleTrackSteps(visibleIndividuals, visibleSetNames);
+    const hiddenBurstFixKeys = new Set(
+      [...this.hiddenBurstIds].flatMap(
+        burstId => this.data.autoBurstById?.get(burstId)?.fixKeys || [],
+      ),
+    );
+    const allPathData = this.getVisibleTrackSteps(visibleIndividuals, visibleSetNames);
+    const pathData = allPathData
+      .filter(step => (
+        !hiddenBurstFixKeys.has(step.sourceFix?.fixKey)
+        && !hiddenBurstFixKeys.has(step.destinationFix?.fixKey)
+      ));
     const pointData = showPoints
       ? this.getVisibleMovementPoints(visibleIndividuals, visibleSetNames)
+        .filter(point => !hiddenBurstFixKeys.has(point.fix?.fixKey))
       : [];
     const temporalFocalData = showPoints && this.temporalSliderEngaged
       ? this.buildTemporalFocalData(visibleIndividuals, visibleSetNames)
       : { points: [] };
+    if (hiddenBurstFixKeys.size) {
+      temporalFocalData.points = temporalFocalData.points.filter(
+        point => !hiddenBurstFixKeys.has(point.fixKey),
+      );
+    }
     const thresholdPointData = [];
     const selectedThresholdPointData = [];
     const candidatePointData = [];
@@ -9204,6 +9800,28 @@ class MovementExampleApp {
     const visibleAutoBurstPaths = drawableAutoBursts
       .map(burst => this.data.autoBurstRenderCache.get(burst.burstId)?.pathItem)
       .filter(Boolean);
+    const manualFlagOutlinePaths = [];
+    if (this.flagTargetKind === "individual" && this.manualFlagTarget.individual) {
+      for (const step of allPathData) {
+        if (step.individual === this.manualFlagTarget.individual) {
+          manualFlagOutlinePaths.push(step);
+        }
+      }
+    } else if (this.flagTargetKind === "bursts") {
+      for (const burst of this.flagTargetBursts()) {
+        if (
+          visibleIndividuals.has(burst.individual)
+          && visibleSetNames.has(burst.setName)
+          && burst.path.length >= 2
+        ) {
+          manualFlagOutlinePaths.push({
+            path: burst.path,
+            individual: burst.individual,
+            setName: burst.setName,
+          });
+        }
+      }
+    }
     const visibleTableSelection = this.getVisibleTableSelectionFixes();
     const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
     const tableSelectedPointData = visibleTableSelection
@@ -9211,7 +9829,7 @@ class MovementExampleApp {
       .map(fix => ({
         fixKey: fix.fixKey,
         position: fix.position,
-        color: [87, 218, 174, 220],
+        color: [255, 204, 40, 235],
       }));
     const segmentSelection = this.hasTableSelection()
       ? this.getCurrentSegmentSelection()
@@ -9247,7 +9865,7 @@ class MovementExampleApp {
       : "browse";
     if (showSuspectedOutlines) {
       const seenSuspected = new Set();
-      for (const fix of this.data.suspiciousFixes || []) {
+      for (const fix of this.data.fixes || []) {
         if (
           fix.review?.status !== "suspected"
           || !visibleIndividuals.has(fix.individual)
@@ -9365,6 +9983,35 @@ class MovementExampleApp {
       );
     }
 
+    if (manualFlagOutlinePaths.length) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-manual-flag-target-outline",
+          data: manualFlagOutlinePaths,
+          dataComparator: sameArrayItems,
+          getPath: item => item.path,
+          getColor: [255, 204, 40, 210],
+          getWidth: 9,
+          widthMinPixels: 5,
+          pickable: false,
+        }),
+      );
+    }
+
+    if (tableSelectionPath.length >= 2) {
+      layers.push(
+        new deck.PathLayer({
+          id: "movement-table-selection-path",
+          data: [{ path: tableSelectionPath }],
+          getPath: item => item.path,
+          getColor: [255, 204, 40, 210],
+          getWidth: 9,
+          widthMinPixels: 5,
+          pickable: false,
+        }),
+      );
+    }
+
     // Each derived step value belongs to its destination fix, so the inbound
     // segment uses that fix's selected-variable color. Drawing it above the
     // optional burst casing keeps speed and other step fields legible.
@@ -9437,20 +10084,6 @@ class MovementExampleApp {
           ),
           getWidth: segment => segment.status === "confirmed" ? 2 : 4.5,
           widthMinPixels: 1,
-          pickable: false,
-        }),
-      );
-    }
-
-    if (tableSelectionPath.length >= 2) {
-      layers.push(
-        new deck.PathLayer({
-          id: "movement-table-selection-path",
-          data: [{ path: tableSelectionPath }],
-          getPath: item => item.path,
-          getColor: [87, 218, 174, 210],
-          getWidth: 6,
-          widthMinPixels: 3,
           pickable: false,
         }),
       );
@@ -9616,8 +10249,8 @@ class MovementExampleApp {
           ),
           getLineColor: item => this.queueMapColor(
             hasFocusedRankingBurst
-              ? [255, 255, 255, 100]
-              : [255, 255, 255, 255],
+              ? [255, 204, 40, 115]
+              : [255, 204, 40, 255],
             item.individual,
           ),
           stroked: true,
@@ -9716,14 +10349,41 @@ class MovementExampleApp {
     if (!this.data || !this.data.fixByKey.has(fixKey)) {
       return;
     }
-    if (this.data.selectedFixKeys.has(fixKey)) {
-      this.data.selectedFixKeys.delete(fixKey);
-    } else {
-      this.data.selectedFixKeys.add(fixKey);
+    this.setCheckedFixIncluded(
+      fixKey,
+      !this.data.selectedFixKeys.has(fixKey),
+      "checked_fix_card",
+    );
+  }
+
+  setCheckedFixIncluded(fixKey, included, selectionMethod = "map_check") {
+    const fix = this.data?.fixByKey?.get(String(fixKey || ""));
+    if (!fix) return;
+    if (this.individualReviewQueue.mode === "queue") {
+      const activeIndividual = this.individualReviewQueue.activeIndividual;
+      if (activeIndividual && fix.individual !== activeIndividual) {
+        this.setStatus("Choose fixes belonging to the active queue individual.", true);
+        this.renderTableSheet();
+        return;
+      }
+    }
+    if (this.flagTargetKind !== "fixes") {
+      this.resetManualFlagTarget();
+      this.data.selectedFixKeys = new Set();
     }
     this.flagTargetKind = "fixes";
+    this.manualFlagTarget.selectionMethods.add(selectionMethod);
+    if (included) {
+      this.data.selectedFixKeys.add(fix.fixKey);
+    } else {
+      this.data.selectedFixKeys.delete(fix.fixKey);
+    }
+    if (!this.data.selectedFixKeys.size) this.flagTargetKind = "none";
     this.renderThresholdPane();
     this.renderSelectedFixes();
+    if (this.individualReviewQueue.mode === "queue") {
+      this.renderIndividuals();
+    }
     this.renderLayers();
     this.updateActionButtons();
   }
@@ -9843,23 +10503,12 @@ class MovementExampleApp {
 
   applyMapSingleFixClick(fixKey, modifiers = {}) {
     if (!this.data?.fixByKey?.has(fixKey)) return;
-    if (this.data.selectedFixKeys.has(fixKey)) {
-      this.data.selectedFixKeys.delete(fixKey);
-    } else {
-      this.data.selectedFixKeys.add(fixKey);
-    }
+    const included = !this.data.selectedFixKeys.has(fixKey);
     this.applyTableSelectionInteraction(fixKey, {
       additive: Boolean(modifiers.additive),
       range: false,
     });
-    this.flagTargetKind = "fixes";
-    this.renderThresholdPane();
-    this.renderSelectedFixes();
-    if (this.refs?.sideSheetTabs?.dataset.activeSheet === "table") {
-      this.renderTableSheet();
-    }
-    this.renderLayers();
-    this.updateActionButtons();
+    this.setCheckedFixIncluded(fixKey, included, "map_check");
   }
 
   handleMapDoubleClick(event) {
@@ -10171,15 +10820,16 @@ class MovementExampleApp {
       histogramMax: null,
     };
     if (this.flagTargetKind === "filter") {
-      this.flagTargetKind = "fixes";
+      this.flagTargetKind = this.data?.selectedFixKeys?.size ? "fixes" : "none";
     }
   }
 
   syncFlagTargetToThreshold() {
     if (this.getActiveThresholdMatchKeys().size) {
+      this.resetManualFlagTarget({ resetKind: false });
       this.flagTargetKind = "filter";
     } else if (this.flagTargetKind === "filter") {
-      this.flagTargetKind = "fixes";
+      this.flagTargetKind = this.data?.selectedFixKeys?.size ? "fixes" : "none";
     }
     this.updateActionButtons();
   }
@@ -11060,6 +11710,7 @@ class MovementExampleApp {
       this.data.detailAutoBursts = [];
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
+      this.renderIndividuals();
       this.renderSelectedFixes();
       this.renderThresholdPane();
       this.renderLayers();
@@ -11085,6 +11736,7 @@ class MovementExampleApp {
       this.data.detailTruncated = false;
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, this.data.detailIndividuals);
+      this.renderIndividuals();
       this.renderSelectedFixes();
       this.renderThresholdPane();
       this.renderLayers();
@@ -11139,6 +11791,7 @@ class MovementExampleApp {
       this.data.detailAutoBursts = parseMovementAutoBursts(payload.auto_bursts || []);
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, this.data.detailIndividuals);
+      this.renderIndividuals();
       this.renderSelectedFixes();
       this.renderThresholdPane();
       this.renderLayers();
@@ -11162,6 +11815,7 @@ class MovementExampleApp {
       this.data.detailAutoBursts = [];
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
+      this.renderIndividuals();
       this.renderSelectedFixes();
       this.renderThresholdPane();
       this.renderLayers();
@@ -11170,17 +11824,26 @@ class MovementExampleApp {
     }
   }
 
-  buildFixesRequestUrl({ familyName, studyName, datasetId, artifactName, individuals = [], reviewStatus = "", limit } = {}) {
+  buildFixesRequestUrl({
+    familyName,
+    studyName,
+    datasetId,
+    artifactName,
+    individuals = [],
+    reviewStatus = "",
+    limit,
+    data = this.data,
+  } = {}) {
     const params = new URLSearchParams({ logical_name: artifactName });
     params.set("burst_gap_mode", this.getBurstGapMode());
     params.set("burst_gap_seconds", String(this.getBurstGapSeconds()));
     params.set("burst_gap_quantile", String(this.getBurstGapQuantile()));
-    const effectiveBurstGapSeconds = finiteOrNull(this.data?.burstGap?.effectiveSeconds);
+    const effectiveBurstGapSeconds = finiteOrNull(data?.burstGap?.effectiveSeconds);
     if (effectiveBurstGapSeconds !== null && effectiveBurstGapSeconds > 0) {
       params.set("burst_gap_effective_seconds", String(effectiveBurstGapSeconds));
     }
     const normalizedIndividuals = uniqueNonEmpty(individuals).sort((left, right) => left.localeCompare(right));
-    const allIndividuals = this.data ? [...this.data.individuals].sort((left, right) => left.localeCompare(right)) : [];
+    const allIndividuals = data ? [...data.individuals].sort((left, right) => left.localeCompare(right)) : [];
     const shouldOmitIndividuals = normalizedIndividuals.length > 0 && arraysEqual(normalizedIndividuals, allIndividuals);
     if (!shouldOmitIndividuals) {
       for (const individual of normalizedIndividuals) {
@@ -11887,7 +12550,25 @@ class MovementExampleApp {
 
   getActiveFlagTarget() {
     if (!this.data) {
-      return { kind: "fixes", fixes: [], ready: false };
+      return { kind: "none", fixes: [], ready: false };
+    }
+    if (this.flagTargetKind === "individual") {
+      const individual = String(this.manualFlagTarget.individual || "");
+      return {
+        kind: "individual",
+        individual,
+        fixes: [],
+        ready: Boolean(individual && this.data.individuals.includes(individual)),
+      };
+    }
+    if (this.flagTargetKind === "bursts") {
+      const bursts = this.flagTargetBursts();
+      return {
+        kind: "bursts",
+        bursts,
+        fixes: [],
+        ready: bursts.length > 0,
+      };
     }
     if (this.flagTargetKind === "segment") {
       const selection = this.getCurrentSegmentSelection();
@@ -11907,8 +12588,27 @@ class MovementExampleApp {
         return { kind: "filter", fixes, ready: fixes.length > 0 };
       }
     }
+    if (this.flagTargetKind === "none") {
+      return { kind: "none", fixes: [], ready: false };
+    }
     const fixes = this.getSelectedFixes();
     return { kind: "fixes", fixes, ready: fixes.length > 0 };
+  }
+
+  buildIssueWorkflowContext(scopeKind, { selectionMethods = null } = {}) {
+    const methods = Array.isArray(selectionMethods)
+      ? selectionMethods
+      : [...(this.manualFlagTarget.selectionMethods || [])];
+    return {
+      entry_point: this.individualReviewQueue.mode === "queue"
+        ? "individual_review_queue"
+        : "movement_map",
+      active_individual: this.individualReviewQueue.mode === "queue"
+        ? String(this.individualReviewQueue.activeIndividual || "")
+        : "",
+      scope_kind: String(scopeKind || ""),
+      selection_methods: [...new Set(methods.map(String).filter(Boolean))],
+    };
   }
 
   updateActionButtons() {
@@ -11927,7 +12627,11 @@ class MovementExampleApp {
       flagFixes.length > 0
       && flagFixes.every(fix => loadedSuspiciousKeys.has(fix.fixKey))
     );
-    const canEditFlagTarget = hasDetail || flagFixesAreLoadedSuspicious;
+    const canEditFlagTarget = (
+      hasDetail
+      || flagFixesAreLoadedSuspicious
+      || ["individual", "bursts"].includes(flagTarget.kind)
+    );
     const canConfirmSelectedFixes = this.canConfirmFixes(selectedFixes);
     const suspiciousLoading = this.data?.suspiciousState === "loading";
     const candidatePreviewLoading = this.candidateQueryPreview?.status === "loading";
@@ -11967,13 +12671,19 @@ class MovementExampleApp {
         element?.classList.add("movement-profile-hidden");
       }
     }
-    this.refs.markSuspected.textContent = flagTarget.kind === "segment"
+    this.refs.markSuspected.textContent = flagTarget.kind === "individual"
+      ? `Flag entire individual ${flagTarget.individual}`
+      : flagTarget.kind === "bursts"
+        ? `Flag ${formatCount(flagTarget.bursts.length)} selected burst(s)`
+      : flagTarget.kind === "segment"
       ? flagTarget.ready
         ? `Flag selected segment (${formatCount(flagFixes.length)} fixes)`
         : "Select segment end"
       : flagTarget.kind === "filter"
         ? `Flag threshold matches (${formatCount(flagFixes.length)})`
-        : `Flag checked fixes (${formatCount(flagFixes.length)})`;
+        : flagTarget.kind === "fixes"
+          ? `Flag checked fixes (${formatCount(flagFixes.length)})`
+          : "Choose what to flag";
     this.refs.markSuspected.disabled = (
       !canPersistEdits
       || !hasData
@@ -12141,8 +12851,8 @@ class MovementExampleApp {
       this.refs.confirmStatus.classList.add("error");
       return;
     }
-    if (!(await this.flushIndividualReviewDecisions())) {
-      this.refs.confirmStatus.textContent = "Save the staged individual reviews before confirming issues.";
+    if (this.hasUnsavedIndividualReviewDrafts()) {
+      this.refs.confirmStatus.textContent = "Save or discard the unsaved individual decision before confirming issues.";
       this.refs.confirmStatus.classList.add("error");
       return;
     }
@@ -12173,7 +12883,10 @@ class MovementExampleApp {
       this.setUser(user);
       this.pendingConfirmationGroups = [];
       this.refs.confirmModal.classList.add("hidden");
-      await this.loadStudyAtDataset(result.dataset.dataset_id);
+      await this.loadStudyAtDataset(result.dataset.dataset_id, {
+        result,
+        clearTarget: "fixes",
+      });
       this.setStatus(`Confirmed suspected outliers in ${result.dataset.dataset_id}.`);
     } catch (error) {
       await this.handleEditRequestError(error);
@@ -12247,8 +12960,8 @@ class MovementExampleApp {
       this.refs.dismissStatus.classList.add("error");
       return;
     }
-    if (!(await this.flushIndividualReviewDecisions())) {
-      this.refs.dismissStatus.textContent = "Save the staged individual reviews before dismissing issues.";
+    if (this.hasUnsavedIndividualReviewDrafts()) {
+      this.refs.dismissStatus.textContent = "Save or discard the unsaved individual decision before dismissing issues.";
       this.refs.dismissStatus.classList.add("error");
       return;
     }
@@ -12278,7 +12991,10 @@ class MovementExampleApp {
       this.setUser(user);
       this.pendingDismissalGroups = [];
       this.refs.dismissModal.classList.add("hidden");
-      await this.loadStudyAtDataset(result.dataset.dataset_id);
+      await this.loadStudyAtDataset(result.dataset.dataset_id, {
+        result,
+        clearTarget: "fixes",
+      });
       this.setStatus(`Recorded not-suspicious decisions in ${result.dataset.dataset_id}.`);
     } catch (error) {
       await this.handleEditRequestError(error);
@@ -12907,6 +13623,14 @@ class MovementExampleApp {
   openActiveFlagModal() {
     const target = this.getActiveFlagTarget();
     if (!target.ready) return;
+    if (target.kind === "individual") {
+      this.openIndividualReviewModal(target.individual);
+      return;
+    }
+    if (target.kind === "bursts") {
+      this.openSelectedBurstsModal(target.bursts);
+      return;
+    }
     if (target.kind === "segment") {
       this.openSegmentModal("suspected");
       return;
@@ -12931,6 +13655,14 @@ class MovementExampleApp {
       && Boolean(this.candidateQueryPreview?.analysisId)
       && selectedFixes.every(fix => candidateKeys.has(fix.fixKey));
     const origin = isFilterTarget ? "threshold" : (candidateGenerated ? "algorithm" : "manual");
+    const queueReviewIndividual = (
+      !isFilterTarget
+      && this.individualReviewQueue.mode === "queue"
+      && selectedFixes.length
+      && selectedFixes.every(
+        fix => fix.individual === this.individualReviewQueue.activeIndividual,
+      )
+    ) ? this.individualReviewQueue.activeIndividual : "";
     const thresholdFilter = isFilterTarget
       ? {
           field_key: field?.key || "",
@@ -12953,6 +13685,8 @@ class MovementExampleApp {
       issueField: field?.key || "",
       issueThreshold,
       thresholdFilter,
+      queueReviewIndividual,
+      workflowContext: this.buildIssueWorkflowContext(isFilterTarget ? "filter" : "fix"),
     };
     this.refs.issueTitle.textContent = `Mark fixes as ${status}`;
     this.refs.issueMeta.innerHTML = `
@@ -13003,6 +13737,13 @@ class MovementExampleApp {
       selectionMethod: selection.selectionMethod || "",
       issueField: "",
       issueThreshold: "",
+      queueReviewIndividual: (
+        this.individualReviewQueue.mode === "queue"
+        && selection.individual === this.individualReviewQueue.activeIndividual
+      ) ? selection.individual : "",
+      workflowContext: this.buildIssueWorkflowContext("segment", {
+        selectionMethods: [selection.selectionMethod || ""],
+      }),
     };
     this.refs.issueTitle.textContent = `Mark segment as ${status}`;
     this.refs.issueMeta.innerHTML = `
@@ -13032,7 +13773,7 @@ class MovementExampleApp {
     this.refs.issueType.focus();
   }
 
-  openIndividualReviewModal(individual, { queueReview = false } = {}) {
+  openIndividualReviewModal(individual) {
     if (this.rejectLockedEdit()) {
       return;
     }
@@ -13050,13 +13791,15 @@ class MovementExampleApp {
       origin: "manual",
       issueField: "",
       issueThreshold: "",
-      queueReviewIndividual: queueReview ? individual : "",
+      queueReviewIndividual: (
+        this.individualReviewQueue.mode === "queue"
+        && individual === this.individualReviewQueue.activeIndividual
+      ) ? individual : "",
+      workflowContext: this.buildIssueWorkflowContext("individual"),
       defaultIssueType: "individual review",
       defaultOwnerQuestion: "Could you confirm whether this individual's track should be treated as an outlier?",
     };
-    this.refs.issueTitle.textContent = queueReview
-      ? "Flag issues found"
-      : "Add issue";
+    this.refs.issueTitle.textContent = "Flag entire individual";
     this.refs.issueMeta.innerHTML = `
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
@@ -13073,34 +13816,40 @@ class MovementExampleApp {
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
     this.refs.issueClose.disabled = false;
-    this.setupIndividualQueueIssueScope(individual);
     this.refs.issueModal.classList.remove("hidden");
     this.refs.issueNote.focus();
   }
 
-  openBurstReviewModal(burst, { origin = "manual", sourceAnalysisId = "" } = {}) {
+  openSelectedBurstsModal(bursts) {
     if (this.rejectLockedEdit()) {
       return;
     }
-    const burstId = String(burst?.burstId || burst?.burst_id || "");
-    if (!this.data || !burstId || !this.currentArtifact) {
+    bursts = Array.isArray(bursts) ? bursts.filter(Boolean) : [];
+    if (!this.data || !bursts.length || !this.currentArtifact) {
       return;
     }
     this.resetIssueScopeControls();
-    const individual = String(burst?.individual || "");
-    const setName = String(burst?.setName || burst?.set_name || "train");
-    const fixCount = Number(burst?.fixCount ?? burst?.fix_count ?? burst?.n_fixes) || 0;
+    const burstIds = bursts.map(burst => String(burst.burstId || "")).filter(Boolean);
+    const individuals = new Set(bursts.map(burst => String(burst.individual || "")));
+    const individual = individuals.size === 1 ? [...individuals][0] : "";
+    const fixCount = bursts.reduce((total, burst) => total + (Number(burst.fixCount) || 0), 0);
+    const origin = this.manualFlagTarget.origin || "manual";
+    const sourceAnalysisId = this.manualFlagTarget.sourceAnalysisId || "";
     this.pendingIssueStatus = "suspected";
     this.pendingIssueContext = {
       mode: "bursts",
       fixes: [],
-      burstIds: [burstId],
+      burstIds,
       individual,
-      setName,
       origin,
       sourceAnalysisId,
       issueField: "",
       issueThreshold: "",
+      queueReviewIndividual: (
+        this.individualReviewQueue.mode === "queue"
+        && individual === this.individualReviewQueue.activeIndividual
+      ) ? individual : "",
+      workflowContext: this.buildIssueWorkflowContext("bursts"),
       defaultIssueType: origin === "algorithm" ? "burst anomaly" : "burst review",
       defaultOwnerQuestion: "Could you confirm whether these bursts should be treated as outliers?",
     };
@@ -13108,14 +13857,14 @@ class MovementExampleApp {
     this.refs.issueMeta.innerHTML = `
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
-      <div><strong>Burst:</strong> ${escapeHtml(burstId)}</div>
-      <div><strong>Track:</strong> ${escapeHtml(`${individual} • ${setName}`)}</div>
+      <div><strong>Bursts:</strong> ${escapeHtml(formatCount(burstIds.length))}</div>
+      <div><strong>Individual:</strong> ${escapeHtml(individual || "Multiple individuals")}</div>
       <div><strong>Resolved fixes:</strong> ${escapeHtml(formatCount(fixCount))}</div>
       <div><strong>Origin:</strong> ${escapeHtml(origin)}</div>
     `;
     this.refs.issueSelection.textContent = sourceAnalysisId
       ? `This annotation will retain provenance to analysis ${sourceAnalysisId}.`
-      : "The backend will resolve this burst using the current burst-gap settings.";
+      : `The backend will resolve ${formatCount(burstIds.length)} selected burst(s) using the current burst-gap settings.`;
     this.refs.issueUser.value = this.getUser();
     this.refs.issueType.value = origin === "algorithm" ? "burst anomaly" : "burst review";
     this.refs.issueNote.value = "";
@@ -13124,10 +13873,6 @@ class MovementExampleApp {
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
     this.refs.issueClose.disabled = false;
-    this.setupIndividualQueueIssueScope(individual, {
-      initialBurstId: burstId,
-      initialScope: "burst",
-    });
     this.refs.issueModal.classList.remove("hidden");
     this.refs.issueNote.focus();
   }
@@ -13210,12 +13955,6 @@ class MovementExampleApp {
       this.refs.issueStatus.classList.add("error");
       return;
     }
-    if (!(await this.flushIndividualReviewDecisions())) {
-      this.refs.issueStatus.textContent = "Save the staged individual reviews before flagging issues.";
-      this.refs.issueStatus.classList.add("error");
-      return;
-    }
-
     this.refs.issueSubmit.disabled = true;
     this.refs.issueClose.disabled = true;
     this.refs.issueStatus.textContent = context.mode === "segment"
@@ -13277,6 +14016,7 @@ class MovementExampleApp {
         comment: issueNote,
         owner_question: ownerQuestion,
         source_analysis_id: context.sourceAnalysisId || "",
+        workflow_context: context.workflowContext || this.buildIssueWorkflowContext(context.mode),
         burst_gap_mode: this.getBurstGapMode(),
         burst_gap_seconds: this.getBurstGapSeconds(),
         burst_gap_quantile: this.getBurstGapQuantile(),
@@ -13295,10 +14035,22 @@ class MovementExampleApp {
       this.refs.issueModal.classList.add("hidden");
       await this.loadStudyAtDataset(
         result.dataset.dataset_id,
-        { preserveAnnotationContext: true },
+        {
+          preserveAnnotationContext: true,
+          result,
+          clearTarget: context.thresholdFilter
+            ? "filter"
+            : context.mode === "segment"
+              ? "segment"
+              : context.mode === "fixes"
+                ? "fixes"
+                : context.mode === "individual"
+                  ? "individual"
+                  : context.mode === "bursts" ? "bursts" : "",
+        },
       );
       if (queueReviewIndividual) {
-        await this.stageIndividualReviewDecision(queueReviewIndividual, false);
+        this.stageIndividualReviewDecision(queueReviewIndividual, "not_ok");
       }
       this.setStatus(`Created ${result.step.title} in ${result.dataset.dataset_id}.`);
     } catch (error) {
@@ -13315,7 +14067,8 @@ class MovementExampleApp {
     if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
       return;
     }
-    if (!(await this.flushIndividualReviewDecisions())) {
+    if (this.hasUnsavedIndividualReviewDrafts()) {
+      this.setStatus("Save or discard the unsaved individual decision before exporting.", true);
       return;
     }
     this.refs.exportReviewedCsv.disabled = true;
@@ -13479,14 +14232,366 @@ class MovementExampleApp {
 
   async loadStudyAtDataset(
     datasetId,
-    { preserveAnnotationContext = false } = {},
+    {
+      preserveAnnotationContext = false,
+      result = null,
+      clearTarget = "",
+      reason = "mutation",
+    } = {},
   ) {
+    return this.transitionToDataset(datasetId, {
+      preserveAnnotationContext,
+      result,
+      clearTarget,
+      reason,
+    });
+  }
+
+  reviewProjectionIndividuals() {
+    if (!this.data) return [];
+    if (this.data.overviewHasAllFixes || this.data.reportAllState === "loaded") {
+      return [...this.data.individuals];
+    }
+    return uniqueNonEmpty([
+      ...this.getSelectedIndividuals(),
+      ...(this.data.detailIndividuals || []),
+    ]);
+  }
+
+  async fetchReviewProjection(datasetId) {
+    const params = new URLSearchParams({ logical_name: this.currentArtifact });
+    for (const individual of this.reviewProjectionIndividuals()) {
+      params.append("individuals", individual);
+    }
+    const controller = this.beginRequest("reviewProjection");
+    const payload = await this.fetchJSON(
+      `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/dataset/${encodeURIComponent(datasetId)}/review-projection?${params.toString()}`,
+      { signal: controller.signal, cache: "no-store" },
+    );
+    if (this.requestControllers.reviewProjection !== controller) {
+      throw new DOMException("Review update was superseded", "AbortError");
+    }
+    return payload;
+  }
+
+  rememberDatasetMetadata(dataset) {
+    if (!dataset?.dataset_id || this.allDatasets.some(item => item.dataset_id === dataset.dataset_id)) {
+      return;
+    }
+    this.allDatasets.push({
+      dataset_id: dataset.dataset_id,
+      parent_dataset_id: dataset.parent_dataset_id || "",
+      created_at: dataset.created_at || "",
+      user: dataset.user || "",
+      note: dataset.note || "",
+      artifact_count: Array.isArray(dataset.artifacts) ? dataset.artifacts.length : 0,
+      artifact_names: (dataset.artifacts || []).map(artifact => artifact.logical_name),
+      actor: dataset.actor || null,
+    });
+    this.allDatasets.sort(
+      (left, right) => String(right.created_at || "").localeCompare(String(left.created_at || "")),
+    );
+  }
+
+  async refreshGraphMetadata(preferredDatasetId = this.currentDatasetId) {
+    const graph = await this.fetchJSON(
+      `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/graph`,
+      { cache: "no-store" },
+    );
+    this.graph = graph;
+    this.allDatasets = [...(Array.isArray(graph.datasets) ? graph.datasets : [])]
+      .sort((left, right) => String(right.created_at || "").localeCompare(String(left.created_at || "")));
+    this.stepByOutputDatasetId = new Map(
+      (Array.isArray(graph.steps) ? graph.steps : []).map(step => [step.output_dataset_id, step]),
+    );
+    this.refreshDatasetOptions(preferredDatasetId);
+  }
+
+  addMutationResultToGraph(result) {
+    const dataset = result?.dataset;
+    const step = result?.step;
+    if (!dataset?.dataset_id) return;
+    const node = {
+      dataset_id: dataset.dataset_id,
+      parent_dataset_id: dataset.parent_dataset_id || "",
+      created_at: dataset.created_at || "",
+      user: dataset.user || "",
+      note: dataset.note || "",
+      artifact_count: Array.isArray(dataset.artifacts) ? dataset.artifacts.length : 0,
+      artifact_names: Array.isArray(dataset.artifacts)
+        ? dataset.artifacts.map(artifact => artifact.logical_name)
+        : [],
+      actor: dataset.actor || null,
+    };
+    this.allDatasets = [
+      node,
+      ...this.allDatasets.filter(item => item.dataset_id !== node.dataset_id),
+    ].sort((left, right) => String(right.created_at || "").localeCompare(String(left.created_at || "")));
+    this.graph = {
+      ...(this.graph || {}),
+      current_dataset_id: dataset.dataset_id,
+      datasets: this.allDatasets,
+    };
+    if (step?.output_dataset_id) {
+      this.stepByOutputDatasetId.set(step.output_dataset_id, step);
+      const graphSteps = Array.isArray(this.graph?.steps) ? this.graph.steps : [];
+      this.graph = {
+        ...this.graph,
+        steps: [
+          ...graphSteps.filter(item => item.output_dataset_id !== step.output_dataset_id),
+          step,
+        ],
+      };
+    }
+    this.refreshDatasetOptions(dataset.dataset_id);
+  }
+
+  emptyFixReview() {
+    return {
+      status: "",
+      issueId: "",
+      issueType: "",
+      issueField: "",
+      issueThreshold: "",
+      issues: [],
+      effectiveIssues: [],
+      issueNote: "",
+      ownerQuestion: "",
+      reviewUser: "",
+      reviewedAt: "",
+    };
+  }
+
+  applyReviewProjection(projection) {
+    if (!this.data) return;
+    const projectedFixes = parseMovementFixes(projection.fixes || []);
+    const projectedIndividuals = new Set(
+      Array.isArray(projection.projected_individuals)
+        ? projection.projected_individuals.map(String)
+        : [],
+    );
+    const reviewByFixKey = new Map(
+      projectedFixes.map(fix => [fix.fixKey, fix.review]),
+    );
+    const projectedSegments = parseMovementSegments(projection.segments || []);
+    const segmentMembershipsByFixKey = new Map();
+    for (const segment of projectedSegments) {
+      for (const fixKey of segment.fixKeys) {
+        const memberships = segmentMembershipsByFixKey.get(fixKey) || [];
+        memberships.push({
+          status: segment.status,
+          segmentId: segment.segmentId,
+          issueType: segment.issueType,
+          startFixKey: segment.startFixKey,
+          endFixKey: segment.endFixKey,
+          selectionMethod: segment.selectionMethod,
+          issueNote: segment.issueNote,
+          ownerQuestion: segment.ownerQuestion,
+          reviewUser: segment.reviewUser,
+          reviewedAt: segment.reviewedAt,
+        });
+        segmentMembershipsByFixKey.set(fixKey, memberships);
+      }
+    }
+    const patchFixes = fixes => (fixes || []).map(fix => ({
+      ...fix,
+      review: reviewByFixKey.get(fix.fixKey)
+        || (projectedIndividuals.has(fix.individual) ? this.emptyFixReview() : fix.review),
+      segments: segmentMembershipsByFixKey.get(fix.fixKey)
+        || (projectedIndividuals.has(fix.individual) ? [] : fix.segments),
+    }));
+    this.data.overviewFixes = patchFixes(this.data.overviewFixes);
+    this.data.candidateFixes = patchFixes(this.data.candidateFixes);
+    this.data.detailFixes = patchFixes(this.data.detailFixes);
+    this.data.reportAllFixes = patchFixes(this.data.reportAllFixes);
+    this.data.confirmedFixes = patchFixes(this.data.confirmedFixes);
+    this.data.overviewSegments = projectedSegments;
+    this.data.detailSegments = [];
+
+    const merged = new Map();
+    for (const fix of [
+      ...this.data.overviewFixes,
+      ...this.data.candidateFixes,
+      ...this.data.detailFixes,
+      ...this.data.reportAllFixes,
+      ...this.data.confirmedFixes,
+    ]) {
+      merged.set(fix.fixKey, fix);
+    }
+    this.data.fixes = [...merged.values()]
+      .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
+    this.data.fixByKey = new Map(this.data.fixes.map(fix => [fix.fixKey, fix]));
+    this.data.suspiciousFixes = this.data.fixes.filter(fix => fix.review.status === "suspected");
+    this.data.confirmedPointFixes = this.data.fixes.filter(fix => fix.review.status === "confirmed");
+    this.data.suspiciousState = "loaded";
+    this.data.suspiciousMatchingFixCount = Number(
+      projection.review_counts?.suspected,
+    ) || 0;
+    this.data.suspiciousReturnedFixCount = this.data.suspiciousFixes.length;
+    this.data.suspiciousTruncated = false;
+    this.data.confirmedMatchingFixCount = Number(
+      projection.review_counts?.confirmed,
+    ) || 0;
+    this.data.flaggedStepOverlays = buildFlaggedStepOverlays(this.data);
+    this.data.segments = projectedSegments;
+    this.data.segmentById = new Map(projectedSegments.map(segment => [segment.segmentId, segment]));
+
+    const projectedStats = projection.stats || {};
+    const individualReviews = projection.individual_reviews || {};
+    for (const individual of this.data.individuals) {
+      const stats = this.data.stats[individual];
+      const counts = projectedStats[individual] || {};
+      const decision = individualReviews[individual] || {};
+      stats.suspectedCount = Number(counts.suspected_count) || 0;
+      stats.unresolvedSuspectedCount = Number(counts.unresolved_suspected_count) || 0;
+      stats.confirmedCount = Number(counts.confirmed_count) || 0;
+      stats.unresolvedIssueTypes = Array.isArray(counts.unresolved_issue_types)
+        ? counts.unresolved_issue_types.map(String)
+        : [];
+      stats.unresolvedIssueOrigins = Array.isArray(counts.unresolved_issue_origins)
+        ? counts.unresolved_issue_origins.map(String)
+        : [];
+      stats.reviewed = decision.reviewed === true;
+      stats.reviewDecision = String(decision.review_decision || "");
+      stats.reviewOk = decision.review_ok === true;
+      stats.reviewUser = String(decision.review_user || "");
+      stats.reviewedAt = String(decision.reviewed_at || "");
+      stats.reviewComment = String(decision.review_comment || "");
+    }
+  }
+
+  clearCompletedFlagTarget(clearTarget) {
+    if (!this.data) return;
+    if (clearTarget === "filter") {
+      const filterFixKeys = new Set([
+        ...this.getCandidateQueryMatchKeys(),
+        ...this.getActiveThresholdMatchKeys(),
+      ]);
+      this.data.selectedFixKeys = new Set(
+        [...this.data.selectedFixKeys].filter(fixKey => !filterFixKeys.has(fixKey)),
+      );
+      this.clearCandidateQueryPreview({ render: false });
+      this.clearThresholdState();
+    } else if (clearTarget === "segment") {
+      this.setTableSelection();
+      this.mapRangeAwaitingEnd = false;
+    } else if (clearTarget === "fixes") {
+      this.data.selectedFixKeys = new Set();
+      this.setTableSelection();
+    } else if (["individual", "bursts"].includes(clearTarget)) {
+      this.resetManualFlagTarget();
+    }
+  }
+
+  async transitionToDataset(
+    datasetId,
+    {
+      preserveAnnotationContext = false,
+      result = null,
+      clearTarget = "",
+      reason = "dataset_switch",
+    } = {},
+  ) {
+    const transitionId = ++this.viewTransitionId;
+    const detailLoadWasInterrupted = this.data?.detailState === "loading";
+    for (const requestName of [
+      "dataset",
+      "overview",
+      "reviewProjection",
+      "detail",
+      "suspicious",
+      "confirmed",
+    ]) {
+      this.cancelRequest(requestName);
+    }
     const viewContext = this.captureDatasetViewContext();
     if (viewContext && preserveAnnotationContext) {
       viewContext.annotationReloadContext = this.captureAnnotationReloadContext();
     }
-    this.currentDatasetId = datasetId;
-    await this.loadStudy({ preferredDatasetId: datasetId, viewContext });
+    const previousDatasetId = this.currentDatasetId;
+    const previousDataset = this.currentDataset;
+    const previousArtifactEntry = this.currentArtifactEntry;
+    const previousEditLockProfile = this.editLockProfile;
+    this.setStatus(`Loading version ${datasetId}...`);
+    if (result) {
+      this.addMutationResultToGraph(result);
+    }
+    try {
+      const projection = await this.fetchReviewProjection(datasetId);
+      if (transitionId !== this.viewTransitionId) return;
+      this.rememberDatasetMetadata(projection.dataset);
+      const compatible = Boolean(
+        this.data
+        && this.currentArtifact
+        && this.data.sourceSignature
+        && this.data.exclusionSignature
+        && this.data.sourceSignature === String(projection.source_signature || "")
+        && this.data.exclusionSignature === String(projection.exclusion_signature || "")
+      );
+      if (!compatible) {
+        this.currentDatasetId = datasetId;
+        if (reason === "editor_release") {
+          await this.refreshGraphMetadata(datasetId);
+        }
+        await this.loadDataset(viewContext);
+        if (transitionId !== this.viewTransitionId) return;
+        const loadedRequestedView = Boolean(
+          this.data
+          && this.data.sourceSignature === String(projection.source_signature || "")
+          && this.data.exclusionSignature === String(projection.exclusion_signature || "")
+        );
+        if (!loadedRequestedView) {
+          this.currentDatasetId = previousDatasetId;
+          this.currentDataset = previousDataset;
+          this.currentArtifactEntry = previousArtifactEntry;
+          this.editLockProfile = previousEditLockProfile;
+          this.refs.dataset.value = previousDatasetId;
+          this.renderEditLockProfile();
+          this.updateActionButtons();
+          throw new Error("The requested version could not be prepared; the previous view is still open.");
+        }
+        return;
+      }
+
+      this.currentDatasetId = datasetId;
+      this.currentDataset = projection.dataset || this.currentDataset;
+      this.currentArtifactEntry = (this.currentDataset?.artifacts || []).find(
+        artifact => artifact.logical_name === this.currentArtifact,
+      ) || null;
+      this.editLockProfile = projection.edit_profile || this.editLockProfile;
+      this.data.sourceSignature = String(projection.source_signature || "");
+      this.data.exclusionSignature = String(projection.exclusion_signature || "");
+      this.applyReviewProjection(projection);
+      this.clearCompletedFlagTarget(clearTarget);
+      this.refreshDatasetOptions(datasetId);
+      this.restoreAnnotationReloadContext(viewContext);
+      this.renderEditLockProfile();
+      this.renderIndividuals();
+      this.renderSelectedFixes();
+      this.renderThresholdPane();
+      this.renderLegend();
+      this.renderLayers();
+      this.updateActionButtons();
+      this.saveUiState();
+      if (reason === "dataset_switch" || reason === "editor_release") {
+        void this.restoreSavedAnalyses();
+      }
+      if (reason === "editor_release") {
+        void this.refreshGraphMetadata(datasetId);
+      }
+      this.setStatus(`Loaded version ${datasetId} without reloading movement tracks.`);
+      if (detailLoadWasInterrupted) {
+        void this.loadDetailForCurrentSelection({
+          preservedFixKeys: new Set(this.data.selectedFixKeys),
+        });
+      }
+    } catch (error) {
+      if (this.isAbortError(error)) return;
+      this.currentDatasetId = previousDatasetId;
+      this.refs.dataset.value = previousDatasetId;
+      this.setStatus(`Could not load version ${datasetId}: ${error.message}`, true);
+      throw error;
+    }
   }
 
   openResumeModal() {
@@ -13557,7 +14662,8 @@ class MovementExampleApp {
       );
       this.setUser(user);
       this.refs.resumeModal.classList.add("hidden");
-      await this.loadStudyAtDataset(result.dataset.dataset_id);
+      this.currentDatasetId = result.dataset.dataset_id;
+      await this.loadStudy({ preferredDatasetId: result.dataset.dataset_id });
       const archive = result.archive || {};
       this.setStatus(
         `Resumed at ${result.dataset.dataset_id}; archived metadata for `
@@ -13581,9 +14687,6 @@ class MovementExampleApp {
     if (this.refs.undo.disabled) {
       return;
     }
-    if (!(await this.flushIndividualReviewDecisions())) {
-      return;
-    }
     this.refs.undo.disabled = true;
     this.setStatus(`Undoing ${this.currentDatasetId}...`);
     try {
@@ -13597,7 +14700,10 @@ class MovementExampleApp {
           }),
         },
       );
-      await this.loadStudyAtDataset(result.dataset.dataset_id);
+      await this.loadStudyAtDataset(result.dataset.dataset_id, {
+        result,
+        reason: "dataset_switch",
+      });
       this.setStatus(`Undid to ${result.dataset.dataset_id}.`);
     } catch (error) {
       await this.handleEditRequestError(error);
@@ -13712,6 +14818,8 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     : colorFields[0]?.key || "step_length_m";
 
   const data = {
+    sourceSignature: String(summary.source_signature || ""),
+    exclusionSignature: String(summary.exclusion_signature || ""),
     totalRows,
     individuals,
     speciesByIndividual: summary.species_by_individual || {},
@@ -14251,8 +15359,8 @@ function refreshMovementFixCollections(data) {
   for (const fix of [
     ...(data.overviewFixes || []),
     ...(data.candidateFixes || []),
-    ...(data.detailFixes || []),
     ...(data.suspiciousFixes || []),
+    ...(data.detailFixes || []),
     ...(data.confirmedFixes || []),
   ]) {
     merged.set(fix.fixKey, fix);
@@ -14333,6 +15441,7 @@ function buildMovementTrackStepSegments(byTrack) {
         trackKey,
         individual: destinationFix.individual,
         setName: destinationFix.setName,
+        sourceFix: previous,
         destinationFix,
         sourceFlagged: isSourceOnlyFlaggedFix(previous) || isSourceOnlyFlaggedFix(destinationFix),
         path: [previous.position, destinationFix.position],

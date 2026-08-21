@@ -160,6 +160,7 @@ def main():
             "review_id": str(params.get("review_id") or "").strip(),
             "created_at": created_at,
             "source_analysis_id": str(params.get("source_analysis_id") or "").strip(),
+            "workflow_context": dict(params.get("workflow_context") or {}),
             "scope": scope,
             "resolved_fix_count": resolved_fix_count,
         }
