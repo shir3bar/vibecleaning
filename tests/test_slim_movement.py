@@ -175,7 +175,7 @@ def test_slim_movement_load_selects_raw_csv_and_keeps_review_routes(tmp_path):
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/annotate-scope" in paths
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/confirm-issues" in paths
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/dismiss-issues" in paths
-    assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/review-individuals" in paths
+    assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/review-individual" in paths
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/export-reviewed-csv" in paths
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/generate-report" in paths
     assert "/api/apps/movement/family/{family_name}/study/{study_name}/actions/run-burst-anomaly-ranking" in paths
@@ -216,13 +216,17 @@ def test_slim_movement_applies_shared_history_edit_locks(tmp_path):
     current_id = annotation.json()["dataset"]["dataset_id"]
 
     blocked = client.post(
-        f"{base_url}/actions/review-individuals",
+        f"{base_url}/actions/review-individual",
         json={
             "dataset_id": root_id,
             "expected_current_dataset_id": current_id,
             "expected_review_revision": initial_profile.json()["review_revision"],
             "logical_name": "zebra_raw.csv",
-            "decisions": [{"individual": "alpha", "review_ok": True}],
+            "decision": {
+                "individual": "alpha",
+                "review_decision": "ok",
+                "needs_check": False,
+            },
             "user": "reviewer",
         },
     )

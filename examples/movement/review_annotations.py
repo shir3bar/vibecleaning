@@ -332,6 +332,7 @@ def normalize_annotation(raw: dict) -> dict:
         "reviewed": reviewed,
         "review_ok": review_ok if reviewed else None,
         "review_decision": raw_decision if reviewed else "",
+        "needs_check": raw.get("needs_check") is True if reviewed else False,
         "review_id": str(raw.get("review_id") or "").strip(),
         "actor": dict(raw.get("actor") or {}) if isinstance(raw.get("actor"), dict) else {},
         "source_artifact": str(raw.get("source_artifact") or "").strip(),

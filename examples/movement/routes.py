@@ -282,11 +282,11 @@ DISMISS_ISSUES_SCRIPT = build_self_contained_script(
     MOVEMENT_REVIEW_MODULES,
 )
 
-REVIEW_INDIVIDUALS_TEMPLATE_PATH = Path(__file__).with_name(
-    "review_individuals_step_template.py"
+REVIEW_INDIVIDUAL_TEMPLATE_PATH = Path(__file__).with_name(
+    "review_individual_step_template.py"
 )
-REVIEW_INDIVIDUALS_SCRIPT = build_self_contained_script(
-    REVIEW_INDIVIDUALS_TEMPLATE_PATH,
+REVIEW_INDIVIDUAL_SCRIPT = build_self_contained_script(
+    REVIEW_INDIVIDUAL_TEMPLATE_PATH,
     MOVEMENT_REVIEW_MODULES,
 )
 
@@ -345,41 +345,26 @@ def _validate_dismissals(value: object) -> list[dict]:
         raise ValueError(message) from exc
 
 
-def _validate_individual_review_decisions(value: object) -> list[dict]:
-    if not isinstance(value, list) or not value:
-        raise ValueError("Review at least one individual")
-    if len(value) > 25:
-        raise ValueError("A review page supports at most 25 individual decisions")
-    decisions = []
-    seen = set()
-    for item in value:
-        if not isinstance(item, dict):
-            raise ValueError("Invalid individual review decisions")
-        individual = _normalize_individual_name(item.get("individual"))
-        if individual in seen:
-            raise ValueError(f"Duplicate review decision for {individual}")
-        seen.add(individual)
-        raw_decision = str(item.get("review_decision") or "").strip().lower()
-        review_ok = item.get("review_ok")
-        if not raw_decision and isinstance(review_ok, bool):
-            raw_decision = "ok" if review_ok else "not_ok"
-        if raw_decision not in {"ok", "not_ok", "second_opinion"}:
-            raise ValueError(
-                "Individual review decisions require ok, not_ok, or second_opinion"
-            )
-        decisions.append(
-            {
-                "individual": individual,
-                "review_decision": raw_decision,
-                "review_ok": raw_decision == "ok",
-                "comment": _validate_optional_text(
-                    item.get("comment"),
-                    label="Review comment",
-                    max_length=1200,
-                ),
-            }
-        )
-    return decisions
+def _validate_individual_review_decision(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("Review one individual")
+    individual = _normalize_individual_name(value.get("individual"))
+    review_decision = str(value.get("review_decision") or "").strip().lower()
+    if review_decision not in {"ok", "not_ok"}:
+        raise ValueError("Individual review decision must be ok or not_ok")
+    needs_check = value.get("needs_check")
+    if not isinstance(needs_check, bool):
+        raise ValueError("Individual review decision requires a boolean needs_check")
+    return {
+        "individual": individual,
+        "review_decision": review_decision,
+        "needs_check": needs_check,
+        "comment": _validate_optional_text(
+            value.get("comment"),
+            label="Review comment",
+            max_length=1200,
+        ),
+    }
 
 
 def _validate_fix_key(value: object, *, label: str) -> str:
@@ -2463,9 +2448,9 @@ def register_movement_routes(
             return json_error(str(exc), 400)
 
     @app.post(
-        "/api/apps/movement/family/{family_name}/study/{study_name}/actions/review-individuals"
+        "/api/apps/movement/family/{family_name}/study/{study_name}/actions/review-individual"
     )
-    async def post_movement_review_individuals(
+    async def post_movement_review_individual(
         family_name: str,
         study_name: str,
         request: Request,
@@ -2479,7 +2464,7 @@ def register_movement_routes(
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             dataset = load_dataset(study_dir, dataset_id)
             get_dataset_artifact(study_dir, dataset_id, logical_name)
-            decisions = _validate_individual_review_decisions(body.get("decisions"))
+            decision = _validate_individual_review_decision(body.get("decision"))
             user = effective_user(request, body)
             input_artifacts = [logical_name]
             if any(
@@ -2489,18 +2474,15 @@ def register_movement_routes(
                 input_artifacts.append("movement_review_annotations.json")
             payload = {
                 "user": user,
-                "title": (
-                    f"Record review decisions for {len(decisions)} individual(s) "
-                    f"in {logical_name}"
-                ),
+                "title": f"Record review decision for {decision['individual']} in {logical_name}",
                 "kind": "python",
-                "script": REVIEW_INDIVIDUALS_SCRIPT,
+                "script": REVIEW_INDIVIDUAL_SCRIPT,
                 "parameters": {
                     "app": "movement",
-                    "action": "review_individuals",
+                    "action": "review_individual",
                     "target_artifact": logical_name,
                     "dataset_id": dataset_id,
-                    "decisions": decisions,
+                    "decision": decision,
                     "user": user,
                 },
                 "parent_dataset_id": dataset_id,
