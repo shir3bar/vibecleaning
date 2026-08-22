@@ -24,6 +24,7 @@ DERIVED_FIELDS = [
     {"key": "step_length_m", "label": "Step length (m)", "kind": "numeric", "source": "derived"},
     {"key": "speed_mps", "label": "Speed (m/s)", "kind": "numeric", "source": "derived"},
     {"key": "time_delta_s", "label": "Time delta (s)", "kind": "numeric", "source": "derived"},
+    {"key": "turn_angle_deg", "label": "Turn angle (°)", "kind": "numeric", "source": "derived"},
 ]
 
 QUALITY_KEYWORDS = (
@@ -469,15 +470,24 @@ def _row_is_analytically_excluded(
     return False
 
 
-def _build_attributes(raw: dict, *, color_fields: list[dict], step_length_m, speed_mps, time_delta_s) -> dict:
+def _build_attributes(
+    raw: dict,
+    *,
+    color_fields: list[dict],
+    step_length_m,
+    speed_mps,
+    time_delta_s,
+    turn_angle_deg,
+) -> dict:
     attributes = {
         "step_length_m": step_length_m,
         "speed_mps": speed_mps,
         "time_delta_s": time_delta_s,
+        "turn_angle_deg": turn_angle_deg,
     }
     for field in color_fields:
         key = field["key"]
-        if key in {"step_length_m", "speed_mps", "time_delta_s"}:
+        if key in {"step_length_m", "speed_mps", "time_delta_s", "turn_angle_deg"}:
             continue
         raw_value = str(raw.get(key, "")).strip()
         if field["kind"] == "numeric":
@@ -1082,6 +1092,7 @@ def _build_movement_overview(
                 step_length_m=movement_by_fix_key.get(context["fix_key"], {}).get("step_length_m"),
                 speed_mps=movement_by_fix_key.get(context["fix_key"], {}).get("speed_mps"),
                 time_delta_s=movement_by_fix_key.get(context["fix_key"], {}).get("time_delta_s"),
+                turn_angle_deg=movement_by_fix_key.get(context["fix_key"], {}).get("turn_angle_deg"),
             ),
             review=context["review"],
             segment_memberships=context["segment_memberships"],
@@ -1427,6 +1438,7 @@ def _build_movement_fixes(
                         step_length_m=movement_by_fix_key.get(record["fix_key"], {}).get("step_length_m"),
                         speed_mps=movement_by_fix_key.get(record["fix_key"], {}).get("speed_mps"),
                         time_delta_s=movement_by_fix_key.get(record["fix_key"], {}).get("time_delta_s"),
+                        turn_angle_deg=movement_by_fix_key.get(record["fix_key"], {}).get("turn_angle_deg"),
                     ),
                     review=review,
                     segment_memberships=segment_memberships,

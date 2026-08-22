@@ -1,9 +1,14 @@
 import random
-from math import atan2, cos, radians, sin, sqrt
+from math import atan2, cos, degrees, pi, radians, sin, sqrt
 
 
 MAX_STAT_SAMPLES = 2000
-STEP_FEATURE_FIELDS = ("step_length_m", "speed_mps", "time_delta_s")
+STEP_FEATURE_FIELDS = (
+    "step_length_m",
+    "speed_mps",
+    "time_delta_s",
+    "turn_angle_deg",
+)
 EARTH_RADIUS_M = 6371000.0
 
 
@@ -44,6 +49,54 @@ def step_movement_metrics(
         "speed_mps": step_length_m / time_delta_s,
         "time_delta_s": time_delta_s,
     }
+
+
+def initial_bearing_radians(
+    lon1: float,
+    lat1: float,
+    lon2: float,
+    lat2: float,
+) -> float | None:
+    """Return the initial bearing from the first fix to the second."""
+    if lon1 == lon2 and lat1 == lat2:
+        return None
+    phi1 = radians(lat1)
+    phi2 = radians(lat2)
+    delta_lambda = radians(lon2 - lon1)
+    y = sin(delta_lambda) * cos(phi2)
+    x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(delta_lambda)
+    if x == 0.0 and y == 0.0:
+        return None
+    return atan2(y, x)
+
+
+def centered_turn_angle_degrees(
+    previous: dict,
+    center: dict,
+    following: dict,
+) -> float | None:
+    """Return the signed direction change at the center of three fixes."""
+    if not (
+        center["time_ms"] > previous["time_ms"]
+        and following["time_ms"] > center["time_ms"]
+    ):
+        return None
+    inbound = initial_bearing_radians(
+        previous["lon"],
+        previous["lat"],
+        center["lon"],
+        center["lat"],
+    )
+    outbound = initial_bearing_radians(
+        center["lon"],
+        center["lat"],
+        following["lon"],
+        following["lat"],
+    )
+    if inbound is None or outbound is None:
+        return None
+    signed_turn = (outbound - inbound + pi) % (2.0 * pi) - pi
+    return degrees(signed_turn)
 
 
 def _record_sort_key(record: dict) -> tuple[int, int, str]:
@@ -97,8 +150,10 @@ def compute_track_movement(
                     "step_length_m": None,
                     "speed_mps": None,
                     "time_delta_s": None,
+                    "turn_angle_deg": None,
                 }
             )
+            movement.setdefault("turn_angle_deg", None)
             step_length_m = movement["step_length_m"]
             speed_mps = movement["speed_mps"]
             time_delta_s = movement["time_delta_s"]
@@ -114,7 +169,18 @@ def compute_track_movement(
                 "step_length_m": step_length_m,
                 "speed_mps": speed_mps,
                 "time_delta_s": time_delta_s,
+                "turn_angle_deg": movement["turn_angle_deg"],
             }
             previous = record
+
+        for index in range(1, len(sorted_records) - 1):
+            center = sorted_records[index]
+            movement_by_fix_key[center["fix_key"]]["turn_angle_deg"] = (
+                centered_turn_angle_degrees(
+                    sorted_records[index - 1],
+                    center,
+                    sorted_records[index + 1],
+                )
+            )
 
     return movement_by_fix_key, stat_samples

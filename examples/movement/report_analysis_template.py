@@ -12,7 +12,10 @@ from examples.movement.review_annotations import (
     normalize_row_ranges,
     row_number_in_ranges,
 )
-from examples.movement.movement_features import step_movement_metrics
+from examples.movement.movement_features import (
+    centered_turn_angle_degrees,
+    step_movement_metrics,
+)
 
 
 QUALITY_KEYWORDS = (
@@ -331,6 +334,7 @@ def load_rows_with_context(source_path, selected_individuals=None):
                     "step_length_m": None,
                     "speed_mps": None,
                     "time_delta_s": None,
+                    "turn_angle_deg": None,
                 }
             )
     recompute_analytical_movement_context(valid_records)
@@ -339,6 +343,7 @@ def load_rows_with_context(source_path, selected_individuals=None):
 
 def recompute_analytical_movement_context(valid_records):
     previous_by_group = {}
+    eligible_by_group = {}
     for record in sorted(
         valid_records,
         key=lambda item: (item["individual"], item.get("set_name", "train"), item["time_ms"], item["fix_key"]),
@@ -346,12 +351,14 @@ def recompute_analytical_movement_context(valid_records):
         record["time_delta_s"] = None
         record["step_length_m"] = None
         record["speed_mps"] = None
+        record["turn_angle_deg"] = None
         status = normalize_review_status((record.get("review") or {}).get("status"))
         if status == "confirmed":
             record["analytically_excluded"] = True
             continue
         record["analytically_excluded"] = False
         group_key = (record["individual"], record.get("set_name", "train"))
+        eligible_by_group.setdefault(group_key, []).append(record)
         previous = previous_by_group.get(group_key)
         if previous:
             record.update(
@@ -365,6 +372,13 @@ def recompute_analytical_movement_context(valid_records):
                 )
             )
         previous_by_group[group_key] = record
+    for records in eligible_by_group.values():
+        for index in range(1, len(records) - 1):
+            records[index]["turn_angle_deg"] = centered_turn_angle_degrees(
+                records[index - 1],
+                records[index],
+                records[index + 1],
+            )
     return valid_records
 
 
@@ -547,6 +561,8 @@ def issue_field_value(record, issue_field):
         return record.get("speed_mps")
     if issue_field == "time_delta_s":
         return record.get("time_delta_s")
+    if issue_field == "turn_angle_deg":
+        return record.get("turn_angle_deg")
     return None
 
 
@@ -1881,6 +1897,7 @@ def main():
                 "step_length_m",
                 "speed_mps",
                 "time_delta_s",
+                "turn_angle_deg",
                 "status",
                 "owner_question",
                 "issue_note",
@@ -1912,6 +1929,7 @@ def main():
                         "step_length_m": "" if record["step_length_m"] is None else f"{record['step_length_m']:.6f}",
                         "speed_mps": "" if record["speed_mps"] is None else f"{record['speed_mps']:.6f}",
                         "time_delta_s": "" if record["time_delta_s"] is None else f"{record['time_delta_s']:.6f}",
+                        "turn_angle_deg": "" if record["turn_angle_deg"] is None else f"{record['turn_angle_deg']:.6f}",
                         "status": record["review"].get("status", "").strip(),
                         "owner_question": record["review"].get("owner_question", "").strip(),
                         "issue_note": record["review"].get("issue_note", "").strip(),

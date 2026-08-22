@@ -213,6 +213,7 @@ const FIX_POPUP_DEFAULT_FIELDS = [
   "step_length_m",
   "speed_mps",
   "time_delta_s",
+  "turn_angle_deg",
 ];
 const FIX_POPUP_OFFSET_PX = 14;
 const FIX_POPUP_EDGE_PADDING_PX = 12;
@@ -8615,6 +8616,7 @@ class MovementExampleApp {
         `color ${this.refs.colorBy.value}: ${colorValue}`,
         `step ${formatMaybeNumber(fix.attributes.step_length_m, "m")}`,
         `speed ${formatMaybeNumber(fix.attributes.speed_mps, "m/s")}`,
+        `turn ${formatMaybeNumber(fix.attributes.turn_angle_deg, "°")}`,
       ].join(" • ");
       card.appendChild(meta);
 
@@ -9366,6 +9368,7 @@ class MovementExampleApp {
             <th>Issue</th>
             <th>Step (m)</th>
             <th>Speed (m/s)</th>
+            <th>Turn (°)</th>
             <th>Action</th>
           </tr>
         </thead>
@@ -9391,13 +9394,14 @@ class MovementExampleApp {
                 <td>${escapeHtml(issueType)}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(fix.attributes?.step_length_m, "m"))}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(fix.attributes?.speed_mps, "m/s"))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(fix.attributes?.turn_angle_deg, "°"))}</td>
                 <td class="movement-table-cell-actions"><button type="button" data-action="zoom-fix" data-fix-key="${escapeHtml(fix.fixKey)}">Zoom</button></td>
               </tr>
             `;
           }).join("")}
           ${renderedTable.hasMore ? `
             <tr class="movement-table-more-row">
-              <td colspan="9" class="movement-table-more-cell">Scroll to load more rows.</td>
+              <td colspan="11" class="movement-table-more-cell">Scroll to load more rows.</td>
             </tr>
           ` : ""}
         </tbody>
@@ -10735,6 +10739,10 @@ class MovementExampleApp {
         return fix.attributes?.time_delta_s === undefined
           ? null
           : { id: "time_delta_s", label: "Time delta", value: formatMaybeNumber(fix.attributes.time_delta_s, "s") };
+      case "turn_angle_deg":
+        return fix.attributes?.turn_angle_deg === undefined
+          ? null
+          : { id: "turn_angle_deg", label: "Turn angle", value: formatMaybeNumber(fix.attributes.turn_angle_deg, "°") };
       case "review.status": {
         const status = String(fix.review?.status || "").trim();
         return status ? { id: "review.status", label: "Review", value: status } : null;

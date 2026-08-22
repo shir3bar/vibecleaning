@@ -14,7 +14,7 @@ from .summary import (
     parse_time_ms,
     try_float,
 )
-from .movement_features import step_movement_metrics
+from .movement_features import centered_turn_angle_degrees, step_movement_metrics
 
 
 REVIEW_SIDECAR_NAME = "movement_review_annotations.json"
@@ -37,7 +37,12 @@ DEPRECATED_EXPORT_COLUMNS = {
     "outlier_annotation_ids",
 }
 VALID_ORIGINS = {"manual", "threshold", "algorithm"}
-DERIVED_FILTER_FIELDS = {"step_length_m", "speed_mps", "time_delta_s"}
+DERIVED_FILTER_FIELDS = {
+    "step_length_m",
+    "speed_mps",
+    "time_delta_s",
+    "turn_angle_deg",
+}
 
 
 def fix_key_row_number(fix_key: object) -> int:
@@ -147,6 +152,21 @@ def _derived_filter_value(previous: tuple | None, current: tuple, field_key: str
     ).get(field_key)
 
 
+def _turn_filter_value(previous: tuple, center: tuple, following: tuple):
+    def as_record(item: tuple) -> dict:
+        return {
+            "time_ms": item[1],
+            "lon": item[2],
+            "lat": item[3],
+        }
+
+    return centered_turn_angle_degrees(
+        as_record(previous),
+        as_record(center),
+        as_record(following),
+    )
+
+
 def resolve_filter_row_ranges(
     path: Path,
     filter_spec: dict,
@@ -201,6 +221,7 @@ def resolve_filter_row_ranges(
             return _compress_row_numbers(matched_rows), len(matched_rows)
 
         previous_by_track: dict[tuple[str, str], tuple] = {}
+        turn_window_by_track: dict[tuple[str, str], list[tuple]] = {}
         file_order_regressed = False
         for row_index, raw in enumerate(reader, start=1):
             valid = _valid_movement_row(raw, columns)
@@ -226,9 +247,18 @@ def resolve_filter_row_ranges(
             previous = previous_by_track.get(track_key)
             if previous is not None and current[1] < previous[1]:
                 file_order_regressed = True
-            value = _derived_filter_value(previous, current, field_key)
-            if _filter_value_matches(value, filter_spec):
-                matched_rows.append(row_index)
+            if field_key == "turn_angle_deg":
+                window = turn_window_by_track.setdefault(track_key, [])
+                if len(window) == 2:
+                    value = _turn_filter_value(window[0], window[1], current)
+                    if _filter_value_matches(value, filter_spec):
+                        matched_rows.append(window[1][0])
+                    window.pop(0)
+                window.append(current)
+            else:
+                value = _derived_filter_value(previous, current, field_key)
+                if _filter_value_matches(value, filter_spec):
+                    matched_rows.append(row_index)
             previous_by_track[track_key] = current
 
     if not file_order_regressed:
@@ -264,8 +294,19 @@ def resolve_filter_row_ranges(
 
     matched_rows = []
     for records in records_by_track.values():
+        sorted_records = sorted(records, key=lambda item: (item[1], item[0]))
+        if field_key == "turn_angle_deg":
+            for index in range(1, len(sorted_records) - 1):
+                value = _turn_filter_value(
+                    sorted_records[index - 1],
+                    sorted_records[index],
+                    sorted_records[index + 1],
+                )
+                if _filter_value_matches(value, filter_spec):
+                    matched_rows.append(sorted_records[index][0])
+            continue
         previous = None
-        for current in sorted(records, key=lambda item: (item[1], item[0])):
+        for current in sorted_records:
             value = _derived_filter_value(previous, current, field_key)
             if _filter_value_matches(value, filter_spec):
                 matched_rows.append(current[0])

@@ -47,7 +47,12 @@ from examples.movement.review_annotations import (
     resolve_filter_row_ranges,
 )
 from examples.movement.bursts import build_auto_bursts
-from examples.movement.movement_features import STEP_FEATURE_FIELDS, compute_track_movement
+from examples.movement.movement_features import (
+    STEP_FEATURE_FIELDS,
+    centered_turn_angle_degrees,
+    compute_track_movement,
+    initial_bearing_radians,
+)
 import examples.movement.summary as movement_summary
 import examples.movement.review_annotations as movement_review_annotations
 from examples.movement.summary import build_movement_fixes, build_movement_overview, diagnose_track_topology
@@ -106,11 +111,51 @@ def test_compute_track_movement_exposes_only_canonical_step_features():
     features, stats = compute_track_movement(records_by_group)
 
     assert tuple(features["early"]) == STEP_FEATURE_FIELDS
-    assert features["early"] == {"step_length_m": None, "speed_mps": None, "time_delta_s": None}
+    assert features["early"] == {
+        "step_length_m": None,
+        "speed_mps": None,
+        "time_delta_s": None,
+        "turn_angle_deg": None,
+    }
     assert features["late"]["time_delta_s"] == 3600.0
     assert isclose(features["late"]["speed_mps"], features["late"]["step_length_m"] / 3600.0, rel_tol=1e-12)
     assert not any("anomaly" in key.lower() for row in features.values() for key in row)
     assert stats["alpha"]["seen_step"] == 1
+
+
+def test_centered_turn_angle_is_signed_and_attached_to_middle_fix():
+    previous = {"time_ms": 0, "lon": 0.0, "lat": 0.0}
+    center = {"time_ms": 1_000, "lon": 1.0, "lat": 0.0}
+    north = {"time_ms": 2_000, "lon": 1.0, "lat": 1.0}
+    reverse = {"time_ms": 2_000, "lon": 0.0, "lat": 0.0}
+
+    assert initial_bearing_radians(0.0, 0.0, 1.0, 0.0) == pytest.approx(
+        1.5707963267948966
+    )
+    assert centered_turn_angle_degrees(previous, center, north) == pytest.approx(-90.0)
+    assert centered_turn_angle_degrees(previous, center, reverse) == pytest.approx(-180.0)
+    assert centered_turn_angle_degrees(previous, center, {**north, "lon": 1.0, "lat": 0.0}) is None
+
+    records = {
+        ("alpha", "train"): [
+            {**previous, "row_index": 1, "fix_key": "a", "individual": "alpha"},
+            {**center, "row_index": 2, "fix_key": "b", "individual": "alpha"},
+            {**north, "row_index": 3, "fix_key": "c", "individual": "alpha"},
+        ]
+    }
+    features, _stats = compute_track_movement(records)
+
+    assert features["a"]["turn_angle_deg"] is None
+    assert features["b"]["turn_angle_deg"] == pytest.approx(-90.0)
+    assert features["c"]["turn_angle_deg"] is None
+
+
+def test_centered_turn_angle_requires_increasing_times():
+    previous = {"time_ms": 0, "lon": 0.0, "lat": 0.0}
+    center = {"time_ms": 0, "lon": 1.0, "lat": 0.0}
+    following = {"time_ms": 1_000, "lon": 1.0, "lat": 1.0}
+
+    assert centered_turn_angle_degrees(previous, center, following) is None
 
 
 def test_build_auto_bursts_uses_strict_gap_threshold_and_preserves_mapping():
@@ -381,6 +426,11 @@ fix_b,beta,2024-01-01T00:00:00Z,-71.0,41.0,train
     assert "time_delta_s" not in fixes[0].get("attributes", {})
     assert fixes[1]["attributes"]["time_delta_s"] == 3600.0
     assert fixes[2]["attributes"]["time_delta_s"] == 3600.0
+    assert "turn_angle_deg" not in fixes[0].get("attributes", {})
+    assert fixes[1]["attributes"]["turn_angle_deg"] == pytest.approx(0.0372, abs=0.01)
+    assert "turn_angle_deg" not in fixes[2].get("attributes", {})
+    overview = build_movement_overview(csv_path)
+    assert any(field["key"] == "turn_angle_deg" for field in overview["color_fields"])
     assert isclose(
         fixes[1]["attributes"]["speed_mps"],
         fixes[1]["attributes"]["step_length_m"] / 3600.0,
@@ -1454,6 +1504,30 @@ middle,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
 
     assert count == 2
     assert ranges == [[1, 1], [3, 3]]
+
+
+def test_turn_angle_threshold_filter_targets_the_center_fix(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        "eventid,individual,timestamp,longitude,latitude\n"
+        "fix_a,alpha,2024-01-01T00:00:00Z,0,0\n"
+        "fix_b,alpha,2024-01-01T01:00:00Z,1,0\n"
+        "fix_c,alpha,2024-01-01T02:00:00Z,0,0\n",
+        encoding="utf-8",
+    )
+
+    ranges, count = resolve_filter_row_ranges(
+        csv_path,
+        {
+            "field_key": "turn_angle_deg",
+            "field_kind": "numeric",
+            "operator": "lt",
+            "threshold_value": -150,
+        },
+    )
+
+    assert ranges == [[2, 2]]
+    assert count == 1
 
 
 def test_threshold_issue_ui_sends_a_full_dataset_filter_scope():
