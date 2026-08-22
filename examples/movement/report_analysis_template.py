@@ -12,6 +12,7 @@ from examples.movement.review_annotations import (
     normalize_row_ranges,
     row_number_in_ranges,
 )
+from examples.movement.movement_features import step_movement_metrics
 
 
 QUALITY_KEYWORDS = (
@@ -352,18 +353,17 @@ def recompute_analytical_movement_context(valid_records):
         record["analytically_excluded"] = False
         group_key = (record["individual"], record.get("set_name", "train"))
         previous = previous_by_group.get(group_key)
-        if previous and record["time_ms"] > previous["time_ms"]:
-            time_delta_s = (record["time_ms"] - previous["time_ms"]) / 1000.0
-            from math import atan2, cos, radians, sin, sqrt
-            phi1 = radians(previous["lat"])
-            phi2 = radians(record["lat"])
-            delta_phi = radians(record["lat"] - previous["lat"])
-            delta_lambda = radians(record["lon"] - previous["lon"])
-            a = sin(delta_phi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(delta_lambda / 2) ** 2
-            step_length_m = 6371000.0 * 2 * atan2(sqrt(a), sqrt(1 - a))
-            record["time_delta_s"] = time_delta_s
-            record["step_length_m"] = step_length_m
-            record["speed_mps"] = step_length_m / time_delta_s if time_delta_s > 0 else None
+        if previous:
+            record.update(
+                step_movement_metrics(
+                    previous["time_ms"],
+                    previous["lon"],
+                    previous["lat"],
+                    record["time_ms"],
+                    record["lon"],
+                    record["lat"],
+                )
+            )
         previous_by_group[group_key] = record
     return valid_records
 

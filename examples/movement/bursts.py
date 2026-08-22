@@ -1,4 +1,7 @@
 from math import isfinite
+from statistics import median
+
+from .movement_features import haversine_meters
 
 
 DEFAULT_BURST_GAP_MODE = "manual"
@@ -163,6 +166,11 @@ def _finalize_auto_burst(
     burst_gap_seconds: float,
 ) -> dict:
     burst_id = f"{individual}:{set_name}:burst_{int(burst_idx):06d}"
+    path = [row["position"] for row in rows]
+    step_lengths = [
+        haversine_meters(*path[index - 1], *path[index])
+        for index in range(1, len(path))
+    ]
     return {
         "burst_id": burst_id,
         "burst_idx": int(burst_idx),
@@ -175,5 +183,7 @@ def _finalize_auto_burst(
         "fix_count": len(rows),
         "burst_gap_seconds": float(burst_gap_seconds),
         "fix_keys": [row["fix_key"] for row in rows],
-        "path": [row["position"] for row in rows],
+        "path": path,
+        "path_length_m": float(sum(step_lengths)),
+        "median_step_m": float(median(step_lengths)) if step_lengths else None,
     }

@@ -14,7 +14,7 @@ from .summary import (
     parse_time_ms,
     try_float,
 )
-from .movement_features import haversine_meters
+from .movement_features import step_movement_metrics
 
 
 REVIEW_SIDECAR_NAME = "movement_review_annotations.json"
@@ -135,15 +135,16 @@ def _filter_value_matches(value: object, filter_spec: dict) -> bool:
 
 
 def _derived_filter_value(previous: tuple | None, current: tuple, field_key: str):
-    if previous is None or current[1] <= previous[1]:
+    if previous is None:
         return None
-    time_delta_s = (current[1] - previous[1]) / 1000.0
-    if field_key == "time_delta_s":
-        return time_delta_s
-    step_length_m = haversine_meters(previous[2], previous[3], current[2], current[3])
-    if field_key == "step_length_m":
-        return step_length_m
-    return step_length_m / time_delta_s if time_delta_s > 0 else None
+    return step_movement_metrics(
+        previous[1],
+        previous[2],
+        previous[3],
+        current[1],
+        current[2],
+        current[3],
+    ).get(field_key)
 
 
 def resolve_filter_row_ranges(

@@ -7,6 +7,7 @@ import io
 import json
 from math import isclose
 
+import pytest
 from fastapi.testclient import TestClient
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -155,6 +156,8 @@ def test_build_auto_bursts_uses_strict_gap_threshold_and_preserves_mapping():
         "burst_gap_seconds": 3600.0,
         "fix_keys": ["fix_0", "fix_1"],
         "path": [[-70.0, 40.0], [-70.1, 40.1]],
+        "path_length_m": pytest.approx(14003.34, rel=1e-4),
+        "median_step_m": pytest.approx(14003.34, rel=1e-4),
     }
     assert bursts[1]["burst_id"] == "alpha:train:burst_000001"
     assert bursts[1]["fix_keys"] == ["fix_2"]
@@ -2328,8 +2331,9 @@ def test_movement_issue_dialog_keeps_burst_context_preview_available():
     assert "samplePreviewPath(previous.path, 80)" in source
     assert "samplePreviewPath(next.path, 80)" in source
     assert "this.colorForFix(fix)" in source
-    assert "movementPathDistanceMeters(positions)" in source
-    assert "movementMedianStepMeters(positions)" in source
+    assert "distanceMeters: selected.pathLengthM" in source
+    assert "medianStepMeters: selected.medianStepM" in source
+    assert "function movementPositionDistanceMeters" not in source
     assert "`median step ${formatCompactDistance(model.medianStepMeters)}`" in source
     assert "gap before ${formatCompactDuration(model.gapBeforeSeconds)}" in source
     assert "gap after ${formatCompactDuration(model.gapAfterSeconds)}" in source

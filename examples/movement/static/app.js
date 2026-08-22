@@ -13132,8 +13132,8 @@ class MovementExampleApp {
       previousContext,
       nextContext,
       durationSeconds,
-      distanceMeters: movementPathDistanceMeters(positions),
-      medianStepMeters: movementMedianStepMeters(positions),
+      distanceMeters: selected.pathLengthM,
+      medianStepMeters: selected.medianStepM,
       gapBeforeSeconds,
       gapAfterSeconds,
       geometry: buildBurstPreviewGeometry(
@@ -15073,6 +15073,8 @@ function parseMovementAutoBursts(items) {
     endTimeMs: Number(item?.end_time_ms) || 0,
     fixCount: Number(item?.fix_count) || 0,
     burstGapSeconds: Number(item?.burst_gap_seconds) || DEFAULT_BURST_GAP_SECONDS,
+    pathLengthM: finiteOrNull(item?.path_length_m),
+    medianStepM: finiteOrNull(item?.median_step_m),
     fixKeys: Array.isArray(item?.fix_keys) ? item.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
     path: Array.isArray(item?.path)
       ? item.path
@@ -15100,52 +15102,6 @@ function samplePreviewPath(path, maxItems) {
   return samplePreviewIndices(positions.length, maxItems)
     .map(index => positions[index])
     .filter(Boolean);
-}
-
-function movementPositionDistanceMeters(left, right) {
-  const lon1 = Number(left?.[0]);
-  const lat1 = Number(left?.[1]);
-  const lon2 = Number(right?.[0]);
-  const lat2 = Number(right?.[1]);
-  if (![lon1, lat1, lon2, lat2].every(Number.isFinite)) {
-    return 0;
-  }
-  const radians = value => value * Math.PI / 180;
-  const deltaLat = radians(lat2 - lat1);
-  const deltaLon = radians(lon2 - lon1);
-  const a = (
-    Math.sin(deltaLat / 2) ** 2
-    + Math.cos(radians(lat1)) * Math.cos(radians(lat2))
-      * Math.sin(deltaLon / 2) ** 2
-  );
-  return 6371008.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
-}
-
-function movementPathDistanceMeters(path) {
-  const positions = Array.isArray(path) ? path : [];
-  let distance = 0;
-  for (let index = 1; index < positions.length; index += 1) {
-    distance += movementPositionDistanceMeters(positions[index - 1], positions[index]);
-  }
-  return distance;
-}
-
-function movementMedianStepMeters(path) {
-  const positions = Array.isArray(path) ? path : [];
-  if (positions.length < 2) {
-    return null;
-  }
-  const distances = [];
-  for (let index = 1; index < positions.length; index += 1) {
-    distances.push(
-      movementPositionDistanceMeters(positions[index - 1], positions[index]),
-    );
-  }
-  distances.sort((left, right) => left - right);
-  const midpoint = Math.floor(distances.length / 2);
-  return distances.length % 2
-    ? distances[midpoint]
-    : (distances[midpoint - 1] + distances[midpoint]) / 2;
 }
 
 function formatCompactDuration(seconds) {

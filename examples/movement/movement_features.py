@@ -4,6 +4,7 @@ from math import atan2, cos, radians, sin, sqrt
 
 MAX_STAT_SAMPLES = 2000
 STEP_FEATURE_FIELDS = ("step_length_m", "speed_mps", "time_delta_s")
+EARTH_RADIUS_M = 6371000.0
 
 
 def haversine_meters(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -12,7 +13,37 @@ def haversine_meters(lon1: float, lat1: float, lon2: float, lat2: float) -> floa
     delta_phi = radians(lat2 - lat1)
     delta_lambda = radians(lon2 - lon1)
     a = sin(delta_phi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(delta_lambda / 2) ** 2
-    return 6371000.0 * 2 * atan2(sqrt(a), sqrt(1 - a))
+    bounded_a = min(1.0, max(0.0, a))
+    return EARTH_RADIUS_M * 2 * atan2(sqrt(bounded_a), sqrt(1 - bounded_a))
+
+
+def step_movement_metrics(
+    previous_time_ms: int,
+    previous_lon: float,
+    previous_lat: float,
+    current_time_ms: int,
+    current_lon: float,
+    current_lat: float,
+) -> dict[str, float | None]:
+    """Return canonical inbound movement metrics for two fixes."""
+    if current_time_ms <= previous_time_ms:
+        return {
+            "step_length_m": None,
+            "speed_mps": None,
+            "time_delta_s": None,
+        }
+    time_delta_s = (current_time_ms - previous_time_ms) / 1000.0
+    step_length_m = haversine_meters(
+        previous_lon,
+        previous_lat,
+        current_lon,
+        current_lat,
+    )
+    return {
+        "step_length_m": step_length_m,
+        "speed_mps": step_length_m / time_delta_s,
+        "time_delta_s": time_delta_s,
+    }
 
 
 def _record_sort_key(record: dict) -> tuple[int, int, str]:
@@ -52,13 +83,26 @@ def compute_track_movement(
                 individual,
                 {"seen_fix": 0, "seen_step": 0, "seen_speed": 0, "fix": [], "step": [], "speed": []},
             )
-            step_length_m = None
-            time_delta_s = None
-            speed_mps = None
-            if previous and record["time_ms"] > previous["time_ms"]:
-                time_delta_s = (record["time_ms"] - previous["time_ms"]) / 1000.0
-                step_length_m = haversine_meters(previous["lon"], previous["lat"], record["lon"], record["lat"])
-                speed_mps = step_length_m / time_delta_s if time_delta_s > 0 else None
+            movement = (
+                step_movement_metrics(
+                    previous["time_ms"],
+                    previous["lon"],
+                    previous["lat"],
+                    record["time_ms"],
+                    record["lon"],
+                    record["lat"],
+                )
+                if previous
+                else {
+                    "step_length_m": None,
+                    "speed_mps": None,
+                    "time_delta_s": None,
+                }
+            )
+            step_length_m = movement["step_length_m"]
+            speed_mps = movement["speed_mps"]
+            time_delta_s = movement["time_delta_s"]
+            if time_delta_s is not None:
                 indiv_stats["seen_fix"] += 1
                 indiv_stats["seen_step"] += 1
                 _reservoir_append(indiv_stats["fix"], time_delta_s, indiv_stats["seen_fix"], max_stat_samples)
