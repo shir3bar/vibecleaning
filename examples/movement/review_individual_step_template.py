@@ -67,6 +67,8 @@ def main():
                 "action": "review_individual",
                 "reviewed_individual_count": 1,
                 "reviewed_ok_count": 1 if annotation["review_decision"] == "ok" else 0,
+                "reviewed_fix_keep_count": 1 if annotation["review_decision"] == "fix_keep" else 0,
+                "reviewed_remove_count": 1 if annotation["review_decision"] == "remove" else 0,
                 "needs_check_count": 1 if annotation["needs_check"] else 0,
                 "source_artifact": target_artifact,
             },

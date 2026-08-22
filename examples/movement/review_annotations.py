@@ -315,7 +315,7 @@ def normalize_annotation(raw: dict) -> dict:
     except (TypeError, ValueError):
         resolved_fix_count = sum(end - start + 1 for start, end in row_ranges)
     raw_decision = str(raw.get("review_decision") or "").strip().lower()
-    if raw_decision not in {"ok", "not_ok"}:
+    if raw_decision not in {"ok", "fix_keep", "remove"}:
         raw_decision = ""
     reviewed = (raw.get("reviewed") is True or _flag_is_true(raw.get("reviewed"))) and bool(raw_decision)
     return {

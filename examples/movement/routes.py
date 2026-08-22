@@ -355,8 +355,10 @@ def _validate_individual_review_decision(value: object) -> dict:
         raise ValueError("Review one individual")
     individual = _normalize_individual_name(value.get("individual"))
     review_decision = str(value.get("review_decision") or "").strip().lower()
-    if review_decision not in {"ok", "not_ok"}:
-        raise ValueError("Individual review decision must be ok or not_ok")
+    if review_decision not in {"ok", "fix_keep", "remove"}:
+        raise ValueError(
+            "Individual review decision must be ok, fix_keep, or remove"
+        )
     needs_check = value.get("needs_check")
     if not isinstance(needs_check, bool):
         raise ValueError("Individual review decision requires a boolean needs_check")
@@ -893,7 +895,8 @@ def register_movement_routes(
                     "reviewed": 0,
                     "undecided": 0,
                     "ok": 0,
-                    "not_ok": 0,
+                    "fix_keep": 0,
+                    "remove": 0,
                     "needs_check": 0,
                 },
                 **({"individuals": []} if include_individuals else {}),
@@ -916,10 +919,15 @@ def register_movement_routes(
             annotations,
             current_dataset_id=dataset_id,
         )
-        decision_counts = {"ok": 0, "not_ok": 0, "needs_check": 0}
+        decision_counts = {
+            "ok": 0,
+            "fix_keep": 0,
+            "remove": 0,
+            "needs_check": 0,
+        }
         for annotation in valid.values():
             decision = str(annotation.get("review_decision") or "")
-            if decision in {"ok", "not_ok"}:
+            if decision in {"ok", "fix_keep", "remove"}:
                 decision_counts[decision] += 1
             if annotation.get("needs_check") is True:
                 decision_counts["needs_check"] += 1

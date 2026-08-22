@@ -22,7 +22,7 @@ REVIEW_STATE_SCHEMA_VERSION = 1
 VALID_REVIEW_EFFECTS = frozenset(
     {"annotation_only", "preserves_individual_scope", "changes_individual_scope"}
 )
-VALID_REVIEW_DECISIONS = frozenset({"ok", "not_ok"})
+VALID_REVIEW_DECISIONS = frozenset({"ok", "fix_keep", "remove"})
 
 
 class ReviewStateError(ProjectStateError):
@@ -354,7 +354,7 @@ def finish_editor_control(
 def normalize_review_decision(value: object) -> str:
     decision = str(value or "").strip().lower()
     if decision not in VALID_REVIEW_DECISIONS:
-        raise ReviewStateError("Review decision must be ok or not_ok")
+        raise ReviewStateError("Review decision must be ok, fix_keep, or remove")
     return decision
 
 

@@ -2170,10 +2170,14 @@ class MovementExampleApp {
           background: rgba(67, 206, 162, 0.2);
           color: #d8fff3;
         }
-        .movement-queue-card-actions button[data-review-decision="not_ok"],
+        .movement-queue-card-actions button[data-review-decision="fix_keep"],
         .movement-review-needs-check {
           background: rgba(245, 181, 54, 0.16);
           color: #ffe7a6;
+        }
+        .movement-queue-card-actions button[data-review-decision="remove"] {
+          background: rgba(248, 113, 113, 0.16);
+          color: #fecaca;
         }
         .movement-review-choice {
           position: relative;
@@ -2353,6 +2357,12 @@ class MovementExampleApp {
         .movement-review-state.issues {
           background: rgba(245, 181, 54, 0.14);
           color: #ffe2a1;
+        }
+        .movement-review-state.remove,
+        .movement-prior-decision-badge.remove {
+          border-color: rgba(248, 113, 113, 0.42);
+          background: rgba(248, 113, 113, 0.14);
+          color: #fecaca;
         }
         .movement-table-toolbar {
           display: grid;
@@ -6228,7 +6238,7 @@ class MovementExampleApp {
       <table class="movement-admin-dashboard-table">
         <thead><tr>
           <th>Study</th><th>Review</th><th>Reviewer</th><th>Progress</th>
-          <th>OK</th><th>Issues</th><th>Needs check</th><th>Undecided</th><th>Actions</th>
+          <th>OK</th><th>Fix &amp; Keep</th><th>Remove</th><th>Needs check</th><th>Undecided</th><th>Actions</th>
         </tr></thead>
         <tbody>
           ${studies.map(item => {
@@ -6242,7 +6252,8 @@ class MovementExampleApp {
                 <td>${escapeHtml(reviewer)}</td>
                 <td>${escapeHtml(formatCount(counts.reviewed || 0))}/${escapeHtml(formatCount(counts.required || 0))}</td>
                 <td>${escapeHtml(formatCount(counts.ok || 0))}</td>
-                <td>${escapeHtml(formatCount(counts.not_ok || 0))}</td>
+                <td>${escapeHtml(formatCount(counts.fix_keep || 0))}</td>
+                <td>${escapeHtml(formatCount(counts.remove || 0))}</td>
                 <td>${escapeHtml(formatCount(counts.needs_check || 0))}</td>
                 <td>${escapeHtml(formatCount(counts.undecided || 0))}</td>
                 <td><div class="movement-admin-dashboard-actions">
@@ -6251,7 +6262,7 @@ class MovementExampleApp {
                 </div></td>
               </tr>
               <tr data-admin-detail-row data-family="${escapeHtml(item.family || "")}" data-study="${escapeHtml(item.study || "")}" hidden>
-                <td colspan="9"><div class="movement-admin-individuals">Loading...</div></td>
+                <td colspan="10"><div class="movement-admin-individuals">Loading...</div></td>
               </tr>
             `;
           }).join("")}
@@ -6305,7 +6316,7 @@ class MovementExampleApp {
       const individuals = payload?.studies?.[0]?.individuals || [];
       detailRow.querySelector(".movement-admin-individuals").innerHTML = individuals.length
         ? individuals.map(item => (
-          `<div><strong>${escapeHtml(item.individual || "")}</strong><br>${escapeHtml(item.review_decision || "Undecided")}${item.needs_check ? " • Needs check" : ""}</div>`
+          `<div><strong>${escapeHtml(item.individual || "")}</strong><br>${escapeHtml(reviewDecisionLabel(item.review_decision))}${item.needs_check ? " • Needs check" : ""}</div>`
         )).join("")
         : '<div class="movement-empty">No individual decisions.</div>';
       detailRow.dataset.loaded = "true";
@@ -7917,7 +7928,7 @@ class MovementExampleApp {
     if (!individual) {
       return;
     }
-    if (!["ok", "not_ok"].includes(reviewDecision)) return;
+    if (!["ok", "fix_keep", "remove"].includes(reviewDecision)) return;
     const existingState = this.getIndividualReviewState(individual);
     const comment = (
       this.individualReviewQueue.commentDrafts.has(individual)
@@ -8314,10 +8325,8 @@ class MovementExampleApp {
       }
       if (priorDecision) {
         const badge = document.createElement("div");
-        badge.className = `movement-prior-decision-badge ${priorDecision === "not_ok" ? "issues" : priorReview?.needs_check ? "needs-check" : "ok"}`;
-        badge.textContent = priorDecision === "not_ok"
-          ? "Prior review: Issues found"
-          : "Prior review: OK";
+        badge.className = `movement-prior-decision-badge ${reviewDecisionClass(priorDecision, priorReview?.needs_check)}`;
+        badge.textContent = `Prior review: ${reviewDecisionLabel(priorDecision)}`;
         if (priorReview?.needs_check) badge.textContent += " • Needs check";
         card.appendChild(badge);
       }
@@ -8411,26 +8420,20 @@ class MovementExampleApp {
       const origins = Array.isArray(stats.unresolvedIssueOrigins) ? stats.unresolvedIssueOrigins : [];
       const priorDecision = String(reviewState.priorDecision?.review_decision || "");
       const priorNeedsCheck = reviewState.priorDecision?.needs_check === true;
-      const priorLabel = priorDecision === "not_ok"
-        ? "Prior review: Issues found"
-        : priorDecision === "ok"
-          ? "Prior review: OK"
-          : "";
-      const priorClass = priorDecision === "not_ok"
-        ? "issues"
-        : priorNeedsCheck ? "needs-check" : "ok";
+      const priorLabel = priorDecision
+        ? `Prior review: ${reviewDecisionLabel(priorDecision)}`
+        : "";
+      const priorClass = reviewDecisionClass(priorDecision, priorNeedsCheck);
       card.className = `movement-card queue-card interactive${isActive ? " queue-active" : ""}${unresolvedCount ? " has-unresolved-issues" : ""}`;
       const stateLabel = reviewState.reviewed
-        ? reviewState.reviewDecision === "ok"
-          ? "OK"
-          : "Issues found"
-        : priorDecision === "not_ok"
-          ? "Needs review—prior issues"
+        ? reviewDecisionLabel(reviewState.reviewDecision)
+        : priorDecision && priorDecision !== "ok"
+          ? `Needs review—prior ${reviewDecisionLabel(priorDecision)}`
           : queue.skippedIndividuals.has(individual)
             ? "Skipped"
             : "Unreviewed";
       const stateClass = reviewState.reviewed
-        ? reviewState.reviewDecision === "ok" ? " ok" : " issues"
+        ? ` ${reviewDecisionClass(reviewState.reviewDecision)}`
         : "";
       const selectedDecision = String(reviewState.reviewDecision || "");
       card.innerHTML = `
@@ -8460,15 +8463,19 @@ class MovementExampleApp {
               <span class="movement-review-help" id="movement-review-help-ok" role="tooltip">The individual looks acceptable overall. Fix-level flags remain separate and may still require attention.</span>
             </span>
             <span class="movement-review-choice">
-              <button type="button" class="${selectedDecision === "not_ok" ? "is-selected" : ""}" data-review-decision="not_ok" data-individual="${escapeHtml(individual)}" aria-describedby="movement-review-help-issues"${editsLocked ? " disabled" : ""}>Issues found</button>
-              <span class="movement-review-help" id="movement-review-help-issues" role="tooltip">You found a cleaning problem for this individual. Use Flag to record the affected individual, bursts, track section, or fixes.</span>
+              <button type="button" class="${selectedDecision === "fix_keep" ? "is-selected" : ""}" data-review-decision="fix_keep" data-individual="${escapeHtml(individual)}" aria-describedby="movement-review-help-fix-keep"${editsLocked ? " disabled" : ""}>Fix &amp; Keep</button>
+              <span class="movement-review-help" id="movement-review-help-fix-keep" role="tooltip">The individual has cleaning issues, but should remain after the affected fixes, bursts, or track sections are corrected.</span>
+            </span>
+            <span class="movement-review-choice">
+              <button type="button" class="${selectedDecision === "remove" ? "is-selected" : ""}" data-review-decision="remove" data-individual="${escapeHtml(individual)}" aria-describedby="movement-review-help-remove"${editsLocked ? " disabled" : ""}>Remove</button>
+              <span class="movement-review-help" id="movement-review-help-remove" role="tooltip">The individual should be removed from the cleaned dataset. This records a review decision only and does not exclude any data.</span>
             </span>
             <span class="movement-review-choice">
               <label class="movement-review-needs-check">
                 <input type="checkbox" data-review-needs-check data-individual="${escapeHtml(individual)}" aria-describedby="movement-review-help-needs-check"${reviewState.needsCheck ? " checked" : ""}${editsLocked ? " disabled" : ""}>
                 <span>Needs check</span>
               </label>
-              <span class="movement-review-help" id="movement-review-help-needs-check" role="tooltip">Request another reviewer’s opinion in addition to your OK or Issues found decision.</span>
+              <span class="movement-review-help" id="movement-review-help-needs-check" role="tooltip">Request another reviewer’s opinion in addition to your OK, Fix &amp; Keep, or Remove decision.</span>
             </span>
             <button type="button" data-queue-skip data-individual="${escapeHtml(individual)}">Skip</button>
           </div>
@@ -14043,7 +14050,7 @@ class MovementExampleApp {
         },
       );
       if (queueReviewIndividual) {
-        this.stageIndividualReviewDecision(queueReviewIndividual, "not_ok");
+        this.stageIndividualReviewDecision(queueReviewIndividual, "fix_keep");
       }
       this.setStatus(`Created ${result.step.title} in ${result.dataset.dataset_id}.`);
     } catch (error) {
@@ -15777,6 +15784,20 @@ function finiteOrNull(value) {
 
 function formatCount(value) {
   return new Intl.NumberFormat().format(Number(value) || 0);
+}
+
+function reviewDecisionLabel(value) {
+  if (value === "ok") return "OK";
+  if (value === "fix_keep") return "Fix & Keep";
+  if (value === "remove") return "Remove";
+  return "Undecided";
+}
+
+function reviewDecisionClass(value, needsCheck = false) {
+  if (value === "remove") return "remove";
+  if (value === "fix_keep") return "issues";
+  if (needsCheck) return "needs-check";
+  return "ok";
 }
 
 function formatSelectionMethod(value) {

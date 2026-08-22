@@ -2157,10 +2157,12 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert 'data-queue-flag-individual' in source
     assert 'data-queue-flag-burst=' in source
     assert 'data-add-individual-issue' not in source
-    assert 'data-review-decision="not_ok"' in source
-    assert 'class="${selectedDecision === "not_ok" ? "is-selected" : ""}"' in source
+    assert 'data-review-decision="fix_keep"' in source
+    assert 'data-review-decision="remove"' in source
+    assert 'class="${selectedDecision === "fix_keep" ? "is-selected" : ""}"' in source
+    assert 'class="${selectedDecision === "remove" ? "is-selected" : ""}"' in source
     assert 'queueReviewIndividual,' in source
-    assert 'stageIndividualReviewDecision(queueReviewIndividual, "not_ok")' in source
+    assert 'stageIndividualReviewDecision(queueReviewIndividual, "fix_keep")' in source
     assert "prior_decisions_by_individual" in source
     assert "movement-prior-decision-badge" in source
     assert "leftReviewGroup" not in source
@@ -2191,7 +2193,7 @@ def test_manual_issue_preselection_stays_staged_and_does_not_reload_tracks():
     ]
 
     assert "!isFilterTarget" in issue_modal
-    assert 'stageIndividualReviewDecision(queueReviewIndividual, "not_ok")' in submit
+    assert 'stageIndividualReviewDecision(queueReviewIndividual, "fix_keep")' in submit
     assert "flushIndividualReviewDecisions()" not in submit
     assert "flushIndividualReviewDecisions()" not in undo
     assert "applyReviewProjection" in transition
@@ -2466,7 +2468,7 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0
             "user": "reviewer",
             "decision": {
                 "individual": "beta",
-                "review_decision": "not_ok",
+                "review_decision": "remove",
                 "needs_check": False,
                 "comment": "Issues were marked separately",
             },
@@ -2475,6 +2477,8 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0
     assert second_response.status_code == 200
     second_payload = second_response.json()
     assert second_payload["dataset"]["parent_dataset_id"] == reviewed_dataset_id
+    assert second_payload["step"]["summary"]["reviewed_fix_keep_count"] == 0
+    assert second_payload["step"]["summary"]["reviewed_remove_count"] == 1
     reviewed_dataset_id = second_payload["dataset"]["dataset_id"]
     _, sidecar_path = get_dataset_artifact(
         study_dir,
@@ -2501,7 +2505,7 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0
     assert reviewed_stats["alpha"]["review_decision"] == "ok"
     assert reviewed_stats["alpha"]["needs_check"] is True
     assert reviewed_stats["beta"]["reviewed"] is True
-    assert reviewed_stats["beta"]["review_decision"] == "not_ok"
+    assert reviewed_stats["beta"]["review_decision"] == "remove"
     assert reviewed_stats["beta"]["needs_check"] is False
     assert reviewed_stats["beta"]["review_comment"] == "Issues were marked separately"
 
@@ -2523,7 +2527,9 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0
     rows = list(csv.DictReader(io.StringIO(download.text)))
     assert [row["individual-reviewed"] for row in rows] == ["true", "true", "true"]
     assert [row["individual-review-ok"] for row in rows] == ["true", "true", "false"]
+    assert [row["individual-review-decision"] for row in rows] == ["ok", "ok", "remove"]
     assert [row["individual-needs-check"] for row in rows] == ["true", "true", "false"]
+    assert all(row["visible"] == "true" for row in rows)
     assert all(row["manually-marked-outlier"] == "false" for row in rows)
     assert all(row["algorithm-marked-outlier"] == "false" for row in rows)
 
@@ -2543,6 +2549,22 @@ def test_review_individual_rejects_old_batch_payload(tmp_path):
 
     assert response.status_code == 400
     assert "Review one individual" in response.json()["error"]
+
+    old_decision = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/review-individual",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "user": "reviewer",
+            "decision": {
+                "individual": "alpha",
+                "review_decision": "not_ok",
+                "needs_check": False,
+            },
+        },
+    )
+    assert old_decision.status_code == 400
+    assert "ok, fix_keep, or remove" in old_decision.json()["error"]
 
 
 def test_reviewed_csv_artifact_name_is_based_on_source_name():

@@ -217,8 +217,8 @@ def test_review_coverage_follows_dataset_update_and_undo(tmp_path):
     assert coverage["needs_check_count"] == 0
 
     current = original + [
-        _decision(review_id, updated_id, "alpha", "not_ok"),
-        _decision(review_id, updated_id, "gamma", "not_ok", needs_check=True),
+        _decision(review_id, updated_id, "alpha", "fix_keep"),
+        _decision(review_id, updated_id, "gamma", "remove", needs_check=True),
     ]
     assert review_coverage(project, review, current)["complete_allowed"] is True
     profile = review_profile(project, reviewer, current)
@@ -382,7 +382,7 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
             "expected_review_revision": reviewer_load["edit_profile"]["review_revision"],
             "decision": {
                 "individual": "beta",
-                "review_decision": "not_ok",
+                "review_decision": "fix_keep",
                 "needs_check": True,
                 "comment": "check",
             },
@@ -396,7 +396,7 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
         study, output_id, "movement_review_annotations.json"
     )
     annotations = json.loads(annotations_path.read_text())["annotations"]
-    assert {item["review_decision"] for item in annotations} == {"ok", "not_ok"}
+    assert {item["review_decision"] for item in annotations} == {"ok", "fix_keep"}
     assert [item["scope"]["individual"] for item in annotations if item["needs_check"]] == ["beta"]
     assert all(item["user"] == "Rae Reviewer" for item in annotations)
     assert all(item["actor"]["user_id"] == "user_reviewer" for item in annotations)
@@ -422,7 +422,8 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
     completed_row = completed_dashboard.json()["studies"][0]
     assert completed_row["review"]["status"] == "completed"
     assert completed_row["counts"]["ok"] == 1
-    assert completed_row["counts"]["not_ok"] == 1
+    assert completed_row["counts"]["fix_keep"] == 1
+    assert completed_row["counts"]["remove"] == 0
     assert completed_row["counts"]["needs_check"] == 1
     assert completed_row["counts"]["undecided"] == 0
     reassigned = editor_client.post(
@@ -449,7 +450,7 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
     assert fresh_profile["coverage"]["reviewed_count"] == 0
     assert fresh_profile["coverage"]["prior_needs_check_individuals"] == ["beta"]
     assert fresh_profile["coverage"]["prior_decisions_by_individual"]["alpha"]["review_decision"] == "ok"
-    assert fresh_profile["coverage"]["prior_decisions_by_individual"]["beta"]["review_decision"] == "not_ok"
+    assert fresh_profile["coverage"]["prior_decisions_by_individual"]["beta"]["review_decision"] == "fix_keep"
     assert fresh_profile["coverage"]["prior_decisions_by_individual"]["beta"]["needs_check"] is True
 
     forbidden_dashboard = reviewer_client.get("/api/apps/movement/admin/review-summary")
@@ -466,7 +467,8 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
         "reviewed": 0,
         "undecided": 2,
         "ok": 0,
-        "not_ok": 0,
+        "fix_keep": 0,
+        "remove": 0,
         "needs_check": 0,
     }
 
