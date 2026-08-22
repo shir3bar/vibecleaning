@@ -218,12 +218,20 @@ const FIX_POPUP_DEFAULT_FIELDS = [
 const FIX_POPUP_OFFSET_PX = 14;
 const FIX_POPUP_EDGE_PADDING_PX = 12;
 const INDIVIDUAL_COLOR_FIELD_KEY = "individual";
+const GPS_SPIKE_COLOR_FIELD_KEY = "gps_spike_step_turn";
+const DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG = 150;
 const INDIVIDUAL_LEGEND_MAX_ITEMS = 24;
 const INDIVIDUAL_COLOR_FIELD = Object.freeze({
   key: INDIVIDUAL_COLOR_FIELD_KEY,
   label: "Individual ID",
   kind: "categorical",
   source: "identity",
+});
+const GPS_SPIKE_COLOR_FIELD = Object.freeze({
+  key: GPS_SPIKE_COLOR_FIELD_KEY,
+  label: "GPS spike (step + turn)",
+  kind: "numeric",
+  source: "derived",
 });
 
 let assetPromise = null;
@@ -371,6 +379,7 @@ class MovementExampleApp {
       error: "",
     };
     this.thresholdInputPendingBlur = false;
+    this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
     this.pendingConfirmationGroups = [];
@@ -3731,6 +3740,7 @@ class MovementExampleApp {
           return;
         }
         this.currentStudy = nextStudy;
+        this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
         this.closeStudyEvents();
         this.currentDatasetId = "";
         this.currentArtifact = "";
@@ -3749,6 +3759,7 @@ class MovementExampleApp {
         this.refs.dataset.value = this.currentDatasetId;
         return;
       }
+      this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
       await this.transitionToDataset(nextDatasetId, { reason: "dataset_switch" });
     });
     this.refs.artifact.addEventListener("change", async () => {
@@ -3758,6 +3769,7 @@ class MovementExampleApp {
         return;
       }
       const viewContext = this.captureDatasetViewContext();
+      this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
       this.currentArtifact = nextArtifact;
       this.saveUiState();
       if (!this.currentArtifact) {
@@ -6745,6 +6757,7 @@ class MovementExampleApp {
 
   clearLoadedStudyState() {
     this.clearThresholdState();
+    this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
     this.clearOsmContext({ render: false });
     this.clearCandidateQueryPreview({ render: false });
     this.clearAnomalyRanking({ render: false });
@@ -8610,7 +8623,10 @@ class MovementExampleApp {
       const meta = document.createElement("div");
       meta.className = "movement-fix-meta";
       const colorField = this.data.colorFieldByKey.get(this.refs.colorBy.value);
-      const colorValue = formatColorValue(fix.attributes[this.refs.colorBy.value], colorField?.kind || "numeric");
+      const colorValue = formatColorValue(
+        movementColorFieldValue(fix, colorField),
+        colorField?.kind || "numeric",
+      );
       meta.textContent = [
         `fix ${fix.fixKey}`,
         `color ${this.refs.colorBy.value}: ${colorValue}`,
@@ -10352,7 +10368,7 @@ class MovementExampleApp {
       );
     }
     const style = this.data.colorStyles.get(field.key);
-    const value = fix.attributes[field.key];
+    const value = movementColorFieldValue(fix, field);
     if (!style) {
       return [124, 210, 255, POINT_ALPHA];
     }
@@ -10713,7 +10729,7 @@ class MovementExampleApp {
       addRow(
         colorField.key,
         colorField.label,
-        formatColorValue(fix.attributes?.[colorField.key], colorField.kind),
+        formatColorValue(movementColorFieldValue(fix, colorField), colorField.kind),
         { allowMissing: true },
       );
     }
@@ -10861,6 +10877,7 @@ class MovementExampleApp {
     }
     const field = this.getCurrentColorField();
     const visibleFixes = this.getVisibleReviewFixes();
+    const gpsSpikeMode = field?.key === GPS_SPIKE_COLOR_FIELD_KEY;
     if (!field) {
       return {
         field: null,
@@ -10910,7 +10927,7 @@ class MovementExampleApp {
     if (field.kind !== "numeric") {
       const levelCounts = new Map();
       for (const fix of visibleFixes) {
-        const level = discreteFieldLevelLabel(field, fix.attributes[field.key]);
+        const level = discreteFieldLevelLabel(field, movementColorFieldValue(fix, field));
         levelCounts.set(level, (levelCounts.get(level) || 0) + 1);
       }
       const levelOptions = Array.from(levelCounts.entries())
@@ -10918,7 +10935,7 @@ class MovementExampleApp {
         .sort((left, right) => right.count - left.count || left.level.localeCompare(right.level, undefined, { sensitivity: "base" }));
       const selectedLevelSet = new Set(selectedLevels);
       const matchItems = selectedLevelSet.size
-        ? visibleFixes.filter(fix => selectedLevelSet.has(discreteFieldLevelLabel(field, fix.attributes[field.key])))
+        ? visibleFixes.filter(fix => selectedLevelSet.has(discreteFieldLevelLabel(field, movementColorFieldValue(fix, field))))
         : [];
       const matchKeys = new Set(matchItems.map(item => item.fixKey));
       const uncheckedMatchKeys = new Set(
@@ -10946,9 +10963,19 @@ class MovementExampleApp {
     const numericFixes = visibleFixes
       .map(fix => ({
         fix,
-        value: finiteOrNull(fix.attributes[field.key]),
+        value: finiteOrNull(movementColorFieldValue(fix, field)),
+        turnAngle: finiteOrNull(fix.attributes?.turn_angle_deg),
       }))
-      .filter(item => typeof item.value === "number");
+      .filter(item => (
+        typeof item.value === "number"
+        && (
+          !gpsSpikeMode
+          || (
+            typeof item.turnAngle === "number"
+            && Math.abs(item.turnAngle) >= this.gpsSpikeTurnAngleDeg
+          )
+        )
+      ));
     if (!numericFixes.length) {
       return {
         field,
@@ -10962,6 +10989,8 @@ class MovementExampleApp {
         levelOptions: [],
         matchKeys: new Set(),
         uncheckedMatchKeys: new Set(),
+        gpsSpikeMode,
+        turnAngleThreshold: this.gpsSpikeTurnAngleDeg,
       };
     }
 
@@ -11006,6 +11035,8 @@ class MovementExampleApp {
       levelOptions: [],
       matchKeys,
       uncheckedMatchKeys,
+      gpsSpikeMode,
+      turnAngleThreshold: this.gpsSpikeTurnAngleDeg,
     };
   }
 
@@ -11019,6 +11050,12 @@ class MovementExampleApp {
     }
     if (field.kind === "numeric") {
       if (!Number.isFinite(this.thresholdState.value)) {
+        return new Set();
+      }
+      if (
+        field.key === GPS_SPIKE_COLOR_FIELD_KEY
+        && this.thresholdState.value <= 0
+      ) {
         return new Set();
       }
     } else {
@@ -11058,6 +11095,24 @@ class MovementExampleApp {
     const histogramMode = context?.histogramMode === "clipped" ? "clipped" : "full";
     const histogramInputMin = finiteOrNull(context?.histogramInputMin);
     const histogramInputMax = finiteOrNull(context?.histogramInputMax);
+    const gpsSpikeMode = context?.gpsSpikeMode === true;
+    const gpsSpikeControl = gpsSpikeMode
+      ? `
+        <label class="movement-threshold-range-label">
+          <span>Minimum absolute turn angle (°)</span>
+          <input
+            class="movement-threshold-range-input"
+            type="number"
+            min="0"
+            max="180"
+            step="any"
+            data-action="set-gps-spike-turn-angle"
+            value="${escapeHtml(String(this.gpsSpikeTurnAngleDeg))}"
+          >
+        </label>
+        <div class="movement-threshold-note">All fixes remain colored by step length. The histogram includes only fixes with |turn angle| ≥ ${escapeHtml(formatColorValue(this.gpsSpikeTurnAngleDeg, "numeric"))}°.</div>
+      `
+      : "";
 
     let body = "";
     if (!field) {
@@ -11127,8 +11182,11 @@ class MovementExampleApp {
       `;
     } else if (!numericCount || !histogram) {
       body = `
+        ${gpsSpikeControl}
         <div class="movement-threshold-empty">
-          The current numeric field has no usable values in the visible scope.
+          ${gpsSpikeMode
+            ? "No visible fixes meet the current turn-angle requirement."
+            : "The current numeric field has no usable values in the visible scope."}
         </div>
       `;
     } else {
@@ -11152,7 +11210,9 @@ class MovementExampleApp {
       const thresholdLine = thresholdRatio === null
         ? ""
         : `<div class="movement-threshold-line" style="left:${(thresholdRatio * 100).toFixed(2)}%;"></div>`;
-      const subtitle = `${formatCount(numericCount)} visible fixes`;
+      const subtitle = gpsSpikeMode
+        ? `${formatCount(numericCount)} sharp-turn fixes in the visible scope`
+        : `${formatCount(numericCount)} visible fixes`;
       const thresholdPrompt = thresholdValue === null
         ? `Click the histogram or type a ${reverse ? "lower-tail" : "upper-tail"} threshold`
         : "Threshold";
@@ -11164,6 +11224,7 @@ class MovementExampleApp {
             ? `${formatCount(matchCount)} matches • ${formatCount(uncheckedCount)} not in checked fixes`
             : `${formatCount(matchCount)} matches • all in checked fixes`;
       body = `
+        ${gpsSpikeControl}
         <div class="movement-threshold-head">
           <div>
             <div class="movement-threshold-title">${escapeHtml(field.label)}</div>
@@ -11230,14 +11291,14 @@ class MovementExampleApp {
             >
           </label>
         </div>
-        <label class="movement-threshold-toggle">
+        ${gpsSpikeMode ? "" : `<label class="movement-threshold-toggle">
           <input
             type="checkbox"
             data-action="toggle-threshold-reverse"
             ${reverse ? "checked" : ""}
           >
           Reverse threshold: highlight values below the line
-        </label>
+        </label>`}
         <div class="movement-threshold-note">${escapeHtml(selectionNote)}</div>
         <div class="movement-threshold-actions">
           <button
@@ -11269,7 +11330,7 @@ class MovementExampleApp {
     if (!target) {
       return;
     }
-    if (target.closest('input[data-action="set-histogram-min"], input[data-action="set-histogram-max"], input[data-action="set-threshold-value"]')) {
+    if (target.closest('input[data-action="set-histogram-min"], input[data-action="set-histogram-max"], input[data-action="set-threshold-value"], input[data-action="set-gps-spike-turn-angle"]')) {
       this.thresholdInputPendingBlur = true;
     }
   }
@@ -11378,6 +11439,21 @@ class MovementExampleApp {
     }
     const target = event.target instanceof Element ? event.target : null;
     if (!target) {
+      return;
+    }
+    const turnAngleInput = target.closest('input[data-action="set-gps-spike-turn-angle"]');
+    if (turnAngleInput) {
+      this.thresholdInputPendingBlur = false;
+      const turnAngle = finiteOrNull(String(turnAngleInput.value || "").trim());
+      if (turnAngle === null || turnAngle < 0 || turnAngle > 180) {
+        this.setStatus("Turn angle must be between 0° and 180°.", true);
+        this.renderThresholdPane();
+        return;
+      }
+      this.gpsSpikeTurnAngleDeg = turnAngle;
+      this.renderThresholdPane();
+      this.renderLayers();
+      this.syncFlagTargetToThreshold();
       return;
     }
     const numericInput = target.closest('input[data-action="set-histogram-min"], input[data-action="set-histogram-max"], input[data-action="set-threshold-value"]');
@@ -12606,7 +12682,14 @@ class MovementExampleApp {
         .map(fixKey => this.data.fixByKey.get(fixKey))
         .filter(Boolean);
       if (fixes.length || matchKeys.size) {
-        return { kind: "filter", fixes, ready: fixes.length > 0 };
+        return {
+          kind: "filter",
+          filterKind: this.getCurrentColorField()?.key === GPS_SPIKE_COLOR_FIELD_KEY
+            ? "gps_spike"
+            : "threshold",
+          fixes,
+          ready: fixes.length > 0,
+        };
       }
     }
     if (this.flagTargetKind === "none") {
@@ -12701,7 +12784,9 @@ class MovementExampleApp {
         ? `Flag selected segment (${formatCount(flagFixes.length)} fixes)`
         : "Select segment end"
       : flagTarget.kind === "filter"
-        ? `Flag threshold matches (${formatCount(flagFixes.length)})`
+        ? flagTarget.filterKind === "gps_spike"
+          ? `Flag ${formatCount(flagFixes.length)} GPS-spike matches`
+          : `Flag threshold matches (${formatCount(flagFixes.length)})`
         : flagTarget.kind === "fixes"
           ? `Flag checked fixes (${formatCount(flagFixes.length)})`
           : "Choose what to flag";
@@ -13670,6 +13755,7 @@ class MovementExampleApp {
     this.resetIssueScopeControls();
     const field = this.getCurrentColorField();
     const isFilterTarget = target?.kind === "filter";
+    const isGpsSpikeTarget = isFilterTarget && field?.key === GPS_SPIKE_COLOR_FIELD_KEY;
     const issueThreshold = isFilterTarget ? this.getCurrentIssueThreshold() : "";
     const candidateKeys = this.getCandidateQueryReturnedMatchKeys();
     const candidateGenerated = !isFilterTarget
@@ -13684,8 +13770,16 @@ class MovementExampleApp {
         fix => fix.individual === this.individualReviewQueue.activeIndividual,
       )
     ) ? this.individualReviewQueue.activeIndividual : "";
-    const thresholdFilter = isFilterTarget
+    const thresholdFilter = isGpsSpikeTarget
       ? {
+          kind: "gps_spike",
+          step_length_threshold_m: this.thresholdState.value,
+          minimum_abs_turn_angle_deg: this.gpsSpikeTurnAngleDeg,
+          individuals: this.getSelectedIndividuals(),
+          set_names: [...this.getVisibleSetNames()],
+        }
+      : isFilterTarget
+        ? {
           field_key: field?.key || "",
           field_kind: field?.kind || "",
           operator: this.thresholdState.reverse === true ? "lt" : "gt",
@@ -13695,19 +13789,24 @@ class MovementExampleApp {
           selected_levels: Array.isArray(this.thresholdState.selectedLevels)
             ? [...this.thresholdState.selectedLevels]
             : [],
-        }
-      : null;
+          }
+        : null;
     this.pendingIssueStatus = status;
     this.pendingIssueContext = {
       mode: "fixes",
       fixes: selectedFixes,
       origin,
       sourceAnalysisId: candidateGenerated ? this.candidateQueryPreview.analysisId : "",
-      issueField: field?.key || "",
+      issueField: isGpsSpikeTarget
+        ? "step_length_m + abs(turn_angle_deg)"
+        : field?.key || "",
       issueThreshold,
       thresholdFilter,
       queueReviewIndividual,
-      workflowContext: this.buildIssueWorkflowContext(isFilterTarget ? "filter" : "fix"),
+      workflowContext: this.buildIssueWorkflowContext(
+        isFilterTarget ? "filter" : "fix",
+        { selectionMethods: isGpsSpikeTarget ? ["color_threshold"] : null },
+      ),
     };
     this.refs.issueTitle.textContent = `Mark fixes as ${status}`;
     this.refs.issueMeta.innerHTML = `
@@ -13716,8 +13815,8 @@ class MovementExampleApp {
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
       <div><strong>${isFilterTarget ? "Visible preview matches" : "Checked fixes"}:</strong> ${escapeHtml(formatCount(selectedFixes.length))}</div>
-      <div><strong>Flag scope:</strong> ${isFilterTarget ? "all matching fixes in the full dataset" : "checked fixes"}</div>
-      <div><strong>Issue variable:</strong> ${escapeHtml(field?.label || "Not set")}</div>
+      <div><strong>Flag scope:</strong> ${isGpsSpikeTarget ? "all matching fixes in the visible individual and track scope" : isFilterTarget ? "all matching fixes in the full dataset" : "checked fixes"}</div>
+      <div><strong>Issue variable:</strong> ${escapeHtml(isGpsSpikeTarget ? "Step length + absolute turn angle" : field?.label || "Not set")}</div>
       <div><strong>Issue threshold:</strong> ${escapeHtml(issueThreshold || "Not set")}</div>
       <div><strong>Origin:</strong> ${escapeHtml(origin)}</div>
     `;
@@ -13941,6 +14040,12 @@ class MovementExampleApp {
 
   getCurrentIssueThreshold() {
     const field = this.getCurrentColorField();
+    if (
+      field?.key === GPS_SPIKE_COLOR_FIELD_KEY
+      && Number.isFinite(this.thresholdState.value)
+    ) {
+      return `step > ${this.thresholdState.value} m and |turn| >= ${this.gpsSpikeTurnAngleDeg}°`;
+    }
     return getIssueThresholdFromState(field, this.thresholdState);
   }
 
@@ -15486,7 +15591,11 @@ function isSourceOnlyFlaggedBurstFromData(data, burst) {
 }
 
 function buildMovementColorFields(fields) {
-  const merged = [INDIVIDUAL_COLOR_FIELD, ...(Array.isArray(fields) ? fields : [])];
+  const merged = [
+    INDIVIDUAL_COLOR_FIELD,
+    GPS_SPIKE_COLOR_FIELD,
+    ...(Array.isArray(fields) ? fields : []),
+  ];
   const seen = new Set();
   return merged.filter(field => {
     const key = String(field?.key || "");
@@ -15503,7 +15612,7 @@ function computeMovementColorStyles(colorFields, fixes) {
   for (const field of colorFields) {
     if (field.kind === "numeric") {
       const values = fixes
-        .map(fix => finiteOrNull(fix.attributes[field.key]))
+        .map(fix => finiteOrNull(movementColorFieldValue(fix, field)))
         .filter(value => typeof value === "number");
       colorStyles.set(field.key, {
         kind: "numeric",
@@ -15516,7 +15625,7 @@ function computeMovementColorStyles(colorFields, fixes) {
       continue;
     }
     const categories = uniqueStrings(fixes.map(fix => {
-      const raw = fix.attributes[field.key];
+      const raw = movementColorFieldValue(fix, field);
       return raw === null || raw === undefined || raw === "" ? "Missing" : String(raw);
     }));
     const palette = new Map();
@@ -15537,6 +15646,14 @@ function computeMovementColorStyles(colorFields, fixes) {
     });
   }
   return colorStyles;
+}
+
+function movementColorFieldValue(fix, field) {
+  if (!fix || !field) return null;
+  const attributeKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY
+    ? "step_length_m"
+    : field.key;
+  return fix.attributes?.[attributeKey];
 }
 
 function computeNumericRange(values) {
@@ -15910,7 +16027,7 @@ function deriveReportSampleValue(
     return null;
   }
   const values = (Array.isArray(focalFixes) ? focalFixes : [])
-    .map(fix => finiteOrNull(fix?.attributes?.[effectiveField.key]))
+    .map(fix => finiteOrNull(movementColorFieldValue(fix, effectiveField)))
     .filter(value => typeof value === "number");
   if (!values.length) {
     return null;

@@ -1530,6 +1530,152 @@ def test_turn_angle_threshold_filter_targets_the_center_fix(tmp_path):
     assert count == 1
 
 
+def test_gps_spike_filter_combines_step_turn_and_visible_scope(tmp_path, monkeypatch):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        "eventid,individual,timestamp,longitude,latitude,set\n"
+        "a_1,alpha,2024-01-01T00:00:00Z,0,0,train\n"
+        "a_2,alpha,2024-01-01T01:00:00Z,1,0,train\n"
+        "a_3,alpha,2024-01-01T02:00:00Z,0,0,train\n"
+        "b_1,beta,2024-01-01T00:00:00Z,0,0,test\n"
+        "b_2,beta,2024-01-01T01:00:00Z,2,0,test\n"
+        "b_3,beta,2024-01-01T02:00:00Z,0,0,test\n",
+        encoding="utf-8",
+    )
+    filter_spec = {
+        "kind": "gps_spike",
+        "step_length_threshold_m": 100_000,
+        "minimum_abs_turn_angle_deg": 150,
+        "individuals": ["alpha"],
+        "set_names": ["train"],
+    }
+    real_open = Path.open
+    source_open_count = 0
+
+    def counted_open(path, *args, **kwargs):
+        nonlocal source_open_count
+        if path == csv_path:
+            source_open_count += 1
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+
+    ranges, count = resolve_filter_row_ranges(csv_path, filter_spec)
+    excluded_ranges, excluded_count = resolve_filter_row_ranges(
+        csv_path,
+        filter_spec,
+        confirmed_fix_keys={"id:a_2#row:2"},
+    )
+
+    assert ranges == [[2, 2]]
+    assert count == 1
+    assert excluded_ranges == []
+    assert excluded_count == 0
+    assert source_open_count == 2
+
+
+def test_gps_spike_flagging_creates_one_scoped_annotation_step(tmp_path):
+    csv_content = (
+        "eventid,individual,timestamp,longitude,latitude,set\n"
+        "a_1,alpha,2024-01-01T00:00:00Z,0,0,train\n"
+        "a_2,alpha,2024-01-01T01:00:00Z,1,0,train\n"
+        "a_3,alpha,2024-01-01T02:00:00Z,0,0,train\n"
+    )
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=csv_content)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "expected_current_dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {
+                "kind": "filter",
+                "filter": {
+                    "kind": "gps_spike",
+                    "step_length_threshold_m": 100_000,
+                    "minimum_abs_turn_angle_deg": 150,
+                    "individuals": ["alpha"],
+                    "set_names": ["train"],
+                },
+            },
+            "status": "suspected",
+            "origin": "threshold",
+            "issue_type": "GPS spike",
+            "issue_field": "step_length_m + abs(turn_angle_deg)",
+            "issue_threshold": "step > 100000 m and |turn| >= 150°",
+            "comment": "Review the backtracking jump",
+            "owner_question": "Is this a GPS spike?",
+            "workflow_context": {
+                "entry_point": "movement_map",
+                "scope_kind": "filter",
+                "selection_methods": ["color_threshold"],
+            },
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "analysis" not in payload
+    assert payload["step"]["summary"]["resolved_fix_count"] == 1
+    assert payload["step"]["parameters"]["scope"]["filter"]["kind"] == "gps_spike"
+    _, sidecar_path = get_dataset_artifact(
+        tmp_path / "data" / "movement_clean" / "test_study",
+        payload["dataset"]["dataset_id"],
+        "movement_review_annotations.json",
+    )
+    annotation = json.loads(sidecar_path.read_text(encoding="utf-8"))["annotations"][0]
+    assert annotation["scope"]["row_ranges"] == [[2, 2]]
+    assert annotation["scope"]["filter"]["individuals"] == ["alpha"]
+    assert annotation["workflow_context"]["selection_methods"] == ["color_threshold"]
+
+
+def test_gps_spike_filter_validation_rejects_invalid_thresholds(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+    base_payload = {
+        "dataset_id": dataset_id,
+        "logical_name": "movement.csv",
+        "scope": {
+            "kind": "filter",
+            "filter": {
+                "kind": "gps_spike",
+                "step_length_threshold_m": 0,
+                "minimum_abs_turn_angle_deg": 181,
+                "individuals": ["alpha"],
+                "set_names": ["train"],
+            },
+        },
+        "status": "suspected",
+        "issue_type": "GPS spike",
+        "comment": "Review",
+        "owner_question": "Valid?",
+        "user": "reviewer",
+    }
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json=base_payload,
+    )
+
+    assert response.status_code == 400
+    assert "step threshold must be positive" in response.json()["error"]
+
+
+def test_gps_spike_color_mode_is_visual_until_explicit_flagging():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert 'label: "GPS spike (step + turn)"' in source
+    assert "GPS_SPIKE_COLOR_FIELD" in source
+    assert 'data-action="set-gps-spike-turn-angle"' in source
+    assert "Math.abs(item.turnAngle) >= this.gpsSpikeTurnAngleDeg" in source
+    assert '? "step_length_m"' in source
+    assert "Flag ${formatCount(flagFixes.length)} GPS-spike matches" in source
+    assert 'kind: "gps_spike"' in source
+    assert 'selectionMethods: isGpsSpikeTarget ? ["color_threshold"] : null' in source
+    assert "this.openIssueModal(\"suspected\", target);" in source
+
+
 def test_threshold_issue_ui_sends_a_full_dataset_filter_scope():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     assert 'kind: "filter"' in source

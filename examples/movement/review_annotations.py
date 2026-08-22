@@ -14,7 +14,11 @@ from .summary import (
     parse_time_ms,
     try_float,
 )
-from .movement_features import centered_turn_angle_degrees, step_movement_metrics
+from .movement_features import (
+    centered_turn_angle_degrees,
+    compute_track_movement,
+    step_movement_metrics,
+)
 
 
 REVIEW_SIDECAR_NAME = "movement_review_annotations.json"
@@ -179,7 +183,17 @@ def resolve_filter_row_ranges(
     Derived step fields use a streaming pass when each track is already in time
     order. A second, lean grouped pass is used only for files with track-order
     regressions so the result retains the app's chronological step semantics.
+    Compound GPS-spike filters group their selected scope from one CSV pass and
+    reuse the canonical track metric calculation.
     """
+    if str(filter_spec.get("kind") or "").strip().lower() == "gps_spike":
+        return _resolve_gps_spike_row_ranges(
+            path,
+            filter_spec,
+            confirmed_fix_keys=set(confirmed_fix_keys or set()),
+            confirmed_individual_tracks=set(confirmed_individual_tracks or set()),
+        )
+
     field_key = str(filter_spec.get("field_key") or "").strip()
     if not field_key:
         raise ValueError("Filter field is required")
@@ -311,6 +325,79 @@ def resolve_filter_row_ranges(
             if _filter_value_matches(value, filter_spec):
                 matched_rows.append(current[0])
             previous = current
+    return _compress_row_numbers(matched_rows), len(matched_rows)
+
+
+def _resolve_gps_spike_row_ranges(
+    path: Path,
+    filter_spec: dict,
+    *,
+    confirmed_fix_keys: set[str],
+    confirmed_individual_tracks: set[tuple[str, str]],
+) -> tuple[list[list[int]], int]:
+    step_threshold = float(filter_spec["step_length_threshold_m"])
+    turn_threshold = float(filter_spec["minimum_abs_turn_angle_deg"])
+    selected_individuals = {str(item) for item in filter_spec.get("individuals") or []}
+    selected_set_names = {str(item) for item in filter_spec.get("set_names") or []}
+    records_by_track: dict[tuple[str, str], list[dict]] = {}
+
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        columns = detect_columns(list(reader.fieldnames or []))
+        if not columns["individual"] or not columns["time"] or not columns["lon"] or not columns["lat"]:
+            raise ValueError("CSV is missing required columns for movement filtering")
+        for row_index, raw in enumerate(reader, start=1):
+            valid = _valid_movement_row(raw, columns)
+            if valid is None:
+                continue
+            individual = valid["individual"]
+            set_name = valid["set_name"]
+            if individual not in selected_individuals or set_name not in selected_set_names:
+                continue
+            fix_key = _make_fix_key(
+                row_index,
+                valid["fix_id"],
+                individual,
+                valid["time_ms"],
+            )
+            if _row_is_analytically_excluded(
+                raw,
+                fix_key=fix_key,
+                individual=individual,
+                set_name=set_name,
+                confirmed_fix_keys=confirmed_fix_keys,
+                confirmed_individual_tracks=confirmed_individual_tracks,
+            ):
+                continue
+            records_by_track.setdefault((individual, set_name), []).append(
+                {
+                    "row_index": row_index,
+                    "fix_key": fix_key,
+                    "individual": individual,
+                    "set_name": set_name,
+                    "time_ms": valid["time_ms"],
+                    "lon": valid["lon"],
+                    "lat": valid["lat"],
+                }
+            )
+
+    movement_by_fix_key, _stat_samples = compute_track_movement(
+        records_by_track,
+        max_stat_samples=0,
+    )
+    matched_rows = []
+    for records in records_by_track.values():
+        for record in records:
+            movement = movement_by_fix_key.get(record["fix_key"], {})
+            step_length = movement.get("step_length_m")
+            turn_angle = movement.get("turn_angle_deg")
+            if (
+                isinstance(step_length, (int, float))
+                and isinstance(turn_angle, (int, float))
+                and step_length > step_threshold
+                and abs(turn_angle) >= turn_threshold
+            ):
+                matched_rows.append(record["row_index"])
     return _compress_row_numbers(matched_rows), len(matched_rows)
 
 
