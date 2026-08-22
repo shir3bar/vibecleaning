@@ -923,6 +923,31 @@ def test_movement_frontend_distinguishes_source_flags_from_review_status():
     assert '"source_flags",\n      "Source flags"' in source
 
 
+def test_movement_frontend_clears_checked_fix_halos_and_enlarges_suspicious_fixes():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    clear_handler = source[
+        source.index('    this.refs.clearFixes.addEventListener("click", () => {'):
+        source.index('    this.refs.candidateQuerySelect.addEventListener', source.index('    this.refs.clearFixes.addEventListener("click", () => {'))
+    ]
+    single_click = source[
+        source.index("  applyMapSingleFixClick(fixKey) {"):
+        source.index("  handleMapDoubleClick(event) {", source.index("  applyMapSingleFixClick(fixKey) {"))
+    ]
+    suspected_layer = source[
+        source.index('          id: "movement-suspected-outline"'):
+        source.index('          id: "movement-threshold-points"', source.index('          id: "movement-suspected-outline"'))
+    ]
+
+    assert "this.setTableSelection();" in clear_handler
+    assert "this.mapRangeAwaitingEnd = false;" in clear_handler
+    assert "this.renderTableSheet();" in clear_handler
+    assert "applyTableSelectionInteraction" not in single_click
+    assert "this.colorForFix(item.fix)" in suspected_layer
+    assert "filled: true" in suspected_layer
+    assert "radiusMinPixels: 8" in suspected_layer
+    assert "pickable: true" in suspected_layer
+
+
 def test_movement_frontend_excludes_confirmed_audit_fixes_from_color_scale():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     refresh = source[
@@ -2226,6 +2251,8 @@ def test_burst_visibility_defaults_on_and_stays_independent_from_flag_selection(
     assert ".filter(point => !hiddenBurstFixKeys.has(point.fix?.fixKey))" in source
     assert "!hiddenBurstFixKeys.has(step.sourceFix?.fixKey)" in source
     assert "!hiddenBurstFixKeys.has(step.destinationFix?.fixKey)" in source
+    assert "&& !hiddenBurstFixKeys.has(step.fixKey)" in source
+    assert "|| hiddenBurstFixKeys.has(fix.fixKey)" in source
     assert "sourceFix: previous" in source
     assert "for (const step of allPathData)" in source
     assert "zoomToPath" not in flag_method

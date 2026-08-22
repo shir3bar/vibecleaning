@@ -3848,9 +3848,15 @@ class MovementExampleApp {
     this.refs.clearFixes.addEventListener("click", () => {
       if (!this.data) return;
       this.data.selectedFixKeys = new Set();
-      this.flagTargetKind = "none";
+      if (this.flagTargetKind === "fixes") {
+        this.setTableSelection();
+        this.mapRangeAwaitingEnd = false;
+        this.resetManualFlagTarget({ resetKind: false });
+        this.flagTargetKind = "none";
+      }
       this.renderThresholdPane();
       this.renderSelectedFixes();
+      this.renderTableSheet();
       this.renderLayers();
       this.updateActionButtons();
     });
@@ -9793,6 +9799,7 @@ class MovementExampleApp {
     const visibleFlaggedSteps = (this.data.flaggedStepOverlays || []).filter(step => (
       visibleIndividuals.has(step.individual)
       && visibleSetNames.has(step.setName)
+      && !hiddenBurstFixKeys.has(step.fixKey)
       && (step.status !== "confirmed" || this.refs.showConfirmed.checked)
     ));
     const visibleAutoBursts = this.getVisibleAutoBursts();
@@ -9870,6 +9877,7 @@ class MovementExampleApp {
           fix.review?.status !== "suspected"
           || !visibleIndividuals.has(fix.individual)
           || !visibleSetNames.has(fix.setName)
+          || hiddenBurstFixKeys.has(fix.fixKey)
           || seenSuspected.has(fix.fixKey)
         ) {
           continue;
@@ -9878,7 +9886,9 @@ class MovementExampleApp {
         suspectedPointData.push({
           fixKey: fix.fixKey,
           individual: fix.individual,
+          setName: fix.setName,
           position: fix.position,
+          fix,
         });
       }
     }
@@ -10151,17 +10161,25 @@ class MovementExampleApp {
           id: "movement-suspected-outline",
           data: suspectedPointData,
           getPosition: item => item.position,
+          getFillColor: item => this.queueMapColor(
+            this.colorForFix(item.fix),
+            item.individual,
+          ),
           getLineColor: item => this.queueMapColor(
             [255, 204, 40, 255],
             item.individual,
           ),
-          filled: false,
+          filled: true,
           stroked: true,
-          lineWidthMinPixels: 4,
-          getRadius: 125,
-          radiusMinPixels: 9,
+          lineWidthMinPixels: 3,
+          getRadius: 135,
+          radiusMinPixels: 8,
           radiusMaxPixels: 17,
-          pickable: false,
+          updateTriggers: {
+            getFillColor: [this.refs.colorBy.value, queueDimKey],
+            getLineColor: queueDimKey,
+          },
+          pickable: true,
         }),
       );
       layers.push(
@@ -10370,6 +10388,8 @@ class MovementExampleApp {
     if (this.flagTargetKind !== "fixes") {
       this.resetManualFlagTarget();
       this.data.selectedFixKeys = new Set();
+      this.setTableSelection();
+      this.mapRangeAwaitingEnd = false;
     }
     this.flagTargetKind = "fixes";
     this.manualFlagTarget.selectionMethods.add(selectionMethod);
@@ -10478,15 +10498,12 @@ class MovementExampleApp {
       return;
     }
     const fixKey = picked.object.fixKey;
-    const modifiers = {
-      additive: Boolean(event?.originalEvent?.metaKey || event?.originalEvent?.ctrlKey),
-    };
     if (this.pendingMapSingleClickTimer !== null) {
       window.clearTimeout(this.pendingMapSingleClickTimer);
     }
     this.pendingMapSingleClickTimer = window.setTimeout(() => {
       this.pendingMapSingleClickTimer = null;
-      this.applyMapSingleFixClick(fixKey, modifiers);
+      this.applyMapSingleFixClick(fixKey);
     }, 220);
   }
 
@@ -10501,13 +10518,9 @@ class MovementExampleApp {
       : null;
   }
 
-  applyMapSingleFixClick(fixKey, modifiers = {}) {
+  applyMapSingleFixClick(fixKey) {
     if (!this.data?.fixByKey?.has(fixKey)) return;
     const included = !this.data.selectedFixKeys.has(fixKey);
-    this.applyTableSelectionInteraction(fixKey, {
-      additive: Boolean(modifiers.additive),
-      range: false,
-    });
     this.setCheckedFixIncluded(fixKey, included, "map_check");
   }
 
