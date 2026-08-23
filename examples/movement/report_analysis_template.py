@@ -1744,6 +1744,16 @@ def main():
                 source = artifact
             elif artifact.get("logical_name") == "movement_review_annotations.json":
                 sidecar = artifact
+        source_attachment_name = str(params.get("source_attachment_name") or "").strip()
+        sidecar_attachment_name = str(params.get("sidecar_attachment_name") or "").strip()
+        if source_attachment_name:
+            source = attachment_by_name.get(source_attachment_name)
+            if source is None:
+                raise SystemExit("Report source attachment was not provided")
+        if sidecar_attachment_name:
+            sidecar = attachment_by_name.get(sidecar_attachment_name)
+            if sidecar is None:
+                raise SystemExit("Report review attachment was not provided")
         if source is None:
             raise SystemExit("Target artifact was not provided as an input")
 

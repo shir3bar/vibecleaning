@@ -56,7 +56,18 @@ def main():
     feature_rows = build_burst_feature_rows(eligible_fixes, movement["auto_bursts"])
     feature_set = str(params.get("feature_set") or "movement_only").strip()
     scoring = score_bursts(feature_rows, config={"feature_set": feature_set})
-    individual_ranking = rank_individuals(scoring["scored_bursts"])
+    ranking_method = str(
+        params.get("ranking_method") or "isolation_forest"
+    ).strip()
+    ranking_aggregation = (
+        "sum_outlier_margin"
+        if ranking_method == "isolation_forest_decision_margin"
+        else "maximum_anomaly_score"
+    )
+    individual_ranking = rank_individuals(
+        scoring["scored_bursts"],
+        config={"aggregation": ranking_aggregation},
+    )
     warnings = [*scoring["warnings"], *individual_ranking["warnings"]]
 
     result = {
@@ -65,6 +76,7 @@ def main():
             if scoring["run_status"] != "completed"
             else individual_ranking["run_status"]
         ),
+        "ranking_method": ranking_method,
         "input_artifact": {
             "dataset_id": dataset_id,
             "logical_name": target_artifact,
@@ -74,7 +86,8 @@ def main():
         "confirmed_exclusion_count": len(confirmed_fix_keys),
         "burst_feature_count": len(feature_rows),
         "model_fit": {
-            key: value for key, value in scoring.items() if key != "scored_bursts"
+            **{key: value for key, value in scoring.items() if key != "scored_bursts"},
+            "ranking_method": ranking_method,
         },
         "individual_ranking_summary": {
             key: value
@@ -103,8 +116,10 @@ def main():
                 for key in (
                     "rank",
                     "individual",
+                    "individual_score",
                     "top_burst_score",
                     "top_burst_id",
+                    "contributing_burst_count",
                     "burst_count",
                     "scored_burst_count",
                 )

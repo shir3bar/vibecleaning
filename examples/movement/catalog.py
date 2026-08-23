@@ -5,9 +5,10 @@ from app.state import ensure_project_state, has_project_inputs, load_dataset
 
 
 FAMILY_SPECS = [
-    {"name": "movement_clean", "label": "Clean"},
-    {"name": "movement_hightemporalres", "label": "High Temporal Resolution"},
-    {"name": "movement_raw", "label": "Raw"},
+    {"name": "movement_clean", "label": "Clean", "source_format": "csv"},
+    {"name": "movement_hightemporalres", "label": "High Temporal Resolution", "source_format": "csv"},
+    {"name": "movement_raw", "label": "Raw", "source_format": "csv"},
+    {"name": "movement_rds", "label": "RDS", "source_format": "rds"},
 ]
 
 SAFE_PATH_PART = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -24,8 +25,12 @@ def validate_catalog_part(raw_value: object, *, label: str) -> str:
     return value
 
 
-def family_names() -> list[str]:
-    return [item["name"] for item in FAMILY_SPECS]
+def family_names(*, source_format: str | None = None) -> list[str]:
+    return [
+        item["name"]
+        for item in FAMILY_SPECS
+        if source_format is None or item.get("source_format") == source_format
+    ]
 
 
 def detect_study_slug(filename: str) -> str:

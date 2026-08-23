@@ -1,5 +1,3 @@
-from sklearn.ensemble import IsolationForest
-
 from examples.movement.burst_feature_matrix import (
     DEFAULT_FEATURE_SET,
     FEATURE_SET_EXCLUSION_CONTEXT,
@@ -24,6 +22,14 @@ MODEL_IMPUTATION_NOTE = (
     "not as an observed explanation value."
 )
 EXPLANATION_LIST_LIMIT = 3
+RANKING_AGGREGATION_MAX = "maximum_anomaly_score"
+RANKING_AGGREGATION_MARGIN_SUM = "sum_outlier_margin"
+RANKING_AGGREGATION_SCORE_SUM = "sum_anomaly_score"
+SUPPORTED_RANKING_AGGREGATIONS = {
+    RANKING_AGGREGATION_MAX,
+    RANKING_AGGREGATION_MARGIN_SUM,
+    RANKING_AGGREGATION_SCORE_SUM,
+}
 
 
 def _normalize_config(config: dict | None) -> dict:
@@ -166,6 +172,12 @@ def _build_observed_quantile_explanations(
 
 def score_bursts(feature_rows: list[dict], config: dict | None = None) -> dict:
     """Score burst feature rows without creating fix- or individual-level outputs."""
+    # Keep scikit-learn (and its compiled SciPy dependency) isolated to the
+    # Isolation Forest provider. Source is_outlier ranking imports this module
+    # only for the shared individual-ranking presentation and does not need the
+    # model stack.
+    from sklearn.ensemble import IsolationForest
+
     normalized_config = _normalize_config(config)
     model_config = normalized_config["model_config"]
     feature_set = normalized_config["feature_set"]
@@ -220,12 +232,27 @@ def score_bursts(feature_rows: list[dict], config: dict | None = None) -> dict:
 
     model = IsolationForest(**model_config)
     model.fit(prepared["matrix"])
-    anomaly_scores = -model.score_samples(prepared["matrix"])
+    sample_scores = model.score_samples(prepared["matrix"])
+    decision_scores = model.decision_function(prepared["matrix"])
+    anomaly_scores = -sample_scores
+    result["score_offset"] = float(model.offset_)
+    result["decision_boundary"] = 0.0
     result["run_status"] = "completed"
     result["scored_burst_count"] = len(burst_rows)
     scored_rows = [
-        {**row, "anomaly_score": float(score)}
-        for row, score in zip(burst_rows, anomaly_scores)
+        {
+            **row,
+            "anomaly_score": float(anomaly_score),
+            "decision_function": float(decision_score),
+            "outlier_margin": float(max(0.0, -decision_score)),
+            "is_model_outlier": bool(decision_score < 0.0),
+        }
+        for row, anomaly_score, decision_score in zip(
+            burst_rows,
+            anomaly_scores,
+            decision_scores,
+            strict=True,
+        )
     ]
     result["scored_bursts"] = _build_observed_quantile_explanations(
         scored_rows,
@@ -244,8 +271,13 @@ def _burst_reference(row: dict, anomaly_score: float) -> dict:
         "set_name",
         "start_time_ms",
         "end_time_ms",
+        "fix_count",
         "n_fixes",
         "fix_keys",
+        "decision_function",
+        "outlier_margin",
+        "is_model_outlier",
+        "is_outlier_count",
         "top_high_quantile_features",
         "top_low_quantile_features",
         "missing_features",
@@ -256,15 +288,23 @@ def _burst_reference(row: dict, anomaly_score: float) -> dict:
 
 
 def rank_individuals(scored_bursts: list[dict], config: dict | None = None) -> dict:
-    """Rank individuals globally by their highest scored automatic burst."""
-    if config not in (None, {}):
-        raise ValueError("Individual ranking does not accept configuration in v1")
+    """Rank individuals using an explicit aggregation of their burst scores."""
+    normalized_config = dict(config or {})
+    unsupported = sorted(set(normalized_config) - {"aggregation"})
+    if unsupported:
+        raise ValueError(f"Unsupported individual ranking config values: {unsupported}")
+    aggregation = str(
+        normalized_config.get("aggregation") or RANKING_AGGREGATION_MAX
+    ).strip()
+    if aggregation not in SUPPORTED_RANKING_AGGREGATIONS:
+        raise ValueError(f"Unsupported individual ranking aggregation: {aggregation}")
 
     warnings = []
     burst_count_by_individual: dict[str, int] = {}
-    scored_by_individual: dict[str, list[tuple[dict, float]]] = {}
+    scored_by_individual: dict[str, list[tuple[dict, float, float]]] = {}
     skipped_without_individual = 0
     skipped_without_score = 0
+    skipped_without_aggregate = 0
     for burst in scored_bursts:
         individual = str(burst.get("individual", "")).strip()
         if not individual:
@@ -275,7 +315,17 @@ def rank_individuals(scored_bursts: list[dict], config: dict | None = None) -> d
         if score is None:
             skipped_without_score += 1
             continue
-        scored_by_individual.setdefault(individual, []).append((burst, score))
+        if aggregation == RANKING_AGGREGATION_MARGIN_SUM:
+            aggregate_value = _numeric_value(burst.get("outlier_margin"))
+            if aggregate_value is None:
+                skipped_without_aggregate += 1
+                continue
+            aggregate_value = max(0.0, aggregate_value)
+        else:
+            aggregate_value = score
+        scored_by_individual.setdefault(individual, []).append(
+            (burst, score, aggregate_value)
+        )
 
     if skipped_without_individual:
         warnings.append(
@@ -284,6 +334,10 @@ def rank_individuals(scored_bursts: list[dict], config: dict | None = None) -> d
     if skipped_without_score:
         warnings.append(
             f"Skipped {skipped_without_score} burst row(s) without a finite anomaly_score."
+        )
+    if skipped_without_aggregate:
+        warnings.append(
+            f"Skipped {skipped_without_aggregate} burst row(s) without a finite outlier_margin."
         )
 
     ranked_individuals = []
@@ -298,14 +352,25 @@ def rank_individuals(scored_bursts: list[dict], config: dict | None = None) -> d
             ),
         )
         ranked_burst_refs = [
-            _burst_reference(burst, score) for burst, score in ranked_bursts
+            _burst_reference(burst, score) for burst, score, _aggregate in ranked_bursts
         ]
         top_burst = ranked_burst_refs[0]
+        individual_score = (
+            top_burst["anomaly_score"]
+            if aggregation == RANKING_AGGREGATION_MAX
+            else sum(item[2] for item in ranked_bursts)
+        )
+        contributing_burst_count = sum(
+            1 for _burst, _score, aggregate_value in ranked_bursts
+            if aggregate_value > 0.0
+        )
         ranked_individuals.append(
             {
                 "individual": individual,
+                "individual_score": float(individual_score),
                 "top_burst_id": top_burst["burst_id"],
                 "top_burst_score": top_burst["anomaly_score"],
+                "contributing_burst_count": contributing_burst_count,
                 "burst_count": burst_count_by_individual[individual],
                 "scored_burst_count": len(ranked_burst_refs),
                 "ranked_burst_refs": ranked_burst_refs,
@@ -314,6 +379,7 @@ def rank_individuals(scored_bursts: list[dict], config: dict | None = None) -> d
 
     ranked_individuals.sort(
         key=lambda row: (
+            -row["individual_score"],
             -row["top_burst_score"],
             row["individual"],
             str(row["ranked_burst_refs"][0].get("set_name", "")),
@@ -325,10 +391,16 @@ def rank_individuals(scored_bursts: list[dict], config: dict | None = None) -> d
 
     if not ranked_individuals:
         warnings.append("No scored automatic bursts are available for individual ranking.")
+    ranking_method = {
+        RANKING_AGGREGATION_MAX: "maximum_burst_anomaly_score",
+        RANKING_AGGREGATION_MARGIN_SUM: "sum_positive_outlier_decision_margin",
+        RANKING_AGGREGATION_SCORE_SUM: "sum_burst_anomaly_score",
+    }[aggregation]
     return {
         "run_status": "completed" if ranked_individuals else "unresolved",
         "ranking_scope": "individual",
-        "ranking_method": "maximum_burst_anomaly_score",
+        "ranking_method": ranking_method,
+        "aggregation": aggregation,
         "input_burst_count": len(scored_bursts),
         "scored_burst_count": sum(
             row["scored_burst_count"] for row in ranked_individuals

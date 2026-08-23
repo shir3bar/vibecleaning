@@ -17,7 +17,7 @@ from .bursts import (
     DEFAULT_BURST_GAP_QUANTILE,
     DEFAULT_BURST_GAP_SECONDS,
 )
-from .review_annotations import confirmed_exclusion_scopes, load_review_annotations
+from .review_annotations import load_review_annotations
 
 
 RESTORABLE_ANALYSIS_OUTPUTS = {
@@ -68,14 +68,23 @@ def _review_exclusion_signature(project_dir: Path, dataset_id: str, logical_name
     else:
         sidecar_path = project_dir / str(sidecar.get("path") or "")
         annotations = load_review_annotations(sidecar_path)
-    fix_keys, individual_tracks = confirmed_exclusion_scopes(
-        annotations,
-        source_artifact=logical_name,
-    )
-    payload = {
-        "fix_keys": sorted(fix_keys),
-        "individual_tracks": sorted([list(item) for item in individual_tracks]),
-    }
+    payload = []
+    for annotation in annotations:
+        if annotation.get("status") != "confirmed":
+            continue
+        source_artifact = str(annotation.get("source_artifact") or "")
+        if source_artifact and source_artifact != logical_name:
+            continue
+        scope = dict(annotation.get("scope") or {})
+        payload.append({
+            "source_artifact": source_artifact,
+            "kind": str(scope.get("kind") or "fix"),
+            "row_ranges": scope.get("row_ranges") or [],
+            "source_rows": scope.get("source_rows") or [],
+            "individual": str(scope.get("individual") or ""),
+            "set_name": str(scope.get("set_name") or ""),
+        })
+    payload.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -100,6 +109,7 @@ def _analysis_parameters_match(
     burst_gap_seconds: float,
     burst_gap_quantile: float,
     feature_set: str,
+    ranking_method: str,
 ) -> tuple[bool, list[str]]:
     if action not in RESTORABLE_ANALYSIS_OUTPUTS:
         return True, []
@@ -115,6 +125,12 @@ def _analysis_parameters_match(
         reasons.append("burst gap quantile differs")
     if stored_feature_set != feature_set:
         reasons.append("feature set differs")
+    if (
+        action == "run_burst_anomaly_ranking"
+        and str(parameters.get("ranking_method") or "isolation_forest")
+        != ranking_method
+    ):
+        reasons.append("ranking method differs")
     return not reasons, reasons
 
 
@@ -173,6 +189,7 @@ def build_movement_analysis_history(
     burst_gap_seconds: float = DEFAULT_BURST_GAP_SECONDS,
     burst_gap_quantile: float = DEFAULT_BURST_GAP_QUANTILE,
     feature_set: str = "movement_only",
+    ranking_method: str = "isolation_forest",
 ) -> dict:
     ancestor_dataset_ids = _ancestor_dataset_ids(project_dir, dataset_id)
     signature_cache: dict[str, tuple[str, str]] = {}
@@ -233,6 +250,7 @@ def build_movement_analysis_history(
             burst_gap_seconds=burst_gap_seconds,
             burst_gap_quantile=burst_gap_quantile,
             feature_set=feature_set,
+            ranking_method=ranking_method,
         )
         reasons.extend(parameter_reasons)
         realized_outputs = _realized_output_names(project_dir, analysis)

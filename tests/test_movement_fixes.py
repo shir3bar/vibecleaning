@@ -1963,6 +1963,7 @@ def create_saved_movement_analysis(
     action: str = "run_burst_anomaly_ranking",
     output_name: str = "burst_anomaly_ranking.json",
     feature_set: str = "movement_only",
+    ranking_method: str = "isolation_forest",
 ):
     study_dir = tmp_path / "data" / "movement_clean" / "test_study"
     script = f'''import json
@@ -1993,6 +1994,7 @@ Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text(json.dumps({{"run_statu
                 "burst_gap_seconds": 60,
                 "burst_gap_quantile": 0.75,
                 "feature_set": feature_set,
+                "ranking_method": ranking_method,
             },
         },
     )
@@ -2070,6 +2072,30 @@ def test_movement_analysis_history_explains_parameter_mismatches(tmp_path):
         "burst gap quantile differs",
         "feature set differs",
     }
+
+
+def test_movement_analysis_history_distinguishes_ranking_aggregation(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+    saved = create_saved_movement_analysis(tmp_path, dataset_id=dataset_id)
+
+    response = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/analyses",
+        params={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": "60",
+            "burst_gap_quantile": "0.75",
+            "feature_set": "movement_only",
+            "ranking_method": "isolation_forest_decision_margin",
+        },
+    )
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["analysis_id"] == saved["analysis"]["analysis_id"]
+    assert item["compatible"] is False
+    assert item["compatibility_reasons"] == ["ranking method differs"]
 
 
 def test_movement_analysis_history_survives_sidecar_only_dataset_steps(tmp_path):

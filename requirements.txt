@@ -7,3 +7,4 @@ scikit-learn
 shapely
 osmium
 pandas
+rdata>=1.1,<2

@@ -130,6 +130,18 @@ def test_score_bursts_adds_scores_only_to_burst_rows_and_prioritizes_outlier():
         row["anomaly_score"] for row in result["scored_bursts"]
     )
     assert scored_outlier["anomaly_score"] > result["scored_bursts"][0]["anomaly_score"]
+    assert result["decision_boundary"] == 0.0
+    assert isinstance(result["score_offset"], float)
+    assert all(
+        row["decision_function"]
+        == pytest.approx(-row["anomaly_score"] - result["score_offset"])
+        for row in result["scored_bursts"]
+    )
+    assert all(
+        row["outlier_margin"] == pytest.approx(max(0.0, -row["decision_function"]))
+        and row["is_model_outlier"] is (row["decision_function"] < 0.0)
+        for row in result["scored_bursts"]
+    )
     assert all(
         not any("anomaly" in str(fix_key).lower() for fix_key in row["fix_keys"])
         for row in result["scored_bursts"]
@@ -607,6 +619,79 @@ def test_rank_individuals_uses_highest_burst_score_globally_per_individual():
     ]
     assert alpha["ranked_burst_refs"][0]["set_name"] == "test"
     assert alpha["ranked_burst_refs"][0]["fix_keys"] == ["alpha_test"]
+    assert alpha["individual_score"] == alpha["top_burst_score"]
+
+
+def test_rank_individuals_can_sum_positive_isolation_forest_decision_margins():
+    scored_bursts = [
+        {
+            "burst_id": "alpha:burst_1",
+            "individual": "alpha",
+            "anomaly_score": 0.70,
+            "decision_function": -0.12,
+            "outlier_margin": 0.12,
+        },
+        {
+            "burst_id": "alpha:burst_2",
+            "individual": "alpha",
+            "anomaly_score": 0.65,
+            "decision_function": -0.10,
+            "outlier_margin": 0.10,
+        },
+        {
+            "burst_id": "alpha:burst_3",
+            "individual": "alpha",
+            "anomaly_score": 0.20,
+            "decision_function": 0.30,
+            "outlier_margin": 0.0,
+        },
+        {
+            "burst_id": "beta:burst_1",
+            "individual": "beta",
+            "anomaly_score": 0.95,
+            "decision_function": -0.20,
+            "outlier_margin": 0.20,
+        },
+    ]
+
+    result = rank_individuals(
+        scored_bursts,
+        config={"aggregation": "sum_outlier_margin"},
+    )
+
+    assert result["aggregation"] == "sum_outlier_margin"
+    assert result["ranking_method"] == "sum_positive_outlier_decision_margin"
+    assert [row["individual"] for row in result["ranked_individuals"]] == [
+        "alpha",
+        "beta",
+    ]
+    alpha, beta = result["ranked_individuals"]
+    assert alpha["individual_score"] == pytest.approx(0.22)
+    assert alpha["contributing_burst_count"] == 2
+    assert alpha["top_burst_score"] == 0.70
+    assert beta["individual_score"] == pytest.approx(0.20)
+
+
+def test_rank_individuals_can_sum_source_outlier_counts_across_bursts():
+    scored_bursts = [
+        {"burst_id": "alpha:burst_1", "individual": "alpha", "anomaly_score": 2},
+        {"burst_id": "alpha:burst_2", "individual": "alpha", "anomaly_score": 3},
+        {"burst_id": "beta:burst_1", "individual": "beta", "anomaly_score": 4},
+    ]
+
+    result = rank_individuals(
+        scored_bursts,
+        config={"aggregation": "sum_anomaly_score"},
+    )
+
+    assert result["aggregation"] == "sum_anomaly_score"
+    assert result["ranking_method"] == "sum_burst_anomaly_score"
+    assert [row["individual"] for row in result["ranked_individuals"]] == [
+        "alpha",
+        "beta",
+    ]
+    assert result["ranked_individuals"][0]["individual_score"] == 5.0
+    assert result["ranked_individuals"][0]["top_burst_score"] == 3.0
 
 
 def test_rank_individuals_breaks_equal_bursts_by_track_and_skips_unscored_rows():
@@ -708,7 +793,12 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert 'Feature set: ${String(modelFit.feature_set).replaceAll("_", " ")}' in source
     assert "anomalyFeatureSetLabel" in source
     assert "Running burst anomaly ranking analysis (${featureSetLabel})" in source
-    assert "Created ${this.anomalyFeatureSetLabel(returnedFeatureSet)} burst anomaly ranking analysis" in source
+    assert "Created ${this.rankingMethodLabel(returnedMethod)} ranking analysis" in source
+    assert '<option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>' in ranking_sheet
+    assert "sum_positive_outlier_decision_margin" not in source
+    assert "Individual score" in renderer
+    assert "Top burst score" in renderer
+    assert "decision margin" in source
     assert "modelFit.excluded_by_feature_set" in source
     assert "Fitted feature sample:" in source
     assert 'data-role="side-tab-ranking">Burst Ranking' in source
@@ -787,6 +877,7 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert "+${escapeHtml(formatCount(moreCount))} more" in source
     assert "handleAnomalyRankingClick" in source
     assert "inspectRankingBurst" in source
+    assert "isolateIndividual: true" in ranking_handler
     assert "getRankingBurstPath" in source
     assert "this.zoomToPath(path)" in ranking_handler
     assert "ref.fix_keys" in ranking_handler
@@ -841,6 +932,8 @@ def test_burst_anomaly_route_creates_analysis_artifact_without_dataset_mutation(
     assert summary["burst_gap"]["effective_seconds"] == 60.0
     assert summary["burst_gap"]["quantile"] == 0.75
     assert summary["model_fit"]["model"] == "IsolationForest"
+    assert summary["ranking_method"] == "isolation_forest"
+    assert summary["model_fit"]["ranking_method"] == "isolation_forest"
     assert summary["model_fit"]["feature_set"] == "movement_only"
     assert summary["model_fit"]["scored_burst_count"] == 4
     assert summary["model_fit"]["preprocessing"]["scaling"] == "none"
@@ -850,6 +943,7 @@ def test_burst_anomaly_route_creates_analysis_artifact_without_dataset_mutation(
     assert summary["model_fit"]["excluded_by_feature_set"] == {}
     assert "scored_bursts" not in summary
     assert summary["individual_ranking_summary"]["ranking_scope"] == "individual"
+    assert summary["individual_ranking_summary"]["aggregation"] == "maximum_anomaly_score"
     assert len(summary["ranked_individuals"]) == 2
     assert all("ranked_burst_refs" in row for row in summary["ranked_individuals"])
     assert all(row["ranked_burst_refs"] for row in summary["ranked_individuals"])
@@ -900,6 +994,58 @@ def test_burst_anomaly_route_creates_analysis_artifact_without_dataset_mutation(
     assert state["project"]["current_dataset_id"] == dataset_id
     assert state["counts"]["analyses"] == 1
     assert state["counts"]["steps"] == 0
+
+
+def test_burst_anomaly_route_supports_total_decision_margin_ranking(tmp_path):
+    client, _, dataset_id = _create_anomaly_analysis_client(tmp_path)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/run-burst-anomaly-ranking",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": 60,
+            "ranking_method": "isolation_forest_decision_margin",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["analysis"]["parameters"]["ranking_method"] == (
+        "isolation_forest_decision_margin"
+    )
+    assert "total decision margin" in payload["analysis"]["title"]
+    summary = payload["summary"]
+    assert summary["ranking_method"] == "isolation_forest_decision_margin"
+    assert summary["model_fit"]["ranking_method"] == (
+        "isolation_forest_decision_margin"
+    )
+    assert summary["individual_ranking_summary"]["aggregation"] == (
+        "sum_outlier_margin"
+    )
+    assert summary["individual_ranking_summary"]["ranking_method"] == (
+        "sum_positive_outlier_decision_margin"
+    )
+    assert all("individual_score" in row for row in summary["ranked_individuals"])
+
+
+def test_burst_anomaly_route_rejects_unknown_ranking_method(tmp_path):
+    client, _, dataset_id = _create_anomaly_analysis_client(tmp_path)
+
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/run-burst-anomaly-ranking",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "ranking_method": "mean_raw_score",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "Invalid ranking_method"
 
 
 def test_burst_anomaly_route_accepts_movement_plus_context_feature_set(tmp_path):

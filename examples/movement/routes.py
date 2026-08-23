@@ -66,8 +66,9 @@ from .analysis_history import (
     build_movement_analysis_history,
     review_exclusion_signature,
 )
-from .catalog import get_study_dir, list_families, list_studies
+from .catalog import family_names, get_study_dir, list_families, list_studies
 from .review_annotations import (
+    annotation_applies,
     apply_review_annotation_counts,
     apply_review_annotations,
     build_review_projection,
@@ -85,7 +86,23 @@ from .summary import (
     build_movement_fixes,
     build_movement_overview,
     build_movement_summary,
-    list_movement_individuals,
+)
+from .sources import (
+    source_adapter,
+    source_fixes,
+    source_individuals,
+    source_overview,
+    source_summary,
+)
+from .rds_index import (
+    build_rds_report_inputs,
+    build_rds_binary_columns,
+    ensure_rds_index,
+    rds_burst_feature_rows,
+    rds_report_row_ranges,
+    resolve_rds_review_scope,
+    source_outlier_ranking,
+    source_rows_from_fix_keys,
 )
 
 
@@ -93,6 +110,14 @@ ArtifactFilter = Callable[[dict], bool]
 MAX_REPORT_SNAPSHOTS = 100
 MAX_REPORT_SNAPSHOT_BYTES = 20 * 1024 * 1024
 MAX_BACKGROUND_ANALYSIS_JOBS = 100
+RANKING_ISOLATION_FOREST = "isolation_forest"
+RANKING_ISOLATION_FOREST_DECISION_MARGIN = "isolation_forest_decision_margin"
+RANKING_SOURCE_IS_OUTLIER = "source_is_outlier"
+SUPPORTED_RANKING_METHODS = {
+    RANKING_ISOLATION_FOREST,
+    RANKING_ISOLATION_FOREST_DECISION_MARGIN,
+    RANKING_SOURCE_IS_OUTLIER,
+}
 
 
 def _edit_locked_response(exc: EditLockedError) -> JSONResponse:
@@ -262,16 +287,53 @@ BURST_ANOMALY_ANALYSIS_SCRIPT = build_self_contained_script(
     ANOMALY_ANALYSIS_TEMPLATE_PATH,
     MOVEMENT_ANOMALY_MODULES,
 )
+SOURCE_OUTLIER_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name(
+    "source_outlier_analysis_template.py"
+)
+SOURCE_OUTLIER_ANALYSIS_SCRIPT = build_self_contained_script(
+    SOURCE_OUTLIER_ANALYSIS_TEMPLATE_PATH,
+    (
+        "examples.movement.burst_feature_matrix",
+        "examples.movement.anomaly_ranking",
+    ),
+)
+RDS_ANOMALY_ANALYSIS_TEMPLATE_PATH = Path(__file__).with_name(
+    "rds_anomaly_analysis_template.py"
+)
+RDS_ANOMALY_ANALYSIS_SCRIPT = build_self_contained_script(
+    RDS_ANOMALY_ANALYSIS_TEMPLATE_PATH,
+    (
+        "examples.movement.burst_feature_matrix",
+        "examples.movement.anomaly_ranking",
+    ),
+)
 
 EXPORT_REVIEWED_CSV_TEMPLATE_PATH = Path(__file__).with_name("export_reviewed_csv_analysis_template.py")
 EXPORT_REVIEWED_CSV_SCRIPT = build_self_contained_script(
     EXPORT_REVIEWED_CSV_TEMPLATE_PATH,
     MOVEMENT_REVIEW_MODULES,
 )
+EXPORT_REVIEWED_RDS_TEMPLATE_PATH = Path(__file__).with_name(
+    "export_reviewed_rds_analysis_template.py"
+)
+EXPORT_REVIEWED_RDS_SCRIPT = build_self_contained_script(
+    EXPORT_REVIEWED_RDS_TEMPLATE_PATH,
+    (
+        *MOVEMENT_REVIEW_MODULES,
+        "app.state",
+        "examples.movement.rds_index",
+        "examples.movement.rds_export",
+    ),
+)
 
 ANNOTATE_SCOPE_TEMPLATE_PATH = Path(__file__).with_name("annotate_scope_step_template.py")
 ANNOTATE_SCOPE_SCRIPT = build_self_contained_script(
     ANNOTATE_SCOPE_TEMPLATE_PATH,
+    MOVEMENT_REVIEW_MODULES,
+)
+RDS_REVIEW_STEP_TEMPLATE_PATH = Path(__file__).with_name("rds_review_step_template.py")
+RDS_REVIEW_STEP_SCRIPT = build_self_contained_script(
+    RDS_REVIEW_STEP_TEMPLATE_PATH,
     MOVEMENT_REVIEW_MODULES,
 )
 
@@ -348,6 +410,94 @@ def _validate_dismissals(value: object) -> list[dict]:
     except ValueError as exc:
         message = str(exc).replace("confirmation", "dismissal").replace("Confirm", "Dismiss")
         raise ValueError(message) from exc
+
+
+def _rds_resolution_records(
+    annotations: list[dict],
+    raw_requests: object,
+    *,
+    status: str,
+    note: str,
+) -> list[dict]:
+    if not isinstance(raw_requests, list) or not raw_requests:
+        raise ValueError("Choose at least one suspected issue")
+    parents = {
+        str(item.get("annotation_id") or ""): item
+        for item in annotations
+        if item.get("status") == "suspected" and not item.get("parent_annotation_id")
+    }
+    resolutions = [
+        item
+        for item in annotations
+        if item.get("status") in {"confirmed", "dismissed"}
+    ]
+
+    def applies_to_token(annotation: dict, token: str) -> bool:
+        scope = dict(annotation.get("scope") or {})
+        source_rows = scope.get("source_rows") or []
+        if source_rows:
+            selected = source_rows_from_fix_keys([token])[0]
+            for source in source_rows:
+                if str(source.get("logical_name") or "") != selected["logical_name"]:
+                    continue
+                row_number = int(selected["row_ranges"][0][0])
+                return any(
+                    int(start) <= row_number <= int(end)
+                    for start, end in source.get("row_ranges") or []
+                )
+            return False
+        return annotation_applies(
+            annotation,
+            fix_key=token,
+            individual="",
+            set_name="train",
+        )
+    records = []
+    for raw in raw_requests:
+        if not isinstance(raw, dict):
+            raise ValueError("Invalid issue resolution")
+        parent_id = _validate_required_text(
+            raw.get("parent_annotation_id"),
+            label="Suspected issue id",
+            max_length=240,
+        )
+        parent = parents.get(parent_id)
+        if parent is None:
+            raise ValueError(f"Suspected issue was not found: {parent_id}")
+        fix_keys = _validate_fix_keys(raw.get("fix_keys"))
+        selected_tokens = set(fix_keys)
+        if not all(applies_to_token(parent, token) for token in selected_tokens):
+            raise ValueError(f"Selected fixes do not belong to suspected issue: {parent_id}")
+        if any(
+            str(item.get("parent_annotation_id") or "") == parent_id
+            and applies_to_token(item, token)
+            for item in resolutions
+            for token in selected_tokens
+        ):
+            raise ValueError(f"Selected fixes are already resolved: {parent_id}")
+        parent_scope = dict(parent.get("scope") or {})
+        records.append({
+            "annotation_kind": "confirmation" if status == "confirmed" else "dismissal",
+            "parent_annotation_id": parent_id,
+            "status": status,
+            "origin": str(parent.get("origin") or "manual"),
+            "issue_type": str(parent.get("issue_type") or ""),
+            "issue_field": str(parent.get("issue_field") or ""),
+            "issue_threshold": str(parent.get("issue_threshold") or ""),
+            "comment": note,
+            "owner_question": str(parent.get("owner_question") or ""),
+            "source_analysis_id": str(parent.get("source_analysis_id") or ""),
+            "scope": {
+                "kind": "confirmation" if status == "confirmed" else "dismissal",
+                "source_rows": source_rows_from_fix_keys(fix_keys),
+                "burst_id": str(parent_scope.get("burst_id") or ""),
+                "individual": str(parent_scope.get("individual") or ""),
+                "set_name": str(parent_scope.get("set_name") or ""),
+                "burst_source": str(parent_scope.get("burst_source") or ""),
+            },
+            "resolved_fix_count": len(set(fix_keys)),
+        })
+    return records
 
 
 def _validate_individual_review_decision(value: object) -> dict:
@@ -775,9 +925,15 @@ def register_movement_routes(
     overview_fix_limit: int | None = None,
     overview_series_points: int | None = None,
     background_anomaly_ranking: bool = False,
+    source_format: str = "csv",
 ):
     data_root = data_root.resolve()
-    configured_families = set(allowed_families or [])
+    configured_source = source_adapter(source_format)
+    configured_families = (
+        set(allowed_families)
+        if allowed_families is not None
+        else set(family_names(source_format=configured_source.source_format))
+    )
     configured_overview_fix_limit = (
         None if overview_fix_limit is None else max(0, int(overview_fix_limit))
     )
@@ -843,9 +999,16 @@ def register_movement_routes(
         return get_study_dir(data_root, require_configured_family(family_name), study_name)
 
     def configured_artifact_filter(artifact: dict) -> bool:
-        logical_name = str(artifact.get("logical_name") or "")
-        is_csv = logical_name.lower().endswith(".csv")
-        return is_csv and (artifact_filter is None or artifact_filter(artifact))
+        return configured_source.accepts(artifact) and (
+            artifact_filter is None or artifact_filter(artifact)
+        )
+
+    def validate_requested_bundle(body: dict, signature: str) -> None:
+        requested = str(body.get("source_bundle_signature") or "").strip()
+        if requested and requested != signature:
+            raise EditConflictError(
+                "The RDS source bundle changed. Reload the study before applying this selection."
+            )
 
     def current_actor(request: Request) -> Actor | None:
         return request_actor(request) if authentication_enabled else None
@@ -1317,6 +1480,14 @@ def register_movement_routes(
             return value
         raise ValueError("Invalid feature_set")
 
+    def parse_ranking_method(raw_value: object) -> str:
+        value = str(raw_value or RANKING_ISOLATION_FOREST).strip().lower()
+        if value not in SUPPORTED_RANKING_METHODS:
+            raise ValueError("Invalid ranking_method")
+        if value == RANKING_SOURCE_IS_OUTLIER and not configured_source.bundle_scoped:
+            raise ValueError("source_is_outlier ranking requires an RDS movement study")
+        return value
+
     def parse_optional_individual(raw_value: object) -> str:
         if raw_value in (None, ""):
             return ""
@@ -1446,6 +1617,12 @@ def register_movement_routes(
                 study_dir,
                 configured_artifact_filter,
             )
+            payload["source_format"] = configured_source.source_format
+            payload["source_artifacts"] = [
+                str(item.get("logical_name") or "")
+                for item in payload["dataset"].get("artifacts") or []
+                if configured_artifact_filter(item)
+            ]
             payload["edit_profile"] = combined_edit_profile(
                 study_dir,
                 str(payload["dataset_id"]),
@@ -1488,20 +1665,32 @@ def register_movement_routes(
                 study_dir, dataset_id, logical_name
             )
             annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
-            confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
-                annotations,
-                source_artifact=logical_name,
+            confirmed_fix_keys, confirmed_individual_tracks = (
+                (set(), set())
+                if configured_source.bundle_scoped
+                else confirmed_exclusion_scopes(
+                    annotations,
+                    source_artifact=logical_name,
+                )
             )
-            payload = await run_in_threadpool(
-                build_movement_overview,
-                artifact_path,
-                confirmed_fix_keys=confirmed_fix_keys,
-                confirmed_individual_tracks=confirmed_individual_tracks,
-                burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
-                burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
-                burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
-                overview_fix_limit=configured_overview_fix_limit,
-                max_series_points=configured_overview_series_points,
+            overview_options = {
+                "confirmed_fix_keys": confirmed_fix_keys,
+                "confirmed_individual_tracks": confirmed_individual_tracks,
+                "burst_gap_mode": parse_burst_gap_mode(burst_gap_mode),
+                "burst_gap_seconds": parse_burst_gap_seconds(burst_gap_seconds),
+                "burst_gap_quantile": parse_burst_gap_quantile(burst_gap_quantile),
+            }
+            if configured_overview_fix_limit is not None:
+                overview_options["overview_fix_limit"] = configured_overview_fix_limit
+            if configured_overview_series_points is not None:
+                overview_options["max_series_points"] = configured_overview_series_points
+            payload, current_source_signature = await run_in_threadpool(
+                source_overview,
+                configured_source,
+                study_dir,
+                dataset_id,
+                logical_name,
+                **overview_options,
             )
             visible_annotations = display_annotations(study_dir, dataset_id, annotations)
             payload = apply_review_annotations(
@@ -1509,17 +1698,15 @@ def register_movement_routes(
                 visible_annotations,
                 source_artifact=logical_name,
             )
-            result = apply_review_annotation_counts(
-                    payload,
-                    artifact_path,
-                    visible_annotations,
-                    source_artifact=logical_name,
-                )
-            result["source_signature"] = artifact_signature(artifact_entry)
+            result = payload if configured_source.bundle_scoped else apply_review_annotation_counts(
+                payload,
+                artifact_path,
+                visible_annotations,
+                source_artifact=logical_name,
+            )
+            result["source_signature"] = current_source_signature
             result["exclusion_signature"] = review_exclusion_signature(
-                study_dir,
-                dataset_id,
-                logical_name,
+                study_dir, dataset_id, logical_name
             )
             return JSONResponse(result)
         except (ValueError, ProjectStateError) as exc:
@@ -1553,17 +1740,30 @@ def register_movement_routes(
             individuals = parse_optional_individuals(
                 request.query_params.getlist("individuals")
             )
-            projection = await run_in_threadpool(
-                build_review_projection,
-                artifact_path,
-                visible_annotations,
-                source_artifact=logical_name,
-                individuals=individuals,
-            )
+            if configured_source.bundle_scoped:
+                bundle, _index_path = await run_in_threadpool(
+                    ensure_rds_index, study_dir, dataset_id
+                )
+                projection = {
+                    "fixes": [],
+                    "segments": [],
+                    "stats": {},
+                    "source_format": "rds",
+                }
+                current_source_signature = bundle.signature
+            else:
+                projection = await run_in_threadpool(
+                    build_review_projection,
+                    artifact_path,
+                    visible_annotations,
+                    source_artifact=logical_name,
+                    individuals=individuals,
+                )
+                current_source_signature = artifact_signature(artifact_entry)
             projection.update(
                 {
                     "dataset": dataset,
-                    "source_signature": artifact_signature(artifact_entry),
+                    "source_signature": current_source_signature,
                     "exclusion_signature": review_exclusion_signature(
                         study_dir,
                         dataset_id,
@@ -1611,24 +1811,41 @@ def register_movement_routes(
             normalized_review_status = str(review_status or "").strip().lower()
             if normalized_review_status not in {"", "reviewed", "suspected", "confirmed"}:
                 raise ValueError("Invalid review status")
-            requested_limit = parse_optional_limit(limit) if limit not in (None, "") else DEFAULT_FIX_LIMIT
+            requested_limit = (
+                parse_optional_limit(limit)
+                if limit not in (None, "")
+                else None if configured_source.bundle_scoped
+                else DEFAULT_FIX_LIMIT
+            )
             annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
-            annotation_fix_keys, annotation_individuals = _review_annotation_candidates(
-                annotations,
-                logical_name=logical_name,
+            annotation_fix_keys, annotation_individuals = (
+                (set(), set())
+                if configured_source.bundle_scoped
+                else _review_annotation_candidates(
+                    annotations,
+                    logical_name=logical_name,
+                )
             )
-            confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
-                annotations,
-                source_artifact=logical_name,
+            confirmed_fix_keys, confirmed_individual_tracks = (
+                (set(), set())
+                if configured_source.bundle_scoped
+                else confirmed_exclusion_scopes(
+                    annotations,
+                    source_artifact=logical_name,
+                )
             )
-            payload = await run_in_threadpool(
-                build_movement_fixes,
-                artifact_path,
+            payload, _current_source_signature = await run_in_threadpool(
+                source_fixes,
+                configured_source,
+                study_dir,
+                dataset_id,
+                logical_name,
                 individuals=individuals or None,
                 additional_review_fix_keys=annotation_fix_keys if normalized_review_status else None,
                 additional_review_individuals=annotation_individuals if normalized_review_status else None,
                 confirmed_fix_keys=confirmed_fix_keys,
                 confirmed_individual_tracks=confirmed_individual_tracks,
+                annotations=annotations if configured_source.bundle_scoped else None,
                 start_ms=parse_optional_int(start_ms, label="start_ms"),
                 end_ms=parse_optional_int(end_ms, label="end_ms"),
                 review_status=normalized_review_status,
@@ -1646,12 +1863,13 @@ def register_movement_routes(
                 visible_annotations,
                 source_artifact=logical_name,
             )
-            payload = apply_review_annotation_counts(
-                payload,
-                artifact_path,
-                visible_annotations,
-                source_artifact=logical_name,
-            )
+            if not configured_source.bundle_scoped:
+                payload = apply_review_annotation_counts(
+                    payload,
+                    artifact_path,
+                    visible_annotations,
+                    source_artifact=logical_name,
+                )
             if normalized_review_status:
                 payload = _filter_review_status_payload(
                     payload,
@@ -1659,6 +1877,47 @@ def register_movement_routes(
                     limit=requested_limit,
                 )
             return JSONResponse(payload)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 404)
+
+    @app.get(
+        "/api/apps/movement/family/{family_name}/study/{study_name}/"
+        "dataset/{dataset_id}/fixes-binary"
+    )
+    async def get_movement_study_fixes_binary(
+        family_name: str,
+        study_name: str,
+        dataset_id: str,
+        request: Request,
+    ):
+        try:
+            if not configured_source.bundle_scoped:
+                raise ProjectStateError("Binary study fixes are available for RDS studies")
+            study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
+            bundle, index_path = await run_in_threadpool(
+                ensure_rds_index, study_dir, dataset_id
+            )
+            annotations = _load_dataset_review_annotations(
+                study_dir, dataset_id=dataset_id
+            )
+            visible_annotations = display_annotations(study_dir, dataset_id, annotations)
+            payload = await run_in_threadpool(
+                build_rds_binary_columns,
+                index_path,
+                bundle_signature=bundle.signature,
+                annotations=visible_annotations,
+            )
+            return StreamingResponse(
+                iter((payload,)),
+                media_type="application/vnd.vibecleaning.movement-columns",
+                headers={
+                    "Content-Length": str(len(payload)),
+                    "X-Movement-Source-Signature": bundle.signature,
+                },
+            )
+        except ReviewForbiddenError as exc:
+            return json_error(str(exc), 404)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
@@ -1675,13 +1934,20 @@ def register_movement_routes(
             require_read(request, study_dir)
             _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
             annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
-            confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
-                annotations,
-                source_artifact=logical_name,
+            confirmed_fix_keys, confirmed_individual_tracks = (
+                (set(), set())
+                if configured_source.bundle_scoped
+                else confirmed_exclusion_scopes(
+                    annotations,
+                    source_artifact=logical_name,
+                )
             )
-            payload = await run_in_threadpool(
-                build_movement_summary,
-                artifact_path,
+            payload, _current_source_signature = await run_in_threadpool(
+                source_summary,
+                configured_source,
+                study_dir,
+                dataset_id,
+                logical_name,
                 confirmed_fix_keys=confirmed_fix_keys,
                 confirmed_individual_tracks=confirmed_individual_tracks,
             )
@@ -1691,14 +1957,14 @@ def register_movement_routes(
                 visible_annotations,
                 source_artifact=logical_name,
             )
-            return JSONResponse(
-                apply_review_annotation_counts(
-                    payload,
-                    artifact_path,
-                    visible_annotations,
-                    source_artifact=logical_name,
-                )
-            )
+            if configured_source.bundle_scoped:
+                return JSONResponse(payload)
+            return JSONResponse(apply_review_annotation_counts(
+                payload,
+                artifact_path,
+                visible_annotations,
+                source_artifact=logical_name,
+            ))
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
@@ -1713,6 +1979,7 @@ def register_movement_routes(
         burst_gap_seconds: float | None = None,
         burst_gap_quantile: float | None = None,
         feature_set: str = "movement_only",
+        ranking_method: str = "isolation_forest",
     ):
         try:
             study_dir = configured_study_dir(family_name, study_name)
@@ -1720,8 +1987,8 @@ def register_movement_routes(
             normalized_dataset_id = validate_path_part(dataset_id, label="dataset")
             normalized_logical_name = validate_path_part(logical_name, label="artifact")
             get_dataset_artifact(study_dir, normalized_dataset_id, normalized_logical_name)
-            return JSONResponse(
-                await run_in_threadpool(
+            method = parse_ranking_method(ranking_method)
+            history = await run_in_threadpool(
                     build_movement_analysis_history,
                     study_dir,
                     dataset_id=normalized_dataset_id,
@@ -1730,8 +1997,40 @@ def register_movement_routes(
                     burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
                     burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
                     feature_set=parse_anomaly_feature_set(feature_set),
+                    ranking_method=method,
                 )
-            )
+            if configured_source.bundle_scoped:
+                bundle, _index_path = await run_in_threadpool(
+                    ensure_rds_index, study_dir, normalized_dataset_id
+                )
+                exclusion_signature = review_exclusion_signature(
+                    study_dir, normalized_dataset_id, normalized_logical_name
+                )
+                latest = {}
+                for item in history.get("items") or []:
+                    params = dict(item.get("parameters") or {})
+                    reasons = []
+                    if item.get("action") == "run_burst_anomaly_ranking":
+                        if params.get("source_bundle_signature") != bundle.signature:
+                            reasons.append("source bundle differs")
+                        if params.get("burst_definition_signature") != "source:burst_:v1":
+                            reasons.append("source burst definition differs")
+                        if params.get("review_exclusion_signature") != exclusion_signature:
+                            reasons.append("confirmed exclusion state differs")
+                        if str(params.get("feature_set") or "movement_only") != parse_anomaly_feature_set(feature_set):
+                            reasons.append("feature set differs")
+                        if str(params.get("ranking_method") or "isolation_forest") != method:
+                            reasons.append("ranking method differs")
+                    else:
+                        reasons.append("RDS feature-space restoration is unavailable")
+                    item["compatible"] = not reasons
+                    item["compatibility_reasons"] = reasons
+                    if item["compatible"] and item["action"] not in latest:
+                        latest[item["action"]] = item["analysis_id"]
+                history["source_signature"] = bundle.signature
+                history["confirmed_exclusion_signature"] = exclusion_signature
+                history["latest_compatible_by_action"] = latest
+            return JSONResponse(history)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
@@ -1773,6 +2072,7 @@ def register_movement_routes(
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             dataset = load_dataset(study_dir, dataset_id)
             get_dataset_artifact(study_dir, dataset_id, logical_name)
+            ranking_method = parse_ranking_method(body.get("ranking_method"))
             feature_set = parse_anomaly_feature_set(body.get("feature_set"))
             feature_set_label = (
                 "movement + OSM context"
@@ -1780,25 +2080,107 @@ def register_movement_routes(
                 else "movement only"
             )
             user = effective_user(request, body)
+            input_artifacts = _movement_analysis_input_names(dataset, logical_name)
+            input_attachments = []
+            analysis_script = BURST_ANOMALY_ANALYSIS_SCRIPT
+            aggregation_label = (
+                "total decision margin"
+                if ranking_method == RANKING_ISOLATION_FOREST_DECISION_MARGIN
+                else "worst burst"
+            )
+            analysis_title = (
+                f"Rank automatic movement bursts by Isolation Forest "
+                f"{aggregation_label} ({feature_set_label}) for {logical_name}"
+            )
+            parameters = {
+                "app": "movement",
+                "action": "run_burst_anomaly_ranking",
+                "ranking_method": ranking_method,
+                "target_artifact": logical_name,
+                "dataset_id": dataset_id,
+                "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),
+                "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
+                "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
+                "feature_set": feature_set,
+                "user": user,
+            }
+            if configured_source.bundle_scoped:
+                bundle, index_path = await run_in_threadpool(
+                    ensure_rds_index, study_dir, dataset_id
+                )
+                annotations = _load_dataset_review_annotations(
+                    study_dir, dataset_id=dataset_id
+                )
+                exclusion_signature = review_exclusion_signature(
+                    study_dir, dataset_id, logical_name
+                )
+                input_artifacts = [
+                    str(item.get("logical_name") or "")
+                    for item in dataset.get("artifacts") or []
+                    if configured_source.accepts(item)
+                ]
+                if any(
+                    item.get("logical_name") == "movement_review_annotations.json"
+                    for item in dataset.get("artifacts") or []
+                ):
+                    input_artifacts.append("movement_review_annotations.json")
+                parameters.update({
+                    "source_bundle_signature": bundle.signature,
+                    "burst_definition_signature": "source:burst_:v1",
+                    "review_exclusion_signature": exclusion_signature,
+                })
+                if ranking_method == RANKING_SOURCE_IS_OUTLIER:
+                    source_ranking = await run_in_threadpool(
+                        source_outlier_ranking, index_path, annotations
+                    )
+                    attachment = {
+                        "source_bundle_signature": bundle.signature,
+                        "burst_definition_signature": "source:burst_:v1",
+                        "review_exclusion_signature": exclusion_signature,
+                        "scored_bursts": source_ranking["scored_bursts"],
+                    }
+                    input_attachments = [{
+                        "logical_name": "source_outlier_bursts.json",
+                        "content": (json.dumps(attachment, sort_keys=True) + "\n").encode("utf-8"),
+                        "content_type": "application/json",
+                    }]
+                    analysis_script = SOURCE_OUTLIER_ANALYSIS_SCRIPT
+                    analysis_title = f"Rank source is_outlier totals for RDS study {study_name}"
+                else:
+                    feature_rows = await run_in_threadpool(
+                        rds_burst_feature_rows, index_path, annotations
+                    )
+                    attachment = {
+                        "source_bundle_signature": bundle.signature,
+                        "burst_definition_signature": "source:burst_:v1",
+                        "review_exclusion_signature": exclusion_signature,
+                        "feature_rows": feature_rows,
+                    }
+                    input_attachments = [{
+                        "logical_name": "rds_burst_features.json",
+                        "content": (json.dumps(attachment, sort_keys=True) + "\n").encode("utf-8"),
+                        "content_type": "application/json",
+                    }]
+                    analysis_script = RDS_ANOMALY_ANALYSIS_SCRIPT
+                    aggregation_label = (
+                        "total decision margin"
+                        if ranking_method == RANKING_ISOLATION_FOREST_DECISION_MARGIN
+                        else "worst burst"
+                    )
+                    analysis_title = (
+                        f"Rank authoritative RDS bursts by Isolation Forest "
+                        f"{aggregation_label} ({feature_set_label}) for {study_name}"
+                    )
             payload = {
                 "user": user,
-                "title": f"Rank automatic movement bursts ({feature_set_label}) for {logical_name}",
+                "title": analysis_title,
                 "kind": "python",
-                "script": BURST_ANOMALY_ANALYSIS_SCRIPT,
+                "script": analysis_script,
                 "dataset_id": dataset_id,
-                "input_artifacts": _movement_analysis_input_names(dataset, logical_name),
+                "input_artifacts": input_artifacts,
+                "input_attachments": input_attachments,
                 "output_artifacts": ["burst_anomaly_ranking.json"],
-                "parameters": {
-                    "app": "movement",
-                    "action": "run_burst_anomaly_ranking",
-                    "target_artifact": logical_name,
-                    "dataset_id": dataset_id,
-                    "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),
-                    "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
-                    "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
-                    "feature_set": feature_set,
-                    "user": user,
-                },
+                "parameters": parameters,
             }
             payload = prepare_analysis_payload(request, study_dir, payload)
             if background_anomaly_ranking:
@@ -1950,7 +2332,7 @@ def register_movement_routes(
             logical_name = str(body.get("logical_name") or "").strip()
             if logical_name:
                 logical_name = validate_path_part(logical_name, label="artifact")
-                artifact, artifact_path = get_dataset_artifact(study_dir, current_id, logical_name)
+                artifact, _ = get_dataset_artifact(study_dir, current_id, logical_name)
                 if not configured_artifact_filter(artifact):
                     raise ReviewStateError("Artifact is not reviewable")
             else:
@@ -1960,8 +2342,14 @@ def register_movement_routes(
                 if not candidates:
                     raise ReviewStateError("Selected dataset has no reviewable movement artifact")
                 logical_name = str(candidates[0]["logical_name"])
-                _, artifact_path = get_dataset_artifact(study_dir, current_id, logical_name)
-            individuals = await run_in_threadpool(list_movement_individuals, artifact_path)
+                get_dataset_artifact(study_dir, current_id, logical_name)
+            individuals = await run_in_threadpool(
+                source_individuals,
+                configured_source,
+                study_dir,
+                current_id,
+                logical_name,
+            )
             result = assign_review(
                 study_dir,
                 editor=actor,
@@ -2329,8 +2717,10 @@ def register_movement_routes(
             if scope_kind not in {"fix", "segment", "burst", "bursts", "individual", "filter"}:
                 raise ValueError("Invalid review scope")
             scope: dict[str, object] = {"kind": scope_kind}
+            rds_scope: dict[str, object] = {"kind": scope_kind}
             if scope_kind in {"fix", "segment"}:
                 selected_fix_keys = _validate_fix_keys(raw_scope.get("fix_keys"))
+                rds_scope["fix_keys"] = selected_fix_keys
                 scope["row_ranges"] = compress_fix_keys(selected_fix_keys)
                 scope["fix_count"] = len(selected_fix_keys)
                 if scope_kind == "segment":
@@ -2360,6 +2750,16 @@ def register_movement_routes(
                     if selection_method and selection_method not in {"map_double_click", "table_shift_click"}:
                         raise ValueError("Invalid segment selection method")
                     scope["selection_method"] = selection_method
+                    rds_scope.update({
+                        key: scope[key]
+                        for key in (
+                            "start_fix_key",
+                            "end_fix_key",
+                            "individual",
+                            "set_name",
+                            "selection_method",
+                        )
+                    })
             elif scope_kind == "individual":
                 scope["individual"] = _normalize_individual_name(raw_scope.get("individual"))
                 scope["set_name"] = _validate_optional_text(
@@ -2367,14 +2767,20 @@ def register_movement_routes(
                     label="Set name",
                     max_length=40,
                 )
+                rds_scope.update({
+                    "individual": scope["individual"],
+                    "set_name": scope["set_name"],
+                })
             elif scope_kind == "filter":
                 scope["filter"] = _validate_filter_scope(raw_scope.get("filter"))
+                rds_scope["filter"] = scope["filter"]
             elif scope_kind == "burst":
                 scope["burst_id"] = _validate_required_text(
                     raw_scope.get("burst_id"),
                     label="Burst id",
                     max_length=240,
                 )
+                rds_scope["burst_id"] = scope["burst_id"]
             else:
                 raw_burst_ids = raw_scope.get("burst_ids")
                 if not isinstance(raw_burst_ids, list):
@@ -2392,6 +2798,7 @@ def register_movement_routes(
                 if not burst_ids:
                     raise ValueError("Choose at least one burst")
                 scope["burst_ids"] = burst_ids
+                rds_scope["burst_ids"] = burst_ids
 
             status = _validate_status(body.get("status"))
             if status != "suspected":
@@ -2420,7 +2827,48 @@ def register_movement_routes(
             if scope_kind == "filter":
                 raw_origin = "threshold"
             user = effective_user(request, body)
+            step_script = ANNOTATE_SCOPE_SCRIPT
             input_artifacts = [logical_name]
+            rds_records = None
+            source_bundle_signature = ""
+            if configured_source.bundle_scoped:
+                bundle, index_path = await run_in_threadpool(
+                    ensure_rds_index, study_dir, dataset_id
+                )
+                validate_requested_bundle(body, bundle.signature)
+                resolved_scope, resolved_fix_count = await run_in_threadpool(
+                    resolve_rds_review_scope, index_path, rds_scope
+                )
+                if resolved_fix_count <= 0:
+                    raise ValueError("Review scope did not resolve to any fixes")
+                scope = resolved_scope
+                source_bundle_signature = bundle.signature
+                step_script = RDS_REVIEW_STEP_SCRIPT
+                input_artifacts = [
+                    str(item.get("logical_name") or "")
+                    for item in dataset.get("artifacts") or []
+                    if configured_source.accepts(item)
+                ]
+                rds_records = [{
+                    "annotation_kind": "issue",
+                    "status": status,
+                    "origin": raw_origin,
+                    "issue_type": issue_type,
+                    "issue_field": _validate_optional_text(
+                        body.get("issue_field"), label="Issue field", max_length=240
+                    ),
+                    "issue_threshold": _validate_optional_text(
+                        body.get("issue_threshold"), label="Issue threshold", max_length=600
+                    ),
+                    "comment": comment,
+                    "owner_question": owner_question,
+                    "source_analysis_id": source_analysis_id,
+                    "workflow_context": _validate_issue_workflow_context(
+                        body.get("workflow_context")
+                    ),
+                    "scope": scope,
+                    "resolved_fix_count": resolved_fix_count,
+                }]
             if any(
                 artifact.get("logical_name") == "movement_review_annotations.json"
                 for artifact in dataset.get("artifacts", [])
@@ -2437,7 +2885,7 @@ def register_movement_routes(
                 "user": user,
                 "title": f"Mark {scope_title} as {status} in {logical_name}",
                 "kind": "python",
-                "script": ANNOTATE_SCOPE_SCRIPT,
+                "script": step_script,
                 "parameters": {
                     "app": "movement",
                     "action": "annotate_scope",
@@ -2467,6 +2915,8 @@ def register_movement_routes(
                     "burst_gap_seconds": parse_burst_gap_seconds(body.get("burst_gap_seconds")),
                     "burst_gap_quantile": parse_burst_gap_quantile(body.get("burst_gap_quantile")),
                     "user": user,
+                    "source_bundle_signature": source_bundle_signature,
+                    "records": rds_records or [],
                 },
                 "parent_dataset_id": dataset_id,
                 "input_artifacts": input_artifacts,
@@ -2520,7 +2970,30 @@ def register_movement_routes(
                 label="Confirmation note",
                 max_length=1200,
             )
+            step_script = CONFIRM_ISSUES_SCRIPT
+            step_parameters_confirmations = confirmations
+            records = []
+            source_bundle_signature = ""
             input_artifacts = [logical_name]
+            if configured_source.bundle_scoped:
+                bundle, _index_path = await run_in_threadpool(
+                    ensure_rds_index, study_dir, dataset_id
+                )
+                validate_requested_bundle(body, bundle.signature)
+                records = _rds_resolution_records(
+                    _load_dataset_review_annotations(study_dir, dataset_id=dataset_id),
+                    body.get("confirmations"),
+                    status="confirmed",
+                    note=note,
+                )
+                source_bundle_signature = bundle.signature
+                step_script = RDS_REVIEW_STEP_SCRIPT
+                step_parameters_confirmations = []
+                input_artifacts = [
+                    str(item.get("logical_name") or "")
+                    for item in dataset.get("artifacts") or []
+                    if configured_source.accepts(item)
+                ]
             if any(
                 artifact.get("logical_name") == "movement_review_annotations.json"
                 for artifact in dataset.get("artifacts", [])
@@ -2531,13 +3004,15 @@ def register_movement_routes(
                 "user": user,
                 "title": f"Confirm {sum(item['fix_count'] for item in confirmations)} suspected fix(es) in {logical_name}",
                 "kind": "python",
-                "script": CONFIRM_ISSUES_SCRIPT,
+                "script": step_script,
                 "parameters": {
                     "app": "movement",
                     "action": "confirm_issues",
                     "target_artifact": logical_name,
                     "dataset_id": dataset_id,
-                    "confirmations": confirmations,
+                    "confirmations": step_parameters_confirmations,
+                    "records": records,
+                    "source_bundle_signature": source_bundle_signature,
                     "note": note,
                     "user": user,
                 },
@@ -2593,7 +3068,30 @@ def register_movement_routes(
                 label="Dismissal note",
                 max_length=1200,
             )
+            step_script = DISMISS_ISSUES_SCRIPT
+            step_parameters_dismissals = dismissals
+            records = []
+            source_bundle_signature = ""
             input_artifacts = [logical_name]
+            if configured_source.bundle_scoped:
+                bundle, _index_path = await run_in_threadpool(
+                    ensure_rds_index, study_dir, dataset_id
+                )
+                validate_requested_bundle(body, bundle.signature)
+                records = _rds_resolution_records(
+                    _load_dataset_review_annotations(study_dir, dataset_id=dataset_id),
+                    body.get("dismissals"),
+                    status="dismissed",
+                    note=note,
+                )
+                source_bundle_signature = bundle.signature
+                step_script = RDS_REVIEW_STEP_SCRIPT
+                step_parameters_dismissals = []
+                input_artifacts = [
+                    str(item.get("logical_name") or "")
+                    for item in dataset.get("artifacts") or []
+                    if configured_source.accepts(item)
+                ]
             if any(
                 artifact.get("logical_name") == "movement_review_annotations.json"
                 for artifact in dataset.get("artifacts", [])
@@ -2605,13 +3103,15 @@ def register_movement_routes(
                 "user": user,
                 "title": f"Dismiss suspicion for {dismissed_fix_count} fix(es) in {logical_name}",
                 "kind": "python",
-                "script": DISMISS_ISSUES_SCRIPT,
+                "script": step_script,
                 "parameters": {
                     "app": "movement",
                     "action": "dismiss_issues",
                     "target_artifact": logical_name,
                     "dataset_id": dataset_id,
-                    "dismissals": dismissals,
+                    "dismissals": step_parameters_dismissals,
+                    "records": records,
+                    "source_bundle_signature": source_bundle_signature,
                     "note": note,
                     "user": user,
                 },
@@ -2669,7 +3169,38 @@ def register_movement_routes(
             get_dataset_artifact(study_dir, dataset_id, logical_name)
             decision = _validate_individual_review_decision(body.get("decision"))
             user = effective_user(request, body)
+            step_script = REVIEW_INDIVIDUAL_SCRIPT
+            records = []
+            source_bundle_signature = ""
             input_artifacts = [logical_name]
+            if configured_source.bundle_scoped:
+                bundle, index_path = await run_in_threadpool(
+                    ensure_rds_index, study_dir, dataset_id
+                )
+                validate_requested_bundle(body, bundle.signature)
+                resolved_scope, resolved_fix_count = await run_in_threadpool(
+                    resolve_rds_review_scope,
+                    index_path,
+                    {"kind": "individual", "individual": decision["individual"]},
+                )
+                if resolved_fix_count <= 0:
+                    raise ValueError("Individual review scope did not resolve to any fixes")
+                records = [{
+                    "annotation_kind": "individual_review",
+                    "reviewed": True,
+                    "review_decision": decision["review_decision"],
+                    "needs_check": decision["needs_check"],
+                    "comment": decision["comment"],
+                    "scope": resolved_scope,
+                    "resolved_fix_count": resolved_fix_count,
+                }]
+                source_bundle_signature = bundle.signature
+                step_script = RDS_REVIEW_STEP_SCRIPT
+                input_artifacts = [
+                    str(item.get("logical_name") or "")
+                    for item in dataset.get("artifacts") or []
+                    if configured_source.accepts(item)
+                ]
             if any(
                 artifact.get("logical_name") == "movement_review_annotations.json"
                 for artifact in dataset.get("artifacts", [])
@@ -2679,13 +3210,15 @@ def register_movement_routes(
                 "user": user,
                 "title": f"Record review decision for {decision['individual']} in {logical_name}",
                 "kind": "python",
-                "script": REVIEW_INDIVIDUAL_SCRIPT,
+                "script": step_script,
                 "parameters": {
                     "app": "movement",
                     "action": "review_individual",
                     "target_artifact": logical_name,
                     "dataset_id": dataset_id,
                     "decision": decision,
+                    "records": records,
+                    "source_bundle_signature": source_bundle_signature,
                     "user": user,
                 },
                 "parent_dataset_id": dataset_id,
@@ -2753,6 +3286,66 @@ def register_movement_routes(
             screenshot_mode = _validate_screenshot_mode(body.get("screenshot_mode"))
             snapshots = _validate_snapshots(body.get("snapshots"))
             snapshot_parameters, snapshot_attachments = _report_snapshot_inputs(snapshots)
+            report_attachments = list(snapshot_attachments)
+            report_source_attachment_name = ""
+            report_sidecar_attachment_name = ""
+            report_source_bundle_signature = ""
+            if configured_source.bundle_scoped:
+                bundle, index_path = ensure_rds_index(study_dir, dataset_id)
+                validate_requested_bundle(body, bundle.signature)
+                report_source_bundle_signature = bundle.signature
+                report_input_artifacts = [
+                    str(item.get("logical_name") or "")
+                    for item in bundle.artifacts
+                ]
+                if any(
+                    artifact.get("logical_name") == "movement_review_annotations.json"
+                    for artifact in dataset.get("artifacts", [])
+                ):
+                    report_input_artifacts.append("movement_review_annotations.json")
+                annotations = _load_dataset_review_annotations(
+                    study_dir, dataset_id=dataset_id
+                )
+                raw_snapshot_windows = body.get("snapshot_windows") or []
+                csv_content, sidecar_content, artifact_offsets, _ = build_rds_report_inputs(
+                    index_path,
+                    annotations=annotations,
+                    fix_keys=fix_keys,
+                    issue_ids=issue_ids,
+                    individuals=individuals,
+                    snapshot_individuals=(
+                        str(item.get("individual") or "")
+                        for item in raw_snapshot_windows
+                        if isinstance(item, dict)
+                    ),
+                    target_artifact=logical_name,
+                )
+                fix_row_ranges = rds_report_row_ranges(fix_keys, artifact_offsets)
+                for normalized, raw in zip(
+                    snapshot_windows, raw_snapshot_windows, strict=True
+                ):
+                    normalized["anchor_row_ranges"] = rds_report_row_ranges(
+                        _validate_fix_keys(raw.get("anchor_fix_keys"), allow_empty=True),
+                        artifact_offsets,
+                    )
+                    normalized["report_row_ranges"] = rds_report_row_ranges(
+                        _validate_fix_keys(raw.get("report_fix_keys"), allow_empty=True),
+                        artifact_offsets,
+                    )
+                report_source_attachment_name = "movement_rds_report_source.csv"
+                report_sidecar_attachment_name = "movement_rds_report_annotations.json"
+                report_attachments.extend([
+                    {
+                        "logical_name": report_source_attachment_name,
+                        "content": csv_content,
+                        "content_type": "text/csv",
+                    },
+                    {
+                        "logical_name": report_sidecar_attachment_name,
+                        "content": sidecar_content,
+                        "content_type": "application/json",
+                    },
+                ])
             user = effective_user(request, body)
             individual_report_artifacts = _build_individual_report_artifacts(individuals)
             effective_output_mode = output_mode if len(individuals) > 1 else "combined"
@@ -2787,7 +3380,7 @@ def register_movement_routes(
                 "script": GENERATE_REPORT_SCRIPT,
                 "dataset_id": dataset_id,
                 "input_artifacts": report_input_artifacts,
-                "input_attachments": snapshot_attachments,
+                "input_attachments": report_attachments,
                 "output_artifacts": output_artifacts,
                 "parameters": {
                     "app": "movement",
@@ -2795,6 +3388,9 @@ def register_movement_routes(
                     "report_type": report_type,
                     "output_mode": effective_output_mode,
                     "target_artifact": logical_name,
+                    "source_attachment_name": report_source_attachment_name,
+                    "sidecar_attachment_name": report_sidecar_attachment_name,
+                    "source_bundle_signature": report_source_bundle_signature,
                     "fix_row_ranges": fix_row_ranges,
                     "issue_ids": issue_ids,
                     "individuals": individuals,
@@ -2851,6 +3447,60 @@ def register_movement_routes(
             payload = prepare_analysis_payload(request, study_dir, payload)
             return JSONResponse(create_analysis(study_dir, payload))
         except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/export-reviewed-rds")
+    async def post_movement_export_reviewed_rds(
+        family_name: str, study_name: str, request: Request
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            if not configured_source.bundle_scoped:
+                raise ValueError("Reviewed RDS export requires an RDS movement study")
+            study_dir = configured_study_dir(family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            dataset = load_dataset(study_dir, dataset_id)
+            input_artifacts = [
+                str(item.get("logical_name") or "")
+                for item in dataset.get("artifacts") or []
+                if configured_source.accepts(item)
+            ]
+            if not input_artifacts:
+                raise ValueError("Dataset has no RDS movement artifacts")
+            if any(
+                item.get("logical_name") == "movement_review_annotations.json"
+                for item in dataset.get("artifacts") or []
+            ):
+                input_artifacts.append("movement_review_annotations.json")
+            user = effective_user(request, body)
+            payload = {
+                "user": user,
+                "title": f"Export reviewed RDS movement study {study_name}",
+                "kind": "python",
+                "script": EXPORT_REVIEWED_RDS_SCRIPT,
+                "dataset_id": dataset_id,
+                "input_artifacts": input_artifacts,
+                "output_artifacts": ["movement_reviewed_rds.zip"],
+                "parameters": {
+                    "app": "movement",
+                    "action": "export_reviewed_rds",
+                    "dataset_id": dataset_id,
+                    "writer": str(body.get("writer") or "auto"),
+                    "user": user,
+                },
+            }
+            payload = prepare_analysis_payload(request, study_dir, payload)
+            return JSONResponse(create_analysis(study_dir, payload))
+        except (
+            ReviewForbiddenError,
+            ReviewConflictError,
+            ReviewLockedError,
+            ReviewStateError,
+        ) as exc:
             return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)

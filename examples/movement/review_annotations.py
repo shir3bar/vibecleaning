@@ -405,7 +405,33 @@ def row_tokens_for_scope(scope: dict) -> set[str]:
     tokens = set()
     for start, end in normalize_row_ranges(scope.get("row_ranges") or []):
         tokens.update(f"row:{row_number}" for row_number in range(start, end + 1))
+    for source in normalize_source_rows(scope.get("source_rows") or []):
+        logical_name = source["logical_name"]
+        for start, end in source["row_ranges"]:
+            tokens.update(
+                f"file:{logical_name}#row:{row_number}"
+                for row_number in range(start, end + 1)
+            )
     return tokens
+
+
+def normalize_source_rows(raw_sources: object) -> list[dict]:
+    if not isinstance(raw_sources, list):
+        return []
+    by_name: dict[str, list[list[int]]] = {}
+    for item in raw_sources:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid movement source rows")
+        logical_name = str(item.get("logical_name") or "").strip()
+        if not logical_name or Path(logical_name).name != logical_name:
+            raise ValueError("Invalid movement source artifact")
+        by_name.setdefault(logical_name, []).extend(
+            normalize_row_ranges(item.get("row_ranges") or [])
+        )
+    return [
+        {"logical_name": name, "row_ranges": normalize_row_ranges(ranges)}
+        for name, ranges in sorted(by_name.items())
+    ]
 
 
 def load_review_annotations(path: Path | None) -> list[dict]:
@@ -431,6 +457,7 @@ def normalize_annotation(raw: dict) -> dict:
     status = "dismissed" if annotation_kind == "dismissal" or raw_status == "dismissed" else _normalize_review_status(raw_status)
     fix_keys = sorted({str(item).strip() for item in scope.get("fix_keys", []) if str(item).strip()})
     row_ranges = normalize_row_ranges(scope.get("row_ranges") or [])
+    source_rows = normalize_source_rows(scope.get("source_rows") or [])
     if not row_ranges and fix_keys:
         row_ranges = compress_fix_keys(fix_keys)
     try:
@@ -439,10 +466,22 @@ def normalize_annotation(raw: dict) -> dict:
             int(
                 raw.get("resolved_fix_count")
                 or sum(end - start + 1 for start, end in row_ranges)
+                or sum(
+                    end - start + 1
+                    for source in source_rows
+                    for start, end in source["row_ranges"]
+                )
             ),
         )
     except (TypeError, ValueError):
-        resolved_fix_count = sum(end - start + 1 for start, end in row_ranges)
+        resolved_fix_count = (
+            sum(end - start + 1 for start, end in row_ranges)
+            + sum(
+                end - start + 1
+                for source in source_rows
+                for start, end in source["row_ranges"]
+            )
+        )
     raw_decision = str(raw.get("review_decision") or "").strip().lower()
     if raw_decision not in {"ok", "fix_keep", "remove"}:
         raw_decision = ""
@@ -458,6 +497,7 @@ def normalize_annotation(raw: dict) -> dict:
         "review_id": str(raw.get("review_id") or "").strip(),
         "actor": dict(raw.get("actor") or {}) if isinstance(raw.get("actor"), dict) else {},
         "source_artifact": str(raw.get("source_artifact") or "").strip(),
+        "source_id": str(raw.get("source_id") or "").strip(),
         "source_dataset_id": str(raw.get("source_dataset_id") or "").strip(),
         "status": status,
         "origin": origin,
@@ -478,6 +518,7 @@ def normalize_annotation(raw: dict) -> dict:
         "scope": {
             "kind": str(scope.get("kind") or "fix").strip().lower(),
             "row_ranges": row_ranges,
+            "source_rows": source_rows,
             "filter": dict(scope.get("filter") or {}) if isinstance(scope.get("filter"), dict) else {},
             "burst_id": str(scope.get("burst_id") or "").strip(),
             "individual": str(scope.get("individual") or "").strip(),
@@ -533,7 +574,14 @@ def source_row_annotation(raw: dict, *, fix_key: str, source_artifact: str) -> d
     )
 
 
-def annotation_applies(annotation: dict, *, fix_key: str, individual: str, set_name: str) -> bool:
+def annotation_applies(
+    annotation: dict,
+    *,
+    fix_key: str,
+    individual: str,
+    set_name: str,
+    source_artifact: str = "",
+) -> bool:
     scope = annotation.get("scope") or {}
     kind = str(scope.get("kind") or "fix")
     if kind == "individual":
@@ -541,6 +589,19 @@ def annotation_applies(annotation: dict, *, fix_key: str, individual: str, set_n
             return False
         scoped_set = str(scope.get("set_name") or "")
         return not scoped_set or scoped_set == set_name
+    source_rows = scope.get("source_rows") or []
+    if source_rows:
+        logical_name = str(source_artifact or "").strip()
+        if not logical_name and fix_key.startswith("file:") and "#row:" in fix_key:
+            logical_name = fix_key[5:].rsplit("#row:", 1)[0]
+        for source in source_rows:
+            if str(source.get("logical_name") or "") != logical_name:
+                continue
+            return row_number_in_ranges(
+                fix_key_row_number(fix_key),
+                source.get("row_ranges") or [],
+            )
+        return False
     row_ranges = scope.get("row_ranges") or []
     if row_ranges:
         return row_number_in_ranges(fix_key_row_number(fix_key), row_ranges)
@@ -575,6 +636,7 @@ def effective_issues_for_fix(
     fix_key: str,
     individual: str,
     set_name: str,
+    source_artifact: str = "",
     existing_issues: list[dict] | None = None,
 ) -> list[dict]:
     """Return one effective record per parent suspicion for a movement fix."""
@@ -587,6 +649,7 @@ def effective_issues_for_fix(
             fix_key=fix_key,
             individual=individual,
             set_name=set_name,
+            source_artifact=source_artifact,
         )
     ]
     parents: dict[str, dict] = {}
@@ -1026,7 +1089,11 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
     relevant_issues = [
         item
         for item in annotations
-        if item["status"] and (not item["source_artifact"] or item["source_artifact"] == source_artifact)
+        if item["status"] and (
+            not source_artifact
+            or not item["source_artifact"]
+            or item["source_artifact"] == source_artifact
+        )
     ]
     review_decisions = individual_review_decisions(
         annotations,
@@ -1040,10 +1107,17 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
         fix_key = str(fix.get("fix_key") or "")
         individual = str(fix.get("individual") or "")
         set_name = str(fix.get("set") or "train")
+        fix_source_artifact = str(fix.get("source_artifact") or source_artifact)
         matches = [
             item
             for item in relevant_issues
-            if annotation_applies(item, fix_key=fix_key, individual=individual, set_name=set_name)
+            if annotation_applies(
+                item,
+                fix_key=fix_key,
+                individual=individual,
+                set_name=set_name,
+                source_artifact=fix_source_artifact,
+            )
         ]
         existing_review = dict(fix.get("review") or {})
         existing_issues = list(existing_review.get("issues") or [])
@@ -1059,6 +1133,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
             fix_key=fix_key,
             individual=individual,
             set_name=set_name,
+            source_artifact=fix_source_artifact,
             existing_issues=existing_issues,
         )
         status = effective_review_status(effective_issues)

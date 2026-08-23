@@ -9,6 +9,7 @@ dependencies = [
   "numpy",
   "osmium",
   "pandas",
+  "rdata>=1.1,<2",
   "scikit-learn",
   "shapely",
   "uvicorn",
