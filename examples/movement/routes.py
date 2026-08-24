@@ -118,6 +118,24 @@ SUPPORTED_RANKING_METHODS = {
     RANKING_ISOLATION_FOREST_DECISION_MARGIN,
     RANKING_SOURCE_IS_OUTLIER,
 }
+RANKING_DEFINITION_SIGNATURES = {
+    RANKING_ISOLATION_FOREST: "isolation_forest:maximum_burst_score:v1",
+    RANKING_ISOLATION_FOREST_DECISION_MARGIN: (
+        "isolation_forest:sum_positive_decision_margin:v1"
+    ),
+    RANKING_SOURCE_IS_OUTLIER: "source_is_outlier:sum_fix_counts:v1",
+}
+
+
+def _ranking_definition_matches(ranking_method: str, stored_signature: object) -> bool:
+    stored = str(stored_signature or "")
+    expected = RANKING_DEFINITION_SIGNATURES[ranking_method]
+    if stored:
+        return stored == expected
+    # Existing maximum-burst Isolation Forest analyses keep their original
+    # meaning. Pre-sum source analyses do not: they ranked individuals by only
+    # their worst burst and must not be restored as source-total rankings.
+    return ranking_method != RANKING_SOURCE_IS_OUTLIER
 
 
 def _edit_locked_response(exc: EditLockedError) -> JSONResponse:
@@ -1488,6 +1506,9 @@ def register_movement_routes(
             raise ValueError("source_is_outlier ranking requires an RDS movement study")
         return value
 
+    def ranking_definition_signature(ranking_method: str) -> str:
+        return RANKING_DEFINITION_SIGNATURES[ranking_method]
+
     def parse_optional_individual(raw_value: object) -> str:
         if raw_value in (None, ""):
             return ""
@@ -2021,6 +2042,11 @@ def register_movement_routes(
                             reasons.append("feature set differs")
                         if str(params.get("ranking_method") or "isolation_forest") != method:
                             reasons.append("ranking method differs")
+                        if not _ranking_definition_matches(
+                            method,
+                            params.get("ranking_definition_signature"),
+                        ):
+                            reasons.append("ranking definition differs")
                     else:
                         reasons.append("RDS feature-space restoration is unavailable")
                     item["compatible"] = not reasons
@@ -2096,6 +2122,9 @@ def register_movement_routes(
                 "app": "movement",
                 "action": "run_burst_anomaly_ranking",
                 "ranking_method": ranking_method,
+                "ranking_definition_signature": ranking_definition_signature(
+                    ranking_method
+                ),
                 "target_artifact": logical_name,
                 "dataset_id": dataset_id,
                 "burst_gap_mode": parse_burst_gap_mode(body.get("burst_gap_mode")),

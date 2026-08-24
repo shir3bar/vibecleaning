@@ -2553,15 +2553,20 @@ def test_movement_frontend_has_lazy_editor_review_dashboard():
 def test_movement_individual_queue_explains_burst_ranking_availability():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
-    assert "No compatible burst ranking is available for this dataset version and burst definition." in source
-    assert "Compatible saved ranking available" in source
+    assert "No compatible ${escapeHtml(rankingLabel)} ranking is available" in source
+    assert "ranking available" in source
     assert 'data-queue-action="load-ranking"' in source
-    assert "hasAvailableIndividualQueueRanking()" in source
-    assert "Burst ranking in progress. Dataset order will remain in use." in source
+    assert "rankingMethodOptions()" in source
+    assert "syncIndividualQueueRankingOptions()" in source
+    assert '<option value="isolation_forest">Isolation forest — worst burst</option>' in source
+    assert '<option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>' in source
+    assert '<option value="source_is_outlier">Source is_outlier — total flagged fixes</option>' in source
+    assert "ranking in progress." in source
     assert "Apply completed ranking" in source
     assert 'data-queue-action="run-ranking"' in source
     assert "noteCompletedIndividualQueueRanking()" in source
     assert "queue.pendingRankingAnalysisId = this.anomalyRanking.analysisId" in source
+    assert "queue.rankingMethod === this.anomalyRanking.rankingMethod" in source
 
 
 def test_movement_issue_dialog_keeps_burst_context_preview_available():

@@ -486,6 +486,7 @@ class MovementExampleApp {
       saving: false,
       appliedRankingAnalysisId: "",
       pendingRankingAnalysisId: "",
+      rankingMethod: this.uiState.rankingMethod || "isolation_forest",
     };
     this.handleWindowResize = () => this.handleLayoutResize();
     this.handleSidePanePointerMove = event => this.onSidePanePointerMove(event);
@@ -632,13 +633,7 @@ class MovementExampleApp {
     return `isolation forest — worst burst (${this.anomalyFeatureSetLabel()})`;
   }
 
-  syncRankingMethodControl() {
-    if (!this.refs?.rankingMethod) {
-      return;
-    }
-    const requestedMethod = String(
-      this.refs.rankingMethod.value || this.uiState.rankingMethod || "isolation_forest",
-    );
+  rankingMethodOptions() {
     const options = [
       ["isolation_forest", "Isolation forest — worst burst"],
       ["isolation_forest_decision_margin", "Isolation forest — total decision margin"],
@@ -646,6 +641,34 @@ class MovementExampleApp {
     if (MOVEMENT_APP_CONFIG.rdsSource) {
       options.push(["source_is_outlier", "Source is_outlier — total flagged fixes"]);
     }
+    return options;
+  }
+
+  syncIndividualQueueRankingOptions() {
+    if (!this.refs?.individualQueueOrder) {
+      return;
+    }
+    const selectedValue = this.individualReviewQueue?.orderMode === "ranking"
+      ? String(this.individualReviewQueue.rankingMethod || this.getRankingMethod())
+      : "dataset";
+    this.refs.individualQueueOrder.innerHTML = [
+      ["dataset", "Dataset order"],
+      ...this.rankingMethodOptions(),
+    ].map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
+    this.refs.individualQueueOrder.value = selectedValue;
+    if (!this.refs.individualQueueOrder.value) {
+      this.refs.individualQueueOrder.value = "dataset";
+    }
+  }
+
+  syncRankingMethodControl() {
+    if (!this.refs?.rankingMethod) {
+      return;
+    }
+    const requestedMethod = String(
+      this.refs.rankingMethod.value || this.uiState.rankingMethod || "isolation_forest",
+    );
+    const options = this.rankingMethodOptions();
     this.refs.rankingMethod.innerHTML = options
       .map(([value, label]) => `<option value="${value}">${label}</option>`)
       .join("");
@@ -653,17 +676,13 @@ class MovementExampleApp {
     this.refs.rankingMethod.value = supported.has(requestedMethod)
       ? requestedMethod
       : "isolation_forest";
-    const method = this.getRankingMethod();
-    if (this.refs.runAnomalyRanking) {
-      this.refs.runAnomalyRanking.textContent = {
-        source_is_outlier: "Rank source outlier totals",
-        isolation_forest_decision_margin: "Rank by total decision margin",
-      }[method] || "Rank by worst burst";
-    }
+    this.refs.runAnomalyRanking.textContent = "Rank bursts";
+    this.syncIndividualQueueRankingOptions();
   }
 
   handleRankingMethodChange() {
     this.syncRankingMethodControl();
+    this.individualReviewQueue.rankingMethod = this.getRankingMethod();
     this.saveUiState();
     this.clearAnomalyRanking();
     if (this.data) {
@@ -3156,6 +3175,13 @@ class MovementExampleApp {
               <option value="movement_only">Movement only</option>
             </select>
           </label>
+          <label data-role="ranking-method-control">Ranking type
+            <select data-role="ranking-method">
+              <option value="isolation_forest">Isolation forest — worst burst</option>
+              <option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>
+              <option value="source_is_outlier">Source is_outlier — total flagged fixes</option>
+            </select>
+          </label>
           <button type="button" data-role="run-anomaly-ranking">Rank bursts</button>
           <button type="button" data-role="run-burst-feature-space">Feature space</button>
           <button type="button" data-role="generate-report">Generate report</button>
@@ -3212,7 +3238,9 @@ class MovementExampleApp {
                     <label class="movement-queue-order">Review order
                       <select data-role="individual-queue-order">
                         <option value="dataset">Dataset order</option>
-                        <option value="ranking">Burst ranking</option>
+                        <option value="isolation_forest">Isolation forest — worst burst</option>
+                        <option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>
+                        <option value="source_is_outlier">Source is_outlier — total flagged fixes</option>
                       </select>
                     </label>
                     <label class="movement-queue-order">Queue
@@ -3287,13 +3315,6 @@ class MovementExampleApp {
               <div class="movement-side-sheet ranking hidden" data-role="side-sheet-ranking">
                 <div class="movement-side-head movement-ranking-head">
                   <span>Burst ranking</span>
-                  <label data-role="ranking-method-control" hidden>Ranking type
-                    <select data-role="ranking-method">
-                      <option value="isolation_forest">Isolation forest — worst burst</option>
-                      <option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>
-                      <option value="source_is_outlier">Source is_outlier — total flagged fixes</option>
-                    </select>
-                  </label>
                 </div>
                 <div class="movement-anomaly-ranking" data-role="anomaly-ranking"></div>
               </div>
@@ -3750,7 +3771,7 @@ class MovementExampleApp {
     this.refs.tableSortDirection.dataset.direction = this.uiState.tableDescending ? "desc" : "asc";
     this.refs.tableSortDirection.textContent = this.uiState.tableDescending ? "Descending" : "Ascending";
     this.refs.individualSearch.value = this.individualSearchQuery;
-    this.refs.individualQueueOrder.value = this.individualReviewQueue.orderMode;
+    this.syncIndividualQueueRankingOptions();
     this.refs.individualQueueFilter.value = this.individualReviewQueue.filterMode;
     this.applySidePaneWidth(this.sidePaneWidthPx, { save: false, resizeMap: false });
     this.setSideSheet(
@@ -5061,6 +5082,9 @@ class MovementExampleApp {
             ...this.makeEmptyAnomalyRanking(),
             analysisId: rankingAnalysisId,
             status: "available",
+            rankingMethod: String(
+              ranking?.parameters?.ranking_method || this.getRankingMethod(),
+            ),
             createdAt: String(ranking.created_at || ""),
             user: String(ranking.user || ""),
             loadedFromHistory: true,
@@ -5163,7 +5187,12 @@ class MovementExampleApp {
         burstGap: artifact?.burst_gap || null,
         modelFit: artifact?.model_fit || artifact?.scorer || null,
         rankingSummary: artifact?.individual_ranking_summary || null,
-        rankingMethod: String(artifact?.ranking_method || artifact?.model_fit?.ranking_method || ""),
+        rankingMethod: String(
+          artifact?.ranking_method
+          || artifact?.model_fit?.ranking_method
+          || metadata.rankingMethod
+          || this.getRankingMethod(),
+        ),
         createdAt: String(metadata.createdAt || ""),
         user: String(metadata.user || ""),
         loadedFromHistory: true,
@@ -6232,6 +6261,11 @@ class MovementExampleApp {
     const modelFit = result.modelFit || {};
     const rankingSummary = result.rankingSummary || {};
     const rankingMethod = String(result.rankingMethod || modelFit.ranking_method || this.getRankingMethod());
+    const individualScoreLabel = rankingMethod === "source_is_outlier"
+      ? "Total source outliers"
+      : rankingMethod === "isolation_forest_decision_margin"
+        ? "Total decision margin"
+        : "Worst burst score";
     const metadata = [
       result.analysisId ? `Analysis: ${result.analysisId}` : "",
       result.createdAt ? `${result.loadedFromHistory ? "Restored" : "Created"}: ${formatDateTime(result.createdAt)}${result.user ? ` by ${result.user}` : ""}` : "",
@@ -6281,7 +6315,7 @@ class MovementExampleApp {
           <tr>
             <th>Rank</th>
             <th>Individual</th>
-            <th>Individual score</th>
+            <th>${escapeHtml(individualScoreLabel)}</th>
             <th>Top burst score</th>
             <th>Top burst</th>
             <th>Bursts</th>
@@ -7011,6 +7045,7 @@ class MovementExampleApp {
         mapScope: queue.mapScope,
         appliedRankingAnalysisId: queue.appliedRankingAnalysisId,
         pendingRankingAnalysisId: queue.pendingRankingAnalysisId,
+        rankingMethod: queue.rankingMethod,
       },
     };
   }
@@ -7043,6 +7078,9 @@ class MovementExampleApp {
     );
     queue.pendingRankingAnalysisId = String(
       queueState.pendingRankingAnalysisId || "",
+    );
+    queue.rankingMethod = String(
+      queueState.rankingMethod || this.getRankingMethod(),
     );
   }
 
@@ -7763,16 +7801,6 @@ class MovementExampleApp {
     );
   }
 
-  hasAvailableIndividualQueueRanking() {
-    return (
-      this.hasCompatibleIndividualQueueRanking()
-      || (
-        Boolean(this.anomalyRanking?.analysisId)
-        && ["available", "restoring", "restore_error"].includes(this.anomalyRanking?.status)
-      )
-    );
-  }
-
   getIndividualQueueOrder() {
     const individuals = this.data?.individuals || [];
     const visibleIndividuals = individuals.filter(individual => {
@@ -7793,6 +7821,7 @@ class MovementExampleApp {
       this.individualReviewQueue.orderMode === "ranking"
       && this.hasCompatibleIndividualQueueRanking()
       && this.individualReviewQueue.appliedRankingAnalysisId === this.anomalyRanking.analysisId
+      && this.individualReviewQueue.rankingMethod === this.anomalyRanking.rankingMethod
     );
     return [...visibleIndividuals].sort((left, right) => {
       if (useRanking) {
@@ -8452,22 +8481,36 @@ class MovementExampleApp {
     }
   }
 
-  async changeIndividualQueueOrder(orderMode) {
-    if (orderMode === "ranking" && !this.hasCompatibleIndividualQueueRanking()) {
+  async changeIndividualQueueOrder(orderValue) {
+    const rankingMethods = new Set(this.rankingMethodOptions().map(([value]) => value));
+    const requestedMethod = rankingMethods.has(orderValue) ? orderValue : "";
+    if (!requestedMethod) {
+      this.individualReviewQueue.orderMode = "dataset";
+      this.individualReviewQueue.appliedRankingAnalysisId = "";
+      this.individualReviewQueue.pendingRankingAnalysisId = "";
+    } else {
+      const methodChanged = requestedMethod !== this.getRankingMethod();
+      this.individualReviewQueue.rankingMethod = requestedMethod;
+      if (methodChanged) {
+        this.refs.rankingMethod.value = requestedMethod;
+        this.syncRankingMethodControl();
+        this.saveUiState();
+        this.clearAnomalyRanking({ render: false });
+        await this.restoreSavedAnalyses();
+      }
       if (["available", "restore_error"].includes(this.anomalyRanking?.status)) {
         await this.loadSavedAnomalyRanking();
       }
-      if (!this.hasCompatibleIndividualQueueRanking()) {
-        this.individualReviewQueue.orderMode = "dataset";
-        this.refs.individualQueueOrder.value = "dataset";
-        this.renderIndividuals();
-        return;
+      this.individualReviewQueue.orderMode = "ranking";
+      if (
+        this.hasCompatibleIndividualQueueRanking()
+        && this.anomalyRanking.rankingMethod === requestedMethod
+      ) {
+        this.individualReviewQueue.appliedRankingAnalysisId = this.anomalyRanking.analysisId;
+        this.individualReviewQueue.pendingRankingAnalysisId = "";
+      } else {
+        this.individualReviewQueue.appliedRankingAnalysisId = "";
       }
-    }
-    this.individualReviewQueue.orderMode = orderMode === "ranking" ? "ranking" : "dataset";
-    if (this.individualReviewQueue.orderMode === "ranking") {
-      this.individualReviewQueue.appliedRankingAnalysisId = this.anomalyRanking.analysisId;
-      this.individualReviewQueue.pendingRankingAnalysisId = "";
     }
     this.individualReviewQueue.pageIndex = 0;
     this.individualReviewQueue.groupIndex = 0;
@@ -8482,9 +8525,14 @@ class MovementExampleApp {
     }
     const queue = this.individualReviewQueue;
     if (queue.appliedRankingAnalysisId !== this.anomalyRanking.analysisId) {
-      queue.pendingRankingAnalysisId = this.anomalyRanking.analysisId;
-      if (queue.orderMode === "ranking") {
-        queue.orderMode = "dataset";
+      if (
+        queue.orderMode === "ranking"
+        && queue.rankingMethod === this.anomalyRanking.rankingMethod
+      ) {
+        queue.appliedRankingAnalysisId = this.anomalyRanking.analysisId;
+        queue.pendingRankingAnalysisId = "";
+      } else {
+        queue.pendingRankingAnalysisId = this.anomalyRanking.analysisId;
       }
     }
   }
@@ -8494,6 +8542,7 @@ class MovementExampleApp {
       return;
     }
     this.individualReviewQueue.orderMode = "ranking";
+    this.individualReviewQueue.rankingMethod = this.anomalyRanking.rankingMethod;
     this.individualReviewQueue.appliedRankingAnalysisId = this.anomalyRanking.analysisId;
     this.individualReviewQueue.pendingRankingAnalysisId = "";
     this.individualReviewQueue.pageIndex = 0;
@@ -8509,23 +8558,27 @@ class MovementExampleApp {
       return;
     }
     target.classList.remove("error");
+    const rankingMethod = String(
+      this.individualReviewQueue.rankingMethod || this.getRankingMethod(),
+    );
+    const rankingLabel = this.rankingMethodLabel(rankingMethod);
     if (this.anomalyRanking?.status === "checking") {
       target.innerHTML = (
-        '<span class="movement-queue-ranking-copy">Checking for a compatible saved burst ranking…</span>'
+        `<span class="movement-queue-ranking-copy">Checking for a saved ${escapeHtml(rankingLabel)} ranking…</span>`
         + '<button type="button" disabled>Checking…</button>'
       );
       return;
     }
     if (this.anomalyRanking?.status === "restoring") {
       target.innerHTML = (
-        '<span class="movement-queue-ranking-copy">Loading the saved burst ranking. Dataset order will remain in use.</span>'
+        `<span class="movement-queue-ranking-copy">Loading the saved ${escapeHtml(rankingLabel)} ranking.</span>`
         + '<button type="button" disabled>Loading…</button>'
       );
       return;
     }
     if (this.anomalyRanking?.status === "loading") {
       target.innerHTML = (
-        '<span class="movement-queue-ranking-copy">Burst ranking in progress. Dataset order will remain in use.</span>'
+        `<span class="movement-queue-ranking-copy">${escapeHtml(rankingLabel)} ranking in progress.</span>`
         + '<button type="button" disabled>Running…</button>'
       );
       return;
@@ -8542,7 +8595,7 @@ class MovementExampleApp {
       const metadata = [
         this.anomalyRanking.createdAt
           ? `Saved ranking ${formatDateTime(this.anomalyRanking.createdAt)}`
-          : "Compatible saved ranking available",
+          : `${rankingLabel} ranking available`,
         this.burstGapLabel(),
       ].filter(Boolean).join(" • ");
       target.innerHTML = (
@@ -8554,8 +8607,8 @@ class MovementExampleApp {
     if (!this.hasCompatibleIndividualQueueRanking()) {
       target.classList.add("error");
       target.innerHTML = (
-        '<span class="movement-queue-ranking-copy" title="No compatible burst ranking is available for this dataset version and burst definition.">'
-        + "No compatible burst ranking is available for this dataset version and burst definition.</span>"
+        `<span class="movement-queue-ranking-copy" title="No compatible ${escapeHtml(rankingLabel)} ranking is available for this dataset version and burst definition.">`
+        + `No compatible ${escapeHtml(rankingLabel)} ranking is available.</span>`
         + '<button type="button" data-queue-action="run-ranking">Run burst ranking</button>'
       );
       return;
@@ -8565,8 +8618,8 @@ class MovementExampleApp {
       : this.burstGapLabel();
     const metadata = [
       this.anomalyRanking.createdAt
-        ? `Ranking ${formatDateTime(this.anomalyRanking.createdAt)}`
-        : "Ranking available",
+        ? `${rankingLabel} • ${formatDateTime(this.anomalyRanking.createdAt)}`
+        : `${rankingLabel} available`,
       burstSettings,
     ].filter(Boolean).join(" • ");
     const needsApply = (
@@ -8718,20 +8771,7 @@ class MovementExampleApp {
   renderIndividualReviewQueue() {
     const position = this.getIndividualQueuePosition();
     const queue = this.individualReviewQueue;
-    const rankingLoaded = this.hasCompatibleIndividualQueueRanking();
-    const rankingAvailable = this.hasAvailableIndividualQueueRanking();
-    if (queue.orderMode === "ranking" && !rankingLoaded) {
-      queue.orderMode = "dataset";
-      queue.appliedRankingAnalysisId = "";
-    }
-    this.refs.individualQueueOrder.value = queue.orderMode;
-    const rankingOption = this.refs.individualQueueOrder.querySelector('option[value="ranking"]');
-    if (rankingOption) {
-      rankingOption.disabled = (
-        !rankingAvailable
-        || ["checking", "restoring", "loading"].includes(this.anomalyRanking?.status)
-      );
-    }
+    this.syncIndividualQueueRankingOptions();
     this.refs.individualHead.textContent = (
       `Individual review queue (${formatCount(position.ordered.length)})`
     );

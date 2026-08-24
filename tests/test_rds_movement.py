@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 from app.auth import AuthManager
 from app.state import ensure_project_state, get_dataset_artifact
 from examples.movement.rds_export import export_reviewed_rds_bundle
+from examples.movement.routes import _ranking_definition_matches
 from examples.movement.rds_index import (
     build_rds_fixes,
     ensure_rds_index,
@@ -92,10 +93,11 @@ def test_shared_frontend_selects_rds_artifacts_in_rds_mode():
         source.index('<div class="movement-side-sheet ranking hidden"'):
         source.index('<div class="movement-side-sheet feature-space hidden"')
     ]
-    assert 'data-role="ranking-method-control"' in ranking_sheet
-    assert '<option value="isolation_forest">Isolation forest — worst burst</option>' in ranking_sheet
-    assert '<option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>' in ranking_sheet
-    assert '<option value="source_is_outlier">Source is_outlier — total flagged fixes</option>' in ranking_sheet
+    assert 'data-role="ranking-method-control"' not in ranking_sheet
+    assert '<label data-role="ranking-method-control">Ranking type' in source
+    assert '<option value="isolation_forest">Isolation forest — worst burst</option>' in source
+    assert '<option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>' in source
+    assert '<option value="source_is_outlier">Source is_outlier — total flagged fixes</option>' in source
     assert 'this.refs.rankingMethod.addEventListener("change"' in source
     ranking_handler_start = source.index("  handleRankingMethodChange() {")
     ranking_handler_end = source.index("\n  hasOsmContextFeatures() {", ranking_handler_start)
@@ -105,6 +107,15 @@ def test_shared_frontend_selects_rds_artifacts_in_rds_mode():
     assert binary_layers.count('widthUnits: "meters"') == 2
     assert "getWidth: 9" in binary_layers
     assert binary_layers.count("widthMinPixels: 2") == 2
+
+
+def test_pre_sum_source_ranking_is_not_treated_as_a_source_total_ranking():
+    assert _ranking_definition_matches("source_is_outlier", "") is False
+    assert _ranking_definition_matches(
+        "source_is_outlier",
+        "source_is_outlier:sum_fix_counts:v1",
+    ) is True
+    assert _ranking_definition_matches("isolation_forest", "") is True
 
 
 def test_rds_adapter_matches_existing_csv_movement_model(tmp_path):
@@ -229,6 +240,9 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
         summary = job.json()["result"]["summary"]
         summaries[ranking_method] = summary
         assert summary["ranking_method"] == ranking_method
+        assert job.json()["result"]["analysis"]["parameters"][
+            "ranking_definition_signature"
+        ]
 
     source_summary = summaries["source_is_outlier"]
     assert source_summary["individual_ranking_summary"]["aggregation"] == "sum_anomaly_score"

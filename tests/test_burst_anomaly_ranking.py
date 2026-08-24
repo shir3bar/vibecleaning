@@ -794,9 +794,12 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert "anomalyFeatureSetLabel" in source
     assert "Running burst anomaly ranking analysis (${featureSetLabel})" in source
     assert "Created ${this.rankingMethodLabel(returnedMethod)} ranking analysis" in source
-    assert '<option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>' in ranking_sheet
+    assert '<option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>' in source
+    assert 'data-role="ranking-method-control"' not in ranking_sheet
+    assert 'this.refs.runAnomalyRanking.textContent = "Rank bursts"' in source
     assert "sum_positive_outlier_decision_margin" not in source
-    assert "Individual score" in renderer
+    assert "Total source outliers" in renderer
+    assert "Total decision margin" in renderer
     assert "Top burst score" in renderer
     assert "decision margin" in source
     assert "modelFit.excluded_by_feature_set" in source
