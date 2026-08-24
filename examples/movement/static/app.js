@@ -532,6 +532,7 @@ class MovementExampleApp {
     this.map = null;
     this.mapLoaded = false;
     this.overlay = null;
+    this.binaryFilterExtension = null;
     this.pendingIssueStatus = "suspected";
     this.flagTargetKind = "none";
     this.manualFlagTarget = {
@@ -11111,7 +11112,10 @@ class MovementExampleApp {
   retainedBinaryDeckLayers(visibleIndividuals, showPoints) {
     if (!this.data?.binaryBlocks?.size || !window.deck?.DataFilterExtension) return [];
     const layers = [];
-    const filterExtension = new deck.DataFilterExtension({ filterSize: 1 });
+    if (!this.binaryFilterExtension) {
+      this.binaryFilterExtension = new deck.DataFilterExtension({ filterSize: 1 });
+    }
+    const filterExtension = this.binaryFilterExtension;
     const full = this.data.fullBinaryMovement;
     const allSelected = (
       Boolean(full)

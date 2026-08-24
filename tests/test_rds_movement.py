@@ -102,16 +102,15 @@ def test_shared_frontend_selects_rds_artifacts_in_rds_mode():
     ranking_handler_end = source.index("\n  hasOsmContextFeatures() {", ranking_handler_start)
     assert "this.anomalyRankings.get(method)" in source[ranking_handler_start:ranking_handler_end]
     assert "rankingMethod: this.getRankingMethod()" in source
-    binary_layers = source[source.index("binaryDeckLayers(") : source.index("renderLayers(", source.index("binaryDeckLayers("))]
-    assert binary_layers.count('widthUnits: "meters"') == 2
-    assert "getWidth: 9" in binary_layers
-    assert binary_layers.count("widthMinPixels: 2") == 2
+    assert "retainedBinaryDeckLayers(" in source
+    assert "movement-overview-preview-" in source
+    assert "requestMovementBinaryAttributes(" in source
 
 
 def test_rds_frontend_loads_full_binary_only_after_selecting_all():
     source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-    assert 'this.cancelRequest("binaryFixes")' in source
-    assert "wholeRdsStudySelected" in source
+    assert "cancelBinaryRequests(" in source
+    assert "wholeStudySelected" in source
     assert "if (data.overviewTruncated) {\n    return [];" in source
     assert source.count("await this.loadBinaryMovement({") == 1
 
@@ -128,14 +127,15 @@ def test_pre_sum_source_ranking_is_not_treated_as_a_source_total_ranking():
 def test_rds_binary_renderer_reuses_attributes_and_omits_empty_overlays():
     source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
     binary_layers = source[
-        source.index("binaryDeckLayers(") : source.index(
-            "renderLayers(", source.index("binaryDeckLayers(")
+        source.index("  retainedBinaryDeckLayers(") : source.index(
+            "\n  renderLayers(", source.index("  retainedBinaryDeckLayers(")
         )
     ]
-    assert "binary.renderCache?.key === cacheKey" in source
-    assert "attributes.thresholdCount > 0" in binary_layers
-    assert "attributes.suspectedCount > 0" in binary_layers
-    assert "attributes.confirmedCount > 0" in binary_layers
+    assert "binary.renderCaches?.has(cacheKey)" in source
+    assert "this.binaryFilterExtension = new deck.DataFilterExtension" in binary_layers
+    assert "attributes.thresholdCount" in binary_layers
+    assert "attributes.suspectedCount" in binary_layers
+    assert "attributes.confirmedCount" in binary_layers
 
 
 def test_rds_adapter_matches_existing_csv_movement_model(tmp_path):
@@ -389,6 +389,33 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
     with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle_zip:
         assert "writer_manifest.json" in bundle_zip.namelist()
         assert set(header["artifacts"]).issubset(bundle_zip.namelist())
+
+
+def test_rds_binary_subset_contains_only_requested_individual(tmp_path):
+    client, _study_dir = _client(tmp_path)
+    loaded = client.get(
+        "/api/apps/movement/family/movement_rds/study/268904527/load"
+    ).json()
+    dataset_id = loaded["dataset_id"]
+    logical_name = loaded["logical_name"]
+    overview = client.get(
+        f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{dataset_id}/overview",
+        params={"logical_name": logical_name},
+    ).json()
+    individual = overview["individuals"][0]
+
+    response = client.get(
+        f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{dataset_id}/fixes-binary",
+        params=[("logical_name", logical_name), ("individuals", individual)],
+    )
+
+    assert response.status_code == 200, response.text
+    header = _binary_header(response.content)
+    assert header["version"] == 2
+    assert header["loaded_individuals"] == [individual]
+    assert list(header["individual_point_ranges"]) == [individual]
+    assert header["row_count"] == overview["stats"][individual]["row_count"]
+    assert header["line_count"] == max(0, header["row_count"] - 1)
 
 
 def test_python_reviewed_rds_export_adds_only_permitted_columns(tmp_path):
