@@ -109,6 +109,14 @@ def test_shared_frontend_selects_rds_artifacts_in_rds_mode():
     assert binary_layers.count("widthMinPixels: 2") == 2
 
 
+def test_rds_frontend_loads_full_binary_only_after_selecting_all():
+    source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    assert 'this.cancelRequest("binaryFixes")' in source
+    assert "wholeRdsStudySelected" in source
+    assert "if (data.overviewTruncated) {\n    return [];" in source
+    assert source.count("await this.loadBinaryMovement({") == 1
+
+
 def test_pre_sum_source_ranking_is_not_treated_as_a_source_total_ranking():
     assert _ranking_definition_matches("source_is_outlier", "") is False
     assert _ranking_definition_matches(

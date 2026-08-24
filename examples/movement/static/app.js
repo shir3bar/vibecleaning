@@ -4053,6 +4053,7 @@ class MovementExampleApp {
     });
     this.refs.selectNone.addEventListener("click", () => {
       if (!this.data) return;
+      this.cancelRequest("binaryFixes");
       this.clearThresholdState();
       this.data.selectedIndividuals = new Set();
       this.data.selectedFixKeys = new Set();
@@ -4311,7 +4312,6 @@ class MovementExampleApp {
     binary.renderCache = null;
     data.binaryMovement = binary;
     data.binaryMapReady = true;
-    data.selectedIndividuals = new Set(data.individuals);
     for (const field of data.colorFields) {
       const stats = binary.header.color_stats?.[field.key];
       if (field.kind === "numeric" && stats) {
@@ -7411,7 +7411,6 @@ class MovementExampleApp {
       ) || null;
       this.clearLoadedStudyState();
       this.data = buildDatasetFromSummary(summary, this.uiState.colorBy);
-      await this.loadBinaryMovement({ familyName, studyName, datasetId: this.currentDatasetId });
       this.restoreAnnotationReloadContext(viewContext);
       this.syncAnomalyFeatureSetOptions({ save: false });
       const preservedFixKeys = this.initializeDatasetView(viewContext);
@@ -7441,9 +7440,7 @@ class MovementExampleApp {
       } else {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
       }
-      if (!this.data.binaryMapReady) {
-        void this.loadDetailForCurrentSelection({ preservedFixKeys });
-      }
+      void this.loadDetailForCurrentSelection({ preservedFixKeys });
       if (this.refs.showConfirmed.checked) {
         void this.loadConfirmedFixes();
       }
@@ -7594,12 +7591,15 @@ class MovementExampleApp {
         return;
       }
       const nextData = buildDatasetFromSummary(summary, this.uiState.colorBy);
-      await this.loadBinaryMovement({ familyName, studyName, datasetId, data: nextData });
       const availableIndividuals = new Set(nextData.individuals);
       const transitionIndividuals = viewContext
         ? (viewContext.selectedIndividuals || []).filter(individual => availableIndividuals.has(individual))
         : initialMovementVisibleIndividuals(nextData);
-      if (nextData.overviewTruncated && transitionIndividuals.length && !nextData.binaryMapReady) {
+      const transitionRequestsWholeRdsStudy = (
+        MOVEMENT_APP_CONFIG.rdsSource
+        && transitionIndividuals.length === nextData.individuals.length
+      );
+      if (nextData.overviewTruncated && transitionIndividuals.length && !transitionRequestsWholeRdsStudy) {
         const detailPayload = await this.fetchJSON(
           this.buildFixesRequestUrl({
             familyName,
@@ -7654,9 +7654,7 @@ class MovementExampleApp {
       } else {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
       }
-      if (!this.data.binaryMapReady) {
-        void this.loadDetailForCurrentSelection({ preservedFixKeys });
-      }
+      void this.loadDetailForCurrentSelection({ preservedFixKeys });
       if (this.refs.showConfirmed.checked) {
         void this.loadConfirmedFixes();
       }
@@ -12594,6 +12592,43 @@ class MovementExampleApp {
     }
     const selectedIndividuals = this.getSelectedIndividuals();
     const preserved = preservedFixKeys instanceof Set ? preservedFixKeys : new Set(this.data.selectedFixKeys);
+    const wholeRdsStudySelected = (
+      MOVEMENT_APP_CONFIG.rdsSource
+      && selectedIndividuals.length > 0
+      && selectedIndividuals.length === this.data.individuals.length
+    );
+    if (wholeRdsStudySelected && !this.data.binaryMapReady) {
+      this.cancelRequest("detail");
+      this.data.detailState = "loading";
+      this.data.detailIndividuals = [...selectedIndividuals];
+      this.updateActionButtons();
+      this.setStatus(
+        `Loading all ${formatCount(this.data.totalRows)} indexed fixes across ${formatCount(selectedIndividuals.length)} individuals...`,
+      );
+      try {
+        await this.loadBinaryMovement({
+          familyName: this.currentFamily,
+          studyName: this.currentStudy,
+          datasetId: this.currentDatasetId,
+        });
+      } catch (error) {
+        if (this.isAbortError(error) || !this.data) {
+          return;
+        }
+        this.data.detailState = "error";
+        this.updateActionButtons();
+        this.setStatus(`Could not load all indexed fixes: ${error.message}`, true);
+        return;
+      }
+      const currentSelection = this.getSelectedIndividuals();
+      if (
+        !this.data
+        || !this.data.binaryMapReady
+        || currentSelection.length !== this.data.individuals.length
+      ) {
+        return;
+      }
+    }
     if (this.data.binaryMapReady && selectedIndividuals.length > 1) {
       this.cancelRequest("detail");
       this.data.detailState = "idle";
@@ -15863,7 +15898,7 @@ function initialMovementVisibleIndividuals(data) {
     return [];
   }
   if (data.overviewTruncated) {
-    if (!data.binaryMapReady) return [];
+    return [];
   }
   return data.individuals || [];
 }
