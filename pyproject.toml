@@ -19,6 +19,7 @@ dependencies = [
 dev = [
   "httpx",
   "ipykernel",
+  "playwright>=1.62.0",
   "pytest",
 ]
 

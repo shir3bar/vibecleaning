@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import struct
 import sys
 import base64
 import csv
@@ -952,8 +953,9 @@ def test_movement_frontend_colors_inbound_steps_above_burst_casing():
 
     assert "buildMovementTrackStepSegments(data.eligibleFixesByTrack)" in source
     assert "destinationFix" in source
-    assert "this.colorForFix(item.destinationFix)" in renderer
-    assert "getVisibleTrackSteps(visibleIndividuals, visibleSetNames)" in renderer
+    assert "this.colorForFix(item.destinationFix)" in source
+    assert "retainedBinaryDeckLayers(visibleIndividuals, showPoints)" in renderer
+    assert "attributes.lineColors" in source
     assert "suppressedBaseTrackKeys" not in source
     assert renderer.index('id: "movement-bursts"') < renderer.index('id: "movement-paths"')
     assert "interpolateSeriesPosition" not in source
@@ -1115,7 +1117,8 @@ def test_movement_frontend_uses_cached_binary_searched_temporal_focus():
     assert "function nearestTrackFixIndex(fixes, currentTimeMs)" in source
     assert "while (low < high)" in source
     assert "visiblePointCache" in source
-    assert "getVisibleMovementPoints(visibleIndividuals, visibleSetNames)" in renderer
+    assert "retainedBinaryDeckLayers(visibleIndividuals, showPoints)" in renderer
+    assert "binary.lineSourcePositions" in source
     assert "showPoints && this.temporalSliderEngaged" in renderer
     assert "buildTemporalFocalData(visibleIndividuals, visibleSetNames)" in renderer
     assert 'id: "movement-temporal-focal-steps"' not in renderer
@@ -1207,6 +1210,52 @@ def create_movement_test_client(tmp_path: Path, *, csv_content: str = CSV_CONTEN
     dataset_id = load_project_state(study_dir)["current_dataset_id"]
     client = TestClient(app)
     return client, dataset_id
+
+
+def parse_movement_binary_payload(content: bytes) -> tuple[dict, int]:
+    assert content[:4] == b"VCM1"
+    header_length = struct.unpack_from("<I", content, 4)[0]
+    header = json.loads(content[8 : 8 + header_length])
+    return header, ((8 + header_length + 7) // 8) * 8
+
+
+def test_csv_exact_binary_subset_matches_canonical_fixes(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+    params = [("logical_name", "movement.csv"), ("individuals", "alpha")]
+    binary_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/fixes-binary",
+        params=params,
+    )
+    json_response = client.get(
+        f"/api/apps/movement/family/movement_clean/study/test_study/dataset/{dataset_id}/fixes",
+        params=params,
+    )
+
+    assert binary_response.status_code == 200, binary_response.text
+    assert json_response.status_code == 200, json_response.text
+    header, data_offset = parse_movement_binary_payload(binary_response.content)
+    canonical = json_response.json()["fixes"]
+    assert header["version"] == 2
+    assert header["source_format"] == "csv"
+    assert header["loaded_individuals"] == ["alpha"]
+    assert header["row_count"] == len(canonical) == 2
+    assert header["line_count"] == 1
+    assert header["individual_point_ranges"] == {"alpha": [0, 2]}
+
+    offset_meta = header["arrays"]["fix_key_offsets"]
+    bytes_meta = header["arrays"]["fix_key_bytes"]
+    offsets = struct.unpack_from(
+        "<3I", binary_response.content, data_offset + offset_meta["offset"]
+    )
+    key_bytes = binary_response.content[
+        data_offset + bytes_meta["offset"] :
+        data_offset + bytes_meta["offset"] + bytes_meta["length"]
+    ]
+    binary_keys = [
+        key_bytes[offsets[index] : offsets[index + 1]].decode("utf-8")
+        for index in range(2)
+    ]
+    assert binary_keys == [fix["fix_key"] for fix in canonical]
 
 
 def test_fix_annotation_template_uses_row_range_fast_path():
@@ -2497,9 +2546,15 @@ def test_burst_visibility_defaults_on_and_stays_independent_from_flag_selection(
     assert '${this.hiddenBurstIds.has(burst.burstId) ? "" : " checked"}' in source
     assert 'id: "movement-inspected-burst-outline"' not in source
     assert 'id: "movement-inspected-burst-endpoints"' not in source
-    assert ".filter(point => !hiddenBurstFixKeys.has(point.fix?.fixKey))" in source
-    assert "!hiddenBurstFixKeys.has(step.sourceFix?.fixKey)" in source
-    assert "!hiddenBurstFixKeys.has(step.destinationFix?.fixKey)" in source
+    assert "hiddenBurstIds: [...this.hiddenBurstIds]" in source
+    assert "pointFilter[index] = !hidden && status !== 2 ? 1 : 0" in source
+    worker_source = MOVEMENT_APP_JS.with_name("movement_binary_worker.js").read_text(
+        encoding="utf-8"
+    )
+    assert "hiddenBursts.has(burstIdAt(movement, index, individual))" in worker_source
+    assert "pointFilter[targetIndex]" in worker_source
+    assert "arrays.burst_values[sourceIndex]" in worker_source
+    assert "arrays.burst_values[targetIndex]" in worker_source
     assert "&& !hiddenBurstFixKeys.has(step.fixKey)" in source
     assert "|| hiddenBurstFixKeys.has(fix.fixKey)" in source
     assert "sourceFix: previous" in source
