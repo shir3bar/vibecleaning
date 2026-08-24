@@ -10196,6 +10196,25 @@ class MovementExampleApp {
     });
     const hiddenBurstIds = this.hiddenBurstIds;
     const activeQueueIndividual = this.queueActiveIndividual();
+    const fieldStyle = field ? this.data.colorStyles.get(field.key) : null;
+    const cacheKey = JSON.stringify({
+      selectedCodes: [...selectedCodes].sort((left, right) => left - right),
+      showPoints: Boolean(showPoints),
+      field: field?.key || "",
+      fieldStyle: fieldStyle || null,
+      hiddenBurstIds: [...hiddenBurstIds].sort(),
+      activeQueueIndividual: activeQueueIndividual || "",
+      showConfirmed: Boolean(this.refs.showConfirmed.checked),
+      threshold: {
+        fieldKey: this.thresholdState.fieldKey || "",
+        value: finiteOrNull(this.thresholdState.value),
+        reverse: this.thresholdState.reverse === true,
+        selectedLevels: [...(this.thresholdState.selectedLevels || [])].sort(),
+      },
+    });
+    if (binary.renderCache?.key === cacheKey) {
+      return binary.renderCache.attributes;
+    }
     const pointColors = new Uint8Array(rowCount * 4);
     const pointFilter = new Uint8Array(rowCount);
     const suspectedFilter = new Uint8Array(rowCount);
@@ -10204,6 +10223,9 @@ class MovementExampleApp {
     const thresholdActive = this.thresholdState.fieldKey === field?.key;
     const thresholdValue = thresholdActive ? finiteOrNull(this.thresholdState.value) : null;
     const thresholdLevels = new Set(thresholdActive ? this.thresholdState.selectedLevels || [] : []);
+    let suspectedCount = 0;
+    let confirmedCount = 0;
+    let thresholdCount = 0;
     for (let index = 0; index < rowCount; index += 1) {
       const code = Number(arrays.individual_codes[index]);
       const individual = String(binary.header.individuals?.[code] || "");
@@ -10226,6 +10248,9 @@ class MovementExampleApp {
           thresholdFilter[index] = Number.isFinite(value) && validGpsTurn && matches ? 1 : 0;
         }
       }
+      suspectedCount += suspectedFilter[index];
+      confirmedCount += confirmedFilter[index];
+      thresholdCount += thresholdFilter[index];
       const color = this.binaryColorForIndex(binary, index, field);
       const opacity = activeQueueIndividual && individual !== activeQueueIndividual ? 0.25 : 1;
       const offset = index * 4;
@@ -10255,7 +10280,21 @@ class MovementExampleApp {
       lineColors[colorOffset + 2] = pointColors[pointOffset + 2];
       lineColors[colorOffset + 3] = Math.round(185 * (activeQueueIndividual && individual !== activeQueueIndividual ? 0.25 : 1));
     }
-    return { pointColors, pointFilter, suspectedFilter, confirmedFilter, thresholdFilter, lineColors, lineFilter, burstFilter };
+    const attributes = {
+      pointColors,
+      pointFilter,
+      suspectedFilter,
+      confirmedFilter,
+      thresholdFilter,
+      lineColors,
+      lineFilter,
+      burstFilter,
+      suspectedCount,
+      confirmedCount,
+      thresholdCount,
+    };
+    binary.renderCache = { key: cacheKey, attributes };
+    return attributes;
   }
 
   binaryDeckLayers(visibleIndividuals, showPoints) {
@@ -10323,48 +10362,52 @@ class MovementExampleApp {
         extensions: [filterExtension],
         pickable: true,
       }));
-      layers.push(new deck.ScatterplotLayer({
-        id: "movement-binary-threshold-points",
-        data: {
-          length: pointData.length,
-          attributes: {
-            getPosition: pointData.attributes.getPosition,
-            getFilterValue: { value: attributes.thresholdFilter, size: 1 },
+      if (attributes.thresholdCount > 0) {
+        layers.push(new deck.ScatterplotLayer({
+          id: "movement-binary-threshold-points",
+          data: {
+            length: pointData.length,
+            attributes: {
+              getPosition: pointData.attributes.getPosition,
+              getFilterValue: { value: attributes.thresholdFilter, size: 1 },
+            },
           },
-        },
-        getLineColor: [255, 236, 148, 255],
-        filled: false,
-        stroked: true,
-        lineWidthMinPixels: 2.5,
-        getRadius: 108,
-        radiusMinPixels: 6,
-        radiusMaxPixels: 12,
-        filterRange: [1, 1],
-        extensions: [filterExtension],
-        pickable: true,
-      }));
-      layers.push(new deck.ScatterplotLayer({
-        id: "movement-binary-suspected-outline",
-        data: {
-          length: pointData.length,
-          attributes: {
-            getPosition: pointData.attributes.getPosition,
-            getFillColor: pointData.attributes.getFillColor,
-            getFilterValue: { value: attributes.suspectedFilter, size: 1 },
+          getLineColor: [255, 236, 148, 255],
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 2.5,
+          getRadius: 108,
+          radiusMinPixels: 6,
+          radiusMaxPixels: 12,
+          filterRange: [1, 1],
+          extensions: [filterExtension],
+          pickable: true,
+        }));
+      }
+      if (attributes.suspectedCount > 0) {
+        layers.push(new deck.ScatterplotLayer({
+          id: "movement-binary-suspected-outline",
+          data: {
+            length: pointData.length,
+            attributes: {
+              getPosition: pointData.attributes.getPosition,
+              getFillColor: pointData.attributes.getFillColor,
+              getFilterValue: { value: attributes.suspectedFilter, size: 1 },
+            },
           },
-        },
-        getLineColor: [255, 204, 40, 255],
-        filled: true,
-        stroked: true,
-        lineWidthMinPixels: 3,
-        getRadius: 135,
-        radiusMinPixels: 8,
-        radiusMaxPixels: 17,
-        filterRange: [1, 1],
-        extensions: [filterExtension],
-        pickable: true,
-      }));
-      if (this.refs.showConfirmed.checked) {
+          getLineColor: [255, 204, 40, 255],
+          filled: true,
+          stroked: true,
+          lineWidthMinPixels: 3,
+          getRadius: 135,
+          radiusMinPixels: 8,
+          radiusMaxPixels: 17,
+          filterRange: [1, 1],
+          extensions: [filterExtension],
+          pickable: true,
+        }));
+      }
+      if (this.refs.showConfirmed.checked && attributes.confirmedCount > 0) {
         layers.unshift(new deck.ScatterplotLayer({
           id: "movement-binary-confirmed-exclusions",
           data: {

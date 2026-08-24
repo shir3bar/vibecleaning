@@ -126,6 +126,19 @@ def test_pre_sum_source_ranking_is_not_treated_as_a_source_total_ranking():
     assert _ranking_definition_matches("isolation_forest", "") is True
 
 
+def test_rds_binary_renderer_reuses_attributes_and_omits_empty_overlays():
+    source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    binary_layers = source[
+        source.index("binaryDeckLayers(") : source.index(
+            "renderLayers(", source.index("binaryDeckLayers(")
+        )
+    ]
+    assert "binary.renderCache?.key === cacheKey" in source
+    assert "attributes.thresholdCount > 0" in binary_layers
+    assert "attributes.suspectedCount > 0" in binary_layers
+    assert "attributes.confirmedCount > 0" in binary_layers
+
+
 def test_rds_adapter_matches_existing_csv_movement_model(tmp_path):
     source = _sample_files()[0]
     frame = read_movement_rds(source)
