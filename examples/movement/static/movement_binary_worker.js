@@ -1,4 +1,5 @@
 const movements = new Map();
+const GPS_SPIKE_FIELD_KEY = "gps_spike_step_turn";
 
 function parseMovementBinary(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -39,8 +40,13 @@ function parseMovementBinary(buffer) {
 
 function numericColor(value, range) {
   if (!Number.isFinite(value)) return [120, 136, 153, 120];
-  const span = (Number(range?.max) - Number(range?.min)) || 1;
-  const ratio = Math.max(0, Math.min(1, (value - Number(range?.min || 0)) / span));
+  const requestedMin = Number(range?.min);
+  const requestedMax = Number(range?.max);
+  const min = Number.isFinite(requestedMin) ? requestedMin : 0;
+  const max = Number.isFinite(requestedMax) && requestedMax !== min
+    ? requestedMax
+    : min + 1;
+  const ratio = Math.max(0, Math.min(1, (value - min) / (max - min)));
   const start = [76, 196, 255];
   const middle = [255, 214, 92];
   const end = [242, 80, 103];
@@ -73,7 +79,7 @@ function colorAt(movement, index, spec) {
     const color = spec.individualColors?.[individual] || [124, 210, 255];
     return [color[0], color[1], color[2], 215];
   }
-  const sourceKey = field.key === "gps_spike_candidate" ? "step_length_m" : field.key;
+  const sourceKey = field.key === GPS_SPIKE_FIELD_KEY ? "step_length_m" : field.key;
   const column = movement.header.color_columns?.[sourceKey];
   const value = arrays[column?.array || sourceKey]?.[index];
   if (field.kind === "boolean") {
@@ -113,11 +119,12 @@ function buildAttributes(movement, spec) {
     confirmedFilter[index] = !hidden && status === 2 ? 1 : 0;
     if (!hidden && status !== 2 && threshold.active) {
       const field = spec.field || {};
-      const sourceKey = field.key === "gps_spike_candidate" ? "step_length_m" : field.key;
+      const sourceKey = field.key === GPS_SPIKE_FIELD_KEY ? "step_length_m" : field.key;
       const column = movement.header.color_columns?.[sourceKey];
       const value = arrays[column?.array || sourceKey]?.[index];
       if (field.kind === "boolean") {
-        thresholdFilter[index] = thresholdLevels.has(Number(value) ? "True" : "False") ? 1 : 0;
+        const level = Number(value) === 1 ? "True" : Number(value) === 0 ? "False" : "Missing";
+        thresholdFilter[index] = thresholdLevels.has(level) ? 1 : 0;
       } else if (field.kind === "categorical") {
         const code = Number(value);
         const level = code > 0 ? String(column?.levels?.[code - 1] || "Missing") : "Missing";
@@ -125,7 +132,7 @@ function buildAttributes(movement, spec) {
       } else if (field.kind === "numeric" && Number.isFinite(Number(threshold.value))) {
         const number = Number(value);
         const turn = Number(arrays.turn_angle_deg?.[index]);
-        const validTurn = field.key !== "gps_spike_candidate"
+        const validTurn = field.key !== GPS_SPIKE_FIELD_KEY
           || (Number.isFinite(turn) && Math.abs(turn) >= Number(spec.gpsSpikeTurnAngleDeg));
         const matches = threshold.reverse ? number < Number(threshold.value) : number > Number(threshold.value);
         thresholdFilter[index] = Number.isFinite(number) && validTurn && matches ? 1 : 0;

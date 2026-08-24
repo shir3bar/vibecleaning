@@ -4512,7 +4512,10 @@ class MovementExampleApp {
     binary.renderCaches = new Map();
     binary.attributePromises = new Map();
     for (const field of data.colorFields) {
-      const stats = binary.header.color_stats?.[field.key];
+      const statsKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY
+        ? "step_length_m"
+        : field.key;
+      const stats = binary.header.color_stats?.[statsKey];
       if (field.kind === "numeric" && stats) {
         data.colorStyles.set(field.key, {
           kind: "numeric",
@@ -10795,6 +10798,7 @@ class MovementExampleApp {
         this.movementDiagnostics.binaryAttributeBuilds += 1;
         binary.renderCaches.set(cacheKey, attributes);
         binary.lastRenderAttributes = attributes;
+        binary.lastRenderCacheKey = cacheKey;
         while (binary.renderCaches.size > 3) {
           binary.renderCaches.delete(binary.renderCaches.keys().next().value);
         }
@@ -10906,6 +10910,8 @@ class MovementExampleApp {
     };
     if (!(binary.renderCaches instanceof Map)) binary.renderCaches = new Map();
     binary.renderCaches.set(cacheKey, attributes);
+    binary.lastRenderAttributes = attributes;
+    binary.lastRenderCacheKey = cacheKey;
     while (binary.renderCaches.size > 3) {
       binary.renderCaches.delete(binary.renderCaches.keys().next().value);
     }
@@ -11040,6 +11046,7 @@ class MovementExampleApp {
     const appendLayers = ({ binary, individual = "", fullLayer = false, visible = false }) => {
       const { cacheKey } = this.binaryRenderSpecification();
       let attributes = binary.renderCaches?.get(cacheKey) || null;
+      let attributeCacheKey = cacheKey;
       if (!attributes) {
         void this.prepareRetainedBinaryAttributes(binary).then(() => {
           if (this.data?.binaryBlocks && [...this.data.binaryBlocks.values()].includes(binary)) {
@@ -11047,6 +11054,7 @@ class MovementExampleApp {
           }
         }).catch(error => this.setStatus(`Map color warning: ${error.message}`, true));
         attributes = binary.lastRenderAttributes || null;
+        attributeCacheKey = binary.lastRenderCacheKey || "pending";
       }
       if (!attributes) return;
       const code = individual
@@ -11065,7 +11073,7 @@ class MovementExampleApp {
       const deckData = this.retainedBinaryDeckData(
         binary,
         attributes,
-        cacheKey,
+        attributeCacheKey,
         pointRange,
         lineRange,
       );
@@ -12689,6 +12697,7 @@ class MovementExampleApp {
     const disabledReason = context?.disabledReason || "";
     const matchCount = Number(context?.matchCount) || context?.matchKeys?.size || 0;
     const uncheckedCount = context?.uncheckedMatchKeys?.size || 0;
+    const previewTruncated = context?.previewTruncated === true;
     const histogram = context?.histogram;
     const histogramMode = context?.histogramMode === "clipped" ? "clipped" : "full";
     const histogramInputMin = finiteOrNull(context?.histogramInputMin);
@@ -12737,7 +12746,9 @@ class MovementExampleApp {
         ? `${formatCount(matchCount)} fixes match ${formatCount(selectedLevels.length)} selected levels.`
         : "Choose one or more levels to highlight matching fixes.";
       const selectionNote = uncheckedCount > 0
-        ? `${formatCount(uncheckedCount)} matching fixes can optionally be added to the checked-fix list.`
+        ? previewTruncated
+          ? `${formatCount(matchCount)} fixes match; the first ${formatCount(uncheckedCount)} can optionally be added to the checked-fix preview.`
+          : `${formatCount(uncheckedCount)} matching fixes can optionally be added to the checked-fix list.`
         : matchCount > 0
           ? "All matching fixes are already in the checked-fix list."
           : "No levels are selected yet.";
@@ -12770,7 +12781,7 @@ class MovementExampleApp {
             class="movement-emphasis"
             data-action="check-above-threshold"
             ${uncheckedCount === 0 ? "disabled" : ""}
-          >Add matches to checked fixes${uncheckedCount > 0 ? ` (${escapeHtml(formatCount(uncheckedCount))})` : ""}</button>
+          >${previewTruncated ? "Add preview matches" : "Add matches to checked fixes"}${uncheckedCount > 0 ? ` (${escapeHtml(formatCount(uncheckedCount))})` : ""}</button>
           <button
             type="button"
             data-action="clear-threshold"
@@ -12818,6 +12829,8 @@ class MovementExampleApp {
         ? "No threshold set"
         : matchCount === 0
           ? "No matches"
+          : previewTruncated
+            ? `${formatCount(matchCount)} matches • the checked-fix preview is limited to ${formatCount(context.matchKeys.size)}`
           : uncheckedCount > 0
             ? `${formatCount(matchCount)} matches • ${formatCount(uncheckedCount)} not in checked fixes`
             : `${formatCount(matchCount)} matches • all in checked fixes`;
@@ -12897,14 +12910,14 @@ class MovementExampleApp {
           >
           Reverse threshold: highlight values below the line
         </label>`}
-        <div class="movement-threshold-note">${escapeHtml(selectionNote)}</div>
+        <div class="movement-threshold-note">${escapeHtml(selectionNote)}${previewTruncated ? " The main flag action still applies the full threshold filter." : ""}</div>
         <div class="movement-threshold-actions">
           <button
             type="button"
             class="movement-emphasis"
             data-action="check-above-threshold"
             ${uncheckedCount === 0 ? "disabled" : ""}
-          >Add matches to checked fixes</button>
+          >${previewTruncated ? "Add preview matches" : "Add matches to checked fixes"}${previewTruncated ? ` (${escapeHtml(formatCount(uncheckedCount))})` : ""}</button>
           <button
             type="button"
             data-action="clear-threshold"

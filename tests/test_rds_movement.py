@@ -126,16 +126,46 @@ def test_pre_sum_source_ranking_is_not_treated_as_a_source_total_ranking():
 
 def test_rds_binary_renderer_reuses_attributes_and_omits_empty_overlays():
     source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    worker_source = (MOVEMENT_STATIC_ROOT / "movement_binary_worker.js").read_text(
+        encoding="utf-8"
+    )
     binary_layers = source[
         source.index("  retainedBinaryDeckLayers(") : source.index(
             "\n  renderLayers(", source.index("  retainedBinaryDeckLayers(")
         )
     ]
     assert "binary.renderCaches?.has(cacheKey)" in source
+    assert "binary.lastRenderCacheKey = cacheKey" in source
+    assert "attributeCacheKey = binary.lastRenderCacheKey" in binary_layers
     assert "this.binaryFilterExtension = new deck.DataFilterExtension" in binary_layers
     assert "attributes.thresholdCount" in binary_layers
     assert "attributes.suspectedCount" in binary_layers
     assert "attributes.confirmedCount" in binary_layers
+    assert 'const GPS_SPIKE_FIELD_KEY = "gps_spike_step_turn"' in worker_source
+    assert '"gps_spike_candidate"' not in worker_source
+    assert "Number.isFinite(requestedMax)" in worker_source
+
+
+def test_binary_color_changes_do_not_cache_stale_attributes_under_the_new_state():
+    source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    renderer = source[
+        source.index("  retainedBinaryDeckLayers(") : source.index(
+            "\n  renderLayers(", source.index("  retainedBinaryDeckLayers(")
+        )
+    ]
+    loader = source[
+        source.index("  async loadBinaryMovement(") : source.index(
+            "\n  binaryFixAt(", source.index("  async loadBinaryMovement(")
+        )
+    ]
+
+    assert "let attributeCacheKey = cacheKey" in renderer
+    assert 'attributeCacheKey = binary.lastRenderCacheKey || "pending"' in renderer
+    assert "attributes,\n        attributeCacheKey," in renderer
+    assert "field.key === GPS_SPIKE_COLOR_FIELD_KEY" in loader
+    assert '? "step_length_m"' in loader
+    assert "the checked-fix preview is limited" in source
+    assert "The main flag action still applies the full threshold filter." in source
 
 
 def test_rds_adapter_matches_existing_csv_movement_model(tmp_path):
