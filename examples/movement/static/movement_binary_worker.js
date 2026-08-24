@@ -153,7 +153,10 @@ function buildAttributes(movement, spec) {
     lineColors[lineOffset] = pointColors[pointOffset];
     lineColors[lineOffset + 1] = pointColors[pointOffset + 1];
     lineColors[lineOffset + 2] = pointColors[pointOffset + 2];
-    lineColors[lineOffset + 3] = 185;
+    lineColors[lineOffset + 3] = (
+      Number(arrays.source_flags?.[sourceIndex])
+      || Number(arrays.source_flags?.[targetIndex])
+    ) ? 52 : 185;
   }
   return {
     pointColors,

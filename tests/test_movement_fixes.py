@@ -950,25 +950,33 @@ def test_movement_frontend_colors_inbound_steps_above_burst_casing():
         source.index("  renderLayers({ temporalOnly = false } = {}) {"):
         source.index("  isSourceOnlyFlaggedBurst(")
     ]
+    worker_source = MOVEMENT_APP_JS.with_name("movement_binary_worker.js").read_text(
+        encoding="utf-8"
+    )
 
-    assert "buildMovementTrackStepSegments(data.eligibleFixesByTrack)" in source
-    assert "destinationFix" in source
-    assert "this.colorForFix(item.destinationFix)" in source
+    assert "buildMovementTrackStepSegments" not in source
     assert "retainedBinaryDeckLayers(visibleIndividuals, showPoints)" in renderer
-    assert "attributes.lineColors" in source
+    assert "const pointOffset = targetIndex * 4" in worker_source
+    assert "lineColors[lineOffset] = pointColors[pointOffset]" in worker_source
     assert "suppressedBaseTrackKeys" not in source
-    assert renderer.index('id: "movement-bursts"') < renderer.index('id: "movement-paths"')
+    assert renderer.index('id: "movement-bursts"') < renderer.index(
+        "retainedBinaryDeckLayers(visibleIndividuals, showPoints)"
+    )
     assert "interpolateSeriesPosition" not in source
     assert 'id: "movement-cursor"' not in source
 
 
 def test_movement_frontend_distinguishes_source_flags_from_review_status():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    worker_source = MOVEMENT_APP_JS.with_name("movement_binary_worker.js").read_text(
+        encoding="utf-8"
+    )
 
     assert "sourceFlags:" in source
     assert "function isSourceOnlyFlaggedFix(fix)" in source
-    assert "sourceFlagged: isSourceOnlyFlaggedFix(previous) || isSourceOnlyFlaggedFix(destinationFix)" in source
-    assert "item.sourceFlagged ? 52 : 185" in source
+    assert "buildMovementTrackStepSegments" not in source
+    assert "Number(arrays.source_flags?.[sourceIndex])" in worker_source
+    assert ") ? 52 : 185" in worker_source
     assert 'id: "movement-source-flagged-points"' not in source
     assert 'id: "movement-suspected-outline"' in source
     assert 'const showSuspectedOutlines = this.data.suspiciousState === "loaded";' in source
@@ -1088,8 +1096,16 @@ def test_movement_frontend_uses_one_scope_aware_flag_action():
     assert 'data-add-individual-issue' not in source
     assert "Choose what to flag" in source
     assert '[255, 204, 40, 210]' in source
-    assert source.index('id: "movement-manual-flag-target-outline"') < source.index('id: "movement-paths"')
-    assert source.index('id: "movement-table-selection-path"') < source.index('id: "movement-paths"')
+    binary_renderer = source[
+        source.index("  retainedBinaryDeckLayers("):
+        source.index("  renderLayers({ temporalOnly = false } = {}) {")
+    ]
+    assert binary_renderer.index("movement-binary-manual-flag-outline-") < binary_renderer.index(
+        "movement-binary-paths-"
+    )
+    assert source.index('id: "movement-table-selection-path"') < source.index(
+        "layers.push(...this.retainedBinaryDeckLayers(visibleIndividuals, showPoints))"
+    )
 
 
 def test_movement_frontend_precomputes_inbound_flagged_steps():
@@ -1116,7 +1132,8 @@ def test_movement_frontend_uses_cached_binary_searched_temporal_focus():
     assert "window.requestAnimationFrame" in source
     assert "function nearestTrackFixIndex(fixes, currentTimeMs)" in source
     assert "while (low < high)" in source
-    assert "visiblePointCache" in source
+    assert "visiblePointCache" not in source
+    assert "binary.deckDataCaches" in source
     assert "retainedBinaryDeckLayers(visibleIndividuals, showPoints)" in renderer
     assert "binary.lineSourcePositions" in source
     assert "showPoints && this.temporalSliderEngaged" in renderer
@@ -2557,8 +2574,8 @@ def test_burst_visibility_defaults_on_and_stays_independent_from_flag_selection(
     assert "arrays.burst_values[targetIndex]" in worker_source
     assert "&& !hiddenBurstFixKeys.has(step.fixKey)" in source
     assert "|| hiddenBurstFixKeys.has(fix.fixKey)" in source
-    assert "sourceFix: previous" in source
-    assert "for (const step of allPathData)" in source
+    assert "for (const track of overviewPreviewTracks)" in source
+    assert "movement-binary-manual-flag-outline-" in source
     assert "zoomToPath" not in flag_method
     assert "zoomToPath" not in visibility_method
     assert 'event.target.closest("button, input, label, select, textarea, [data-queue-burst-controls]")' in source
@@ -2609,29 +2626,24 @@ def test_rds_detail_loading_is_additive_and_does_not_rebuild_browse_cards():
     assert "missingIndividuals = selectedIndividuals.filter" in rds_loader
     assert "individuals: missingIndividuals" in rds_loader
     assert "cacheMovementDetailPayload(this.data, payload, missingIndividuals);" in rds_loader
-    assert "composeMovementDetailSelection(this.data, currentSelection);" in rds_loader
+    assert "composeFocusedMovementSelection(this.data, currentSelection);" in rds_loader
+    assert "focusedObjectCache" in rds_loader
 
 
-def test_rds_object_renderer_keeps_existing_individual_gpu_layers_stable():
+def test_exact_block_renderer_replaces_obsolete_rds_object_map_path():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
-    group_builder = source[
-        source.index("  getRdsObjectRenderGroups("):
-        source.index("  buildTemporalFocalData(", source.index("  getRdsObjectRenderGroups("))
-    ]
     renderer = source[
-        source.index("  renderLayers({ temporalOnly = false } = {}) {"):
-        source.index("  isSourceOnlyFlaggedBurst(")
+        source.index("  retainedBinaryDeckLayers("):
+        source.index("  renderLayers({ temporalOnly = false } = {}) {")
     ]
 
-    assert "if (!entry.renderData)" in group_builder
-    assert "buildMovementTrackStepSegments(tracks)" in group_builder
-    assert "movement-paths-rds-${group.code}" in renderer
-    assert "movement-points-rds-${group.code}" in renderer
-    assert "movement-burst-casing-rds-${code}" in renderer
-    assert "movement-bursts-rds-${code}" in renderer
-    assert "dataComparator: sameArrayItems" in renderer
-    assert "colorStyleKey" in renderer
-    assert "rdsObjectGroups.flatMap(group => group.points)" not in renderer
+    assert "getRdsObjectRenderGroups" not in source
+    assert "detailCache" not in source
+    assert "composeMovementDetailSelection" not in source
+    assert "binary.individualRanges.get(code)" in renderer
+    assert "movement-binary-paths-${suffix}" in renderer
+    assert "movement-binary-points-${suffix}" in renderer
+    assert "visible: !useFullLayer && visibleIndividuals.has(individual)" in renderer
 
 
 def test_movement_frontend_has_lazy_editor_review_dashboard():
@@ -4469,5 +4481,10 @@ def test_movement_frontend_refreshes_queue_dimming_when_active_individual_change
 
     assert not frozen, f"layers dim but never refresh their dimming: {frozen}"
     # Guard against the audit silently passing on an empty layer list.
-    assert "movement-paths" in layer_ids
+    retained_renderer = source[
+        source.index("  retainedBinaryDeckLayers("):
+        source.index("  renderLayers({ temporalOnly = false } = {}) {")
+    ]
+    assert "movement-binary-paths-${suffix}" in retained_renderer
+    assert "const opacity = queueIndividual" in retained_renderer
     assert "movement-bursts" in layer_ids

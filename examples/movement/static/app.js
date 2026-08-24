@@ -10567,38 +10567,6 @@ class MovementExampleApp {
     });
   }
 
-  getVisibleMovementPoints(visibleIndividuals, visibleSetNames) {
-    const cacheKey = [
-      [...visibleIndividuals].sort().join("|"),
-      [...visibleSetNames].sort().join("|"),
-    ].join("::");
-    const cache = this.data.visiblePointCache;
-    if (cache.has(cacheKey)) return cache.get(cacheKey);
-    const points = [];
-    for (const [trackKey, fixes] of this.data.eligibleFixesByTrack || []) {
-      const first = fixes[0];
-      if (
-        !first
-        || !visibleIndividuals.has(first.individual)
-        || !visibleSetNames.has(first.setName)
-      ) {
-        continue;
-      }
-      for (const fix of fixes) {
-        points.push({
-          fix,
-          fixKey: fix.fixKey,
-          individual: fix.individual,
-          setName: fix.setName,
-          trackKey,
-          position: fix.position,
-        });
-      }
-    }
-    cache.set(cacheKey, points);
-    return points;
-  }
-
   getExactMapIndividuals() {
     const exact = new Set();
     for (const individual of this.data?.binaryBlocks?.keys?.() || []) {
@@ -10664,66 +10632,6 @@ class MovementExampleApp {
         this.renderLayers();
       });
     });
-  }
-
-  getVisibleTrackSteps(visibleIndividuals, visibleSetNames) {
-    const cacheKey = [
-      [...visibleIndividuals].sort().join("|"),
-      [...visibleSetNames].sort().join("|"),
-    ].join("::");
-    const cache = this.data.visibleTrackStepCache;
-    if (cache.has(cacheKey)) return cache.get(cacheKey);
-    const steps = (this.data.trackStepSegments || []).filter(step => (
-      visibleIndividuals.has(step.individual)
-      && visibleSetNames.has(step.setName)
-    ));
-    cache.set(cacheKey, steps);
-    return steps;
-  }
-
-  getRdsObjectRenderGroups(visibleIndividuals, visibleSetNames) {
-    if (!MOVEMENT_APP_CONFIG.rdsSource || this.data?.binaryMovement) {
-      return [];
-    }
-    const cache = ensureMovementDetailCache(this.data);
-    const groups = [];
-    for (let code = 0; code < this.data.individuals.length; code += 1) {
-      const individual = this.data.individuals[code];
-      if (!visibleIndividuals.has(individual)) continue;
-      const entry = cache.get(individual);
-      if (!entry) continue;
-      if (!entry.renderData) {
-        const tracks = buildMovementFixTrackIndex(entry.fixes || []);
-        const points = [];
-        for (const [trackKey, fixes] of tracks) {
-          for (const fix of fixes) {
-            points.push({
-              fix,
-              fixKey: fix.fixKey,
-              individual: fix.individual,
-              setName: fix.setName,
-              trackKey,
-              position: fix.position,
-            });
-          }
-        }
-        entry.renderData = {
-          points,
-          steps: buildMovementTrackStepSegments(tracks),
-        };
-      }
-      groups.push({
-        code,
-        individual,
-        points: visibleSetNames.has(entry.renderData.points[0]?.setName || "train")
-          ? entry.renderData.points
-          : [],
-        steps: visibleSetNames.has(entry.renderData.steps[0]?.setName || "train")
-          ? entry.renderData.steps
-          : [],
-      });
-    }
-    return groups;
   }
 
   buildTemporalFocalData(visibleIndividuals, visibleSetNames) {
@@ -10978,7 +10886,10 @@ class MovementExampleApp {
       lineColors[colorOffset] = pointColors[pointOffset];
       lineColors[colorOffset + 1] = pointColors[pointOffset + 1];
       lineColors[colorOffset + 2] = pointColors[pointOffset + 2];
-      lineColors[colorOffset + 3] = 185;
+      lineColors[colorOffset + 3] = (
+        Number(arrays.source_flags?.[sourceIndex])
+        || Number(arrays.source_flags?.[targetIndex])
+      ) ? 52 : 185;
     }
     const attributes = {
       pointColors,
@@ -11122,7 +11033,10 @@ class MovementExampleApp {
       && visibleIndividuals.size === this.data.individuals.length
     );
     const queueIndividual = this.queueActiveIndividual();
-    const useFullLayer = allSelected && !queueIndividual;
+    const manualFlagIndividual = this.flagTargetKind === "individual"
+      ? String(this.manualFlagTarget.individual || "")
+      : "";
+    const useFullLayer = allSelected && !queueIndividual && !manualFlagIndividual;
     const appendLayers = ({ binary, individual = "", fullLayer = false, visible = false }) => {
       const { cacheKey } = this.binaryRenderSpecification();
       let attributes = binary.renderCaches?.get(cacheKey) || null;
@@ -11156,6 +11070,19 @@ class MovementExampleApp {
         lineRange,
       );
       const pointData = deckData.pointData;
+      if (manualFlagIndividual && individual === manualFlagIndividual) {
+        layers.push(new deck.LineLayer({
+          id: `movement-binary-manual-flag-outline-${suffix}`,
+          data: deckData.pathData,
+          getColor: [255, 204, 40, 210],
+          getWidth: 9,
+          widthMinPixels: 5,
+          filterRange: [1, 1],
+          extensions: [filterExtension],
+          visible,
+          pickable: false,
+        }));
+      }
       if (this.refs.showBursts.checked) {
         layers.push(new deck.LineLayer({
           id: `movement-binary-burst-casing-${suffix}`,
@@ -11301,12 +11228,6 @@ class MovementExampleApp {
     // Checkbox-driven map rendering is block-based for both adapters. Object
     // collections remain available for focused review/table work, but must not
     // be merged or scanned merely because visibility changed.
-    const useRdsObjectGroups = false;
-    const rdsDrawableGroups = [];
-    const allPathData = [];
-    const pathData = [];
-    const pointData = [];
-    const rdsVisiblePointCount = 0;
     const temporalFocalData = showPoints && this.temporalSliderEngaged
       ? this.buildTemporalFocalData(visibleIndividuals, visibleSetNames)
       : { points: [] };
@@ -11359,9 +11280,9 @@ class MovementExampleApp {
       .filter(Boolean);
     const manualFlagOutlinePaths = [];
     if (this.flagTargetKind === "individual" && this.manualFlagTarget.individual) {
-      for (const step of allPathData) {
-        if (step.individual === this.manualFlagTarget.individual) {
-          manualFlagOutlinePaths.push(step);
+      for (const track of overviewPreviewTracks) {
+        if (track.individual === this.manualFlagTarget.individual) {
+          manualFlagOutlinePaths.push(track);
         }
       }
     } else if (this.flagTargetKind === "bursts") {
@@ -11420,9 +11341,6 @@ class MovementExampleApp {
     const queueDimKey = this.individualReviewQueue.mode === "queue"
       ? `queue:${this.queueActiveIndividual()}`
       : "browse";
-    const colorStyleKey = JSON.stringify(
-      this.data.colorStyles.get(this.refs.colorBy.value) || null,
-    );
     if (showSuspectedOutlines) {
       const seenSuspected = new Set();
       for (const fix of this.data.fixes || []) {
@@ -11531,48 +11449,7 @@ class MovementExampleApp {
         }),
       );
     }
-    if (visibleAutoBurstPaths.length && useRdsObjectGroups) {
-      const burstPathsByIndividual = new Map();
-      for (const item of visibleAutoBurstPaths) {
-        const individual = String(item?.burst?.individual || "");
-        const paths = burstPathsByIndividual.get(individual) || [];
-        paths.push(item);
-        burstPathsByIndividual.set(individual, paths);
-      }
-      for (const [individual, paths] of burstPathsByIndividual) {
-        const code = Math.max(0, this.data.individuals.indexOf(individual));
-        layers.push(new deck.PathLayer({
-          id: `movement-burst-casing-rds-${code}`,
-          data: paths,
-          dataComparator: sameArrayItems,
-          getPath: item => item.path,
-          getColor: item => this.burstCasingColor(item, focusedBurstId),
-          getWidth: item => this.burstCasingWidth(item, focusedBurstId),
-          widthMinPixels: 2,
-          updateTriggers: {
-            getColor: [focusedBurstId, queueDimKey],
-            getWidth: focusedBurstId,
-          },
-          pickable: false,
-        }));
-      }
-      for (const [individual, paths] of burstPathsByIndividual) {
-        const code = Math.max(0, this.data.individuals.indexOf(individual));
-        layers.push(new deck.PathLayer({
-          id: `movement-bursts-rds-${code}`,
-          data: paths,
-          dataComparator: sameArrayItems,
-          getPath: item => item.path,
-          getColor: item => this.burstFillColor(item, focusedBurstId),
-          getWidth: item => this.burstFillWidth(item),
-          widthMinPixels: 1,
-          updateTriggers: {
-            getColor: [focusedBurstId, queueDimKey],
-          },
-          pickable: true,
-        }));
-      }
-    } else if (visibleAutoBurstPaths.length && !hasExactMapBlocks) {
+    if (visibleAutoBurstPaths.length && !hasExactMapBlocks) {
       layers.push(
         new deck.PathLayer({
           id: "movement-burst-casing",
@@ -11642,50 +11519,6 @@ class MovementExampleApp {
     // Each derived step value belongs to its destination fix, so the inbound
     // segment uses that fix's selected-variable color. Drawing it above the
     // optional burst casing keeps speed and other step fields legible.
-    if (useRdsObjectGroups) {
-      for (const group of rdsDrawableGroups) {
-        layers.push(new deck.PathLayer({
-          id: `movement-paths-rds-${group.code}`,
-          data: group.steps,
-          dataComparator: sameArrayItems,
-          getPath: item => item.path,
-          getColor: item => {
-            const color = this.colorForFix(item.destinationFix);
-            return this.queueMapColor(
-              [color[0], color[1], color[2], item.sourceFlagged ? 52 : 185],
-              item.individual,
-            );
-          },
-          getWidth: item => item.sourceFlagged ? 1.5 : 3,
-          widthMinPixels: 2,
-          updateTriggers: {
-            getColor: [this.refs.colorBy.value, colorStyleKey, queueDimKey],
-          },
-          pickable: false,
-        }));
-      }
-    } else if (!hasExactMapBlocks) {
-      layers.push(new deck.PathLayer({
-        id: "movement-paths",
-        data: pathData,
-        dataComparator: sameArrayItems,
-        getPath: item => item.path,
-        getColor: item => {
-          const color = this.colorForFix(item.destinationFix);
-          return this.queueMapColor(
-            [color[0], color[1], color[2], item.sourceFlagged ? 52 : 185],
-            item.individual,
-          );
-        },
-        getWidth: item => item.sourceFlagged ? 1.5 : 3,
-        widthMinPixels: 2,
-        updateTriggers: {
-          getColor: [this.refs.colorBy.value, queueDimKey],
-        },
-        pickable: false,
-      }));
-    }
-
     if (visibleFlaggedSteps.length) {
       layers.push(
         new deck.PathLayer({
@@ -11739,45 +11572,6 @@ class MovementExampleApp {
     }
 
     if (showPoints) {
-      if (useRdsObjectGroups) {
-        for (const group of rdsDrawableGroups) {
-          layers.push(new deck.ScatterplotLayer({
-            id: `movement-points-rds-${group.code}`,
-            data: group.points,
-            dataComparator: sameArrayItems,
-            getPosition: item => item.position,
-            getFillColor: item => this.queueMapColor(
-              this.colorForFix(item.fix),
-              item.individual,
-            ),
-            getRadius: 68,
-            radiusMinPixels: 3,
-            radiusMaxPixels: 8,
-            updateTriggers: {
-              getFillColor: [this.refs.colorBy.value, colorStyleKey, queueDimKey],
-            },
-            pickable: true,
-          }));
-        }
-      } else if (!hasExactMapBlocks) {
-        layers.push(new deck.ScatterplotLayer({
-          id: "movement-points",
-          data: pointData,
-          dataComparator: sameArrayItems,
-          getPosition: item => item.position,
-          getFillColor: item => this.queueMapColor(
-            this.colorForFix(item.fix),
-            item.individual,
-          ),
-          getRadius: 68,
-          radiusMinPixels: 3,
-          radiusMaxPixels: 8,
-          updateTriggers: {
-            getFillColor: [this.refs.colorBy.value, queueDimKey],
-          },
-          pickable: true,
-        }));
-      }
       if (temporalFocalData.points.length) {
         layers.push(
           new deck.ScatterplotLayer({
@@ -11985,8 +11779,7 @@ class MovementExampleApp {
         layers,
         useDevicePixels: (
           this.getVisibleExactPointCount(visibleIndividuals)
-          || rdsVisiblePointCount
-          || pointData.length + selectedPointData.length
+          || selectedPointData.length
         ) <= LARGE_MAP_POINT_THRESHOLD,
       });
     } catch (error) {
@@ -13833,7 +13626,7 @@ class MovementExampleApp {
   }
 
   async loadRdsDetailForSelection(selectedIndividuals, preserved) {
-    const cache = ensureMovementDetailCache(this.data);
+    const cache = ensureFocusedMovementCache(this.data);
     const missingIndividuals = selectedIndividuals.filter(individual => !cache.has(individual));
     const cachedIndividuals = selectedIndividuals.filter(individual => cache.has(individual));
     const renderedChanged = !arraysEqual(
@@ -13845,7 +13638,7 @@ class MovementExampleApp {
     this.data.detailState = missingIndividuals.length ? "loading" : "loaded";
     this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, selectedIndividuals);
     if (renderedChanged) {
-      composeMovementDetailSelection(this.data, cachedIndividuals);
+      composeFocusedMovementSelection(this.data, cachedIndividuals);
       refreshMovementFixCollections(this.data, { colorFieldKeys: [this.refs.colorBy.value] });
       this.renderSelectedFixes();
       this.renderThresholdPane();
@@ -13903,8 +13696,8 @@ class MovementExampleApp {
       cacheMovementDetailPayload(this.data, payload, missingIndividuals);
       this.beginPreviewHandoff(missingIndividuals);
       const currentSelection = this.getSelectedIndividuals();
-      const stillMissing = currentSelection.filter(individual => !this.data.detailCache.has(individual));
-      composeMovementDetailSelection(this.data, currentSelection);
+      const stillMissing = currentSelection.filter(individual => !this.data.focusedObjectCache.has(individual));
+      composeFocusedMovementSelection(this.data, currentSelection);
       this.data.detailIndividuals = [...currentSelection];
       this.data.detailLoadingIndividuals = stillMissing;
       this.data.detailState = stillMissing.length ? "loading" : "loaded";
@@ -16566,7 +16359,7 @@ class MovementExampleApp {
     this.data.confirmedFixes = patchFixes(this.data.confirmedFixes);
     this.data.overviewSegments = projectedSegments;
     this.data.detailSegments = [];
-    seedMovementDetailCacheFromCurrentData(this.data);
+    seedFocusedMovementCacheFromCurrentData(this.data);
 
     const merged = new Map();
     for (const fix of [
@@ -16992,9 +16785,6 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     stats,
     fixes: [],
     fixByKey: new Map(),
-    trackStepSegments: [],
-    visiblePointCache: new Map(),
-    visibleTrackStepCache: new Map(),
     autoBurstRenderCache: new Map(),
     segments: [],
     segmentById: new Map(),
@@ -17035,7 +16825,7 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     detailIndividuals: [],
     detailRenderedIndividuals: [],
     detailLoadingIndividuals: [],
-    detailCache: new Map(),
+    focusedObjectCache: new Map(),
     detailLimit: null,
     detailMatchingFixCount: 0,
     detailReturnedFixCount: 0,
@@ -17481,15 +17271,15 @@ function normalizeSegmentMemberships(items) {
     : [];
 }
 
-function ensureMovementDetailCache(data) {
-  if (!(data?.detailCache instanceof Map)) {
-    data.detailCache = new Map();
+function ensureFocusedMovementCache(data) {
+  if (!(data?.focusedObjectCache instanceof Map)) {
+    data.focusedObjectCache = new Map();
   }
-  return data.detailCache;
+  return data.focusedObjectCache;
 }
 
 function cacheMovementDetailPayload(data, payload, requestedIndividuals = []) {
-  const cache = ensureMovementDetailCache(data);
+  const cache = ensureFocusedMovementCache(data);
   const fixes = parseMovementFixes(payload?.fixes || []);
   const segments = parseMovementSegments(payload?.segments || []);
   const autoBursts = parseMovementAutoBursts(payload?.auto_bursts || []);
@@ -17519,8 +17309,8 @@ function cacheMovementDetailPayload(data, payload, requestedIndividuals = []) {
   }
 }
 
-function composeMovementDetailSelection(data, individuals) {
-  const cache = ensureMovementDetailCache(data);
+function composeFocusedMovementSelection(data, individuals) {
+  const cache = ensureFocusedMovementCache(data);
   const selected = uniqueNonEmpty(individuals);
   const fixes = [];
   const segments = [];
@@ -17554,9 +17344,9 @@ function composeMovementDetailSelection(data, individuals) {
   data.detailLimit = limit;
 }
 
-function seedMovementDetailCacheFromCurrentData(data) {
+function seedFocusedMovementCacheFromCurrentData(data) {
   if (!data) return;
-  data.detailCache = new Map();
+  data.focusedObjectCache = new Map();
   const individuals = uniqueNonEmpty([
     ...(data.detailIndividuals || []),
     ...(data.detailFixes || []).map(fix => fix.individual),
@@ -17565,7 +17355,7 @@ function seedMovementDetailCacheFromCurrentData(data) {
   ]);
   for (const individual of individuals) {
     const fixes = (data.detailFixes || []).filter(fix => fix.individual === individual);
-    data.detailCache.set(individual, {
+    data.focusedObjectCache.set(individual, {
       fixes,
       segments: (data.detailSegments || []).filter(segment => segment.individual === individual),
       autoBursts: (data.detailAutoBursts || []).filter(burst => burst.individual === individual),
@@ -17602,11 +17392,6 @@ function refreshMovementFixCollections(data, { colorFieldKeys = null, recomputeC
   data.eligibleTrackPositionByFixKey = buildMovementTrackPositionLookup(data.eligibleFixesByTrack);
   data.allTrackPositionByFixKey = buildMovementTrackPositionLookup(data.allFixesByTrack);
   data.flaggedStepOverlays = buildFlaggedStepOverlays(data);
-  data.trackStepSegments = MOVEMENT_APP_CONFIG.rdsSource
-    ? []
-    : buildMovementTrackStepSegments(data.eligibleFixesByTrack);
-  data.visiblePointCache = new Map();
-  data.visibleTrackStepCache = new Map();
   const mergedSegments = new Map();
   for (const segment of [...(data.overviewSegments || []), ...(data.detailSegments || [])]) {
     mergedSegments.set(segment.segmentId, segment);
@@ -17678,27 +17463,6 @@ function buildMovementFixTrackIndex(fixes, { includeExcluded = false } = {}) {
     trackFixes.sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
   }
   return byTrack;
-}
-
-function buildMovementTrackStepSegments(byTrack) {
-  const steps = [];
-  for (const [trackKey, fixes] of byTrack || []) {
-    for (let index = 1; index < fixes.length; index += 1) {
-      const previous = fixes[index - 1];
-      const destinationFix = fixes[index];
-      steps.push({
-        stepKey: `${previous.fixKey}->${destinationFix.fixKey}`,
-        trackKey,
-        individual: destinationFix.individual,
-        setName: destinationFix.setName,
-        sourceFix: previous,
-        destinationFix,
-        sourceFlagged: isSourceOnlyFlaggedFix(previous) || isSourceOnlyFlaggedFix(destinationFix),
-        path: [previous.position, destinationFix.position],
-      });
-    }
-  }
-  return steps;
 }
 
 function buildMovementTrackPositionLookup(byTrack) {

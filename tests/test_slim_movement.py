@@ -447,11 +447,15 @@ def test_slim_ranking_layout_keeps_map_full_height_and_resizes_canvas():
 
 def test_large_movement_views_reuse_geometry_without_capping_color_by_points():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    worker_source = MOVEMENT_APP_JS.with_name("movement_binary_worker.js").read_text(
+        encoding="utf-8"
+    )
 
     assert "MAX_ORDINARY_MAP_POINTS" not in source
     assert "MAX_SOURCE_FLAGGED_MAP_POINTS" not in source
     assert 'id: "movement-source-flagged-points"' not in source
-    assert "item.sourceFlagged ? 52 : 185" in source
+    assert "Number(arrays.source_flags?.[sourceIndex])" in worker_source
+    assert ") ? 52 : 185" in worker_source
     assert 'id: "movement-suspected-outline"' in source
     assert "useDevicePixels:" in source
     assert "dataComparator: sameArrayItems" in source
