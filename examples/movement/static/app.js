@@ -417,6 +417,7 @@ class MovementExampleApp {
     };
     this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
+    this.anomalyRankings = new Map();
     this.burstFeatureSpace = this.makeEmptyBurstFeatureSpace();
     this.candidateQueryLibrary = {
       status: "idle",
@@ -682,10 +683,23 @@ class MovementExampleApp {
 
   handleRankingMethodChange() {
     this.syncRankingMethodControl();
-    this.individualReviewQueue.rankingMethod = this.getRankingMethod();
     this.saveUiState();
-    this.clearAnomalyRanking();
-    if (this.data) {
+    const method = this.getRankingMethod();
+    const cached = this.anomalyRankings.get(method);
+    if (cached) {
+      this.anomalyRanking = cached;
+      this.focusedRankingBurst = null;
+      this.renderAnomalyRanking();
+      this.renderIndividuals();
+      this.renderLayers();
+      this.updateActionButtons();
+    } else if (this.data) {
+      this.anomalyRanking = {
+        ...this.makeEmptyAnomalyRanking(),
+        status: "checking",
+        rankingMethod: method,
+      };
+      this.renderAnomalyRanking();
       void this.restoreSavedAnalyses();
     }
   }
@@ -3175,13 +3189,6 @@ class MovementExampleApp {
               <option value="movement_only">Movement only</option>
             </select>
           </label>
-          <label data-role="ranking-method-control">Ranking type
-            <select data-role="ranking-method">
-              <option value="isolation_forest">Isolation forest — worst burst</option>
-              <option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>
-              <option value="source_is_outlier">Source is_outlier — total flagged fixes</option>
-            </select>
-          </label>
           <button type="button" data-role="run-anomaly-ranking">Rank bursts</button>
           <button type="button" data-role="run-burst-feature-space">Feature space</button>
           <button type="button" data-role="generate-report">Generate report</button>
@@ -3315,6 +3322,13 @@ class MovementExampleApp {
               <div class="movement-side-sheet ranking hidden" data-role="side-sheet-ranking">
                 <div class="movement-side-head movement-ranking-head">
                   <span>Burst ranking</span>
+                  <label data-role="ranking-method-control">View ranking
+                    <select data-role="ranking-method">
+                      <option value="isolation_forest">Isolation forest — worst burst</option>
+                      <option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>
+                      <option value="source_is_outlier">Source is_outlier — total flagged fixes</option>
+                    </select>
+                  </label>
                 </div>
                 <div class="movement-anomaly-ranking" data-role="anomaly-ranking"></div>
               </div>
@@ -3851,9 +3865,15 @@ class MovementExampleApp {
       if (queueAction?.dataset.queueAction === "run-ranking") {
         void this.runBurstAnomalyRanking({ openRankingSheet: false });
       } else if (queueAction?.dataset.queueAction === "load-ranking") {
-        void this.loadSavedAnomalyRanking();
+        void this.loadSavedAnomalyRanking({
+          ranking: this.getIndividualQueueRanking(),
+          activateRanking: false,
+        });
       } else if (queueAction?.dataset.queueAction === "check-ranking") {
-        void this.restoreSavedAnalyses();
+        void this.restoreSavedAnalyses({
+          rankingMethod: this.individualReviewQueue.rankingMethod,
+          activateRanking: false,
+        });
       } else if (queueAction?.dataset.queueAction === "apply-ranking") {
         void this.applyCompletedIndividualQueueRanking();
       }
@@ -4968,10 +4988,65 @@ class MovementExampleApp {
     };
   }
 
+  rankingResultsFromArtifact(artifact, metadata = {}) {
+    const shared = {
+      analysisId: String(metadata.analysisId || ""),
+      status: String(artifact?.run_status || "completed"),
+      burstScores: this.makeBurstScoreMap(artifact?.scored_bursts),
+      warnings: Array.isArray(artifact?.warnings) ? artifact.warnings : [],
+      burstGap: artifact?.burst_gap || null,
+      modelFit: artifact?.model_fit || artifact?.scorer || null,
+      createdAt: String(metadata.createdAt || ""),
+      user: String(metadata.user || ""),
+      loadedFromHistory: Boolean(metadata.loadedFromHistory),
+      restoreError: "",
+    };
+    const views = artifact?.individual_rankings && typeof artifact.individual_rankings === "object"
+      ? artifact.individual_rankings
+      : null;
+    const results = new Map();
+    if (views) {
+      for (const method of ["isolation_forest", "isolation_forest_decision_margin"]) {
+        const view = views[method];
+        if (!view) continue;
+        results.set(method, {
+          ...shared,
+          rankedIndividuals: Array.isArray(view.ranked_individuals) ? view.ranked_individuals : [],
+          rankingSummary: view,
+          rankingMethod: method,
+        });
+      }
+    }
+    if (!results.size) {
+      const method = String(
+        artifact?.ranking_method
+        || artifact?.model_fit?.ranking_method
+        || metadata.rankingMethod
+        || "isolation_forest",
+      );
+      results.set(method, {
+        ...shared,
+        rankedIndividuals: Array.isArray(artifact?.ranked_individuals) ? artifact.ranked_individuals : [],
+        rankingSummary: artifact?.individual_ranking_summary || null,
+        rankingMethod: method,
+      });
+    }
+    return results;
+  }
+
+  cacheRankingArtifact(artifact, metadata = {}) {
+    const results = this.rankingResultsFromArtifact(artifact, metadata);
+    for (const [method, result] of results) {
+      this.anomalyRankings.set(method, result);
+    }
+    return results;
+  }
+
   clearAnomalyRanking({ render = true } = {}) {
     this.cancelRequest("anomalyRanking");
     this.cancelRequest("issueBurstScores");
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
+    this.anomalyRankings.clear();
     this.focusedRankingBurst = null;
     if (this.individualReviewQueue) {
       this.individualReviewQueue.appliedRankingAnalysisId = "";
@@ -5014,20 +5089,21 @@ class MovementExampleApp {
     }
   }
 
-  async restoreSavedAnalyses() {
+  async restoreSavedAnalyses({
+    rankingMethod = this.getRankingMethod(),
+    activateRanking = true,
+  } = {}) {
     if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
       return;
     }
-    const loadedRanking = this.hasCompatibleIndividualQueueRanking()
-      ? this.anomalyRanking
-      : null;
+    const loadedRanking = this.anomalyRankings.get(rankingMethod) || null;
     const loadedRankingAnalysisId = String(loadedRanking?.analysisId || "");
     const familyName = this.currentFamily;
     const studyName = this.currentStudy;
     const datasetId = this.currentDatasetId;
     const artifactName = this.currentArtifact;
     const controller = this.beginRequest("analysisHistory");
-    if (!loadedRanking) {
+    if (!loadedRanking && activateRanking) {
       this.anomalyRanking = {
         ...this.makeEmptyAnomalyRanking(),
         status: "checking",
@@ -5042,7 +5118,7 @@ class MovementExampleApp {
       burst_gap_seconds: String(this.getBurstGapSeconds()),
       burst_gap_quantile: String(this.getBurstGapQuantile()),
       feature_set: this.getAnomalyFeatureSet(),
-      ranking_method: this.getRankingMethod(),
+      ranking_method: rankingMethod,
     });
     try {
       const history = await this.fetchJSON(
@@ -5067,7 +5143,7 @@ class MovementExampleApp {
       const tasks = [];
       if (ranking) {
         const rankingAnalysisId = String(ranking.analysis_id || "");
-        this.anomalyRanking = (
+        const availableRanking = (
           loadedRanking
           && rankingAnalysisId
           && rankingAnalysisId === loadedRankingAnalysisId
@@ -5083,17 +5159,22 @@ class MovementExampleApp {
             analysisId: rankingAnalysisId,
             status: "available",
             rankingMethod: String(
-              ranking?.parameters?.ranking_method || this.getRankingMethod(),
+              rankingMethod,
             ),
             createdAt: String(ranking.created_at || ""),
             user: String(ranking.user || ""),
             loadedFromHistory: true,
           };
+        this.anomalyRankings.set(rankingMethod, availableRanking);
+        if (activateRanking) this.anomalyRanking = availableRanking;
       } else {
-        this.anomalyRanking = {
+        const unavailableRanking = {
           ...this.makeEmptyAnomalyRanking(),
           status: "unavailable",
+          rankingMethod,
         };
+        this.anomalyRankings.set(rankingMethod, unavailableRanking);
+        if (activateRanking) this.anomalyRanking = unavailableRanking;
       }
       if (featureSpace && MOVEMENT_APP_CONFIG.featureSpace) {
         tasks.push(this.restoreSavedBurstFeatureSpace(featureSpace, controller.signal).then(() => {
@@ -5109,7 +5190,7 @@ class MovementExampleApp {
           console.warn("Could not restore saved movement analysis", result.reason);
         }
       }
-      this.renderAnomalyRanking();
+      if (activateRanking) this.renderAnomalyRanking();
       this.renderBurstFeatureSpace();
       this.noteCompletedIndividualQueueRanking();
       this.renderIndividuals();
@@ -5117,22 +5198,32 @@ class MovementExampleApp {
       if (restored.length) {
         this.setStatus(`Restored saved ${restored.join(" and ")}.`);
       }
-      if (
-        ranking
-        && this.individualReviewQueue.mode === "browse"
-        && this.refs.sideSheetTabs?.dataset.activeSheet === "ranking"
-      ) {
-        void this.loadSavedAnomalyRanking();
+      if (ranking && (
+        !activateRanking
+        || (
+          this.individualReviewQueue.mode === "browse"
+          && this.refs.sideSheetTabs?.dataset.activeSheet === "ranking"
+        )
+      )) {
+        await this.loadSavedAnomalyRanking({
+          ranking: this.anomalyRankings.get(rankingMethod),
+          activateRanking,
+        });
       }
     } catch (error) {
       if (!this.isAbortError(error)) {
         console.warn("Could not load saved movement analyses", error);
-        this.anomalyRanking = loadedRanking || {
+        const failedRanking = loadedRanking || {
           ...this.makeEmptyAnomalyRanking(),
           status: "history_error",
+          rankingMethod,
           restoreError: error.message,
         };
-        this.renderAnomalyRanking();
+        this.anomalyRankings.set(rankingMethod, failedRanking);
+        if (activateRanking) {
+          this.anomalyRanking = failedRanking;
+          this.renderAnomalyRanking();
+        }
         this.renderIndividuals();
       }
     } finally {
@@ -5142,11 +5233,14 @@ class MovementExampleApp {
     }
   }
 
-  async loadSavedAnomalyRanking() {
-    if (!["available", "restore_error"].includes(this.anomalyRanking?.status)) {
+  async loadSavedAnomalyRanking({
+    ranking = this.anomalyRanking,
+    activateRanking = true,
+  } = {}) {
+    if (!["available", "restore_error"].includes(ranking?.status)) {
       return;
     }
-    const metadata = { ...this.anomalyRanking };
+    const metadata = { ...ranking };
     const analysisId = String(metadata.analysisId || "");
     if (!analysisId) {
       return;
@@ -5156,14 +5250,16 @@ class MovementExampleApp {
     const datasetId = this.currentDatasetId;
     const artifactName = this.currentArtifact;
     const controller = this.beginRequest("anomalyRanking");
-    this.anomalyRanking = {
-      ...metadata,
-      status: "restoring",
-      restoreError: "",
-    };
-    this.renderAnomalyRanking();
-    this.renderIndividuals();
-    this.updateActionButtons();
+    if (activateRanking) {
+      this.anomalyRanking = {
+        ...metadata,
+        status: "restoring",
+        restoreError: "",
+      };
+      this.renderAnomalyRanking();
+      this.renderIndividuals();
+      this.updateActionButtons();
+    }
     try {
       const artifact = await this.fetchJSON(
         `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/analysis/${encodeURIComponent(analysisId)}/artifact/burst_anomaly_ranking.json`,
@@ -5178,28 +5274,21 @@ class MovementExampleApp {
       ) {
         return;
       }
-      this.anomalyRanking = {
+      this.cacheRankingArtifact(artifact, {
         analysisId,
-        status: String(artifact?.run_status || "completed"),
-        rankedIndividuals: Array.isArray(artifact?.ranked_individuals) ? artifact.ranked_individuals : [],
-        burstScores: this.makeBurstScoreMap(artifact?.scored_bursts),
-        warnings: Array.isArray(artifact?.warnings) ? artifact.warnings : [],
-        burstGap: artifact?.burst_gap || null,
-        modelFit: artifact?.model_fit || artifact?.scorer || null,
-        rankingSummary: artifact?.individual_ranking_summary || null,
-        rankingMethod: String(
-          artifact?.ranking_method
-          || artifact?.model_fit?.ranking_method
-          || metadata.rankingMethod
-          || this.getRankingMethod(),
-        ),
-        createdAt: String(metadata.createdAt || ""),
-        user: String(metadata.user || ""),
+        rankingMethod: metadata.rankingMethod || this.getRankingMethod(),
+        createdAt: metadata.createdAt,
+        user: metadata.user,
         loadedFromHistory: true,
-        restoreError: "",
-      };
+      });
+      if (activateRanking) {
+        this.anomalyRanking = this.anomalyRankings.get(this.getRankingMethod())
+          || this.anomalyRankings.get(String(metadata.rankingMethod || ""))
+          || [...this.anomalyRankings.values()][0]
+          || this.makeEmptyAnomalyRanking();
+      }
       this.noteCompletedIndividualQueueRanking();
-      this.renderAnomalyRanking();
+      if (activateRanking) this.renderAnomalyRanking();
       this.renderIndividuals();
       this.updateActionButtons();
       this.setStatus(
@@ -5212,12 +5301,16 @@ class MovementExampleApp {
         return;
       }
       if (this.requestControllers.anomalyRanking === controller) {
-        this.anomalyRanking = {
+        const failedRanking = {
           ...metadata,
           status: "restore_error",
           restoreError: error.message,
         };
-        this.renderAnomalyRanking();
+        this.anomalyRankings.set(String(metadata.rankingMethod || ""), failedRanking);
+        if (activateRanking) {
+          this.anomalyRanking = failedRanking;
+          this.renderAnomalyRanking();
+        }
         this.renderIndividuals();
         this.updateActionButtons();
         this.setStatus(`Could not load the saved burst ranking: ${error.message}`, true);
@@ -5253,6 +5346,33 @@ class MovementExampleApp {
     };
   }
 
+  async requestBurstRankingProvider(provider, controller) {
+    const featureSet = this.getAnomalyFeatureSet();
+    let result = await this.requestJSON(
+      `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/run-burst-anomaly-ranking`,
+      {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({
+          dataset_id: this.currentDatasetId,
+          logical_name: this.currentArtifact,
+          burst_gap_mode: this.getBurstGapMode(),
+          burst_gap_seconds: this.getBurstGapSeconds(),
+          burst_gap_quantile: this.getBurstGapQuantile(),
+          feature_set: featureSet,
+          ranking_provider: provider,
+          ranking_method: provider,
+          user: this.getUser() || "reviewer",
+        }),
+      },
+    );
+    const jobId = String(result?.job_id || "");
+    if (jobId) {
+      result = await this.waitForAnomalyRankingJob(jobId, controller);
+    }
+    return result;
+  }
+
   async runBurstAnomalyRanking({ openRankingSheet = true } = {}) {
     if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
       return;
@@ -5262,61 +5382,58 @@ class MovementExampleApp {
       ...this.makeEmptyAnomalyRanking(),
       status: "loading",
     };
-    const featureSet = this.getAnomalyFeatureSet();
-    const rankingMethod = this.getRankingMethod();
-    const featureSetLabel = this.rankingMethodLabel(rankingMethod);
+    const featureSetLabel = this.anomalyFeatureSetLabel();
+    const displayedMethod = this.getRankingMethod();
+    const providers = MOVEMENT_APP_CONFIG.rdsSource
+      ? ["isolation_forest", "source_is_outlier"]
+      : ["isolation_forest"];
+    for (const provider of providers) {
+      for (const method of provider === "isolation_forest"
+        ? ["isolation_forest", "isolation_forest_decision_margin"]
+        : ["source_is_outlier"]) {
+        this.anomalyRankings.delete(method);
+      }
+    }
     this.renderAnomalyRanking();
     this.renderIndividuals();
     this.updateActionButtons();
-    this.setStatus(`Running burst anomaly ranking analysis (${featureSetLabel})...`);
+    this.setStatus(`Running ${providers.length} burst ranking ${providers.length === 1 ? "analysis" : "analyses"} (${featureSetLabel})...`);
     try {
-      let result = await this.requestJSON(
-        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/run-burst-anomaly-ranking`,
-        {
-          method: "POST",
-          signal: controller.signal,
-          body: JSON.stringify({
-            dataset_id: this.currentDatasetId,
-            logical_name: this.currentArtifact,
-            burst_gap_mode: this.getBurstGapMode(),
-            burst_gap_seconds: this.getBurstGapSeconds(),
-            burst_gap_quantile: this.getBurstGapQuantile(),
-            feature_set: featureSet,
-            ranking_method: rankingMethod,
-            user: this.getUser() || "reviewer",
-          }),
-        },
+      if (openRankingSheet) this.setSideSheet("ranking");
+      const settled = await Promise.allSettled(
+        providers.map(provider => this.requestBurstRankingProvider(provider, controller)),
       );
-      const jobId = String(result?.job_id || "");
-      if (jobId) {
-        if (openRankingSheet) {
-          this.setSideSheet("ranking");
-        }
-        this.setStatus(
-          `Burst anomaly ranking started in the background (${featureSetLabel}). You can keep using the map while it runs.`,
-        );
-        result = await this.waitForAnomalyRankingJob(jobId, controller);
-      }
       if (this.requestControllers.anomalyRanking !== controller) {
         return;
       }
-      const summary = result?.summary || {};
-      this.anomalyRanking = {
-        analysisId: String(result?.analysis_id || result?.analysis?.analysis_id || ""),
-        status: String(summary.run_status || "completed"),
-        rankedIndividuals: Array.isArray(summary.ranked_individuals) ? summary.ranked_individuals : [],
-        burstScores: this.makeBurstScoreMap(summary.scored_bursts),
-        warnings: Array.isArray(summary.warnings) ? summary.warnings : [],
-        burstGap: summary.burst_gap || null,
-        modelFit: summary.model_fit || summary.scorer || null,
-        rankingSummary: summary.individual_ranking_summary || null,
-        rankingMethod: String(summary.ranking_method || summary.model_fit?.ranking_method || rankingMethod),
-        createdAt: String(result?.analysis?.created_at || ""),
-        user: String(result?.analysis?.user || ""),
-        loadedFromHistory: false,
-      };
-      if (openRankingSheet) {
-        this.setSideSheet("ranking");
+      const failures = [];
+      settled.forEach((entry, index) => {
+        if (entry.status === "rejected") {
+          failures.push(`${this.rankingMethodLabel(providers[index])}: ${entry.reason?.message || entry.reason}`);
+          return;
+        }
+        const result = entry.value || {};
+        const summary = result.summary || {};
+        this.cacheRankingArtifact(summary, {
+          analysisId: String(result?.analysis_id || result?.analysis?.analysis_id || ""),
+          rankingMethod: providers[index],
+          createdAt: String(result?.analysis?.created_at || ""),
+          user: String(result?.analysis?.user || ""),
+          loadedFromHistory: false,
+        });
+      });
+      if (!this.anomalyRankings.size) {
+        throw new Error(failures.join("; ") || "Burst ranking analyses returned no results.");
+      }
+      this.anomalyRanking = this.anomalyRankings.get(displayedMethod)
+        || this.anomalyRankings.get("isolation_forest")
+        || this.anomalyRankings.get("source_is_outlier")
+        || this.makeEmptyAnomalyRanking();
+      if (failures.length) {
+        this.anomalyRanking = {
+          ...this.anomalyRanking,
+          warnings: [...this.anomalyRanking.warnings, ...failures],
+        };
       }
       this.noteCompletedIndividualQueueRanking();
       this.renderAnomalyRanking();
@@ -5326,8 +5443,10 @@ class MovementExampleApp {
       if (this.anomalyRanking.status === "unresolved") {
         this.setStatus("Burst anomaly ranking could not be resolved for this artifact. Review its warnings below.", true);
       } else {
-        const returnedMethod = String(this.anomalyRanking.modelFit?.ranking_method || rankingMethod);
-        this.setStatus(`Created ${this.rankingMethodLabel(returnedMethod)} ranking analysis for ${count} individuals.`);
+        this.setStatus(
+          `Created ${formatCount(this.anomalyRankings.size)} ranking views for ${count} individuals${failures.length ? `; ${failures.length} provider failed` : ""}.`,
+          failures.length > 0,
+        );
       }
     } catch (error) {
       if (this.isAbortError(error)) {
@@ -7063,6 +7182,7 @@ class MovementExampleApp {
       && ranking.rankedIndividuals.length
     ) {
       this.anomalyRanking = ranking;
+      this.anomalyRankings.set(String(ranking.rankingMethod || this.getRankingMethod()), ranking);
     }
     const queueState = preserved.queue || {};
     const queue = this.individualReviewQueue;
@@ -7790,12 +7910,18 @@ class MovementExampleApp {
     return true;
   }
 
-  hasCompatibleIndividualQueueRanking() {
+  getIndividualQueueRanking() {
+    const method = String(this.individualReviewQueue?.rankingMethod || "");
+    return this.anomalyRankings.get(method)
+      || (this.anomalyRanking?.rankingMethod === method ? this.anomalyRanking : null);
+  }
+
+  hasCompatibleIndividualQueueRanking(ranking = this.getIndividualQueueRanking()) {
     return (
-      this.anomalyRanking?.status === "completed"
-      && Boolean(this.anomalyRanking.analysisId)
-      && Array.isArray(this.anomalyRanking.rankedIndividuals)
-      && this.anomalyRanking.rankedIndividuals.length > 0
+      ranking?.status === "completed"
+      && Boolean(ranking.analysisId)
+      && Array.isArray(ranking.rankedIndividuals)
+      && ranking.rankedIndividuals.length > 0
     );
   }
 
@@ -7811,15 +7937,15 @@ class MovementExampleApp {
         || state.priorNeedsCheck;
     });
     const datasetIndex = new Map(this.data?.individuals?.map((individual, index) => [individual, index]) || []);
+    const queueRanking = this.getIndividualQueueRanking();
     const rankingIndex = new Map(
-      (this.anomalyRanking?.rankedIndividuals || [])
+      (queueRanking?.rankedIndividuals || [])
         .map((row, index) => [String(row?.individual || ""), Number(row?.rank) || index + 1]),
     );
     const useRanking = (
       this.individualReviewQueue.orderMode === "ranking"
-      && this.hasCompatibleIndividualQueueRanking()
-      && this.individualReviewQueue.appliedRankingAnalysisId === this.anomalyRanking.analysisId
-      && this.individualReviewQueue.rankingMethod === this.anomalyRanking.rankingMethod
+      && this.hasCompatibleIndividualQueueRanking(queueRanking)
+      && this.individualReviewQueue.appliedRankingAnalysisId === queueRanking.analysisId
     );
     return [...visibleIndividuals].sort((left, right) => {
       if (useRanking) {
@@ -8487,24 +8613,25 @@ class MovementExampleApp {
       this.individualReviewQueue.appliedRankingAnalysisId = "";
       this.individualReviewQueue.pendingRankingAnalysisId = "";
     } else {
-      const methodChanged = requestedMethod !== this.getRankingMethod();
       this.individualReviewQueue.rankingMethod = requestedMethod;
-      if (methodChanged) {
-        this.refs.rankingMethod.value = requestedMethod;
-        this.syncRankingMethodControl();
-        this.saveUiState();
-        this.clearAnomalyRanking({ render: false });
-        await this.restoreSavedAnalyses();
+      let queueRanking = this.getIndividualQueueRanking();
+      if (!queueRanking || ["unavailable", "history_error"].includes(queueRanking.status)) {
+        await this.restoreSavedAnalyses({
+          rankingMethod: requestedMethod,
+          activateRanking: false,
+        });
+        queueRanking = this.getIndividualQueueRanking();
       }
-      if (["available", "restore_error"].includes(this.anomalyRanking?.status)) {
-        await this.loadSavedAnomalyRanking();
+      if (["available", "restore_error"].includes(queueRanking?.status)) {
+        await this.loadSavedAnomalyRanking({
+          ranking: queueRanking,
+          activateRanking: false,
+        });
+        queueRanking = this.getIndividualQueueRanking();
       }
       this.individualReviewQueue.orderMode = "ranking";
-      if (
-        this.hasCompatibleIndividualQueueRanking()
-        && this.anomalyRanking.rankingMethod === requestedMethod
-      ) {
-        this.individualReviewQueue.appliedRankingAnalysisId = this.anomalyRanking.analysisId;
+      if (this.hasCompatibleIndividualQueueRanking(queueRanking)) {
+        this.individualReviewQueue.appliedRankingAnalysisId = queueRanking.analysisId;
         this.individualReviewQueue.pendingRankingAnalysisId = "";
       } else {
         this.individualReviewQueue.appliedRankingAnalysisId = "";
@@ -8518,30 +8645,28 @@ class MovementExampleApp {
   }
 
   noteCompletedIndividualQueueRanking() {
-    if (!this.hasCompatibleIndividualQueueRanking()) {
+    const queueRanking = this.getIndividualQueueRanking();
+    if (!this.hasCompatibleIndividualQueueRanking(queueRanking)) {
       return;
     }
     const queue = this.individualReviewQueue;
-    if (queue.appliedRankingAnalysisId !== this.anomalyRanking.analysisId) {
-      if (
-        queue.orderMode === "ranking"
-        && queue.rankingMethod === this.anomalyRanking.rankingMethod
-      ) {
-        queue.appliedRankingAnalysisId = this.anomalyRanking.analysisId;
+    if (queue.appliedRankingAnalysisId !== queueRanking.analysisId) {
+      if (queue.orderMode === "ranking") {
+        queue.appliedRankingAnalysisId = queueRanking.analysisId;
         queue.pendingRankingAnalysisId = "";
       } else {
-        queue.pendingRankingAnalysisId = this.anomalyRanking.analysisId;
+        queue.pendingRankingAnalysisId = queueRanking.analysisId;
       }
     }
   }
 
   async applyCompletedIndividualQueueRanking() {
-    if (!this.hasCompatibleIndividualQueueRanking()) {
+    const queueRanking = this.getIndividualQueueRanking();
+    if (!this.hasCompatibleIndividualQueueRanking(queueRanking)) {
       return;
     }
     this.individualReviewQueue.orderMode = "ranking";
-    this.individualReviewQueue.rankingMethod = this.anomalyRanking.rankingMethod;
-    this.individualReviewQueue.appliedRankingAnalysisId = this.anomalyRanking.analysisId;
+    this.individualReviewQueue.appliedRankingAnalysisId = queueRanking.analysisId;
     this.individualReviewQueue.pendingRankingAnalysisId = "";
     this.individualReviewQueue.pageIndex = 0;
     this.individualReviewQueue.groupIndex = 0;
@@ -8560,49 +8685,50 @@ class MovementExampleApp {
       this.individualReviewQueue.rankingMethod || this.getRankingMethod(),
     );
     const rankingLabel = this.rankingMethodLabel(rankingMethod);
-    if (this.anomalyRanking?.status === "checking") {
+    const queueRanking = this.getIndividualQueueRanking();
+    if (queueRanking?.status === "checking") {
       target.innerHTML = (
         `<span class="movement-queue-ranking-copy">Checking for a saved ${escapeHtml(rankingLabel)} ranking…</span>`
         + '<button type="button" disabled>Checking…</button>'
       );
       return;
     }
-    if (this.anomalyRanking?.status === "restoring") {
+    if (queueRanking?.status === "restoring") {
       target.innerHTML = (
         `<span class="movement-queue-ranking-copy">Loading the saved ${escapeHtml(rankingLabel)} ranking.</span>`
         + '<button type="button" disabled>Loading…</button>'
       );
       return;
     }
-    if (this.anomalyRanking?.status === "loading") {
+    if (queueRanking?.status === "loading") {
       target.innerHTML = (
         `<span class="movement-queue-ranking-copy">${escapeHtml(rankingLabel)} ranking in progress.</span>`
         + '<button type="button" disabled>Running…</button>'
       );
       return;
     }
-    if (this.anomalyRanking?.status === "history_error") {
+    if (queueRanking?.status === "history_error") {
       target.classList.add("error");
       target.innerHTML = (
-        `<span class="movement-queue-ranking-copy" title="${escapeHtml(this.anomalyRanking.restoreError || "")}">Could not check saved burst rankings.</span>`
+        `<span class="movement-queue-ranking-copy" title="${escapeHtml(queueRanking.restoreError || "")}">Could not check saved burst rankings.</span>`
         + '<button type="button" data-queue-action="check-ranking">Try again</button>'
       );
       return;
     }
-    if (["available", "restore_error"].includes(this.anomalyRanking?.status)) {
+    if (["available", "restore_error"].includes(queueRanking?.status)) {
       const metadata = [
-        this.anomalyRanking.createdAt
-          ? `Saved ranking ${formatDateTime(this.anomalyRanking.createdAt)}`
+        queueRanking.createdAt
+          ? `Saved ranking ${formatDateTime(queueRanking.createdAt)}`
           : `${rankingLabel} ranking available`,
         this.burstGapLabel(),
       ].filter(Boolean).join(" • ");
       target.innerHTML = (
         `<span class="movement-queue-ranking-copy" title="${escapeHtml(metadata)}">${escapeHtml(metadata)}</span>`
-        + `<button type="button" data-queue-action="load-ranking">${this.anomalyRanking.status === "restore_error" ? "Retry loading" : "Load ranking"}</button>`
+        + `<button type="button" data-queue-action="load-ranking">${queueRanking.status === "restore_error" ? "Retry loading" : "Load ranking"}</button>`
       );
       return;
     }
-    if (!this.hasCompatibleIndividualQueueRanking()) {
+    if (!this.hasCompatibleIndividualQueueRanking(queueRanking)) {
       target.classList.add("error");
       target.innerHTML = (
         `<span class="movement-queue-ranking-copy" title="No compatible ${escapeHtml(rankingLabel)} ranking is available for this dataset version and burst definition.">`
@@ -8611,18 +8737,18 @@ class MovementExampleApp {
       );
       return;
     }
-    const burstSettings = this.anomalyRanking.burstGap
-      ? formatBurstGapMetadata(parseMovementBurstGap({ burst_gap: this.anomalyRanking.burstGap }))
+    const burstSettings = queueRanking.burstGap
+      ? formatBurstGapMetadata(parseMovementBurstGap({ burst_gap: queueRanking.burstGap }))
       : this.burstGapLabel();
     const metadata = [
-      this.anomalyRanking.createdAt
-        ? `${rankingLabel} • ${formatDateTime(this.anomalyRanking.createdAt)}`
+      queueRanking.createdAt
+        ? `${rankingLabel} • ${formatDateTime(queueRanking.createdAt)}`
         : `${rankingLabel} available`,
       burstSettings,
     ].filter(Boolean).join(" • ");
     const needsApply = (
       this.individualReviewQueue.appliedRankingAnalysisId
-      !== this.anomalyRanking.analysisId
+      !== queueRanking.analysisId
     );
     target.innerHTML = (
       `<span class="movement-queue-ranking-copy" title="${escapeHtml(metadata)}">${escapeHtml(metadata)}</span>`

@@ -2272,10 +2272,10 @@ def test_movement_frontend_restores_saved_burst_analyses():
     assert 'status: "checking"' in source
     assert 'status: "available"' in source
     assert 'status: "restoring"' in source
-    assert "const loadedRanking = this.hasCompatibleIndividualQueueRanking()" in source
+    assert "const loadedRanking = this.anomalyRankings.get(rankingMethod)" in source
     assert "rankingAnalysisId === loadedRankingAnalysisId" in source
     assert "createdAt: String(ranking.created_at || loadedRanking.createdAt || \"\")" in source
-    assert "this.anomalyRanking = loadedRanking || {" in source
+    assert "const failedRanking = loadedRanking || {" in source
     assert "Checking for a compatible saved burst ranking" in source
     assert "Loading saved burst ranking" in source
     assert 'data-action="load-saved-ranking"' in source
@@ -2565,8 +2565,8 @@ def test_movement_individual_queue_explains_burst_ranking_availability():
     assert "Apply completed ranking" in source
     assert 'data-queue-action="run-ranking"' in source
     assert "noteCompletedIndividualQueueRanking()" in source
-    assert "queue.pendingRankingAnalysisId = this.anomalyRanking.analysisId" in source
-    assert "queue.rankingMethod === this.anomalyRanking.rankingMethod" in source
+    assert "queue.pendingRankingAnalysisId = queueRanking.analysisId" in source
+    assert "const queueRanking = this.getIndividualQueueRanking()" in source
 
 
 def test_movement_issue_dialog_keeps_burst_context_preview_available():

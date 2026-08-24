@@ -93,15 +93,14 @@ def test_shared_frontend_selects_rds_artifacts_in_rds_mode():
         source.index('<div class="movement-side-sheet ranking hidden"'):
         source.index('<div class="movement-side-sheet feature-space hidden"')
     ]
-    assert 'data-role="ranking-method-control"' not in ranking_sheet
-    assert '<label data-role="ranking-method-control">Ranking type' in source
+    assert '<label data-role="ranking-method-control">View ranking' in ranking_sheet
     assert '<option value="isolation_forest">Isolation forest — worst burst</option>' in source
     assert '<option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>' in source
     assert '<option value="source_is_outlier">Source is_outlier — total flagged fixes</option>' in source
     assert 'this.refs.rankingMethod.addEventListener("change"' in source
     ranking_handler_start = source.index("  handleRankingMethodChange() {")
     ranking_handler_end = source.index("\n  hasOsmContextFeatures() {", ranking_handler_start)
-    assert "void this.restoreSavedAnalyses()" in source[ranking_handler_start:ranking_handler_end]
+    assert "this.anomalyRankings.get(method)" in source[ranking_handler_start:ranking_handler_end]
     assert "rankingMethod: this.getRankingMethod()" in source
     binary_layers = source[source.index("binaryDeckLayers(") : source.index("renderLayers(", source.index("binaryDeckLayers("))]
     assert binary_layers.count('widthUnits: "meters"') == 2

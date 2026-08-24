@@ -833,10 +833,10 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert 'feature_set: featureSet' in source
     assert 'Feature set: ${String(modelFit.feature_set).replaceAll("_", " ")}' in source
     assert "anomalyFeatureSetLabel" in source
-    assert "Running burst anomaly ranking analysis (${featureSetLabel})" in source
-    assert "Created ${this.rankingMethodLabel(returnedMethod)} ranking analysis" in source
+    assert "Running ${providers.length} burst ranking" in source
+    assert "Created ${formatCount(this.anomalyRankings.size)} ranking views" in source
     assert '<option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>' in source
-    assert 'data-role="ranking-method-control"' not in ranking_sheet
+    assert '<label data-role="ranking-method-control">View ranking' in ranking_sheet
     assert 'this.refs.runAnomalyRanking.textContent = "Rank bursts"' in source
     assert "sum_positive_outlier_decision_margin" not in source
     assert "Total source outliers" in renderer
@@ -855,7 +855,6 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert "waitForAnomalyRankingJob" in handler
     assert "analysis-jobs" in handler
     assert "waitForAbortableDelay" in source
-    assert "started in the background" in handler
     assert 'this.setSideSheet("ranking")' in handler
     assert "ranked_individuals" in source
     assert "ranked_burst_refs" in source
@@ -936,7 +935,7 @@ def test_frontend_exposes_read_only_burst_anomaly_ranking_panel():
     assert "burst_count" in source
     assert "scored_burst_count" in source
     assert "formatBurstGapMetadata(parseMovementBurstGap" in source
-    assert "summary.model_fit" in source
+    assert "artifact?.model_fit" in source
     assert "Individuals are ranked by their highest-scoring burst" not in source
     assert "Mark " not in renderer
 
