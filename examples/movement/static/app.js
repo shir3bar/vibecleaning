@@ -309,7 +309,10 @@ function parseMovementBinary(buffer) {
     throw new Error("The movement binary response is truncated.");
   }
   const header = JSON.parse(new TextDecoder().decode(bytes.subarray(8, headerEnd)));
-  if (header.format !== "vibecleaning-movement-columns" || Number(header.version) !== 1) {
+  if (
+    header.format !== "vibecleaning-movement-columns"
+    || ![1, 2].includes(Number(header.version))
+  ) {
     throw new Error("The movement binary response uses an unsupported version.");
   }
   const dataOffset = Math.ceil(headerEnd / 8) * 8;
@@ -338,6 +341,130 @@ function parseMovementBinary(buffer) {
   return { buffer, header, arrays };
 }
 
+function expandMovementBinaryLines(binary) {
+  const sourceIndexes = binary.arrays.line_source_indexes;
+  const targetIndexes = binary.arrays.line_target_indexes;
+  const positions = binary.arrays.positions;
+  const lineSourcePositions = new Float64Array(sourceIndexes.length * 2);
+  const lineTargetPositions = new Float64Array(targetIndexes.length * 2);
+  for (let index = 0; index < sourceIndexes.length; index += 1) {
+    const sourceOffset = Number(sourceIndexes[index]) * 2;
+    const targetOffset = Number(targetIndexes[index]) * 2;
+    lineSourcePositions[index * 2] = positions[sourceOffset];
+    lineSourcePositions[(index * 2) + 1] = positions[sourceOffset + 1];
+    lineTargetPositions[index * 2] = positions[targetOffset];
+    lineTargetPositions[(index * 2) + 1] = positions[targetOffset + 1];
+  }
+  binary.lineSourcePositions = lineSourcePositions;
+  binary.lineTargetPositions = lineTargetPositions;
+  return binary;
+}
+
+let movementBinaryWorkerClient = null;
+let movementBinaryBlockSequence = 0;
+
+function getMovementBinaryWorkerClient() {
+  if (movementBinaryWorkerClient || typeof Worker !== "function") {
+    return movementBinaryWorkerClient;
+  }
+  const worker = new Worker("/static/movement_binary_worker.js");
+  const pending = new Map();
+  const blockIds = new Set();
+  let requestSequence = 0;
+  worker.addEventListener("message", event => {
+    const requestId = Number(event.data?.requestId);
+    const request = pending.get(requestId);
+    if (!request) return;
+    pending.delete(requestId);
+    if (event.data?.type === "error") {
+      request.reject(new Error(event.data.error));
+    } else {
+      request.resolve(event.data);
+    }
+  });
+  worker.addEventListener("error", event => {
+    const error = new Error(event.message || "Movement binary worker failed.");
+    for (const request of pending.values()) request.reject(error);
+    pending.clear();
+  });
+  movementBinaryWorkerClient = {
+    worker,
+    blockIds,
+    request(type, payload = {}) {
+      const requestId = ++requestSequence;
+      return new Promise((resolve, reject) => {
+        pending.set(requestId, { resolve, reject });
+        worker.postMessage({ type, requestId, ...payload });
+      });
+    },
+    release(blockId) {
+      if (!blockIds.delete(blockId)) return;
+      worker.postMessage({ type: "release", blockId });
+      if (!blockIds.size) {
+        for (const request of pending.values()) {
+          request.reject(new Error("Movement binary worker was released."));
+        }
+        pending.clear();
+        worker.terminate();
+        if (movementBinaryWorkerClient?.worker === worker) {
+          movementBinaryWorkerClient = null;
+        }
+      }
+    },
+  };
+  return movementBinaryWorkerClient;
+}
+
+async function prepareMovementBinary(buffer) {
+  const binary = parseMovementBinary(buffer);
+  const client = getMovementBinaryWorkerClient();
+  if (!client) return expandMovementBinaryLines(binary);
+  const blockId = `movement-block-${++movementBinaryBlockSequence}`;
+  client.blockIds.add(blockId);
+  binary.workerBlockId = blockId;
+  try {
+    // Keep the original buffer available to Deck. One shared worker receives
+    // immutable block copies and serves every loaded individual.
+    const result = await client.request("initialize", { blockId, buffer });
+    binary.lineSourcePositions = new Float64Array(result.lineSourcePositions);
+    binary.lineTargetPositions = new Float64Array(result.lineTargetPositions);
+    return binary;
+  } catch (error) {
+    client.release(blockId);
+    throw error;
+  }
+}
+
+function requestMovementBinaryAttributes(binary, spec) {
+  const client = movementBinaryWorkerClient;
+  if (!client || !binary?.workerBlockId) return Promise.resolve(null);
+  return client.request("attributes", {
+    blockId: binary.workerBlockId,
+    spec,
+  }).then(result => result.attributes);
+}
+
+function releaseMovementBinaryBlock(binary) {
+  const blockId = binary?.workerBlockId;
+  if (!blockId) return;
+  binary.workerBlockId = "";
+  movementBinaryWorkerClient?.release(blockId);
+}
+
+function releaseMovementBinaryData(data) {
+  const binaries = new Set([
+    data?.fullBinaryMovement,
+    ...(data?.binaryBlocks?.values?.() || []),
+  ].filter(Boolean));
+  for (const binary of binaries) releaseMovementBinaryBlock(binary);
+  data?.binaryBlocks?.clear?.();
+  if (data) {
+    data.fullBinaryMovement = null;
+    data.binaryMovement = null;
+    data.binaryMapReady = false;
+  }
+}
+
 class MovementExampleApp {
   constructor({ mountEl }) {
     this.mountEl = mountEl;
@@ -363,6 +490,19 @@ class MovementExampleApp {
     this.temporalFocusRenderFrame = null;
     this.temporalSliderEngaged = false;
     this.pendingMapSingleClickTimer = null;
+    this.previewHandoffIndividuals = new Set();
+    this.previewHandoffFrame = null;
+    this.movementDiagnostics = {
+      binaryRequests: 0,
+      binaryCacheHits: 0,
+      binaryAttributeBuilds: 0,
+      previewActivations: 0,
+      exactActivations: 0,
+      lastPreviewActivationMs: null,
+      lastExactActivationMs: null,
+      renderedLayerIds: [],
+    };
+    window.__movementDiagnostics = this.movementDiagnostics;
     this.lastThresholdMatchKeys = new Set();
     this.lastCandidateMatchKeys = new Set();
     this.loadRequestId = 0;
@@ -2734,6 +2874,19 @@ class MovementExampleApp {
         .movement-card.interactive {
           cursor: pointer;
         }
+        .movement-exact-load {
+          display: none;
+          color: #9edcf2;
+          font-size: 10px;
+        }
+        .movement-card[aria-busy] .movement-exact-load {
+          display: block;
+        }
+        .movement-card[data-exact-error="true"] .movement-exact-load {
+          display: block;
+          color: #ff9b9b;
+          cursor: pointer;
+        }
         .movement-card.is-suspected,
         .movement-card.has-unresolved-issues {
           border-color: rgba(251, 191, 36, 0.72);
@@ -3821,7 +3974,10 @@ class MovementExampleApp {
       void this.handleAdminDashboardClick(event);
     });
     this.refs.sideTabIndividuals.addEventListener("click", () => this.setSideSheet("individuals"));
-    this.refs.sideTabTable.addEventListener("click", () => this.setSideSheet("table"));
+    this.refs.sideTabTable.addEventListener("click", () => {
+      this.setSideSheet("table");
+      void this.loadDetailForCurrentSelection({ requireObjects: true });
+    });
     this.refs.sideTabRanking.addEventListener("click", () => this.setSideSheet("ranking"));
     this.refs.sideTabFeatureSpace.addEventListener("click", () => this.setSideSheet("feature_space"));
     this.refs.individualSearch.addEventListener("input", () => {
@@ -4066,7 +4222,7 @@ class MovementExampleApp {
       }
       this.data.selectedIndividuals = new Set(this.data.individuals);
       this.saveUiState();
-      this.renderIndividuals();
+      this.syncIndividualSelectionUi();
       this.renderThresholdPane();
       this.renderLayers();
       this.updateActionButtons();
@@ -4074,12 +4230,12 @@ class MovementExampleApp {
     });
     this.refs.selectNone.addEventListener("click", () => {
       if (!this.data) return;
-      this.cancelRequest("binaryFixes");
+      this.cancelBinaryRequests();
       this.clearThresholdState();
       this.data.selectedIndividuals = new Set();
       this.data.selectedFixKeys = new Set();
       this.saveUiState();
-      this.renderIndividuals();
+      this.syncIndividualSelectionUi();
       this.renderThresholdPane();
       this.renderSelectedFixes();
       this.renderLayers();
@@ -4274,65 +4430,86 @@ class MovementExampleApp {
     return payload;
   }
 
-  async loadBinaryMovement({ familyName, studyName, datasetId, data = this.data } = {}) {
-    if (!MOVEMENT_APP_CONFIG.rdsSource || !data) {
+  async loadBinaryMovement({
+    familyName,
+    studyName,
+    datasetId,
+    individuals = [],
+    data = this.data,
+  } = {}) {
+    if (!data) {
       return;
     }
-    const controller = this.beginRequest("binaryFixes");
+    const requestedIndividuals = uniqueNonEmpty(individuals)
+      .sort((left, right) => left.localeCompare(right));
+    const requestName = requestedIndividuals.length
+      ? `binaryFixes:${requestedIndividuals.join("|")}`
+      : "binaryFixes:full";
+    const controller = this.beginRequest(requestName);
+    const params = new URLSearchParams();
+    if (this.currentArtifact) params.set("logical_name", this.currentArtifact);
+    for (const individual of requestedIndividuals) {
+      params.append("individuals", individual);
+    }
+    if (!MOVEMENT_APP_CONFIG.rdsSource) {
+      params.set("burst_gap_mode", this.getBurstGapMode());
+      params.set("burst_gap_seconds", String(this.getBurstGapSeconds()));
+      params.set("burst_gap_quantile", String(this.getBurstGapQuantile()));
+      const effective = finiteOrNull(data?.burstGap?.effectiveSeconds);
+      if (effective !== null) params.set("burst_gap_effective_seconds", String(effective));
+    }
+    this.movementDiagnostics.binaryRequests += 1;
     const response = await this.fetchResponse(
-      `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/dataset/${encodeURIComponent(datasetId)}/fixes-binary`,
+      `/api/apps/movement/family/${encodeURIComponent(familyName)}/study/${encodeURIComponent(studyName)}/dataset/${encodeURIComponent(datasetId)}/fixes-binary?${params.toString()}`,
       { signal: controller.signal },
     );
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error || `${response.status} ${response.statusText}`);
     }
-    const binary = parseMovementBinary(await response.arrayBuffer());
+    const binary = await prepareMovementBinary(await response.arrayBuffer());
     if (
-      this.requestControllers.binaryFixes !== controller
+      this.requestControllers[requestName] !== controller
       || familyName !== this.currentFamily
       || studyName !== this.currentStudy
       || datasetId !== this.currentDatasetId
     ) {
+      releaseMovementBinaryBlock(binary);
       return;
     }
     if (
       data.sourceSignature
-      && binary.header.source_bundle_signature
-      && data.sourceSignature !== binary.header.source_bundle_signature
+      && (binary.header.source_bundle_signature || binary.header.source_signature)
+      && data.sourceSignature !== (binary.header.source_bundle_signature || binary.header.source_signature)
     ) {
-      throw new Error("The indexed RDS bundle changed while its map data was loading.");
+      releaseMovementBinaryBlock(binary);
+      throw new Error("The movement source changed while its exact map data was loading.");
     }
-    const sourceIndexes = binary.arrays.line_source_indexes;
-    const targetIndexes = binary.arrays.line_target_indexes;
-    const positions = binary.arrays.positions;
-    const lineSourcePositions = new Float64Array(sourceIndexes.length * 2);
-    const lineTargetPositions = new Float64Array(targetIndexes.length * 2);
-    for (let index = 0; index < sourceIndexes.length; index += 1) {
-      const sourceOffset = Number(sourceIndexes[index]) * 2;
-      const targetOffset = Number(targetIndexes[index]) * 2;
-      lineSourcePositions[index * 2] = positions[sourceOffset];
-      lineSourcePositions[(index * 2) + 1] = positions[sourceOffset + 1];
-      lineTargetPositions[index * 2] = positions[targetOffset];
-      lineTargetPositions[(index * 2) + 1] = positions[targetOffset + 1];
-    }
-    binary.lineSourcePositions = lineSourcePositions;
-    binary.lineTargetPositions = lineTargetPositions;
     binary.individualRanges = new Map();
-    let rangeStart = 0;
-    while (rangeStart < Number(binary.header.row_count)) {
-      const code = Number(binary.arrays.individual_codes[rangeStart]);
-      let rangeEnd = rangeStart + 1;
-      while (
-        rangeEnd < Number(binary.header.row_count)
-        && Number(binary.arrays.individual_codes[rangeEnd]) === code
-      ) rangeEnd += 1;
-      binary.individualRanges.set(code, [rangeStart, rangeEnd]);
-      rangeStart = rangeEnd;
+    binary.individualLineRanges = new Map();
+    for (const [individual, range] of Object.entries(binary.header.individual_point_ranges || {})) {
+      const code = (binary.header.individuals || []).indexOf(individual);
+      if (code >= 0) binary.individualRanges.set(code, range.map(Number));
     }
-    binary.renderCache = null;
-    data.binaryMovement = binary;
-    data.binaryMapReady = true;
+    for (const [individual, range] of Object.entries(binary.header.individual_line_ranges || {})) {
+      const code = (binary.header.individuals || []).indexOf(individual);
+      if (code >= 0) binary.individualLineRanges.set(code, range.map(Number));
+    }
+    if (!binary.individualRanges.size) {
+      let rangeStart = 0;
+      while (rangeStart < Number(binary.header.row_count)) {
+        const code = Number(binary.arrays.individual_codes[rangeStart]);
+        let rangeEnd = rangeStart + 1;
+        while (
+          rangeEnd < Number(binary.header.row_count)
+          && Number(binary.arrays.individual_codes[rangeEnd]) === code
+        ) rangeEnd += 1;
+        binary.individualRanges.set(code, [rangeStart, rangeEnd]);
+        rangeStart = rangeEnd;
+      }
+    }
+    binary.renderCaches = new Map();
+    binary.attributePromises = new Map();
     for (const field of data.colorFields) {
       const stats = binary.header.color_stats?.[field.key];
       if (field.kind === "numeric" && stats) {
@@ -4349,10 +4526,46 @@ class MovementExampleApp {
         data.colorStyles.set(field.key, { kind: "boolean" });
       }
     }
+    await this.prepareRetainedBinaryAttributes(binary);
+    if (
+      this.requestControllers[requestName] !== controller
+      || familyName !== this.currentFamily
+      || studyName !== this.currentStudy
+      || datasetId !== this.currentDatasetId
+    ) {
+      releaseMovementBinaryBlock(binary);
+      return;
+    }
+    const loadedIndividuals = uniqueNonEmpty(
+      binary.header.loaded_individuals || binary.header.individuals || [],
+    );
+    const replacedBlocks = new Set();
+    for (const individual of loadedIndividuals) {
+      const previous = data.binaryBlocks.get(individual);
+      if (previous && previous !== binary) replacedBlocks.add(previous);
+      data.binaryBlocks.set(individual, binary);
+    }
+    if (!requestedIndividuals.length) {
+      data.fullBinaryMovement = binary;
+      data.binaryMovement = binary;
+      data.binaryMapReady = true;
+    }
+    const retainedBlocks = new Set(data.binaryBlocks.values());
+    if (data.fullBinaryMovement) retainedBlocks.add(data.fullBinaryMovement);
+    for (const replaced of replacedBlocks) {
+      if (!retainedBlocks.has(replaced)) releaseMovementBinaryBlock(replaced);
+    }
+    if (data === this.data) {
+      this.beginPreviewHandoff(loadedIndividuals);
+    }
+    this.requestControllers[requestName] = null;
+    return binary;
   }
 
-  binaryFixAt(index, { remember = true } = {}) {
-    const binary = this.data?.binaryMovement;
+  binaryFixAt(index, {
+    remember = true,
+    binary = this.data?.fullBinaryMovement || this.data?.binaryMovement,
+  } = {}) {
     const arrays = binary?.arrays;
     const pointIndex = Number(index);
     if (!arrays || !Number.isInteger(pointIndex) || pointIndex < 0 || pointIndex >= Number(binary.header.row_count)) {
@@ -4360,30 +4573,62 @@ class MovementExampleApp {
     }
     const artifact = String(binary.header.artifacts?.[Number(arrays.artifact_codes[pointIndex])] || "");
     const sourceRow = Number(arrays.source_rows[pointIndex]);
-    const fixKey = `file:${artifact}#row:${sourceRow}`;
+    let fixKey = `file:${artifact}#row:${sourceRow}`;
+    if (arrays.fix_key_offsets && arrays.fix_key_bytes) {
+      const start = Number(arrays.fix_key_offsets[pointIndex]);
+      const end = Number(arrays.fix_key_offsets[pointIndex + 1]);
+      fixKey = new TextDecoder().decode(arrays.fix_key_bytes.subarray(start, end));
+    }
     const statusCode = Number(arrays.review_status[pointIndex]);
+    const individual = String(
+      binary.header.individuals?.[Number(arrays.individual_codes[pointIndex])] || "",
+    );
+    const setName = arrays.set_codes
+      ? String(binary.header.sets?.[Number(arrays.set_codes[pointIndex])] || "train")
+      : String(binary.header.implicit_set || "train");
+    const attributes = {
+      individual,
+      step_length_m: Number(arrays.step_length_m?.[pointIndex]),
+      speed_mps: Number(arrays.speed_mps?.[pointIndex]),
+      time_delta_s: Number(arrays.time_delta_s?.[pointIndex]),
+      turn_angle_deg: Number(arrays.turn_angle_deg?.[pointIndex]),
+    };
+    for (const [fieldKey, column] of Object.entries(binary.header.color_columns || {})) {
+      const rawValue = arrays[column.array]?.[pointIndex];
+      if (column.kind === "boolean") {
+        attributes[fieldKey] = Number(rawValue) === 255 ? null : Boolean(rawValue);
+      } else if (column.kind === "categorical") {
+        const code = Number(rawValue);
+        attributes[fieldKey] = code > 0 ? String(column.levels?.[code - 1] || "") : null;
+      } else {
+        const value = Number(rawValue);
+        attributes[fieldKey] = Number.isFinite(value) ? value : null;
+      }
+    }
+    const sourceFlagMask = Number(arrays.source_flags?.[pointIndex]) || 0;
+    const sourceFlags = (binary.header.source_flag_values || []).filter(
+      (_value, flagIndex) => Boolean(sourceFlagMask & (1 << flagIndex)),
+    );
+    const burstCode = Number(arrays.burst_values?.[pointIndex]);
+    const sourceBurst = binary.header.source_format === "csv"
+      ? String(binary.header.burst_ids?.[Math.max(0, burstCode - 1)] || "")
+      : burstCode;
     const fix = {
       fixKey,
-      individual: String(binary.header.individuals?.[Number(arrays.individual_codes[pointIndex])] || ""),
-      setName: String(binary.header.implicit_set || "train"),
+      individual,
+      setName,
       timeMs: Number(arrays.time_ms[pointIndex]),
       position: [Number(arrays.positions[pointIndex * 2]), Number(arrays.positions[(pointIndex * 2) + 1])],
-      attributes: {
-        individual: String(binary.header.individuals?.[Number(arrays.individual_codes[pointIndex])] || ""),
-        step_length_m: Number(arrays.step_length_m[pointIndex]),
-        speed_mps: Number(arrays.speed_mps[pointIndex]),
-        time_delta_s: Number(arrays.time_delta_s[pointIndex]),
-        turn_angle_deg: Number(arrays.turn_angle_deg[pointIndex]),
-        is_outlier: Boolean(arrays.is_outlier[pointIndex]),
-      },
+      attributes,
       review: { status: statusCode === 2 ? "confirmed" : statusCode === 1 ? "suspected" : "", issues: [], effectiveIssues: [] },
       segments: [],
       analyticallyExcluded: statusCode === 2,
-      sourceFlags: [],
+      sourceFlags,
       sourceArtifact: artifact,
       sourceRow,
-      sourceBurst: Number(arrays.burst_values[pointIndex]),
+      sourceBurst,
       binaryIndex: pointIndex,
+      binaryBlock: binary,
     };
     if (remember) {
       this.data.fixByKey.set(fixKey, fix);
@@ -4474,6 +4719,15 @@ class MovementExampleApp {
       existing.abort();
       this.requestControllers[name] = null;
     }
+  }
+
+  cancelBinaryRequests({ keepFull = false } = {}) {
+    for (const name of Object.keys(this.requestControllers)) {
+      if (!name.startsWith("binaryFixes:")) continue;
+      if (keepFull && name === "binaryFixes:full") continue;
+      this.cancelRequest(name);
+    }
+    if (!keepFull) this.data?.binaryPendingIndividuals?.clear?.();
   }
 
   cancelSelectionRequests(level = "family") {
@@ -6069,8 +6323,44 @@ class MovementExampleApp {
     if (pathFromFixKeys.length) {
       return pathFromFixKeys;
     }
+    const binaryIndexes = this.getBinaryBurstIndexes(ref);
+    if (binaryIndexes.length) {
+      const binary = this.data.binaryBlocks.get(String(ref.individual || ""));
+      return binaryIndexes.map(index => [
+        Number(binary.arrays.positions[index * 2]),
+        Number(binary.arrays.positions[(index * 2) + 1]),
+      ]);
+    }
     const burst = this.data.autoBurstById?.get(ref.burst_id || "");
     return burst?.path?.length ? burst.path : [];
+  }
+
+  getBinaryBurstIndexes(ref) {
+    const individual = String(ref?.individual || "");
+    const binary = this.data?.binaryBlocks?.get(individual);
+    if (!binary) return [];
+    const individualCode = (binary.header.individuals || []).indexOf(individual);
+    const [start, end] = binary.individualRanges?.get(individualCode) || [0, 0];
+    const burstId = String(ref?.burst_id || "");
+    let burstCode = null;
+    if (binary.header.source_format === "csv") {
+      const index = (binary.header.burst_ids || []).indexOf(burstId);
+      if (index >= 0) burstCode = index + 1;
+    } else {
+      const match = burstId.match(/:source_(-?\d+)$/);
+      if (match) burstCode = Number(match[1]);
+    }
+    const startTime = finiteOrNull(ref?.start_time_ms);
+    const endTime = finiteOrNull(ref?.end_time_ms);
+    const indexes = [];
+    for (let index = start; index < end; index += 1) {
+      if (burstCode !== null && Number(binary.arrays.burst_values[index]) !== burstCode) continue;
+      const time = Number(binary.arrays.time_ms[index]);
+      if (startTime !== null && time < startTime) continue;
+      if (endTime !== null && time > endTime) continue;
+      indexes.push(index);
+    }
+    return indexes;
   }
 
   setFocusedRankingBurst(ref) {
@@ -6261,6 +6551,13 @@ class MovementExampleApp {
     this.renderIndividuals();
     await this.loadDetailForCurrentSelection({ preservedFixKeys });
 
+    const binary = this.data.binaryBlocks.get(String(ref.individual || ""));
+    if (binary) {
+      for (const index of this.getBinaryBurstIndexes(ref)) {
+        this.binaryFixAt(index, { binary });
+      }
+    }
+
     const preservedFeatureSpaceBurstId = preserveFeatureSpaceSelection
       ? String(this.burstFeatureSpace?.selectedBurstId || "")
       : "";
@@ -6273,7 +6570,12 @@ class MovementExampleApp {
     }
     if (checkFixes) {
       const nextSelected = new Set(this.data.selectedFixKeys);
-      for (const fixKey of fixKeys) {
+      const checkKeys = fixKeys.length
+        ? fixKeys
+        : this.getBinaryBurstIndexes(ref)
+          .map(index => this.binaryFixAt(index, { binary })?.fixKey)
+          .filter(Boolean);
+      for (const fixKey of checkKeys) {
         if (this.data.fixByKey.has(fixKey)) {
           nextSelected.add(fixKey);
         }
@@ -7247,6 +7549,10 @@ class MovementExampleApp {
   }
 
   clearLoadedStudyState() {
+    this.cancelBinaryRequests();
+    try {
+      releaseMovementBinaryData(this.data);
+    } catch {}
     this.clearThresholdState();
     this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
     this.clearOsmContext({ render: false });
@@ -7273,6 +7579,11 @@ class MovementExampleApp {
       window.clearTimeout(this.pendingMapSingleClickTimer);
       this.pendingMapSingleClickTimer = null;
     }
+    if (this.previewHandoffFrame !== null) {
+      window.cancelAnimationFrame(this.previewHandoffFrame);
+      this.previewHandoffFrame = null;
+    }
+    this.previewHandoffIndividuals.clear();
     this.tableRenderState = {
       signature: "",
       rowLimit: TABLE_INITIAL_ROW_LIMIT,
@@ -7667,6 +7978,7 @@ class MovementExampleApp {
 
   async loadArtifact(viewContext = this.captureDatasetViewContext()) {
     this.cancelSelectionRequests("artifact");
+    this.cancelBinaryRequests();
     this.clearAnomalyRanking();
     this.clearBurstFeatureSpace();
     const familyName = this.currentFamily;
@@ -7716,39 +8028,7 @@ class MovementExampleApp {
       const transitionIndividuals = viewContext
         ? (viewContext.selectedIndividuals || []).filter(individual => availableIndividuals.has(individual))
         : initialMovementVisibleIndividuals(nextData);
-      const transitionRequestsWholeRdsStudy = (
-        MOVEMENT_APP_CONFIG.rdsSource
-        && transitionIndividuals.length === nextData.individuals.length
-      );
-      if (nextData.overviewTruncated && transitionIndividuals.length && !transitionRequestsWholeRdsStudy) {
-        const detailPayload = await this.fetchJSON(
-          this.buildFixesRequestUrl({
-            familyName,
-            studyName,
-            datasetId,
-            artifactName,
-            individuals: transitionIndividuals,
-            data: nextData,
-          }),
-          { signal: controller.signal },
-        );
-        nextData.detailState = "loaded";
-        const payloadIndividuals = Array.isArray(detailPayload.detail_scope?.individuals)
-          ? detailPayload.detail_scope.individuals.map(value => String(value)).filter(Boolean)
-          : [];
-        nextData.detailIndividuals = payloadIndividuals.length
-          ? payloadIndividuals
-          : [...transitionIndividuals];
-        nextData.detailLimit = detailPayload.detail_scope?.limit ?? null;
-        nextData.detailMatchingFixCount = Number(detailPayload.matching_fix_count) || 0;
-        nextData.detailReturnedFixCount = Number(detailPayload.returned_fix_count) || 0;
-        nextData.detailTruncated = Boolean(detailPayload.truncated);
-        nextData.detailFixes = parseMovementFixes(detailPayload.fixes || []);
-        nextData.detailSegments = parseMovementSegments(detailPayload.segments || []);
-        nextData.detailAutoBursts = parseMovementAutoBursts(detailPayload.auto_bursts || []);
-        seedMovementDetailCacheFromCurrentData(nextData);
-        refreshMovementFixCollections(nextData);
-      }
+      releaseMovementBinaryData(this.data);
       this.data = nextData;
       this.restoreAnnotationReloadContext(viewContext);
       this.syncAnomalyFeatureSetOptions({ save: false });
@@ -7814,7 +8094,7 @@ class MovementExampleApp {
   }
 
   refreshCurrentColorStyle() {
-    if (!this.data || this.data.binaryMovement) return;
+    if (!this.data || this.data.binaryBlocks?.size) return;
     const field = this.getCurrentColorField();
     if (!field) return;
     const styles = computeMovementColorStyles(
@@ -8296,7 +8576,7 @@ class MovementExampleApp {
       this.renderSelectedFixes();
       this.renderThresholdPane();
       this.renderLayers();
-      await this.loadDetailForCurrentSelection();
+      await this.loadDetailForCurrentSelection({ requireObjects: true });
       this.setSideSheet(queue.browseSideSheet || "individuals", { save: false });
       if (context?.mapView && this.map) {
         this.map.jumpTo(context.mapView);
@@ -8333,7 +8613,7 @@ class MovementExampleApp {
     this.renderThresholdPane();
     this.renderLayers();
     this.updateActionButtons();
-    await this.loadDetailForCurrentSelection();
+    await this.loadDetailForCurrentSelection({ requireObjects: true });
     if (zoom) {
       this.zoomToIndividualQueueActive();
     }
@@ -8873,6 +9153,17 @@ class MovementExampleApp {
         statChip(`confirmed ${formatCount(stats.confirmedCount)}`),
       );
       card.appendChild(statsRow);
+      const exactLoad = document.createElement("div");
+      exactLoad.className = "movement-exact-load";
+      exactLoad.textContent = "Loading exact points and colors…";
+      exactLoad.addEventListener("click", event => {
+        event.stopPropagation();
+        if (!this.data?.detailFailedIndividuals?.has(individual)) return;
+        this.data.detailFailedIndividuals.delete(individual);
+        this.syncIndividualSelectionUi([individual]);
+        void this.loadDetailForCurrentSelection();
+      });
+      card.appendChild(exactLoad);
       if (unresolvedCount) {
         const origins = Array.isArray(stats.unresolvedIssueOrigins) ? stats.unresolvedIssueOrigins : [];
         const notice = document.createElement("div");
@@ -8920,6 +9211,7 @@ class MovementExampleApp {
     }
     const requested = new Set(uniqueNonEmpty(individuals));
     const loading = new Set(this.data.detailLoadingIndividuals || []);
+    const failed = this.data.detailFailedIndividuals || new Set();
     for (const card of this.refs.individuals.querySelectorAll("[data-individual-card]")) {
       const individual = String(card.dataset.individualCard || "");
       if (requested.size && !requested.has(individual)) {
@@ -8928,6 +9220,13 @@ class MovementExampleApp {
       const selected = this.data.selectedIndividuals.has(individual);
       card.style.opacity = selected ? "1" : "0.34";
       card.toggleAttribute("aria-busy", loading.has(individual));
+      card.dataset.exactError = failed.has(individual) ? "true" : "false";
+      const exactLoad = card.querySelector(".movement-exact-load");
+      if (exactLoad) {
+        exactLoad.textContent = failed.has(individual)
+          ? "Exact load failed — click to retry"
+          : "Loading exact points and colors…";
+      }
       const checkbox = card.querySelector("[data-individual-checkbox]");
       if (checkbox) {
         checkbox.checked = selected;
@@ -9106,6 +9405,7 @@ class MovementExampleApp {
     this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(this.data.selectedFixKeys, this.getSelectedIndividuals());
     this.saveUiState();
     this.syncIndividualSelectionUi([individual]);
+    this.renderLayers();
     this.updateActionButtons();
     void this.loadDetailForCurrentSelection();
   }
@@ -9463,7 +9763,43 @@ class MovementExampleApp {
     const anchorPosition = this.data?.eligibleTrackPositionByFixKey?.get(anchorFixKey);
     const targetPosition = this.data?.eligibleTrackPositionByFixKey?.get(targetFixKey);
     if (!anchorPosition || !targetPosition || anchorPosition.trackKey !== targetPosition.trackKey) {
-      return null;
+      const anchorFix = this.data?.fixByKey?.get(anchorFixKey);
+      const targetFix = this.data?.fixByKey?.get(targetFixKey);
+      const binary = anchorFix?.binaryBlock;
+      if (
+        !binary
+        || binary !== targetFix?.binaryBlock
+        || anchorFix.individual !== targetFix.individual
+        || anchorFix.setName !== targetFix.setName
+      ) {
+        return null;
+      }
+      const startIndex = Math.min(anchorFix.binaryIndex, targetFix.binaryIndex);
+      const endIndex = Math.max(anchorFix.binaryIndex, targetFix.binaryIndex);
+      const fixes = [];
+      for (let index = startIndex; index <= endIndex; index += 1) {
+        if (Number(binary.arrays.review_status[index]) === 2) continue;
+        const fix = this.binaryFixAt(index, { binary });
+        if (
+          fix?.individual === anchorFix.individual
+          && fix?.setName === anchorFix.setName
+        ) fixes.push(fix);
+      }
+      if (!fixes.length) return null;
+      return {
+        anchorFixKey,
+        startFixKey: fixes[0].fixKey,
+        endFixKey: fixes[fixes.length - 1].fixKey,
+        selectedFixKeys: new Set(fixes.map(fix => fix.fixKey)),
+        fixes,
+        individual: anchorFix.individual,
+        setName: anchorFix.setName,
+        trackKey: `${anchorFix.individual}\u0000${anchorFix.setName}`,
+        startIndex,
+        endIndex,
+        selectionMethod: this.tableSelection.selectionMethod || "",
+        binaryBlock: binary,
+      };
     }
     const track = this.data?.eligibleFixesByTrack?.get(anchorPosition.trackKey) || [];
     const anchor = track[anchorPosition.index];
@@ -9515,7 +9851,8 @@ class MovementExampleApp {
   }
 
   applyMapRangeEndpoint(fixKey) {
-    if (!this.data?.eligibleTrackPositionByFixKey?.has(fixKey)) {
+    const fix = this.data?.fixByKey?.get(fixKey);
+    if (!this.data?.eligibleTrackPositionByFixKey?.has(fixKey) && !fix?.binaryBlock) {
       this.setStatus("That fix is not part of the current analytical track.", true);
       return;
     }
@@ -9646,6 +9983,9 @@ class MovementExampleApp {
   isFixInTableSelection(fixKey, selection = this.getCurrentSegmentSelection()) {
     if (selection && this.tableSelection.contiguousRange) {
       const position = this.data?.eligibleTrackPositionByFixKey?.get(fixKey);
+      if (!position && selection.binaryBlock) {
+        return selection.selectedFixKeys.has(fixKey);
+      }
       return Boolean(
         position
         && position.trackKey === selection.trackKey
@@ -10141,6 +10481,10 @@ class MovementExampleApp {
       window.clearTimeout(this.pendingMapSingleClickTimer);
       this.pendingMapSingleClickTimer = null;
     }
+    if (this.previewHandoffFrame !== null) {
+      window.cancelAnimationFrame(this.previewHandoffFrame);
+      this.previewHandoffFrame = null;
+    }
     if (this.overlay) {
       try {
         this.overlay.finalize();
@@ -10254,6 +10598,73 @@ class MovementExampleApp {
     return points;
   }
 
+  getExactMapIndividuals() {
+    const exact = new Set();
+    for (const individual of this.data?.binaryBlocks?.keys?.() || []) {
+      exact.add(String(individual));
+    }
+    return exact;
+  }
+
+  getOverviewPreviewTracks(visibleIndividuals, visibleSetNames) {
+    const exactIndividuals = this.getExactMapIndividuals();
+    const tracks = [];
+    for (const individual of this.data?.individuals || []) {
+      if (!visibleIndividuals.has(individual)) continue;
+      if (exactIndividuals.has(individual) && !this.previewHandoffIndividuals.has(individual)) {
+        continue;
+      }
+      for (const setName of visibleSetNames) {
+        const series = this.data.seriesByIndividual?.[individual]?.[setName];
+        if (!series || !Array.isArray(series.positions) || series.positions.length < 2) {
+          continue;
+        }
+        tracks.push({
+          individual,
+          setName,
+          path: series.positions,
+          color: splitColor(this.data.individualPalette[individual], setName, 150),
+        });
+      }
+    }
+    return tracks;
+  }
+
+  getVisibleExactPointCount(visibleIndividuals) {
+    const full = this.data?.fullBinaryMovement;
+    if (full && visibleIndividuals.size === this.data.individuals.length) {
+      return Number(full.header.row_count) || 0;
+    }
+    let count = 0;
+    for (const individual of visibleIndividuals) {
+      const binary = this.data?.binaryBlocks?.get(individual);
+      if (!binary) continue;
+      const code = (binary.header.individuals || []).indexOf(individual);
+      const [start, end] = binary.individualRanges?.get(code) || [0, 0];
+      count += Math.max(0, Number(end) - Number(start));
+    }
+    return count;
+  }
+
+  beginPreviewHandoff(individuals) {
+    let changed = false;
+    for (const individual of uniqueNonEmpty(individuals)) {
+      if (!this.data?.selectedIndividuals?.has(individual)) continue;
+      this.previewHandoffIndividuals.add(individual);
+      changed = true;
+    }
+    if (!changed || this.previewHandoffFrame !== null) return;
+    this.movementDiagnostics.exactActivations += uniqueNonEmpty(individuals).length;
+    this.movementDiagnostics.lastExactActivationMs = performance.now();
+    this.previewHandoffFrame = window.requestAnimationFrame(() => {
+      this.previewHandoffFrame = window.requestAnimationFrame(() => {
+        this.previewHandoffFrame = null;
+        this.previewHandoffIndividuals.clear();
+        this.renderLayers();
+      });
+    });
+  }
+
   getVisibleTrackSteps(visibleIndividuals, visibleSetNames) {
     const cacheKey = [
       [...visibleIndividuals].sort().join("|"),
@@ -10315,12 +10726,14 @@ class MovementExampleApp {
   }
 
   buildTemporalFocalData(visibleIndividuals, visibleSetNames) {
-    const binary = this.data?.binaryMovement;
-    if (binary) {
+    if (this.data?.binaryBlocks?.size) {
       const points = [];
-      for (const [code, [start, end]] of binary.individualRanges || []) {
-        const individual = String(binary.header.individuals?.[code] || "");
-        if (!visibleIndividuals.has(individual)) continue;
+      for (const individual of visibleIndividuals) {
+        const binary = this.data.binaryBlocks.get(individual);
+        if (!binary) continue;
+        const code = (binary.header.individuals || []).indexOf(individual);
+        const [start, end] = binary.individualRanges?.get(code) || [0, 0];
+        if (end <= start) continue;
         let low = start;
         let high = end;
         while (low < high) {
@@ -10336,9 +10749,9 @@ class MovementExampleApp {
         ), candidates[0]);
         for (let index = Math.max(start, focalIndex - 1); index <= Math.min(end - 1, focalIndex + 1); index += 1) {
           if (Number(binary.arrays.review_status[index]) === 2) continue;
-          const burstId = `${individual}:${binary.header.implicit_set || "train"}:source_${Number(binary.arrays.burst_values[index])}`;
+          const burstId = this.binaryBurstIdAt(binary, index, individual);
           if (this.hiddenBurstIds.has(burstId)) continue;
-          const fix = this.binaryFixAt(index, { remember: false });
+          const fix = this.binaryFixAt(index, { remember: false, binary });
           if (!fix) continue;
           points.push({
             fixKey: fix.fixKey,
@@ -10386,44 +10799,48 @@ class MovementExampleApp {
       return [...(this.data.individualPalette[individual] || [124, 210, 255]), POINT_ALPHA];
     }
     if (field.kind === "boolean") {
-      const value = field.key === "is_outlier" ? Number(arrays.is_outlier[index]) : -1;
+      const column = binary.header.color_columns?.[field.key];
+      const values = arrays[column?.array || field.key];
+      const value = values ? Number(values[index]) : -1;
       if (value === 1) return [246, 92, 110, POINT_ALPHA];
       if (value === 0) return [96, 201, 170, POINT_ALPHA];
       return [120, 136, 153, 120];
     }
     if (field.kind === "numeric") {
       const sourceKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY ? "step_length_m" : field.key;
-      const values = arrays[sourceKey];
+      const column = binary.header.color_columns?.[sourceKey];
+      const values = arrays[column?.array || sourceKey];
       const range = this.data.colorStyles.get(field.key)?.range
         || this.data.colorStyles.get(sourceKey)?.range
         || { min: 0, max: 1 };
       return interpolateNumericColor(values ? Number(values[index]) : null, range, POINT_ALPHA);
     }
+    if (field.kind === "categorical") {
+      const column = binary.header.color_columns?.[field.key];
+      const values = arrays[column?.array || field.key];
+      const code = values ? Number(values[index]) : 0;
+      const level = code > 0 ? String(column?.levels?.[code - 1] || "") : "";
+      const style = this.data.colorStyles.get(field.key);
+      const styled = style?.categories?.get?.(level || "Missing");
+      if (styled) return styled;
+      if (!level) return [120, 136, 153, 150];
+      let hash = 0;
+      for (const character of level) hash = ((hash * 31) + character.charCodeAt(0)) >>> 0;
+      return [...hslToRgb(hash % 360, 0.72, 0.56), POINT_ALPHA];
+    }
     return [120, 136, 153, 150];
   }
 
-  buildBinaryRenderAttributes(visibleIndividuals, showPoints) {
-    const binary = this.data?.binaryMovement;
-    if (!binary) return null;
-    const arrays = binary.arrays;
-    const rowCount = Number(binary.header.row_count) || 0;
-    const lineCount = Number(binary.header.line_count) || 0;
+  binaryRenderSpecification() {
     const field = this.getCurrentColorField();
-    const selectedCodes = new Set();
-    (binary.header.individuals || []).forEach((individual, code) => {
-      if (visibleIndividuals.has(String(individual))) selectedCodes.add(code);
-    });
-    const hiddenBurstIds = this.hiddenBurstIds;
-    const activeQueueIndividual = this.queueActiveIndividual();
     const fieldStyle = field ? this.data.colorStyles.get(field.key) : null;
+    const serializedFieldStyle = fieldStyle?.categories instanceof Map
+      ? { ...fieldStyle, categories: [...fieldStyle.categories.entries()] }
+      : fieldStyle || null;
     const cacheKey = JSON.stringify({
-      selectedCodes: [...selectedCodes].sort((left, right) => left - right),
-      showPoints: Boolean(showPoints),
       field: field?.key || "",
-      fieldStyle: fieldStyle || null,
-      hiddenBurstIds: [...hiddenBurstIds].sort(),
-      activeQueueIndividual: activeQueueIndividual || "",
-      showConfirmed: Boolean(this.refs.showConfirmed.checked),
+      fieldStyle: serializedFieldStyle,
+      hiddenBurstIds: [...this.hiddenBurstIds].sort(),
       threshold: {
         fieldKey: this.thresholdState.fieldKey || "",
         value: finiteOrNull(this.thresholdState.value),
@@ -10431,9 +10848,68 @@ class MovementExampleApp {
         selectedLevels: [...(this.thresholdState.selectedLevels || [])].sort(),
       },
     });
-    if (binary.renderCache?.key === cacheKey) {
-      return binary.renderCache.attributes;
+    const categoryColors = fieldStyle?.categories instanceof Map
+      ? Object.fromEntries(fieldStyle.categories)
+      : {};
+    return {
+      cacheKey,
+      spec: {
+        field: field ? { key: field.key, kind: field.kind } : null,
+        range: fieldStyle?.range || null,
+        categoryColors,
+        individualColors: this.data.individualPalette || {},
+        hiddenBurstIds: [...this.hiddenBurstIds],
+        threshold: {
+          active: this.thresholdState.fieldKey === field?.key,
+          value: finiteOrNull(this.thresholdState.value),
+          reverse: this.thresholdState.reverse === true,
+          selectedLevels: [...(this.thresholdState.selectedLevels || [])],
+        },
+        gpsSpikeTurnAngleDeg: this.gpsSpikeTurnAngleDeg,
+      },
+    };
+  }
+
+  async prepareRetainedBinaryAttributes(binary) {
+    const { cacheKey, spec } = this.binaryRenderSpecification();
+    if (binary.renderCaches?.has(cacheKey)) {
+      return binary.renderCaches.get(cacheKey);
     }
+    if (binary.workerBlockId) {
+      if (!(binary.attributePromises instanceof Map)) binary.attributePromises = new Map();
+      if (binary.attributePromises.has(cacheKey)) {
+        return binary.attributePromises.get(cacheKey);
+      }
+      const promise = requestMovementBinaryAttributes(binary, spec).then(attributes => {
+        binary.attributePromises.delete(cacheKey);
+        if (!attributes) return null;
+        this.movementDiagnostics.binaryAttributeBuilds += 1;
+        binary.renderCaches.set(cacheKey, attributes);
+        binary.lastRenderAttributes = attributes;
+        while (binary.renderCaches.size > 3) {
+          binary.renderCaches.delete(binary.renderCaches.keys().next().value);
+        }
+        return attributes;
+      }).catch(error => {
+        binary.attributePromises.delete(cacheKey);
+        throw error;
+      });
+      binary.attributePromises.set(cacheKey, promise);
+      return promise;
+    }
+    return this.buildRetainedBinaryAttributes(binary);
+  }
+
+  buildRetainedBinaryAttributes(binary) {
+    const { cacheKey } = this.binaryRenderSpecification();
+    if (binary.renderCaches?.has(cacheKey)) {
+      return binary.renderCaches.get(cacheKey);
+    }
+    this.movementDiagnostics.binaryAttributeBuilds += 1;
+    const field = this.getCurrentColorField();
+    const arrays = binary.arrays;
+    const rowCount = Number(binary.header.row_count) || 0;
+    const lineCount = Number(binary.header.line_count) || 0;
     const pointColors = new Uint8Array(rowCount * 4);
     const pointFilter = new Uint8Array(rowCount);
     const suspectedFilter = new Uint8Array(rowCount);
@@ -10446,24 +10922,32 @@ class MovementExampleApp {
     let confirmedCount = 0;
     let thresholdCount = 0;
     for (let index = 0; index < rowCount; index += 1) {
-      const code = Number(arrays.individual_codes[index]);
-      const individual = String(binary.header.individuals?.[code] || "");
-      const burstId = `${individual}:${binary.header.implicit_set || "train"}:source_${Number(arrays.burst_values[index])}`;
-      const selected = selectedCodes.has(code) && !hiddenBurstIds.has(burstId);
+      const individual = String(
+        binary.header.individuals?.[Number(arrays.individual_codes[index])] || "",
+      );
+      const burstId = this.binaryBurstIdAt(binary, index, individual);
+      const hidden = this.hiddenBurstIds.has(burstId);
       const status = Number(arrays.review_status[index]);
-      const visible = selected && status !== 2;
-      pointFilter[index] = showPoints && visible ? 1 : 0;
-      suspectedFilter[index] = showPoints && visible && status === 1 ? 1 : 0;
-      confirmedFilter[index] = showPoints && selected && status === 2 && this.refs.showConfirmed.checked ? 1 : 0;
-      if (showPoints && visible && thresholdActive) {
-        if (field.kind === "boolean" && field.key === "is_outlier") {
-          thresholdFilter[index] = thresholdLevels.has(Number(arrays.is_outlier[index]) ? "True" : "False") ? 1 : 0;
+      pointFilter[index] = !hidden && status !== 2 ? 1 : 0;
+      suspectedFilter[index] = !hidden && status === 1 ? 1 : 0;
+      confirmedFilter[index] = !hidden && status === 2 ? 1 : 0;
+      if (!hidden && status !== 2 && thresholdActive) {
+        if (field.kind === "boolean") {
+          const column = binary.header.color_columns?.[field.key];
+          const value = Number(arrays[column?.array || field.key]?.[index]);
+          thresholdFilter[index] = thresholdLevels.has(value ? "True" : "False") ? 1 : 0;
         } else if (field.kind === "numeric" && thresholdValue !== null) {
           const sourceKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY ? "step_length_m" : field.key;
-          const value = Number(arrays[sourceKey]?.[index]);
+          const column = binary.header.color_columns?.[sourceKey];
+          const value = Number(arrays[column?.array || sourceKey]?.[index]);
           const validGpsTurn = field.key !== GPS_SPIKE_COLOR_FIELD_KEY
-            || (Number.isFinite(Number(arrays.turn_angle_deg[index])) && Math.abs(Number(arrays.turn_angle_deg[index])) >= this.gpsSpikeTurnAngleDeg);
-          const matches = this.thresholdState.reverse === true ? value < thresholdValue : value > thresholdValue;
+            || (
+              Number.isFinite(Number(arrays.turn_angle_deg?.[index]))
+              && Math.abs(Number(arrays.turn_angle_deg[index])) >= this.gpsSpikeTurnAngleDeg
+            );
+          const matches = this.thresholdState.reverse === true
+            ? value < thresholdValue
+            : value > thresholdValue;
           thresholdFilter[index] = Number.isFinite(value) && validGpsTurn && matches ? 1 : 0;
         }
       }
@@ -10471,12 +10955,11 @@ class MovementExampleApp {
       confirmedCount += confirmedFilter[index];
       thresholdCount += thresholdFilter[index];
       const color = this.binaryColorForIndex(binary, index, field);
-      const opacity = activeQueueIndividual && individual !== activeQueueIndividual ? 0.25 : 1;
       const offset = index * 4;
       pointColors[offset] = color[0];
       pointColors[offset + 1] = color[1];
       pointColors[offset + 2] = color[2];
-      pointColors[offset + 3] = Math.round(color[3] * opacity);
+      pointColors[offset + 3] = color[3];
     }
     const lineColors = new Uint8Array(lineCount * 4);
     const lineFilter = new Uint8Array(lineCount);
@@ -10484,20 +10967,17 @@ class MovementExampleApp {
     for (let index = 0; index < lineCount; index += 1) {
       const sourceIndex = Number(arrays.line_source_indexes[index]);
       const targetIndex = Number(arrays.line_target_indexes[index]);
-      const code = Number(arrays.individual_codes[targetIndex]);
-      const individual = String(binary.header.individuals?.[code] || "");
-      const sourceBurst = Number(arrays.burst_values[sourceIndex]);
-      const targetBurst = Number(arrays.burst_values[targetIndex]);
-      const burstId = `${individual}:${binary.header.implicit_set || "train"}:source_${targetBurst}`;
-      const visible = selectedCodes.has(code) && !hiddenBurstIds.has(burstId);
-      lineFilter[index] = visible ? 1 : 0;
-      burstFilter[index] = visible && sourceBurst === targetBurst ? 1 : 0;
+      lineFilter[index] = pointFilter[targetIndex];
+      burstFilter[index] = (
+        pointFilter[targetIndex]
+        && Number(arrays.burst_values[sourceIndex]) === Number(arrays.burst_values[targetIndex])
+      ) ? 1 : 0;
       const colorOffset = index * 4;
       const pointOffset = targetIndex * 4;
       lineColors[colorOffset] = pointColors[pointOffset];
       lineColors[colorOffset + 1] = pointColors[pointOffset + 1];
       lineColors[colorOffset + 2] = pointColors[pointOffset + 2];
-      lineColors[colorOffset + 3] = Math.round(185 * (activeQueueIndividual && individual !== activeQueueIndividual ? 0.25 : 1));
+      lineColors[colorOffset + 3] = 185;
     }
     const attributes = {
       pointColors,
@@ -10512,85 +10992,242 @@ class MovementExampleApp {
       confirmedCount,
       thresholdCount,
     };
-    binary.renderCache = { key: cacheKey, attributes };
+    if (!(binary.renderCaches instanceof Map)) binary.renderCaches = new Map();
+    binary.renderCaches.set(cacheKey, attributes);
+    while (binary.renderCaches.size > 3) {
+      binary.renderCaches.delete(binary.renderCaches.keys().next().value);
+    }
     return attributes;
   }
 
-  binaryDeckLayers(visibleIndividuals, showPoints) {
-    const binary = this.data?.binaryMovement;
-    if (!binary || !window.deck?.DataFilterExtension) return [];
-    const attributes = this.buildBinaryRenderAttributes(visibleIndividuals, showPoints);
+  binaryBurstIdAt(binary, index, individual = "") {
+    const code = Number(binary.arrays.burst_values?.[index]);
+    if (binary.header.source_format === "csv") {
+      return String(binary.header.burst_ids?.[Math.max(0, code - 1)] || "");
+    }
+    return `${individual}:${binary.header.implicit_set || "train"}:source_${code}`;
+  }
+
+  retainedBinaryDeckData(binary, attributes, cacheKey, pointRange, lineRange) {
+    if (!(binary.deckDataCaches instanceof Map)) binary.deckDataCaches = new Map();
+    const [pointStart, pointEnd] = pointRange;
+    const [lineStart, lineEnd] = lineRange;
+    const dataKey = `${cacheKey}::${pointStart}:${pointEnd}::${lineStart}:${lineEnd}`;
+    if (binary.deckDataCaches.has(dataKey)) return binary.deckDataCaches.get(dataKey);
+    const pointPosition = {
+      value: binary.arrays.positions.subarray(pointStart * 2, pointEnd * 2),
+      size: 2,
+    };
+    const pointColor = {
+      value: attributes.pointColors.subarray(pointStart * 4, pointEnd * 4),
+      size: 4,
+    };
+    const lineSourcePosition = {
+      value: binary.lineSourcePositions.subarray(lineStart * 2, lineEnd * 2),
+      size: 2,
+    };
+    const lineTargetPosition = {
+      value: binary.lineTargetPositions.subarray(lineStart * 2, lineEnd * 2),
+      size: 2,
+    };
     const pointData = {
-      length: Number(binary.header.row_count) || 0,
+      length: pointEnd - pointStart,
       attributes: {
-        getPosition: { value: binary.arrays.positions, size: 2 },
-        getFillColor: { value: attributes.pointColors, size: 4 },
-        getFilterValue: { value: attributes.pointFilter, size: 1 },
+        getPosition: pointPosition,
+        getFillColor: pointColor,
+        getFilterValue: {
+          value: attributes.pointFilter.subarray(pointStart, pointEnd),
+          size: 1,
+        },
       },
     };
-    const lineBaseAttributes = {
-      getSourcePosition: { value: binary.lineSourcePositions, size: 2 },
-      getTargetPosition: { value: binary.lineTargetPositions, size: 2 },
-    };
-    const filterExtension = new deck.DataFilterExtension({ filterSize: 1 });
-    const layers = [];
-    if (this.refs.showBursts.checked) {
-      layers.push(new deck.LineLayer({
-        id: "movement-binary-burst-casing",
-        data: {
-          length: Number(binary.header.line_count) || 0,
-          attributes: {
-            ...lineBaseAttributes,
-            getFilterValue: { value: attributes.burstFilter, size: 1 },
+    const result = {
+      pointData,
+      pathData: {
+        length: lineEnd - lineStart,
+        attributes: {
+          getSourcePosition: lineSourcePosition,
+          getTargetPosition: lineTargetPosition,
+          getColor: {
+            value: attributes.lineColors.subarray(lineStart * 4, lineEnd * 4),
+            size: 4,
+          },
+          getFilterValue: {
+            value: attributes.lineFilter.subarray(lineStart, lineEnd),
+            size: 1,
           },
         },
-        getColor: BURST_CASING_RGB,
-        getWidth: 9,
+      },
+      burstData: {
+        length: lineEnd - lineStart,
+        attributes: {
+          getSourcePosition: lineSourcePosition,
+          getTargetPosition: lineTargetPosition,
+          getFilterValue: {
+            value: attributes.burstFilter.subarray(lineStart, lineEnd),
+            size: 1,
+          },
+        },
+      },
+      suspectedData: {
+        length: pointEnd - pointStart,
+        attributes: {
+          getPosition: pointPosition,
+          getFillColor: pointColor,
+          getFilterValue: {
+            value: attributes.suspectedFilter.subarray(pointStart, pointEnd),
+            size: 1,
+          },
+        },
+      },
+      confirmedData: {
+        length: pointEnd - pointStart,
+        attributes: {
+          getPosition: pointPosition,
+          getFilterValue: {
+            value: attributes.confirmedFilter.subarray(pointStart, pointEnd),
+            size: 1,
+          },
+        },
+      },
+      thresholdData: {
+        length: pointEnd - pointStart,
+        attributes: {
+          getPosition: pointPosition,
+          getFilterValue: {
+            value: attributes.thresholdFilter.subarray(pointStart, pointEnd),
+            size: 1,
+          },
+        },
+      },
+    };
+    binary.deckDataCaches.set(dataKey, result);
+    while (binary.deckDataCaches.size > 3 * Math.max(1, binary.individualRanges?.size || 1)) {
+      binary.deckDataCaches.delete(binary.deckDataCaches.keys().next().value);
+    }
+    return result;
+  }
+
+  retainedBinaryDeckLayers(visibleIndividuals, showPoints) {
+    if (!this.data?.binaryBlocks?.size || !window.deck?.DataFilterExtension) return [];
+    const layers = [];
+    const filterExtension = new deck.DataFilterExtension({ filterSize: 1 });
+    const full = this.data.fullBinaryMovement;
+    const allSelected = (
+      Boolean(full)
+      && visibleIndividuals.size === this.data.individuals.length
+    );
+    const queueIndividual = this.queueActiveIndividual();
+    const useFullLayer = allSelected && !queueIndividual;
+    const appendLayers = ({ binary, individual = "", fullLayer = false, visible = false }) => {
+      const { cacheKey } = this.binaryRenderSpecification();
+      let attributes = binary.renderCaches?.get(cacheKey) || null;
+      if (!attributes) {
+        void this.prepareRetainedBinaryAttributes(binary).then(() => {
+          if (this.data?.binaryBlocks && [...this.data.binaryBlocks.values()].includes(binary)) {
+            this.renderLayers();
+          }
+        }).catch(error => this.setStatus(`Map color warning: ${error.message}`, true));
+        attributes = binary.lastRenderAttributes || null;
+      }
+      if (!attributes) return;
+      const code = individual
+        ? (binary.header.individuals || []).indexOf(individual)
+        : -1;
+      const pointRange = fullLayer
+        ? [0, Number(binary.header.row_count) || 0]
+        : binary.individualRanges.get(code) || [0, 0];
+      const lineRange = fullLayer
+        ? [0, Number(binary.header.line_count) || 0]
+        : binary.individualLineRanges.get(code) || [0, 0];
+      const [pointStart, pointEnd] = pointRange;
+      const [lineStart, lineEnd] = lineRange;
+      const suffix = fullLayer ? "full" : `individual-${Math.max(0, this.data.individuals.indexOf(individual))}`;
+      const opacity = queueIndividual && individual && individual !== queueIndividual ? 0.25 : 1;
+      const deckData = this.retainedBinaryDeckData(
+        binary,
+        attributes,
+        cacheKey,
+        pointRange,
+        lineRange,
+      );
+      const pointData = deckData.pointData;
+      if (this.refs.showBursts.checked) {
+        layers.push(new deck.LineLayer({
+          id: `movement-binary-burst-casing-${suffix}`,
+          data: deckData.burstData,
+          getColor: BURST_CASING_RGB,
+          getWidth: 9,
+          widthUnits: "meters",
+          widthMinPixels: 2,
+          filterRange: [1, 1],
+          extensions: [filterExtension],
+          opacity,
+          visible,
+          pickable: false,
+        }));
+      }
+      layers.push(new deck.LineLayer({
+        id: `movement-binary-paths-${suffix}`,
+        data: deckData.pathData,
+        getWidth: 3,
         widthUnits: "meters",
         widthMinPixels: 2,
         filterRange: [1, 1],
         extensions: [filterExtension],
+        opacity,
+        visible,
         pickable: false,
       }));
-    }
-    layers.push(new deck.LineLayer({
-      id: "movement-binary-paths",
-      data: {
-        length: Number(binary.header.line_count) || 0,
-        attributes: {
-          ...lineBaseAttributes,
-          getColor: { value: attributes.lineColors, size: 4 },
-          getFilterValue: { value: attributes.lineFilter, size: 1 },
-        },
-      },
-      getWidth: 3,
-      widthUnits: "meters",
-      widthMinPixels: 2,
-      filterRange: [1, 1],
-      extensions: [filterExtension],
-      pickable: false,
-    }));
-    if (showPoints) {
-      layers.push(new deck.ScatterplotLayer({
-        id: "movement-binary-points",
-        data: pointData,
+      if (!showPoints) return;
+      const commonPointProps = {
         getRadius: 68,
         radiusMinPixels: 3,
         radiusMaxPixels: 8,
         filterRange: [1, 1],
         extensions: [filterExtension],
+        opacity,
+        visible,
         pickable: true,
+        userData: { binaryBlock: binary, binaryPointOffset: pointStart },
+      };
+      layers.push(new deck.ScatterplotLayer({
+        id: `movement-binary-points-${suffix}`,
+        data: pointData,
+        ...commonPointProps,
       }));
-      if (attributes.thresholdCount > 0) {
+      if (attributes.suspectedCount) {
         layers.push(new deck.ScatterplotLayer({
-          id: "movement-binary-threshold-points",
-          data: {
-            length: pointData.length,
-            attributes: {
-              getPosition: pointData.attributes.getPosition,
-              getFilterValue: { value: attributes.thresholdFilter, size: 1 },
-            },
-          },
+          id: `movement-binary-suspected-${suffix}`,
+          data: deckData.suspectedData,
+          ...commonPointProps,
+          getLineColor: [255, 204, 40, 255],
+          stroked: true,
+          lineWidthMinPixels: 3,
+          getRadius: 135,
+          radiusMinPixels: 8,
+          radiusMaxPixels: 17,
+        }));
+      }
+      if (this.refs.showConfirmed.checked && attributes.confirmedCount) {
+        layers.push(new deck.ScatterplotLayer({
+          id: `movement-binary-confirmed-${suffix}`,
+          data: deckData.confirmedData,
+          ...commonPointProps,
+          getFillColor: [92, 101, 110, 24],
+          getLineColor: [92, 101, 110, 105],
+          stroked: true,
+          lineWidthMinPixels: 1,
+          getRadius: 52,
+          radiusMinPixels: 3,
+          radiusMaxPixels: 6,
+        }));
+      }
+      if (attributes.thresholdCount && this.thresholdState.fieldKey === this.getCurrentColorField()?.key) {
+        layers.push(new deck.ScatterplotLayer({
+          id: `movement-binary-threshold-${suffix}`,
+          data: deckData.thresholdData,
+          ...commonPointProps,
           getLineColor: [255, 236, 148, 255],
           filled: false,
           stroked: true,
@@ -10598,57 +11235,35 @@ class MovementExampleApp {
           getRadius: 108,
           radiusMinPixels: 6,
           radiusMaxPixels: 12,
-          filterRange: [1, 1],
-          extensions: [filterExtension],
-          pickable: true,
         }));
       }
-      if (attributes.suspectedCount > 0) {
-        layers.push(new deck.ScatterplotLayer({
-          id: "movement-binary-suspected-outline",
-          data: {
-            length: pointData.length,
-            attributes: {
-              getPosition: pointData.attributes.getPosition,
-              getFillColor: pointData.attributes.getFillColor,
-              getFilterValue: { value: attributes.suspectedFilter, size: 1 },
-            },
-          },
-          getLineColor: [255, 204, 40, 255],
-          filled: true,
-          stroked: true,
-          lineWidthMinPixels: 3,
-          getRadius: 135,
-          radiusMinPixels: 8,
-          radiusMaxPixels: 17,
-          filterRange: [1, 1],
-          extensions: [filterExtension],
-          pickable: true,
-        }));
+    };
+
+    if (full) {
+      appendLayers({ binary: full, fullLayer: true, visible: useFullLayer });
+    }
+    if (!(this.data.fullBinaryActivatedIndividuals instanceof Set)) {
+      this.data.fullBinaryActivatedIndividuals = new Set();
+    }
+    if (full && !useFullLayer) {
+      for (const individual of visibleIndividuals) {
+        this.data.fullBinaryActivatedIndividuals.add(individual);
       }
-      if (this.refs.showConfirmed.checked && attributes.confirmedCount > 0) {
-        layers.unshift(new deck.ScatterplotLayer({
-          id: "movement-binary-confirmed-exclusions",
-          data: {
-            length: pointData.length,
-            attributes: {
-              getPosition: pointData.attributes.getPosition,
-              getFilterValue: { value: attributes.confirmedFilter, size: 1 },
-            },
-          },
-          getFillColor: [92, 101, 110, 24],
-          getLineColor: [92, 101, 110, 105],
-          filled: true,
-          stroked: true,
-          lineWidthMinPixels: 1,
-          getRadius: 52,
-          radiusMinPixels: 3,
-          radiusMaxPixels: 6,
-          filterRange: [1, 1],
-          extensions: [filterExtension],
-          pickable: true,
-        }));
+    }
+    for (const individual of this.data.individuals) {
+      const binary = this.data.binaryBlocks.get(individual);
+      if (!binary) continue;
+      if (
+        binary === full
+        && !this.data.fullBinaryActivatedIndividuals.has(individual)
+      ) {
+        continue;
       }
+      appendLayers({
+        binary,
+        individual,
+        visible: !useFullLayer && visibleIndividuals.has(individual),
+      });
     }
     return layers;
   }
@@ -10669,50 +11284,25 @@ class MovementExampleApp {
     const visibleIndividuals = new Set(this.data.selectedIndividuals);
     const visibleSetNames = this.getVisibleSetNames();
     const showPoints = this.refs.showPoints.checked;
+    const overviewPreviewTracks = this.getOverviewPreviewTracks(
+      visibleIndividuals,
+      visibleSetNames,
+    );
     const hiddenBurstFixKeys = new Set(
       [...this.hiddenBurstIds].flatMap(
         burstId => this.data.autoBurstById?.get(burstId)?.fixKeys || [],
       ),
     );
-    const useRdsObjectGroups = MOVEMENT_APP_CONFIG.rdsSource && !this.data.binaryMovement;
-    const rdsObjectGroups = useRdsObjectGroups
-      ? this.getRdsObjectRenderGroups(visibleIndividuals, visibleSetNames)
-      : [];
-    const allPathData = useRdsObjectGroups
-      ? (this.flagTargetKind === "individual"
-        ? rdsObjectGroups.flatMap(group => group.steps)
-        : [])
-      : this.getVisibleTrackSteps(visibleIndividuals, visibleSetNames);
-    const pathData = useRdsObjectGroups
-      ? []
-      : allPathData.filter(step => (
-        !hiddenBurstFixKeys.has(step.sourceFix?.fixKey)
-        && !hiddenBurstFixKeys.has(step.destinationFix?.fixKey)
-      ));
-    const pointData = showPoints
-      ? (useRdsObjectGroups
-        ? []
-        : this.getVisibleMovementPoints(visibleIndividuals, visibleSetNames))
-        .filter(point => !hiddenBurstFixKeys.has(point.fix?.fixKey))
-      : [];
-    const rdsDrawableGroups = rdsObjectGroups.map(group => ({
-      ...group,
-      points: showPoints
-        ? (hiddenBurstFixKeys.size
-          ? group.points.filter(point => !hiddenBurstFixKeys.has(point.fix?.fixKey))
-          : group.points)
-        : [],
-      steps: hiddenBurstFixKeys.size
-        ? group.steps.filter(step => (
-          !hiddenBurstFixKeys.has(step.sourceFix?.fixKey)
-          && !hiddenBurstFixKeys.has(step.destinationFix?.fixKey)
-        ))
-        : group.steps,
-    }));
-    const rdsVisiblePointCount = rdsDrawableGroups.reduce(
-      (count, group) => count + group.points.length,
-      0,
-    );
+    const hasExactMapBlocks = Boolean(this.data.binaryBlocks?.size);
+    // Checkbox-driven map rendering is block-based for both adapters. Object
+    // collections remain available for focused review/table work, but must not
+    // be merged or scanned merely because visibility changed.
+    const useRdsObjectGroups = false;
+    const rdsDrawableGroups = [];
+    const allPathData = [];
+    const pathData = [];
+    const pointData = [];
+    const rdsVisiblePointCount = 0;
     const temporalFocalData = showPoints && this.temporalSliderEngaged
       ? this.buildTemporalFocalData(visibleIndividuals, visibleSetNames)
       : { points: [] };
@@ -10894,6 +11484,25 @@ class MovementExampleApp {
     }
 
     const layers = [];
+    for (const individual of this.data.individuals) {
+      const previewTracks = overviewPreviewTracks.filter(
+        track => track.individual === individual,
+      );
+      if (!previewTracks.length) continue;
+      this.movementDiagnostics.previewActivations += 1;
+      this.movementDiagnostics.lastPreviewActivationMs = performance.now();
+      const code = Math.max(0, this.data.individuals.indexOf(individual));
+      layers.push(new deck.PathLayer({
+        id: `movement-overview-preview-${code}`,
+        data: previewTracks,
+        dataComparator: sameArrayItems,
+        getPath: item => item.path,
+        getColor: item => item.color,
+        getWidth: 2,
+        widthMinPixels: 1,
+        pickable: false,
+      }));
+    }
     if (confirmedPointData.length) {
       layers.push(
         new deck.ScatterplotLayer({
@@ -10959,7 +11568,7 @@ class MovementExampleApp {
           pickable: true,
         }));
       }
-    } else if (visibleAutoBurstPaths.length) {
+    } else if (visibleAutoBurstPaths.length && !hasExactMapBlocks) {
       layers.push(
         new deck.PathLayer({
           id: "movement-burst-casing",
@@ -11022,8 +11631,8 @@ class MovementExampleApp {
       );
     }
 
-    if (this.data.binaryMovement) {
-      layers.push(...this.binaryDeckLayers(visibleIndividuals, showPoints));
+    if (hasExactMapBlocks) {
+      layers.push(...this.retainedBinaryDeckLayers(visibleIndividuals, showPoints));
     }
 
     // Each derived step value belongs to its destination fix, so the inbound
@@ -11051,7 +11660,7 @@ class MovementExampleApp {
           pickable: false,
         }));
       }
-    } else if (!this.data.binaryMovement) {
+    } else if (!hasExactMapBlocks) {
       layers.push(new deck.PathLayer({
         id: "movement-paths",
         data: pathData,
@@ -11146,7 +11755,7 @@ class MovementExampleApp {
             pickable: true,
           }));
         }
-      } else if (!this.data.binaryMovement) {
+      } else if (!hasExactMapBlocks) {
         layers.push(new deck.ScatterplotLayer({
           id: "movement-points",
           data: pointData,
@@ -11367,10 +11976,11 @@ class MovementExampleApp {
     layers.push(...this.getOsmDeckLayers());
 
     try {
+      this.movementDiagnostics.renderedLayerIds = layers.map(layer => String(layer?.id || ""));
       this.overlay.setProps({
         layers,
         useDevicePixels: (
-          this.data.binaryMovement?.header?.row_count
+          this.getVisibleExactPointCount(visibleIndividuals)
           || rdsVisiblePointCount
           || pointData.length + selectedPointData.length
         ) <= LARGE_MAP_POINT_THRESHOLD,
@@ -11571,7 +12181,14 @@ class MovementExampleApp {
       && String(picked.layer?.id || "").startsWith("movement-binary-")
       && Number.isInteger(picked.index)
     ) {
-      return { ...picked, object: this.binaryFixAt(picked.index) };
+      const binary = picked.layer?.props?.userData?.binaryBlock
+        || this.data?.fullBinaryMovement
+        || this.data?.binaryMovement;
+      const pointOffset = Number(picked.layer?.props?.userData?.binaryPointOffset) || 0;
+      return {
+        ...picked,
+        object: this.binaryFixAt(pointOffset + picked.index, { binary }),
+      };
     }
     return picked;
   }
@@ -11609,13 +12226,7 @@ class MovementExampleApp {
       return;
     }
     const point = event?.point;
-    const picked = point && Number.isFinite(point.x) && Number.isFinite(point.y)
-      ? this.overlay.pickObject({
-        x: Number(point.x),
-        y: Number(point.y),
-        radius: 6,
-      })
-      : null;
+    const picked = this.getMapPickedObject(event);
     if (!picked?.object?.fixKey) {
       this.closeFixPopup();
       return;
@@ -11910,22 +12521,23 @@ class MovementExampleApp {
   }
 
   getBinaryThresholdContext(field) {
-    const binary = this.data?.binaryMovement;
-    if (!binary) return null;
-    const arrays = binary.arrays;
-    const selectedIndividuals = new Set(this.getSelectedIndividuals());
-    const visibleIndexes = [];
-    for (let index = 0; index < Number(binary.header.row_count); index += 1) {
-      const individual = String(binary.header.individuals?.[Number(arrays.individual_codes[index])] || "");
-      if (selectedIndividuals.has(individual) && Number(arrays.review_status[index]) !== 2) {
-        visibleIndexes.push(index);
+    const visibleRefs = [];
+    for (const individual of this.getSelectedIndividuals()) {
+      const binary = this.data?.binaryBlocks?.get(individual);
+      if (!binary) continue;
+      const code = (binary.header.individuals || []).indexOf(individual);
+      const [start, end] = binary.individualRanges?.get(code) || [0, 0];
+      for (let index = start; index < end; index += 1) {
+        if (Number(binary.arrays.review_status[index]) !== 2) {
+          visibleRefs.push({ binary, index });
+        }
       }
     }
     const emptyKeys = new Set();
     if (!field || field.key === INDIVIDUAL_COLOR_FIELD_KEY) {
       return {
         field,
-        visibleFixes: { length: visibleIndexes.length },
+        visibleFixes: { length: visibleRefs.length },
         numericFixes: { length: 0 },
         thresholdValue: null,
         histogram: null,
@@ -11947,27 +12559,37 @@ class MovementExampleApp {
     const selectedLevels = this.thresholdState.fieldKey === field.key
       ? uniqueNonEmpty(this.thresholdState.selectedLevels || [])
       : [];
-    const matchIndexes = [];
+    const matchRefs = [];
     let matchCount = 0;
     if (field.kind !== "numeric") {
-      let trueCount = 0;
-      let falseCount = 0;
-      for (const index of visibleIndexes) {
-        if (Number(arrays.is_outlier[index])) trueCount += 1;
-        else falseCount += 1;
+      const levelCounts = new Map();
+      const levelForRef = ({ binary, index }) => {
+        const column = binary.header.color_columns?.[field.key];
+        const value = binary.arrays[column?.array || field.key]?.[index];
+        if (field.kind === "boolean") {
+          return Number(value) === 1 ? "True" : Number(value) === 0 ? "False" : "Missing";
+        }
+        const code = Number(value);
+        return code > 0 ? String(column?.levels?.[code - 1] || "Missing") : "Missing";
+      };
+      for (const ref of visibleRefs) {
+        const level = levelForRef(ref);
+        levelCounts.set(level, (levelCounts.get(level) || 0) + 1);
       }
       const selected = new Set(selectedLevels);
-      for (const index of visibleIndexes) {
-        const level = Number(arrays.is_outlier[index]) ? "True" : "False";
+      for (const ref of visibleRefs) {
+        const level = levelForRef(ref);
         if (!selected.has(level)) continue;
         matchCount += 1;
-        if (matchIndexes.length < MAX_SELECTED_FIXES_SHOWN) matchIndexes.push(index);
+        if (matchRefs.length < MAX_SELECTED_FIXES_SHOWN) matchRefs.push(ref);
       }
-      const fixes = matchIndexes.map(index => this.binaryFixAt(index)).filter(Boolean);
+      const fixes = matchRefs
+        .map(({ binary, index }) => this.binaryFixAt(index, { binary }))
+        .filter(Boolean);
       const matchKeys = new Set(fixes.map(fix => fix.fixKey));
       return {
         field,
-        visibleFixes: { length: visibleIndexes.length },
+        visibleFixes: { length: visibleRefs.length },
         numericFixes: { length: 0 },
         thresholdValue: null,
         histogram: null,
@@ -11976,10 +12598,8 @@ class MovementExampleApp {
         histogramInputMin: null,
         histogramInputMax: null,
         selectedLevels,
-        levelOptions: [
-          { level: "False", count: falseCount },
-          { level: "True", count: trueCount },
-        ].sort((left, right) => right.count - left.count),
+        levelOptions: [...levelCounts].map(([level, count]) => ({ level, count }))
+          .sort((left, right) => right.count - left.count || left.level.localeCompare(right.level)),
         matchKeys,
         uncheckedMatchKeys: new Set([...matchKeys].filter(key => !this.data.selectedFixKeys.has(key))),
         matchCount,
@@ -11987,16 +12607,16 @@ class MovementExampleApp {
       };
     }
     const sourceKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY ? "step_length_m" : field.key;
-    const values = arrays[sourceKey];
     const gpsSpikeMode = field.key === GPS_SPIKE_COLOR_FIELD_KEY;
     const numericValues = [];
-    const eligibleIndexes = [];
-    for (const index of visibleIndexes) {
-      const value = values ? Number(values[index]) : NaN;
-      const turnAngle = Number(arrays.turn_angle_deg[index]);
+    const eligibleRefs = [];
+    for (const ref of visibleRefs) {
+      const column = ref.binary.header.color_columns?.[sourceKey];
+      const value = Number(ref.binary.arrays[column?.array || sourceKey]?.[ref.index]);
+      const turnAngle = Number(ref.binary.arrays.turn_angle_deg?.[ref.index]);
       if (!Number.isFinite(value) || (gpsSpikeMode && (!Number.isFinite(turnAngle) || Math.abs(turnAngle) < this.gpsSpikeTurnAngleDeg))) continue;
       numericValues.push(value);
-      eligibleIndexes.push(index);
+      eligibleRefs.push(ref);
     }
     const styleRange = this.data.colorStyles.get(field.key)?.range
       || this.data.colorStyles.get(sourceKey)?.range
@@ -12017,18 +12637,20 @@ class MovementExampleApp {
     const thresholdValue = rawThreshold === null || !histogram
       ? null : clampThresholdValue(rawThreshold, histogram.min, histogram.max);
     if (thresholdValue !== null) {
-      eligibleIndexes.forEach((index, position) => {
+      eligibleRefs.forEach((ref, position) => {
         const matches = reverse ? numericValues[position] < thresholdValue : numericValues[position] > thresholdValue;
         if (!matches) return;
         matchCount += 1;
-        if (matchIndexes.length < MAX_SELECTED_FIXES_SHOWN) matchIndexes.push(index);
+        if (matchRefs.length < MAX_SELECTED_FIXES_SHOWN) matchRefs.push(ref);
       });
     }
-    const fixes = matchIndexes.map(index => this.binaryFixAt(index)).filter(Boolean);
+    const fixes = matchRefs
+      .map(({ binary, index }) => this.binaryFixAt(index, { binary }))
+      .filter(Boolean);
     const matchKeys = new Set(fixes.map(fix => fix.fixKey));
     return {
       field,
-      visibleFixes: { length: visibleIndexes.length },
+      visibleFixes: { length: visibleRefs.length },
       numericFixes: { length: numericValues.length },
       histogram,
       thresholdValue,
@@ -12052,7 +12674,7 @@ class MovementExampleApp {
       return null;
     }
     const field = this.getCurrentColorField();
-    if (this.data.binaryMovement) {
+    if (this.data.binaryBlocks?.size) {
       return this.getBinaryThresholdContext(field);
     }
     const visibleFixes = this.getVisibleReviewFixes();
@@ -12971,80 +13593,124 @@ class MovementExampleApp {
     return arraysEqual(this.getSelectedIndividuals(), this.data.detailIndividuals);
   }
 
-  async loadDetailForCurrentSelection({ preservedFixKeys } = {}) {
+  async loadDetailForCurrentSelection({ preservedFixKeys, requireObjects = false } = {}) {
     if (!this.data || !this.currentArtifact) {
       return;
     }
     const selectedIndividuals = this.getSelectedIndividuals();
     const preserved = preservedFixKeys instanceof Set ? preservedFixKeys : new Set(this.data.selectedFixKeys);
-    const wholeRdsStudySelected = (
-      MOVEMENT_APP_CONFIG.rdsSource
-      && selectedIndividuals.length > 0
+    const wholeStudySelected = (
+      selectedIndividuals.length > 0
       && selectedIndividuals.length === this.data.individuals.length
     );
-    if (wholeRdsStudySelected && !this.data.binaryMapReady) {
-      this.cancelRequest("detail");
-      this.data.detailState = "loading";
-      this.data.detailIndividuals = [...selectedIndividuals];
-      this.data.detailLoadingIndividuals = [...selectedIndividuals];
-      this.syncIndividualSelectionUi(selectedIndividuals);
-      this.updateActionButtons();
-      this.setStatus(
-        `Loading all ${formatCount(this.data.totalRows)} indexed fixes across ${formatCount(selectedIndividuals.length)} individuals...`,
-      );
-      try {
-        await this.loadBinaryMovement({
-          familyName: this.currentFamily,
-          studyName: this.currentStudy,
-          datasetId: this.currentDatasetId,
-        });
-      } catch (error) {
-        if (this.isAbortError(error) || !this.data) {
-          return;
-        }
-        this.data.detailState = "error";
-        this.updateActionButtons();
-        this.setStatus(`Could not load all indexed fixes: ${error.message}`, true);
-        return;
-      }
-      const currentSelection = this.getSelectedIndividuals();
-      if (
-        !this.data
-        || !this.data.binaryMapReady
-        || currentSelection.length !== this.data.individuals.length
-      ) {
-        return;
-      }
-    }
-    if (this.data.binaryMapReady && selectedIndividuals.length > 1) {
-      this.cancelRequest("detail");
-      this.data.detailState = "idle";
-      this.data.detailIndividuals = [];
-      this.data.detailLoadingIndividuals = [];
-      composeMovementDetailSelection(this.data, []);
-      refreshMovementFixCollections(this.data, { recomputeColorStyles: false });
-      this.renderBurstCountIndicator();
-      this.renderSelectedFixes();
-      this.renderThresholdPane();
-      this.renderLayers();
-      this.updateActionButtons();
-      this.setStatus(`Showing all indexed fixes for ${formatCount(selectedIndividuals.length)} individuals. Select one individual to load its editable table and burst details.`);
-      return;
-    }
     if (!selectedIndividuals.length) {
       this.cancelRequest("detail");
+      this.cancelBinaryRequests();
       this.data.detailState = "idle";
       this.data.detailIndividuals = [];
       this.data.detailLoadingIndividuals = [];
-      composeMovementDetailSelection(this.data, []);
-      refreshMovementFixCollections(this.data, {
-        colorFieldKeys: [this.refs.colorBy.value],
-        recomputeColorStyles: !this.data.binaryMovement,
-      });
       this.data.selectedFixKeys = new Set();
       this.syncIndividualSelectionUi();
       this.renderSelectedFixes();
       this.renderThresholdPane();
+      this.renderLayers();
+      this.updateActionButtons();
+      return;
+    }
+
+    const unresolvedBinaryIndividuals = selectedIndividuals.filter(
+      individual => !this.data.binaryBlocks.has(individual),
+    );
+    const missingBinaryIndividuals = unresolvedBinaryIndividuals.filter(
+      individual => !this.data.binaryPendingIndividuals.has(individual),
+    );
+    if (!requireObjects && unresolvedBinaryIndividuals.length) {
+      this.cancelRequest("detail");
+      this.data.detailState = "loading";
+      this.data.detailIndividuals = [...selectedIndividuals];
+      this.data.detailLoadingIndividuals = [...unresolvedBinaryIndividuals];
+      for (const individual of missingBinaryIndividuals) {
+        this.data.detailFailedIndividuals.delete(individual);
+      }
+      this.syncIndividualSelectionUi(unresolvedBinaryIndividuals);
+      this.updateActionButtons();
+      if (!missingBinaryIndividuals.length) {
+        this.renderLayers();
+        return;
+      }
+      this.setStatus(
+        wholeStudySelected
+          ? `Loading all ${formatCount(this.data.totalRows)} exact fixes across ${formatCount(selectedIndividuals.length)} individuals...`
+          : `Loading exact points and colors for ${formatCount(missingBinaryIndividuals.length)} individual${missingBinaryIndividuals.length === 1 ? "" : "s"}...`,
+      );
+      const pendingToken = {};
+      const requestedBinaryIndividuals = wholeStudySelected
+        ? selectedIndividuals
+        : missingBinaryIndividuals;
+      try {
+        if (wholeStudySelected) {
+          this.cancelBinaryRequests();
+          this.data.binaryPendingIndividuals.clear();
+        }
+        for (const individual of requestedBinaryIndividuals) {
+          this.data.binaryPendingIndividuals.set(individual, pendingToken);
+        }
+        await this.loadBinaryMovement({
+          familyName: this.currentFamily,
+          studyName: this.currentStudy,
+          datasetId: this.currentDatasetId,
+          individuals: wholeStudySelected ? [] : missingBinaryIndividuals,
+        });
+      } catch (error) {
+        if (!this.data) return;
+        for (const individual of requestedBinaryIndividuals) {
+          if (this.data.binaryPendingIndividuals.get(individual) === pendingToken) {
+            this.data.binaryPendingIndividuals.delete(individual);
+          }
+        }
+        if (this.isAbortError(error)) {
+          return;
+        }
+        for (const individual of requestedBinaryIndividuals) {
+          this.data.detailFailedIndividuals.add(individual);
+        }
+        this.data.detailLoadingIndividuals = this.getSelectedIndividuals().filter(
+          individual => this.data.binaryPendingIndividuals.has(individual),
+        );
+        this.data.detailState = this.data.detailLoadingIndividuals.length ? "loading" : "error";
+        this.updateActionButtons();
+        this.syncIndividualSelectionUi(this.getSelectedIndividuals());
+        this.renderLayers();
+        this.setStatus(`Could not load exact map fixes: ${error.message}`, true);
+        return;
+      }
+      for (const individual of requestedBinaryIndividuals) {
+        if (this.data.binaryPendingIndividuals.get(individual) === pendingToken) {
+          this.data.binaryPendingIndividuals.delete(individual);
+        }
+      }
+      const currentSelection = this.getSelectedIndividuals();
+      const stillMissing = currentSelection.filter(individual => !this.data.binaryBlocks.has(individual));
+      this.data.detailLoadingIndividuals = stillMissing;
+      for (const individual of requestedBinaryIndividuals) {
+        this.data.detailFailedIndividuals.delete(individual);
+      }
+      this.data.detailState = stillMissing.length ? "loading" : "map_loaded";
+      this.data.detailIndividuals = [...currentSelection];
+      this.syncIndividualSelectionUi(currentSelection);
+      this.renderBurstCountIndicator();
+      this.renderLayers();
+      this.updateActionButtons();
+      this.setStatus(stillMissing.length
+        ? `Showing available exact tracks; ${formatCount(stillMissing.length)} individual${stillMissing.length === 1 ? " is" : "s are"} still loading.`
+        : `Showing exact points and tracks for ${formatCount(currentSelection.length)} visible individual${currentSelection.length === 1 ? "" : "s"}.`);
+      return;
+    }
+
+    if (!requireObjects) {
+      this.movementDiagnostics.binaryCacheHits += selectedIndividuals.length;
+      this.data.detailState = "map_loaded";
+      this.data.detailIndividuals = [...selectedIndividuals];
       this.renderLayers();
       this.updateActionButtons();
       return;
@@ -13126,6 +13792,7 @@ class MovementExampleApp {
       this.data.detailFixes = parseMovementFixes(payload.fixes || []);
       this.data.detailSegments = parseMovementSegments(payload.segments || []);
       this.data.detailAutoBursts = parseMovementAutoBursts(payload.auto_bursts || []);
+      this.beginPreviewHandoff(this.data.detailIndividuals);
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, this.data.detailIndividuals);
       this.renderIndividuals();
@@ -13230,6 +13897,7 @@ class MovementExampleApp {
         return;
       }
       cacheMovementDetailPayload(this.data, payload, missingIndividuals);
+      this.beginPreviewHandoff(missingIndividuals);
       const currentSelection = this.getSelectedIndividuals();
       const stillMissing = currentSelection.filter(individual => !this.data.detailCache.has(individual));
       composeMovementDetailSelection(this.data, currentSelection);
@@ -16011,7 +16679,7 @@ class MovementExampleApp {
       this.rememberDatasetMetadata(projection.dataset);
       const compatible = Boolean(
         this.data
-        && !this.data.binaryMovement
+        && !this.data.binaryBlocks?.size
         && this.currentArtifact
         && this.data.sourceSignature
         && this.data.exclusionSignature
@@ -16337,6 +17005,11 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     autoBurstsTruncated: Boolean(summary.auto_bursts_truncated),
     overviewHasAllFixes: !overviewTruncated,
     binaryMovement: null,
+    fullBinaryMovement: null,
+    fullBinaryActivatedIndividuals: new Set(),
+    binaryBlocks: new Map(),
+    binaryPendingIndividuals: new Map(),
+    detailFailedIndividuals: new Set(),
     binaryMapReady: false,
     candidateFixes: [],
     suspiciousFixes: [],
