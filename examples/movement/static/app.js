@@ -7745,6 +7745,7 @@ class MovementExampleApp {
         nextData.detailFixes = parseMovementFixes(detailPayload.fixes || []);
         nextData.detailSegments = parseMovementSegments(detailPayload.segments || []);
         nextData.detailAutoBursts = parseMovementAutoBursts(detailPayload.auto_bursts || []);
+        seedMovementDetailCacheFromCurrentData(nextData);
         refreshMovementFixCollections(nextData);
       }
       this.data = nextData;
@@ -8811,6 +8812,7 @@ class MovementExampleApp {
       const coverage = this.data.coverageByIndividual[individual] || {};
       const isSelected = this.data.selectedIndividuals.has(individual);
       const card = document.createElement("div");
+      card.dataset.individualCard = individual;
       const unresolvedCount = Number(stats.unresolvedSuspectedCount) || 0;
       const priorReview = this.getIndividualReviewState(individual).priorDecision || null;
       const priorDecision = String(priorReview?.review_decision || "");
@@ -8824,6 +8826,7 @@ class MovementExampleApp {
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = isSelected;
+      checkbox.dataset.individualCheckbox = individual;
       checkbox.addEventListener("click", event => event.stopPropagation());
       checkbox.addEventListener("change", () => {
         this.toggleIndividual(individual, checkbox.checked);
@@ -8878,6 +8881,7 @@ class MovementExampleApp {
         const bounds = rangeToPercent(this.data.minTimeMs, this.data.maxTimeMs, bar.startMs, bar.endMs);
         const barEl = document.createElement("div");
         barEl.className = "movement-bar";
+        barEl.dataset.setName = setName;
         barEl.style.left = `${bounds.left}%`;
         barEl.style.width = `${bounds.width}%`;
         barEl.style.background = colorCss(this.data.individualPalette[individual], setName, isSelected ? 0.86 : 0.26);
@@ -8886,9 +8890,39 @@ class MovementExampleApp {
       card.appendChild(track);
 
       card.addEventListener("click", () => {
-        this.toggleIndividual(individual, !isSelected);
+        this.toggleIndividual(individual, !this.data?.selectedIndividuals?.has(individual));
       });
       this.refs.individuals.appendChild(card);
+    }
+  }
+
+  syncIndividualSelectionUi(individuals = []) {
+    if (!this.data || this.individualReviewQueue.mode === "queue") {
+      this.renderIndividuals();
+      return;
+    }
+    const requested = new Set(uniqueNonEmpty(individuals));
+    const loading = new Set(this.data.detailLoadingIndividuals || []);
+    for (const card of this.refs.individuals.querySelectorAll("[data-individual-card]")) {
+      const individual = String(card.dataset.individualCard || "");
+      if (requested.size && !requested.has(individual)) {
+        continue;
+      }
+      const selected = this.data.selectedIndividuals.has(individual);
+      card.style.opacity = selected ? "1" : "0.34";
+      card.toggleAttribute("aria-busy", loading.has(individual));
+      const checkbox = card.querySelector("[data-individual-checkbox]");
+      if (checkbox) {
+        checkbox.checked = selected;
+      }
+      for (const bar of card.querySelectorAll(".movement-bar[data-set-name]")) {
+        const setName = String(bar.dataset.setName || "train");
+        bar.style.background = colorCss(
+          this.data.individualPalette[individual],
+          setName,
+          selected ? 0.86 : 0.26,
+        );
+      }
     }
   }
 
@@ -9054,10 +9088,7 @@ class MovementExampleApp {
     }
     this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(this.data.selectedFixKeys, this.getSelectedIndividuals());
     this.saveUiState();
-    this.renderIndividuals();
-    this.renderThresholdPane();
-    this.renderSelectedFixes();
-    this.renderLayers();
+    this.syncIndividualSelectionUi([individual]);
     this.updateActionButtons();
     void this.loadDetailForCurrentSelection();
   }
@@ -12770,6 +12801,8 @@ class MovementExampleApp {
       this.cancelRequest("detail");
       this.data.detailState = "loading";
       this.data.detailIndividuals = [...selectedIndividuals];
+      this.data.detailLoadingIndividuals = [...selectedIndividuals];
+      this.syncIndividualSelectionUi(selectedIndividuals);
       this.updateActionButtons();
       this.setStatus(
         `Loading all ${formatCount(this.data.totalRows)} indexed fixes across ${formatCount(selectedIndividuals.length)} individuals...`,
@@ -12802,12 +12835,8 @@ class MovementExampleApp {
       this.cancelRequest("detail");
       this.data.detailState = "idle";
       this.data.detailIndividuals = [];
-      this.data.detailFixes = [];
-      this.data.detailSegments = [];
-      this.data.detailAutoBursts = [];
-      this.data.detailMatchingFixCount = 0;
-      this.data.detailReturnedFixCount = 0;
-      this.data.detailTruncated = false;
+      this.data.detailLoadingIndividuals = [];
+      composeMovementDetailSelection(this.data, []);
       refreshMovementFixCollections(this.data);
       this.renderBurstCountIndicator();
       this.renderSelectedFixes();
@@ -12821,20 +12850,20 @@ class MovementExampleApp {
       this.cancelRequest("detail");
       this.data.detailState = "idle";
       this.data.detailIndividuals = [];
-      this.data.detailLimit = null;
-      this.data.detailMatchingFixCount = 0;
-      this.data.detailReturnedFixCount = 0;
-      this.data.detailTruncated = false;
-      this.data.detailFixes = [];
-      this.data.detailSegments = [];
-      this.data.detailAutoBursts = [];
+      this.data.detailLoadingIndividuals = [];
+      composeMovementDetailSelection(this.data, []);
       refreshMovementFixCollections(this.data);
       this.data.selectedFixKeys = new Set();
-      this.renderIndividuals();
+      this.syncIndividualSelectionUi();
       this.renderSelectedFixes();
       this.renderThresholdPane();
       this.renderLayers();
       this.updateActionButtons();
+      return;
+    }
+
+    if (MOVEMENT_APP_CONFIG.rdsSource) {
+      await this.loadRdsDetailForSelection(selectedIndividuals, preserved);
       return;
     }
 
@@ -12941,6 +12970,111 @@ class MovementExampleApp {
       this.renderLayers();
       this.updateActionButtons();
       this.setStatus(`Overview loaded, but editable fixes for ${formatCount(selectedIndividuals.length)} visible individuals failed: ${error.message}`, true);
+    }
+  }
+
+  async loadRdsDetailForSelection(selectedIndividuals, preserved) {
+    const cache = ensureMovementDetailCache(this.data);
+    const missingIndividuals = selectedIndividuals.filter(individual => !cache.has(individual));
+    const cachedIndividuals = selectedIndividuals.filter(individual => cache.has(individual));
+    const renderedChanged = !arraysEqual(
+      cachedIndividuals,
+      this.data.detailRenderedIndividuals || [],
+    );
+    this.data.detailIndividuals = [...selectedIndividuals];
+    this.data.detailLoadingIndividuals = [...missingIndividuals];
+    this.data.detailState = missingIndividuals.length ? "loading" : "loaded";
+    this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, selectedIndividuals);
+    if (renderedChanged) {
+      composeMovementDetailSelection(this.data, cachedIndividuals);
+      refreshMovementFixCollections(this.data);
+      this.renderSelectedFixes();
+      this.renderThresholdPane();
+      this.renderLayers();
+    }
+    this.syncIndividualSelectionUi(selectedIndividuals);
+
+    if (!missingIndividuals.length) {
+      this.cancelRequest("detail");
+      this.data.detailState = "loaded";
+      this.data.detailLoadingIndividuals = [];
+      this.renderBurstCountIndicator();
+      this.updateActionButtons();
+      this.setStatus(
+        `Showing ${formatCount(this.data.detailReturnedFixCount || this.data.detailFixes.length)} cached editable fixes for ${formatCount(selectedIndividuals.length)} visible individuals.`,
+      );
+      return;
+    }
+
+    this.cancelRequest("detail");
+    this.renderBurstCountIndicator();
+    this.updateActionButtons();
+    this.setStatus(
+      `Loading exact fixes for ${formatCount(missingIndividuals.length)} newly visible individual${missingIndividuals.length === 1 ? "" : "s"}...`,
+    );
+
+    const familyName = this.currentFamily;
+    const studyName = this.currentStudy;
+    const datasetId = this.currentDatasetId;
+    const artifactName = this.currentArtifact;
+    const requestId = ++this.loadRequestId;
+    try {
+      const controller = this.beginRequest("detail");
+      const payload = await this.fetchJSON(
+        this.buildFixesRequestUrl({
+          familyName,
+          studyName,
+          datasetId,
+          artifactName,
+          individuals: missingIndividuals,
+        }),
+        { signal: controller.signal },
+      );
+      if (
+        requestId !== this.loadRequestId
+        || this.requestControllers.detail !== controller
+        || familyName !== this.currentFamily
+        || studyName !== this.currentStudy
+        || datasetId !== this.currentDatasetId
+        || artifactName !== this.currentArtifact
+        || !this.data
+      ) {
+        return;
+      }
+      cacheMovementDetailPayload(this.data, payload, missingIndividuals);
+      const currentSelection = this.getSelectedIndividuals();
+      const stillMissing = currentSelection.filter(individual => !this.data.detailCache.has(individual));
+      composeMovementDetailSelection(this.data, currentSelection);
+      this.data.detailIndividuals = [...currentSelection];
+      this.data.detailLoadingIndividuals = stillMissing;
+      this.data.detailState = stillMissing.length ? "loading" : "loaded";
+      refreshMovementFixCollections(this.data);
+      this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(
+        preserved,
+        currentSelection,
+      );
+      this.syncIndividualSelectionUi(currentSelection);
+      this.renderBurstCountIndicator();
+      this.renderSelectedFixes();
+      this.renderThresholdPane();
+      this.renderLayers();
+      this.updateActionButtons();
+      this.setStatus(
+        `Loaded ${formatCount(this.data.detailReturnedFixCount || this.data.detailFixes.length)} editable fixes for ${formatCount(currentSelection.length)} visible individuals.`,
+      );
+    } catch (error) {
+      if (this.isAbortError(error) || requestId !== this.loadRequestId || !this.data) {
+        return;
+      }
+      this.data.detailState = "error";
+      this.data.detailLoadingIndividuals = [];
+      this.syncIndividualSelectionUi(selectedIndividuals);
+      this.renderBurstCountIndicator();
+      this.updateActionButtons();
+      this.setStatus(
+        `The newly selected individual fixes could not be loaded: ${error.message}`,
+        true,
+      );
     }
   }
 
@@ -15572,6 +15706,7 @@ class MovementExampleApp {
     this.data.confirmedFixes = patchFixes(this.data.confirmedFixes);
     this.data.overviewSegments = projectedSegments;
     this.data.detailSegments = [];
+    seedMovementDetailCacheFromCurrentData(this.data);
 
     const merged = new Map();
     for (const fix of [
@@ -16033,6 +16168,9 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     detailAutoBursts: [],
     detailState: "idle",
     detailIndividuals: [],
+    detailRenderedIndividuals: [],
+    detailLoadingIndividuals: [],
+    detailCache: new Map(),
     detailLimit: null,
     detailMatchingFixCount: 0,
     detailReturnedFixCount: 0,
@@ -16476,6 +16614,104 @@ function normalizeSegmentMemberships(items) {
     }))
     .filter(item => item.segmentId)
     : [];
+}
+
+function ensureMovementDetailCache(data) {
+  if (!(data?.detailCache instanceof Map)) {
+    data.detailCache = new Map();
+  }
+  return data.detailCache;
+}
+
+function cacheMovementDetailPayload(data, payload, requestedIndividuals = []) {
+  const cache = ensureMovementDetailCache(data);
+  const fixes = parseMovementFixes(payload?.fixes || []);
+  const segments = parseMovementSegments(payload?.segments || []);
+  const autoBursts = parseMovementAutoBursts(payload?.auto_bursts || []);
+  const scopedIndividuals = uniqueNonEmpty([
+    ...requestedIndividuals,
+    ...(Array.isArray(payload?.detail_scope?.individuals) ? payload.detail_scope.individuals : []),
+    ...fixes.map(fix => fix.individual),
+    ...segments.map(segment => segment.individual),
+    ...autoBursts.map(burst => burst.individual),
+  ]);
+  const singleIndividual = scopedIndividuals.length === 1;
+  for (const individual of scopedIndividuals) {
+    const individualFixes = fixes.filter(fix => fix.individual === individual);
+    cache.set(individual, {
+      fixes: individualFixes,
+      segments: segments.filter(segment => segment.individual === individual),
+      autoBursts: autoBursts.filter(burst => burst.individual === individual),
+      matchingFixCount: singleIndividual
+        ? Number(payload?.matching_fix_count) || individualFixes.length
+        : individualFixes.length,
+      returnedFixCount: singleIndividual
+        ? Number(payload?.returned_fix_count) || individualFixes.length
+        : individualFixes.length,
+      truncated: singleIndividual && Boolean(payload?.truncated),
+      limit: payload?.detail_scope?.limit ?? null,
+    });
+  }
+}
+
+function composeMovementDetailSelection(data, individuals) {
+  const cache = ensureMovementDetailCache(data);
+  const selected = uniqueNonEmpty(individuals);
+  const fixes = [];
+  const segments = [];
+  const autoBursts = [];
+  let matchingFixCount = 0;
+  let returnedFixCount = 0;
+  let truncated = false;
+  let limit = null;
+  const renderedIndividuals = [];
+  for (const individual of selected) {
+    const entry = cache.get(individual);
+    if (!entry) continue;
+    renderedIndividuals.push(individual);
+    fixes.push(...entry.fixes);
+    segments.push(...entry.segments);
+    autoBursts.push(...entry.autoBursts);
+    matchingFixCount += Number(entry.matchingFixCount) || entry.fixes.length;
+    returnedFixCount += Number(entry.returnedFixCount) || entry.fixes.length;
+    truncated = truncated || Boolean(entry.truncated);
+    if (entry.limit !== null && entry.limit !== undefined) {
+      limit = limit === null ? Number(entry.limit) : Math.max(limit, Number(entry.limit));
+    }
+  }
+  data.detailFixes = fixes;
+  data.detailSegments = segments;
+  data.detailAutoBursts = autoBursts;
+  data.detailRenderedIndividuals = renderedIndividuals;
+  data.detailMatchingFixCount = matchingFixCount;
+  data.detailReturnedFixCount = returnedFixCount;
+  data.detailTruncated = truncated;
+  data.detailLimit = limit;
+}
+
+function seedMovementDetailCacheFromCurrentData(data) {
+  if (!data) return;
+  data.detailCache = new Map();
+  const individuals = uniqueNonEmpty([
+    ...(data.detailIndividuals || []),
+    ...(data.detailFixes || []).map(fix => fix.individual),
+    ...(data.detailSegments || []).map(segment => segment.individual),
+    ...(data.detailAutoBursts || []).map(burst => burst.individual),
+  ]);
+  for (const individual of individuals) {
+    const fixes = (data.detailFixes || []).filter(fix => fix.individual === individual);
+    data.detailCache.set(individual, {
+      fixes,
+      segments: (data.detailSegments || []).filter(segment => segment.individual === individual),
+      autoBursts: (data.detailAutoBursts || []).filter(burst => burst.individual === individual),
+      matchingFixCount: fixes.length,
+      returnedFixCount: fixes.length,
+      truncated: false,
+      limit: null,
+    });
+  }
+  data.detailRenderedIndividuals = individuals;
+  data.detailLoadingIndividuals = [];
 }
 
 function refreshMovementFixCollections(data) {

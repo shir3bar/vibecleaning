@@ -2528,13 +2528,33 @@ def test_queue_burst_cards_refresh_after_detail_and_resume_interrupted_loads():
         source.index("  async setIndividualViewMode(", source.index("  queueFlagTargetControlsHtml(individual) {"))
     ]
 
-    assert detail_loader.count("this.renderIndividuals();") >= 4
+    assert "this.syncIndividualSelectionUi(selectedIndividuals);" in detail_loader
+    assert "this.syncIndividualSelectionUi(currentSelection);" in detail_loader
     assert 'this.data.detailAutoBursts = parseMovementAutoBursts(payload.auto_bursts || []);' in detail_loader
     assert 'this.data?.detailState === "loading"' in queue_controls
     assert "Loading bursts for this individual…" in queue_controls
     assert "const detailLoadWasInterrupted" in transition
     assert "if (detailLoadWasInterrupted)" in transition
     assert "void this.loadDetailForCurrentSelection" in transition
+
+
+def test_rds_detail_loading_is_additive_and_does_not_rebuild_browse_cards():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    toggle = source[
+        source.index("  toggleIndividual("):
+        source.index("  renderSelectedFixes()", source.index("  toggleIndividual("))
+    ]
+    rds_loader = source[
+        source.index("  async loadRdsDetailForSelection("):
+        source.index("  buildFixesRequestUrl(", source.index("  async loadRdsDetailForSelection("))
+    ]
+
+    assert "this.renderIndividuals();" not in toggle
+    assert "this.syncIndividualSelectionUi([individual]);" in toggle
+    assert "missingIndividuals = selectedIndividuals.filter" in rds_loader
+    assert "individuals: missingIndividuals" in rds_loader
+    assert "cacheMovementDetailPayload(this.data, payload, missingIndividuals);" in rds_loader
+    assert "composeMovementDetailSelection(this.data, currentSelection);" in rds_loader
 
 
 def test_movement_frontend_has_lazy_editor_review_dashboard():
