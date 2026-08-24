@@ -1,11 +1,11 @@
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 
 from app.auth import AuthManager
 from app.web import create_app
 from examples.movement.routes import register_movement_routes
+from examples.movement.shell import install_movement_shell_mode
 
 from . import is_slim_movement_artifact
 def create_slim_movement_app(
@@ -33,10 +33,6 @@ def create_slim_movement_app(
         overview_series_points=250,
         background_anomaly_ranking=True,
     )
-    app.mount(
-        "/slim-static",
-        StaticFiles(directory=index_path.parent),
-        name="slim-static",
-    )
+    install_movement_shell_mode(app, index_path=index_path, mode="slim_movement")
 
     return app

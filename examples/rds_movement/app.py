@@ -1,12 +1,11 @@
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
-
 from app.auth import AuthManager
 from app.web import create_app
 from examples.movement.routes import register_movement_routes
 from examples.movement.rds_index import is_rds_artifact
+from examples.movement.shell import install_movement_shell_mode
 
 
 def create_rds_movement_app(
@@ -36,13 +35,6 @@ def create_rds_movement_app(
         source_format="rds",
     )
 
-    @app.middleware("http")
-    async def inject_rds_movement_mode(request, call_next):
-        if request.url.path == "/":
-            html = index_path.read_text(encoding="utf-8")
-            marker = '<meta name="vibecleaning-movement-mode" content="rds_movement">'
-            html = html.replace("<title>", marker + "\n<title>", 1)
-            return HTMLResponse(html)
-        return await call_next(request)
+    install_movement_shell_mode(app, index_path=index_path, mode="rds_movement")
 
     return app

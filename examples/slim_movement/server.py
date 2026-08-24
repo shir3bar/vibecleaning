@@ -19,7 +19,7 @@ SECURE_COOKIE = os.environ.get("VIBECLEANING_SECURE_COOKIE", "").strip().lower()
 app = create_slim_movement_app(
     data_root=ROOT / "data",
     static_root=ROOT / "examples" / "movement" / "static",
-    index_path=ROOT / "examples" / "slim_movement" / "static" / "index.html",
+    index_path=ROOT / "examples" / "movement" / "static" / "index.html",
     auth_manager=AuthManager.from_data_root(ROOT / "data", secure_cookie=SECURE_COOKIE),
 )
 

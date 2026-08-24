@@ -9,7 +9,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 MOVEMENT_STATIC_ROOT = REPO_ROOT / "examples" / "movement" / "static"
-SLIM_INDEX = REPO_ROOT / "examples" / "slim_movement" / "static" / "index.html"
+SLIM_INDEX = MOVEMENT_STATIC_ROOT / "index.html"
 MOVEMENT_APP_JS = MOVEMENT_STATIC_ROOT / "app.js"
 
 from examples.slim_movement.app import create_slim_movement_app
@@ -64,11 +64,11 @@ def test_slim_movement_serves_shared_viewer_with_slim_profile(tmp_path):
 
     response = client.get("/", headers={"Authorization": ""})
     app_js = client.get("/static/app.js", headers={"Authorization": ""})
-    login_js = client.get("/slim-static/login.js", headers={"Authorization": ""})
+    login_js = client.get("/static/login.js", headers={"Authorization": ""})
 
     assert response.status_code == 200
     assert '<meta name="vibecleaning-movement-mode" content="slim_movement">' in response.text
-    assert "slim movement review" in response.text
+    assert 'data-role="admin-dashboard" hidden>Review dashboard</button>' in response.text
     assert 'id="login-form"' in response.text
     assert 'id="app-shell" hidden' in response.text
     assert 'class="topbar-actions"' in response.text
@@ -79,7 +79,11 @@ def test_slim_movement_serves_shared_viewer_with_slim_profile(tmp_path):
     assert app_js.status_code == 200
     assert "MOVEMENT_APP_CONFIG" in app_js.text
     assert login_js.status_code == 200
-    assert 'import "/static/login.js"' in login_js.text
+    assert 'fetch("/api/auth/login"' in login_js.text
+
+    dashboard = client.get("/api/apps/movement/admin/review-summary")
+    assert dashboard.status_code == 200
+    assert [item["family"] for item in dashboard.json()["studies"]] == ["movement_raw"]
 
 
 def test_slim_auth_keeps_login_assets_public_and_protects_data_routes(tmp_path):
@@ -90,7 +94,7 @@ def test_slim_auth_keeps_login_assets_public_and_protects_data_routes(tmp_path):
         authenticated=False,
     )
 
-    for path in ("/", "/static/app.js", "/slim-static/login.js"):
+    for path in ("/", "/static/app.js", "/static/login.js"):
         response = client.get(path)
         assert response.status_code == 200
         assert "www-authenticate" not in response.headers
