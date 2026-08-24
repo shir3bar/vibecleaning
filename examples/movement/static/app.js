@@ -4016,6 +4016,7 @@ class MovementExampleApp {
     this.refs.colorBy.addEventListener("change", () => {
       this.clearThresholdState();
       this.saveUiState();
+      this.refreshCurrentColorStyle();
       this.renderLegend();
       this.renderThresholdPane();
       this.renderLayers();
@@ -7812,6 +7813,22 @@ class MovementExampleApp {
     this.saveUiState();
   }
 
+  refreshCurrentColorStyle() {
+    if (!this.data || this.data.binaryMovement) return;
+    const field = this.getCurrentColorField();
+    if (!field) return;
+    const styles = computeMovementColorStyles(
+      [field],
+      this.data.fixes.filter(fix => (
+        !fix.analyticallyExcluded && fix.review?.status !== "confirmed"
+      )),
+    );
+    const style = styles.get(field.key);
+    if (style) {
+      this.data.colorStyles.set(field.key, style);
+    }
+  }
+
   initializeIndividualQueueDatasetSelection() {
     if (!this.data || this.individualReviewQueue.mode !== "queue") {
       return;
@@ -10252,6 +10269,51 @@ class MovementExampleApp {
     return steps;
   }
 
+  getRdsObjectRenderGroups(visibleIndividuals, visibleSetNames) {
+    if (!MOVEMENT_APP_CONFIG.rdsSource || this.data?.binaryMovement) {
+      return [];
+    }
+    const cache = ensureMovementDetailCache(this.data);
+    const groups = [];
+    for (let code = 0; code < this.data.individuals.length; code += 1) {
+      const individual = this.data.individuals[code];
+      if (!visibleIndividuals.has(individual)) continue;
+      const entry = cache.get(individual);
+      if (!entry) continue;
+      if (!entry.renderData) {
+        const tracks = buildMovementFixTrackIndex(entry.fixes || []);
+        const points = [];
+        for (const [trackKey, fixes] of tracks) {
+          for (const fix of fixes) {
+            points.push({
+              fix,
+              fixKey: fix.fixKey,
+              individual: fix.individual,
+              setName: fix.setName,
+              trackKey,
+              position: fix.position,
+            });
+          }
+        }
+        entry.renderData = {
+          points,
+          steps: buildMovementTrackStepSegments(tracks),
+        };
+      }
+      groups.push({
+        code,
+        individual,
+        points: visibleSetNames.has(entry.renderData.points[0]?.setName || "train")
+          ? entry.renderData.points
+          : [],
+        steps: visibleSetNames.has(entry.renderData.steps[0]?.setName || "train")
+          ? entry.renderData.steps
+          : [],
+      });
+    }
+    return groups;
+  }
+
   buildTemporalFocalData(visibleIndividuals, visibleSetNames) {
     const binary = this.data?.binaryMovement;
     if (binary) {
@@ -10612,16 +10674,45 @@ class MovementExampleApp {
         burstId => this.data.autoBurstById?.get(burstId)?.fixKeys || [],
       ),
     );
-    const allPathData = this.getVisibleTrackSteps(visibleIndividuals, visibleSetNames);
-    const pathData = allPathData
-      .filter(step => (
+    const useRdsObjectGroups = MOVEMENT_APP_CONFIG.rdsSource && !this.data.binaryMovement;
+    const rdsObjectGroups = useRdsObjectGroups
+      ? this.getRdsObjectRenderGroups(visibleIndividuals, visibleSetNames)
+      : [];
+    const allPathData = useRdsObjectGroups
+      ? (this.flagTargetKind === "individual"
+        ? rdsObjectGroups.flatMap(group => group.steps)
+        : [])
+      : this.getVisibleTrackSteps(visibleIndividuals, visibleSetNames);
+    const pathData = useRdsObjectGroups
+      ? []
+      : allPathData.filter(step => (
         !hiddenBurstFixKeys.has(step.sourceFix?.fixKey)
         && !hiddenBurstFixKeys.has(step.destinationFix?.fixKey)
       ));
     const pointData = showPoints
-      ? this.getVisibleMovementPoints(visibleIndividuals, visibleSetNames)
+      ? (useRdsObjectGroups
+        ? []
+        : this.getVisibleMovementPoints(visibleIndividuals, visibleSetNames))
         .filter(point => !hiddenBurstFixKeys.has(point.fix?.fixKey))
       : [];
+    const rdsDrawableGroups = rdsObjectGroups.map(group => ({
+      ...group,
+      points: showPoints
+        ? (hiddenBurstFixKeys.size
+          ? group.points.filter(point => !hiddenBurstFixKeys.has(point.fix?.fixKey))
+          : group.points)
+        : [],
+      steps: hiddenBurstFixKeys.size
+        ? group.steps.filter(step => (
+          !hiddenBurstFixKeys.has(step.sourceFix?.fixKey)
+          && !hiddenBurstFixKeys.has(step.destinationFix?.fixKey)
+        ))
+        : group.steps,
+    }));
+    const rdsVisiblePointCount = rdsDrawableGroups.reduce(
+      (count, group) => count + group.points.length,
+      0,
+    );
     const temporalFocalData = showPoints && this.temporalSliderEngaged
       ? this.buildTemporalFocalData(visibleIndividuals, visibleSetNames)
       : { points: [] };
@@ -10735,6 +10826,9 @@ class MovementExampleApp {
     const queueDimKey = this.individualReviewQueue.mode === "queue"
       ? `queue:${this.queueActiveIndividual()}`
       : "browse";
+    const colorStyleKey = JSON.stringify(
+      this.data.colorStyles.get(this.refs.colorBy.value) || null,
+    );
     if (showSuspectedOutlines) {
       const seenSuspected = new Set();
       for (const fix of this.data.fixes || []) {
@@ -10824,7 +10918,48 @@ class MovementExampleApp {
         }),
       );
     }
-    if (visibleAutoBurstPaths.length) {
+    if (visibleAutoBurstPaths.length && useRdsObjectGroups) {
+      const burstPathsByIndividual = new Map();
+      for (const item of visibleAutoBurstPaths) {
+        const individual = String(item?.burst?.individual || "");
+        const paths = burstPathsByIndividual.get(individual) || [];
+        paths.push(item);
+        burstPathsByIndividual.set(individual, paths);
+      }
+      for (const [individual, paths] of burstPathsByIndividual) {
+        const code = Math.max(0, this.data.individuals.indexOf(individual));
+        layers.push(new deck.PathLayer({
+          id: `movement-burst-casing-rds-${code}`,
+          data: paths,
+          dataComparator: sameArrayItems,
+          getPath: item => item.path,
+          getColor: item => this.burstCasingColor(item, focusedBurstId),
+          getWidth: item => this.burstCasingWidth(item, focusedBurstId),
+          widthMinPixels: 2,
+          updateTriggers: {
+            getColor: [focusedBurstId, queueDimKey],
+            getWidth: focusedBurstId,
+          },
+          pickable: false,
+        }));
+      }
+      for (const [individual, paths] of burstPathsByIndividual) {
+        const code = Math.max(0, this.data.individuals.indexOf(individual));
+        layers.push(new deck.PathLayer({
+          id: `movement-bursts-rds-${code}`,
+          data: paths,
+          dataComparator: sameArrayItems,
+          getPath: item => item.path,
+          getColor: item => this.burstFillColor(item, focusedBurstId),
+          getWidth: item => this.burstFillWidth(item),
+          widthMinPixels: 1,
+          updateTriggers: {
+            getColor: [focusedBurstId, queueDimKey],
+          },
+          pickable: true,
+        }));
+      }
+    } else if (visibleAutoBurstPaths.length) {
       layers.push(
         new deck.PathLayer({
           id: "movement-burst-casing",
@@ -10894,7 +11029,29 @@ class MovementExampleApp {
     // Each derived step value belongs to its destination fix, so the inbound
     // segment uses that fix's selected-variable color. Drawing it above the
     // optional burst casing keeps speed and other step fields legible.
-    if (!this.data.binaryMovement) {
+    if (useRdsObjectGroups) {
+      for (const group of rdsDrawableGroups) {
+        layers.push(new deck.PathLayer({
+          id: `movement-paths-rds-${group.code}`,
+          data: group.steps,
+          dataComparator: sameArrayItems,
+          getPath: item => item.path,
+          getColor: item => {
+            const color = this.colorForFix(item.destinationFix);
+            return this.queueMapColor(
+              [color[0], color[1], color[2], item.sourceFlagged ? 52 : 185],
+              item.individual,
+            );
+          },
+          getWidth: item => item.sourceFlagged ? 1.5 : 3,
+          widthMinPixels: 2,
+          updateTriggers: {
+            getColor: [this.refs.colorBy.value, colorStyleKey, queueDimKey],
+          },
+          pickable: false,
+        }));
+      }
+    } else if (!this.data.binaryMovement) {
       layers.push(new deck.PathLayer({
         id: "movement-paths",
         data: pathData,
@@ -10969,7 +11126,27 @@ class MovementExampleApp {
     }
 
     if (showPoints) {
-      if (!this.data.binaryMovement) {
+      if (useRdsObjectGroups) {
+        for (const group of rdsDrawableGroups) {
+          layers.push(new deck.ScatterplotLayer({
+            id: `movement-points-rds-${group.code}`,
+            data: group.points,
+            dataComparator: sameArrayItems,
+            getPosition: item => item.position,
+            getFillColor: item => this.queueMapColor(
+              this.colorForFix(item.fix),
+              item.individual,
+            ),
+            getRadius: 68,
+            radiusMinPixels: 3,
+            radiusMaxPixels: 8,
+            updateTriggers: {
+              getFillColor: [this.refs.colorBy.value, colorStyleKey, queueDimKey],
+            },
+            pickable: true,
+          }));
+        }
+      } else if (!this.data.binaryMovement) {
         layers.push(new deck.ScatterplotLayer({
           id: "movement-points",
           data: pointData,
@@ -11192,7 +11369,11 @@ class MovementExampleApp {
     try {
       this.overlay.setProps({
         layers,
-        useDevicePixels: (this.data.binaryMovement?.header?.row_count || pointData.length + selectedPointData.length) <= LARGE_MAP_POINT_THRESHOLD,
+        useDevicePixels: (
+          this.data.binaryMovement?.header?.row_count
+          || rdsVisiblePointCount
+          || pointData.length + selectedPointData.length
+        ) <= LARGE_MAP_POINT_THRESHOLD,
       });
     } catch (error) {
       this.setStatus(`Map warning: ${error.message}`, true);
@@ -12654,7 +12835,9 @@ class MovementExampleApp {
       this.data.confirmedMatchingFixCount = Number(payload.matching_fix_count) || 0;
       this.data.confirmedReturnedFixCount = Number(payload.returned_fix_count) || confirmedFixes.length;
       this.data.confirmedTruncated = Boolean(payload.truncated);
-      refreshMovementFixCollections(this.data);
+      refreshMovementFixCollections(this.data, {
+        colorFieldKeys: MOVEMENT_APP_CONFIG.rdsSource ? [this.refs.colorBy.value] : null,
+      });
       this.renderLegend();
       this.renderLayers();
       this.updateActionButtons();
@@ -12724,7 +12907,9 @@ class MovementExampleApp {
       this.data.suspiciousMatchingFixCount = Number(payload.matching_fix_count) || 0;
       this.data.suspiciousReturnedFixCount = Number(payload.returned_fix_count) || suspiciousFixes.length;
       this.data.suspiciousTruncated = Boolean(payload.truncated);
-      refreshMovementFixCollections(this.data);
+      refreshMovementFixCollections(this.data, {
+        colorFieldKeys: MOVEMENT_APP_CONFIG.rdsSource ? [this.refs.colorBy.value] : null,
+      });
       if (focus) {
         this.clearThresholdState();
         this.setTableSelection();
@@ -12837,7 +13022,7 @@ class MovementExampleApp {
       this.data.detailIndividuals = [];
       this.data.detailLoadingIndividuals = [];
       composeMovementDetailSelection(this.data, []);
-      refreshMovementFixCollections(this.data);
+      refreshMovementFixCollections(this.data, { recomputeColorStyles: false });
       this.renderBurstCountIndicator();
       this.renderSelectedFixes();
       this.renderThresholdPane();
@@ -12852,7 +13037,10 @@ class MovementExampleApp {
       this.data.detailIndividuals = [];
       this.data.detailLoadingIndividuals = [];
       composeMovementDetailSelection(this.data, []);
-      refreshMovementFixCollections(this.data);
+      refreshMovementFixCollections(this.data, {
+        colorFieldKeys: [this.refs.colorBy.value],
+        recomputeColorStyles: !this.data.binaryMovement,
+      });
       this.data.selectedFixKeys = new Set();
       this.syncIndividualSelectionUi();
       this.renderSelectedFixes();
@@ -12987,7 +13175,7 @@ class MovementExampleApp {
     this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, selectedIndividuals);
     if (renderedChanged) {
       composeMovementDetailSelection(this.data, cachedIndividuals);
-      refreshMovementFixCollections(this.data);
+      refreshMovementFixCollections(this.data, { colorFieldKeys: [this.refs.colorBy.value] });
       this.renderSelectedFixes();
       this.renderThresholdPane();
       this.renderLayers();
@@ -13048,7 +13236,7 @@ class MovementExampleApp {
       this.data.detailIndividuals = [...currentSelection];
       this.data.detailLoadingIndividuals = stillMissing;
       this.data.detailState = stillMissing.length ? "loading" : "loaded";
-      refreshMovementFixCollections(this.data);
+      refreshMovementFixCollections(this.data, { colorFieldKeys: [this.refs.colorBy.value] });
       this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(
         preserved,
         currentSelection,
@@ -16714,7 +16902,7 @@ function seedMovementDetailCacheFromCurrentData(data) {
   data.detailLoadingIndividuals = [];
 }
 
-function refreshMovementFixCollections(data) {
+function refreshMovementFixCollections(data, { colorFieldKeys = null, recomputeColorStyles = true } = {}) {
   if (!data) {
     return;
   }
@@ -16737,7 +16925,9 @@ function refreshMovementFixCollections(data) {
   data.eligibleTrackPositionByFixKey = buildMovementTrackPositionLookup(data.eligibleFixesByTrack);
   data.allTrackPositionByFixKey = buildMovementTrackPositionLookup(data.allFixesByTrack);
   data.flaggedStepOverlays = buildFlaggedStepOverlays(data);
-  data.trackStepSegments = buildMovementTrackStepSegments(data.eligibleFixesByTrack);
+  data.trackStepSegments = MOVEMENT_APP_CONFIG.rdsSource
+    ? []
+    : buildMovementTrackStepSegments(data.eligibleFixesByTrack);
   data.visiblePointCache = new Map();
   data.visibleTrackStepCache = new Map();
   const mergedSegments = new Map();
@@ -16754,7 +16944,14 @@ function refreshMovementFixCollections(data) {
   data.autoBursts = Array.from(mergedAutoBursts.values())
     .sort((left, right) => left.startTimeMs - right.startTimeMs || left.burstId.localeCompare(right.burstId));
   data.autoBurstById = new Map(data.autoBursts.map(burst => [burst.burstId, burst]));
+  const previousAutoBurstRenderCache = data.autoBurstRenderCache instanceof Map
+    ? data.autoBurstRenderCache
+    : new Map();
   data.autoBurstRenderCache = new Map(data.autoBursts.map(burst => {
+    const previous = previousAutoBurstRenderCache.get(burst.burstId);
+    if (previous?.pathItem?.burst === burst) {
+      return [burst.burstId, previous];
+    }
     const sourceFlagged = isSourceOnlyFlaggedBurstFromData(data, burst);
     return [
       burst.burstId,
@@ -16768,12 +16965,25 @@ function refreshMovementFixCollections(data) {
       },
     ];
   }));
-  data.colorStyles = computeMovementColorStyles(
-    data.colorFields,
-    data.fixes.filter(fix => (
-      !fix.analyticallyExcluded && fix.review?.status !== "confirmed"
-    )),
-  );
+  if (recomputeColorStyles) {
+    const requestedKeys = Array.isArray(colorFieldKeys) ? new Set(colorFieldKeys) : null;
+    const fields = requestedKeys
+      ? data.colorFields.filter(field => requestedKeys.has(field.key))
+      : data.colorFields;
+    const nextStyles = computeMovementColorStyles(
+      fields,
+      data.fixes.filter(fix => (
+        !fix.analyticallyExcluded && fix.review?.status !== "confirmed"
+      )),
+    );
+    if (requestedKeys) {
+      for (const [key, style] of nextStyles) {
+        data.colorStyles.set(key, style);
+      }
+    } else {
+      data.colorStyles = nextStyles;
+    }
+  }
 }
 
 function buildMovementFixTrackIndex(fixes, { includeExcluded = false } = {}) {

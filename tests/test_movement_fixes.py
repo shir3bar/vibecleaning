@@ -1004,7 +1004,7 @@ def test_movement_frontend_clears_checked_fix_halos_and_enlarges_suspicious_fixe
 def test_movement_frontend_excludes_confirmed_audit_fixes_from_color_scale():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     refresh = source[
-        source.index("function refreshMovementFixCollections(data)")
+        source.index("function refreshMovementFixCollections(data,")
         :source.index("function buildMovementColorFields(fields)")
     ]
 
@@ -2555,6 +2555,28 @@ def test_rds_detail_loading_is_additive_and_does_not_rebuild_browse_cards():
     assert "individuals: missingIndividuals" in rds_loader
     assert "cacheMovementDetailPayload(this.data, payload, missingIndividuals);" in rds_loader
     assert "composeMovementDetailSelection(this.data, currentSelection);" in rds_loader
+
+
+def test_rds_object_renderer_keeps_existing_individual_gpu_layers_stable():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    group_builder = source[
+        source.index("  getRdsObjectRenderGroups("):
+        source.index("  buildTemporalFocalData(", source.index("  getRdsObjectRenderGroups("))
+    ]
+    renderer = source[
+        source.index("  renderLayers({ temporalOnly = false } = {}) {"):
+        source.index("  isSourceOnlyFlaggedBurst(")
+    ]
+
+    assert "if (!entry.renderData)" in group_builder
+    assert "buildMovementTrackStepSegments(tracks)" in group_builder
+    assert "movement-paths-rds-${group.code}" in renderer
+    assert "movement-points-rds-${group.code}" in renderer
+    assert "movement-burst-casing-rds-${code}" in renderer
+    assert "movement-bursts-rds-${code}" in renderer
+    assert "dataComparator: sameArrayItems" in renderer
+    assert "colorStyleKey" in renderer
+    assert "rdsObjectGroups.flatMap(group => group.points)" not in renderer
 
 
 def test_movement_frontend_has_lazy_editor_review_dashboard():
