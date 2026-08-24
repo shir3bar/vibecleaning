@@ -119,19 +119,32 @@ SUPPORTED_RANKING_METHODS = {
     RANKING_SOURCE_IS_OUTLIER,
 }
 RANKING_DEFINITION_SIGNATURES = {
-    RANKING_ISOLATION_FOREST: "isolation_forest:maximum_burst_score:v1",
-    RANKING_ISOLATION_FOREST_DECISION_MARGIN: (
-        "isolation_forest:sum_positive_decision_margin:v1"
-    ),
+    RANKING_ISOLATION_FOREST: "isolation_forest:combined_individual_rankings:v2",
+    RANKING_ISOLATION_FOREST_DECISION_MARGIN: "isolation_forest:combined_individual_rankings:v2",
     RANKING_SOURCE_IS_OUTLIER: "source_is_outlier:sum_fix_counts:v1",
 }
+LEGACY_RANKING_DEFINITION_SIGNATURES = {
+    RANKING_ISOLATION_FOREST: "isolation_forest:maximum_burst_score:v1",
+    RANKING_ISOLATION_FOREST_DECISION_MARGIN: "isolation_forest:sum_positive_decision_margin:v1",
+}
+
+
+def ranking_provider(ranking_method: str) -> str:
+    return (
+        RANKING_SOURCE_IS_OUTLIER
+        if ranking_method == RANKING_SOURCE_IS_OUTLIER
+        else RANKING_ISOLATION_FOREST
+    )
 
 
 def _ranking_definition_matches(ranking_method: str, stored_signature: object) -> bool:
     stored = str(stored_signature or "")
     expected = RANKING_DEFINITION_SIGNATURES[ranking_method]
     if stored:
-        return stored == expected
+        return stored in {
+            expected,
+            LEGACY_RANKING_DEFINITION_SIGNATURES.get(ranking_method),
+        }
     # Existing maximum-burst Isolation Forest analyses keep their original
     # meaning. Pre-sum source analyses do not: they ranked individuals by only
     # their worst burst and must not be restored as source-total rankings.
@@ -2040,7 +2053,12 @@ def register_movement_routes(
                             reasons.append("confirmed exclusion state differs")
                         if str(params.get("feature_set") or "movement_only") != parse_anomaly_feature_set(feature_set):
                             reasons.append("feature set differs")
-                        if str(params.get("ranking_method") or "isolation_forest") != method:
+                        stored_method = str(params.get("ranking_method") or RANKING_ISOLATION_FOREST)
+                        stored_provider = str(params.get("ranking_provider") or "")
+                        if stored_provider:
+                            if stored_provider != ranking_provider(method):
+                                reasons.append("ranking provider differs")
+                        elif stored_method != method:
                             reasons.append("ranking method differs")
                         if not _ranking_definition_matches(
                             method,
@@ -2098,7 +2116,10 @@ def register_movement_routes(
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
             dataset = load_dataset(study_dir, dataset_id)
             get_dataset_artifact(study_dir, dataset_id, logical_name)
-            ranking_method = parse_ranking_method(body.get("ranking_method"))
+            requested_ranking = parse_ranking_method(
+                body.get("ranking_provider") or body.get("ranking_method")
+            )
+            ranking_method = ranking_provider(requested_ranking)
             feature_set = parse_anomaly_feature_set(body.get("feature_set"))
             feature_set_label = (
                 "movement + OSM context"
@@ -2109,19 +2130,16 @@ def register_movement_routes(
             input_artifacts = _movement_analysis_input_names(dataset, logical_name)
             input_attachments = []
             analysis_script = BURST_ANOMALY_ANALYSIS_SCRIPT
-            aggregation_label = (
-                "total decision margin"
-                if ranking_method == RANKING_ISOLATION_FOREST_DECISION_MARGIN
-                else "worst burst"
-            )
             analysis_title = (
                 f"Rank automatic movement bursts by Isolation Forest "
-                f"{aggregation_label} ({feature_set_label}) for {logical_name}"
+                f"({feature_set_label}) for {logical_name}"
             )
             parameters = {
                 "app": "movement",
                 "action": "run_burst_anomaly_ranking",
                 "ranking_method": ranking_method,
+                "ranking_provider": ranking_method,
+                "ranking_schema_version": 2 if ranking_method == RANKING_ISOLATION_FOREST else 1,
                 "ranking_definition_signature": ranking_definition_signature(
                     ranking_method
                 ),
@@ -2191,14 +2209,9 @@ def register_movement_routes(
                         "content_type": "application/json",
                     }]
                     analysis_script = RDS_ANOMALY_ANALYSIS_SCRIPT
-                    aggregation_label = (
-                        "total decision margin"
-                        if ranking_method == RANKING_ISOLATION_FOREST_DECISION_MARGIN
-                        else "worst burst"
-                    )
                     analysis_title = (
                         f"Rank authoritative RDS bursts by Isolation Forest "
-                        f"{aggregation_label} ({feature_set_label}) for {study_name}"
+                        f"({feature_set_label}) for {study_name}"
                     )
             payload = {
                 "user": user,

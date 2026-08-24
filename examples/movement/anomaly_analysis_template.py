@@ -5,6 +5,8 @@ from pathlib import Path
 
 OUTPUT_ARTIFACT_NAME = "burst_anomaly_ranking.json"
 SUMMARY_BURST_REF_LIMIT = 3
+RANKING_MAXIMUM_BURST = "isolation_forest"
+RANKING_TOTAL_MARGIN = "isolation_forest_decision_margin"
 
 
 def _declared_artifact(spec: dict, artifact_list: str, logical_name: str) -> dict | None:
@@ -12,6 +14,26 @@ def _declared_artifact(spec: dict, artifact_list: str, logical_name: str) -> dic
         if artifact.get("logical_name") == logical_name:
             return artifact
     return None
+
+
+def _summary_ranking(ranking: dict) -> dict:
+    return {
+        **{key: value for key, value in ranking.items() if key != "ranked_individuals"},
+        "ranked_individuals": [
+            {
+                **{key: row.get(key) for key in (
+                    "rank", "individual", "individual_score", "top_burst_score",
+                    "top_burst_id", "contributing_burst_count", "burst_count",
+                    "scored_burst_count",
+                )},
+                "ranked_burst_refs": [
+                    {**ref, "individual": row.get("individual")}
+                    for ref in (row.get("ranked_burst_refs") or [])[:SUMMARY_BURST_REF_LIMIT]
+                ],
+            }
+            for row in ranking.get("ranked_individuals") or []
+        ],
+    }
 
 
 def main():
@@ -56,27 +78,33 @@ def main():
     feature_rows = build_burst_feature_rows(eligible_fixes, movement["auto_bursts"])
     feature_set = str(params.get("feature_set") or "movement_only").strip()
     scoring = score_bursts(feature_rows, config={"feature_set": feature_set})
-    ranking_method = str(
-        params.get("ranking_method") or "isolation_forest"
-    ).strip()
-    ranking_aggregation = (
-        "sum_outlier_margin"
-        if ranking_method == "isolation_forest_decision_margin"
-        else "maximum_anomaly_score"
-    )
-    individual_ranking = rank_individuals(
+    maximum_ranking = rank_individuals(
         scoring["scored_bursts"],
-        config={"aggregation": ranking_aggregation},
+        config={"aggregation": "maximum_anomaly_score"},
     )
-    warnings = [*scoring["warnings"], *individual_ranking["warnings"]]
+    margin_ranking = rank_individuals(
+        scoring["scored_bursts"],
+        config={"aggregation": "sum_outlier_margin"},
+    )
+    individual_rankings = {
+        RANKING_MAXIMUM_BURST: maximum_ranking,
+        RANKING_TOTAL_MARGIN: margin_ranking,
+    }
+    warnings = list(dict.fromkeys([
+        *scoring["warnings"],
+        *maximum_ranking["warnings"],
+        *margin_ranking["warnings"],
+    ]))
 
     result = {
         "run_status": (
             scoring["run_status"]
             if scoring["run_status"] != "completed"
-            else individual_ranking["run_status"]
+            else maximum_ranking["run_status"]
         ),
-        "ranking_method": ranking_method,
+        "ranking_schema_version": 2,
+        "ranking_provider": "isolation_forest",
+        "ranking_method": RANKING_MAXIMUM_BURST,
         "input_artifact": {
             "dataset_id": dataset_id,
             "logical_name": target_artifact,
@@ -87,15 +115,16 @@ def main():
         "burst_feature_count": len(feature_rows),
         "model_fit": {
             **{key: value for key, value in scoring.items() if key != "scored_bursts"},
-            "ranking_method": ranking_method,
+            "ranking_method": "isolation_forest",
         },
+        "individual_rankings": individual_rankings,
         "individual_ranking_summary": {
             key: value
-            for key, value in individual_ranking.items()
+            for key, value in maximum_ranking.items()
             if key != "ranked_individuals"
         },
         "scored_bursts": scoring["scored_bursts"],
-        "ranked_individuals": individual_ranking["ranked_individuals"],
+        "ranked_individuals": maximum_ranking["ranked_individuals"],
         "warnings": warnings,
     }
     output_path = Path(output["path"])
@@ -107,33 +136,13 @@ def main():
     response_summary = {
         key: value
         for key, value in result.items()
-        if key not in {"scored_bursts", "ranked_individuals"}
+        if key not in {"scored_bursts", "ranked_individuals", "individual_rankings"}
     }
-    response_summary["ranked_individuals"] = [
-        {
-            **{
-                key: row.get(key)
-                for key in (
-                    "rank",
-                    "individual",
-                    "individual_score",
-                    "top_burst_score",
-                    "top_burst_id",
-                    "contributing_burst_count",
-                    "burst_count",
-                    "scored_burst_count",
-                )
-            },
-            "ranked_burst_refs": [
-                {
-                    **ref,
-                    "individual": row.get("individual"),
-                }
-                for ref in (row.get("ranked_burst_refs") or [])[:SUMMARY_BURST_REF_LIMIT]
-            ],
-        }
-        for row in result["ranked_individuals"]
-    ]
+    response_summary["individual_rankings"] = {
+        method: _summary_ranking(ranking)
+        for method, ranking in individual_rankings.items()
+    }
+    response_summary["ranked_individuals"] = response_summary["individual_rankings"][RANKING_MAXIMUM_BURST]["ranked_individuals"]
     summary_path.write_text(
         json.dumps(response_summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

@@ -41,6 +41,8 @@ def main():
     )
     result = {
         "run_status": ranking["run_status"],
+        "ranking_schema_version": 1,
+        "ranking_provider": "source_is_outlier",
         "ranking_method": "source_is_outlier",
         "source_bundle_signature": source.get("source_bundle_signature"),
         "burst_definition_signature": source.get("burst_definition_signature"),

@@ -125,12 +125,19 @@ def _analysis_parameters_match(
         reasons.append("burst gap quantile differs")
     if stored_feature_set != feature_set:
         reasons.append("feature set differs")
-    if (
-        action == "run_burst_anomaly_ranking"
-        and str(parameters.get("ranking_method") or "isolation_forest")
-        != ranking_method
-    ):
-        reasons.append("ranking method differs")
+    if action == "run_burst_anomaly_ranking":
+        stored_method = str(parameters.get("ranking_method") or "isolation_forest")
+        stored_provider = str(parameters.get("ranking_provider") or "")
+        requested_provider = (
+            "source_is_outlier"
+            if ranking_method == "source_is_outlier"
+            else "isolation_forest"
+        )
+        if stored_provider:
+            if stored_provider != requested_provider:
+                reasons.append("ranking provider differs")
+        elif stored_method != ranking_method:
+            reasons.append("ranking method differs")
     return not reasons, reasons
 
 

@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 import sys
 import json
 
@@ -17,10 +18,50 @@ from examples.movement.burst_features import build_burst_feature_rows
 from examples.movement.routes import (
     ANOMALY_ANALYSIS_TEMPLATE_PATH,
     BURST_ANOMALY_ANALYSIS_SCRIPT,
+    RDS_ANOMALY_ANALYSIS_TEMPLATE_PATH,
     register_movement_routes,
 )
+from examples.movement.script_bundle import build_self_contained_script
 
 MOVEMENT_APP_JS = REPO_ROOT / "examples" / "movement" / "static" / "app.js"
+
+
+def test_combined_isolation_forest_templates_score_bursts_once():
+    for template_path in (
+        ANOMALY_ANALYSIS_TEMPLATE_PATH,
+        RDS_ANOMALY_ANALYSIS_TEMPLATE_PATH,
+    ):
+        source = template_path.read_text(encoding="utf-8")
+        assert source.count("scoring = score_bursts(") == 1
+        assert 'config={"aggregation": "maximum_anomaly_score"}' in source
+        assert 'config={"aggregation": "sum_outlier_margin"}' in source
+
+
+def test_bundled_analysis_delegates_compiled_scipy_imports(tmp_path):
+    entry_path = tmp_path / "compiled_import_check.py"
+    entry_path.write_text(
+        "from examples.movement.anomaly_ranking import rank_individuals\n"
+        "from sklearn.ensemble import IsolationForest\n"
+        "from scipy.sparse.csgraph import minimum_spanning_tree\n"
+        "assert rank_individuals and IsolationForest and minimum_spanning_tree\n",
+        encoding="utf-8",
+    )
+    script = build_self_contained_script(
+        entry_path,
+        (
+            "examples.movement.burst_feature_matrix",
+            "examples.movement.anomaly_ranking",
+        ),
+    )
+    script_path = tmp_path / "analysis.py"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(script_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 ANOMALY_ANALYSIS_CSV = """eventid,individual,timestamp,longitude,latitude,set,gps:hdop,height-above-msl
@@ -936,6 +977,8 @@ def test_burst_anomaly_route_creates_analysis_artifact_without_dataset_mutation(
     assert summary["burst_gap"]["quantile"] == 0.75
     assert summary["model_fit"]["model"] == "IsolationForest"
     assert summary["ranking_method"] == "isolation_forest"
+    assert summary["ranking_provider"] == "isolation_forest"
+    assert summary["ranking_schema_version"] == 2
     assert summary["model_fit"]["ranking_method"] == "isolation_forest"
     assert summary["model_fit"]["feature_set"] == "movement_only"
     assert summary["model_fit"]["scored_burst_count"] == 4
@@ -947,6 +990,16 @@ def test_burst_anomaly_route_creates_analysis_artifact_without_dataset_mutation(
     assert "scored_bursts" not in summary
     assert summary["individual_ranking_summary"]["ranking_scope"] == "individual"
     assert summary["individual_ranking_summary"]["aggregation"] == "maximum_anomaly_score"
+    assert set(summary["individual_rankings"]) == {
+        "isolation_forest",
+        "isolation_forest_decision_margin",
+    }
+    assert summary["individual_rankings"]["isolation_forest"]["aggregation"] == (
+        "maximum_anomaly_score"
+    )
+    assert summary["individual_rankings"]["isolation_forest_decision_margin"][
+        "aggregation"
+    ] == "sum_outlier_margin"
     assert len(summary["ranked_individuals"]) == 2
     assert all("ranked_burst_refs" in row for row in summary["ranked_individuals"])
     assert all(row["ranked_burst_refs"] for row in summary["ranked_individuals"])
@@ -1016,22 +1069,35 @@ def test_burst_anomaly_route_supports_total_decision_margin_ranking(tmp_path):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["analysis"]["parameters"]["ranking_method"] == (
-        "isolation_forest_decision_margin"
-    )
-    assert "total decision margin" in payload["analysis"]["title"]
+    assert payload["analysis"]["parameters"]["ranking_method"] == "isolation_forest"
+    assert payload["analysis"]["parameters"]["ranking_provider"] == "isolation_forest"
+    assert payload["analysis"]["parameters"]["ranking_schema_version"] == 2
     summary = payload["summary"]
-    assert summary["ranking_method"] == "isolation_forest_decision_margin"
-    assert summary["model_fit"]["ranking_method"] == (
-        "isolation_forest_decision_margin"
-    )
-    assert summary["individual_ranking_summary"]["aggregation"] == (
-        "sum_outlier_margin"
-    )
-    assert summary["individual_ranking_summary"]["ranking_method"] == (
+    assert summary["ranking_method"] == "isolation_forest"
+    assert summary["model_fit"]["ranking_method"] == "isolation_forest"
+    margin = summary["individual_rankings"]["isolation_forest_decision_margin"]
+    assert margin["aggregation"] == "sum_outlier_margin"
+    assert margin["ranking_method"] == (
         "sum_positive_outlier_decision_margin"
     )
-    assert all("individual_score" in row for row in summary["ranked_individuals"])
+    assert all("individual_score" in row for row in margin["ranked_individuals"])
+
+    analysis_id = payload["analysis"]["analysis_id"]
+    for ranking_method in ("isolation_forest", "isolation_forest_decision_margin"):
+        history = client.get(
+            "/api/apps/movement/family/movement_clean/study/test_study/analyses",
+            params={
+                "dataset_id": dataset_id,
+                "logical_name": "movement.csv",
+                "burst_gap_mode": "manual",
+                "burst_gap_seconds": 60,
+                "ranking_method": ranking_method,
+            },
+        )
+        assert history.status_code == 200
+        assert history.json()["latest_compatible_by_action"][
+            "run_burst_anomaly_ranking"
+        ] == analysis_id
 
 
 def test_burst_anomaly_route_rejects_unknown_ranking_method(tmp_path):

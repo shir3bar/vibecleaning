@@ -260,7 +260,12 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
         assert job.json()["status"] == "completed", job.json().get("error")
         summary = job.json()["result"]["summary"]
         summaries[ranking_method] = summary
-        assert summary["ranking_method"] == ranking_method
+        expected_provider = (
+            "source_is_outlier"
+            if ranking_method == "source_is_outlier"
+            else "isolation_forest"
+        )
+        assert summary["ranking_method"] == expected_provider
         assert job.json()["result"]["analysis"]["parameters"][
             "ranking_definition_signature"
         ]
@@ -280,8 +285,16 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
         assert len(individual_row["ranked_burst_refs"]) == min(
             3, individual_row["scored_burst_count"]
         )
-    margin_summary = summaries["isolation_forest_decision_margin"]
-    assert margin_summary["individual_ranking_summary"]["aggregation"] == "sum_outlier_margin"
+    isolation_summary = summaries["isolation_forest"]
+    legacy_margin_request_summary = summaries["isolation_forest_decision_margin"]
+    for isolation_result in (isolation_summary, legacy_margin_request_summary):
+        assert isolation_result["ranking_schema_version"] == 2
+        assert isolation_result["individual_rankings"]["isolation_forest"][
+            "aggregation"
+        ] == "maximum_anomaly_score"
+        assert isolation_result["individual_rankings"][
+            "isolation_forest_decision_margin"
+        ]["aggregation"] == "sum_outlier_margin"
 
     report_fix_key = f'file:{header["artifacts"][0]}#row:1'
     report = client.post(
