@@ -1550,7 +1550,7 @@ def _pack_binary_columns(arrays: dict[str, np.ndarray], metadata: dict) -> bytes
         chunks.append(data)
         offset += len(data)
     header = dict(metadata)
-    header.update({"format": "vibecleaning-movement-columns", "version": 1, "arrays": array_meta})
+    header.update({"format": "vibecleaning-movement-columns", "version": 2, "arrays": array_meta})
     header_bytes = json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8")
     prefix = b"VCM1" + struct.pack("<I", len(header_bytes))
     header_padding = b"\0" * (-(len(prefix) + len(header_bytes)) % 8)
@@ -1562,21 +1562,44 @@ def build_rds_binary_columns(
     *,
     bundle_signature: str,
     annotations: list[dict] | None = None,
+    individuals: list[str] | tuple[str, ...] | None = None,
 ) -> bytes:
     with closing(_connect(index_path)) as connection:
-        count = int(connection.execute("SELECT COUNT(*) FROM fixes").fetchone()[0])
         artifacts = connection.execute(
             "SELECT artifact_id, logical_name, row_count FROM artifacts ORDER BY artifact_id"
         ).fetchall()
-        individuals = connection.execute(
+        individual_rows = connection.execute(
             "SELECT individual_key, identifier FROM individuals ORDER BY identifier"
         ).fetchall()
+        requested_identifiers = {
+            str(value).strip() for value in (individuals or []) if str(value).strip()
+        }
+        known_identifiers = {str(row["identifier"]) for row in individual_rows}
+        unknown_identifiers = sorted(requested_identifiers - known_identifiers)
+        if unknown_identifiers:
+            raise ValueError(
+                "Unknown RDS individual identifiers: " + ", ".join(unknown_identifiers)
+            )
+        selected_keys = [
+            int(row["individual_key"])
+            for row in individual_rows
+            if not requested_identifiers or str(row["identifier"]) in requested_identifiers
+        ]
+        where_sql = ""
+        query_values: list[int] = []
+        if requested_identifiers:
+            where_sql = " WHERE f.individual_key IN (" + ",".join("?" for _ in selected_keys) + ")"
+            query_values = selected_keys
+        count = int(connection.execute(
+            "SELECT COUNT(*) FROM fixes f" + where_sql,
+            query_values,
+        ).fetchone()[0])
         individual_code = {
-            int(row["individual_key"]): index for index, row in enumerate(individuals)
+            int(row["individual_key"]): index for index, row in enumerate(individual_rows)
         }
         positions = np.empty((count, 2), dtype=np.float64)
         time_ms = np.empty(count, dtype=np.float64)
-        individual_codes = np.empty(count, dtype=np.uint16 if len(individuals) <= 65535 else np.uint32)
+        individual_codes = np.empty(count, dtype=np.uint16 if len(individual_rows) <= 65535 else np.uint32)
         artifact_codes = np.empty(count, dtype=np.uint16 if len(artifacts) <= 65535 else np.uint32)
         source_rows = np.empty(count, dtype=np.uint32)
         burst_values = np.empty(count, dtype=np.int32)
@@ -1594,8 +1617,8 @@ def build_rds_binary_columns(
             """
             SELECT f.*, a.logical_name FROM fixes f
             JOIN artifacts a ON a.artifact_id=f.artifact_id
-            ORDER BY f.individual_key, f.time_ms, f.source_row
-            """
+            """ + where_sql + " ORDER BY f.individual_key, f.time_ms, f.source_row",
+            query_values,
         )
         index = 0
         while True:
@@ -1629,7 +1652,7 @@ def build_rds_binary_columns(
     }
     for code in affected_individual_codes:
         point_indexes = np.flatnonzero((individual_codes == code) & eligible)
-        identifier = str(individuals[code]["identifier"])
+        identifier = str(individual_rows[code]["identifier"])
         records = []
         for point_index in point_indexes:
             artifact_name = str(artifacts[int(artifact_codes[point_index])]["logical_name"])
@@ -1669,6 +1692,30 @@ def build_rds_binary_columns(
         previous_by_individual[code] = point_index
     line_sources_array = line_sources_array[:line_count]
     line_targets_array = line_targets_array[:line_count]
+    point_ranges = {}
+    line_ranges = {}
+    point_start = 0
+    while point_start < count:
+        code = int(individual_codes[point_start])
+        point_end = point_start + 1
+        while point_end < count and int(individual_codes[point_end]) == code:
+            point_end += 1
+        identifier = str(individual_rows[code]["identifier"])
+        point_ranges[identifier] = [point_start, point_end]
+        point_start = point_end
+    line_start = 0
+    while line_start < line_count:
+        target_index = int(line_targets_array[line_start])
+        code = int(individual_codes[target_index])
+        line_end = line_start + 1
+        while line_end < line_count:
+            next_target = int(line_targets_array[line_end])
+            if int(individual_codes[next_target]) != code:
+                break
+            line_end += 1
+        identifier = str(individual_rows[code]["identifier"])
+        line_ranges[identifier] = [line_start, line_end]
+        line_start = line_end
     color_stats = {}
     for name, values in derived.items():
         finite = values[np.isfinite(values) & eligible]
@@ -1695,12 +1742,27 @@ def build_rds_binary_columns(
     return _pack_binary_columns(
         arrays,
         {
+            "source_format": "rds",
             "row_count": count,
             "line_count": len(line_sources_array),
             "source_bundle_signature": bundle_signature,
             "artifacts": [str(row["logical_name"]) for row in artifacts],
-            "individuals": [str(row["identifier"]) for row in individuals],
+            "individuals": [str(row["identifier"]) for row in individual_rows],
+            "loaded_individuals": [
+                str(row["identifier"])
+                for row in individual_rows
+                if int(row["individual_key"]) in selected_keys
+            ],
+            "individual_point_ranges": point_ranges,
+            "individual_line_ranges": line_ranges,
             "implicit_set": RDS_IMPLICIT_SET,
+            "color_columns": {
+                "step_length_m": {"array": "step_length_m", "kind": "numeric"},
+                "speed_mps": {"array": "speed_mps", "kind": "numeric"},
+                "time_delta_s": {"array": "time_delta_s", "kind": "numeric"},
+                "turn_angle_deg": {"array": "turn_angle_deg", "kind": "numeric"},
+                "is_outlier": {"array": "is_outlier", "kind": "boolean"},
+            },
             "color_stats": color_stats,
         },
     )

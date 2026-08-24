@@ -66,6 +66,7 @@ from .analysis_history import (
     build_movement_analysis_history,
     review_exclusion_signature,
 )
+from .binary_columns import build_csv_binary_columns
 from .catalog import family_names, get_study_dir, list_families, list_studies
 from .review_annotations import (
     annotation_applies,
@@ -1923,31 +1924,85 @@ def register_movement_routes(
         study_name: str,
         dataset_id: str,
         request: Request,
+        logical_name: str = "",
+        burst_gap_mode: str | None = None,
+        burst_gap_seconds: float | None = None,
+        burst_gap_quantile: float | None = None,
+        burst_gap_effective_seconds: float | None = None,
     ):
         try:
-            if not configured_source.bundle_scoped:
-                raise ProjectStateError("Binary study fixes are available for RDS studies")
             study_dir = configured_study_dir(family_name, study_name)
             require_read(request, study_dir)
-            bundle, index_path = await run_in_threadpool(
-                ensure_rds_index, study_dir, dataset_id
+            individuals = parse_optional_individuals(
+                request.query_params.getlist("individuals")
             )
             annotations = _load_dataset_review_annotations(
                 study_dir, dataset_id=dataset_id
             )
             visible_annotations = display_annotations(study_dir, dataset_id, annotations)
-            payload = await run_in_threadpool(
-                build_rds_binary_columns,
-                index_path,
-                bundle_signature=bundle.signature,
-                annotations=visible_annotations,
-            )
+            if configured_source.bundle_scoped:
+                bundle, index_path = await run_in_threadpool(
+                    ensure_rds_index, study_dir, dataset_id
+                )
+                payload = await run_in_threadpool(
+                    build_rds_binary_columns,
+                    index_path,
+                    bundle_signature=bundle.signature,
+                    annotations=visible_annotations,
+                    individuals=individuals or None,
+                )
+                source_signature = bundle.signature
+            else:
+                if not logical_name:
+                    raise ValueError("logical_name is required for CSV binary fixes")
+                _artifact, _artifact_path = get_dataset_artifact(
+                    study_dir, dataset_id, logical_name
+                )
+                confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
+                    annotations,
+                    source_artifact=logical_name,
+                )
+                movement, source_signature = await run_in_threadpool(
+                    source_fixes,
+                    configured_source,
+                    study_dir,
+                    dataset_id,
+                    logical_name,
+                    individuals=individuals or None,
+                    confirmed_fix_keys=confirmed_fix_keys,
+                    confirmed_individual_tracks=confirmed_individual_tracks,
+                    limit=DEFAULT_FIX_LIMIT,
+                    burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
+                    burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
+                    burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
+                    burst_gap_effective_seconds=parse_optional_burst_gap_effective_seconds(
+                        burst_gap_effective_seconds
+                    ),
+                )
+                movement = await run_in_threadpool(
+                    apply_review_annotations,
+                    movement,
+                    visible_annotations,
+                    source_artifact=logical_name,
+                )
+                loaded_individuals = sorted({
+                    str(fix.get("individual") or "")
+                    for fix in movement.get("fixes") or []
+                    if str(fix.get("individual") or "")
+                })
+                payload = await run_in_threadpool(
+                    build_csv_binary_columns,
+                    movement,
+                    source_signature=source_signature,
+                    logical_name=logical_name,
+                    all_individuals=loaded_individuals,
+                )
             return StreamingResponse(
                 iter((payload,)),
                 media_type="application/vnd.vibecleaning.movement-columns",
                 headers={
                     "Content-Length": str(len(payload)),
-                    "X-Movement-Source-Signature": bundle.signature,
+                    "X-Movement-Source-Signature": source_signature,
                 },
             )
         except ReviewForbiddenError as exc:
