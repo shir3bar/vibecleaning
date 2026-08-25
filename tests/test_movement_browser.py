@@ -519,6 +519,40 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         assert scope_view_after["zoom"] == pytest.approx(scope_view_before["zoom"])
         page.locator('button[data-queue-scope="group"]').click()
 
+        active_card = page.locator('[data-queue-individual="alpha"]')
+        burst_visibility = active_card.locator(
+            "input[data-queue-burst-visible]"
+        ).first
+        burst_visibility.wait_for(state="visible", timeout=20_000)
+        page.evaluate("""() => {
+          window.__queueBurstControls = document.querySelector(
+            '[data-queue-individual="alpha"] [data-queue-burst-controls]'
+          );
+          window.__queueBurstVisibility = window.__queueBurstControls.querySelector(
+            'input[data-queue-burst-visible]'
+          );
+          window.__queueBurstFlag = window.__queueBurstControls.querySelector(
+            'input[data-queue-flag-burst]'
+          );
+        }""")
+        burst_visibility.uncheck()
+        burst_visibility.check()
+        burst_flag = active_card.locator("input[data-queue-flag-burst]").first
+        burst_flag.check()
+        burst_flag.uncheck()
+        assert page.evaluate("""() => (
+          window.__queueBurstControls === document.querySelector(
+            '[data-queue-individual="alpha"] [data-queue-burst-controls]'
+          )
+          && window.__queueBurstVisibility === document.querySelector(
+            '[data-queue-individual="alpha"] input[data-queue-burst-visible]'
+          )
+          && window.__queueBurstFlag === document.querySelector(
+            '[data-queue-individual="alpha"] input[data-queue-flag-burst]'
+          )
+          && window.__queueMapCanvas === document.querySelector('[data-role=map] canvas')
+        )""")
+
         page.locator(
             'button[data-review-decision="ok"][data-individual="alpha"]'
         ).click()

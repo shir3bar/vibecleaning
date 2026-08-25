@@ -2866,6 +2866,11 @@ def test_burst_visibility_defaults_on_and_stays_independent_from_flag_selection(
     assert "movement-binary-manual-flag-outline-" in source
     assert "zoomToPath" not in flag_method
     assert "zoomToPath" not in visibility_method
+    assert "this.renderIndividuals();" not in flag_method
+    assert "this.renderIndividuals();" not in visibility_method
+    assert "this.renderTableSheet();" not in visibility_method
+    assert "this.syncBurstControlUi(burst.individual);" in flag_method
+    assert "this.syncBurstControlUi(burst.individual);" in visibility_method
     assert 'event.target.closest("button, input, label, select, textarea, [data-queue-burst-controls]")' in source
     assert "|| individual === this.individualReviewQueue.activeIndividual" in source
     assert "updateTime: false" in ranking_handler

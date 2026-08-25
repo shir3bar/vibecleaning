@@ -8433,6 +8433,62 @@ class MovementExampleApp {
       ));
   }
 
+  queueFlagTargetSummaryText() {
+    if (this.flagTargetKind === "individual") {
+      return "Entire individual selected";
+    }
+    if (this.flagTargetKind === "bursts" && this.manualFlagTarget.burstIds.size) {
+      return `${formatCount(this.manualFlagTarget.burstIds.size)} burst(s) selected`;
+    }
+    if (this.flagTargetKind === "segment") {
+      return "Track section selected";
+    }
+    if (this.flagTargetKind === "fixes" && this.getSelectedFixes().length) {
+      return `${formatCount(this.getSelectedFixes().length)} fix(es) checked`;
+    }
+    return "Choose a target";
+  }
+
+  syncBurstControlUi(individual = "") {
+    if (!this.mountEl) return;
+    const selectedBurstIds = this.flagTargetKind === "bursts"
+      ? this.manualFlagTarget.burstIds
+      : new Set();
+    const cards = individual
+      ? this.refs.individuals.querySelectorAll(
+        `[data-queue-individual="${cssEscape(individual)}"]`,
+      )
+      : this.refs.individuals.querySelectorAll("[data-queue-individual]");
+    for (const card of cards) {
+      for (const input of card.querySelectorAll("input[data-queue-burst-visible]")) {
+        const burstId = String(input.dataset.queueBurstVisible || "");
+        const visible = !this.hiddenBurstIds.has(burstId);
+        input.checked = visible;
+        const controls = input.closest("[data-queue-burst-controls]");
+        controls?.classList.toggle("is-visible", visible);
+        controls?.classList.toggle("is-hidden", !visible);
+      }
+      for (const input of card.querySelectorAll("input[data-queue-flag-burst]")) {
+        const selected = selectedBurstIds.has(String(input.dataset.queueFlagBurst || ""));
+        input.checked = selected;
+        input.closest("[data-queue-burst-controls]")?.classList.toggle("is-selected", selected);
+      }
+      card.querySelector("[data-queue-flag-individual]")?.classList.toggle(
+        "is-active",
+        this.flagTargetKind === "individual"
+          && this.manualFlagTarget.individual === String(card.dataset.queueIndividual || ""),
+      );
+      const summary = card.querySelector(".movement-queue-flag-target-head span");
+      if (summary) summary.textContent = this.queueFlagTargetSummaryText();
+    }
+    for (const input of this.refs.tableWrap.querySelectorAll("input[data-table-burst-visible]")) {
+      input.checked = !this.hiddenBurstIds.has(String(input.dataset.tableBurstVisible || ""));
+    }
+    for (const input of this.refs.tableWrap.querySelectorAll("input[data-table-check-burst]")) {
+      input.checked = selectedBurstIds.has(String(input.dataset.tableCheckBurst || ""));
+    }
+  }
+
   selectEntireIndividualFlagTarget(individual) {
     individual = String(individual || "");
     if (!this.data?.individuals?.includes(individual)) return;
@@ -8478,7 +8534,7 @@ class MovementExampleApp {
       : "";
     if (activeQueueIndividual && burst.individual !== activeQueueIndividual) {
       this.setStatus("Choose bursts belonging to the active queue individual.", true);
-      this.renderIndividuals();
+      this.syncBurstControlUi(burst.individual);
       return;
     }
     if (replace || this.flagTargetKind !== "bursts") {
@@ -8500,9 +8556,7 @@ class MovementExampleApp {
     if (!this.manualFlagTarget.burstIds.size) {
       this.resetManualFlagTarget();
     }
-    if (this.individualReviewQueue.mode === "queue") {
-      this.renderIndividuals();
-    }
+    this.syncBurstControlUi(burst.individual);
     this.renderLayers();
     this.updateActionButtons();
     const count = this.manualFlagTarget.burstIds.size;
@@ -8519,6 +8573,7 @@ class MovementExampleApp {
       : "";
     if (activeQueueIndividual && burst.individual !== activeQueueIndividual) {
       this.setStatus("Change visibility only for bursts belonging to the active queue individual.", true);
+      this.syncBurstControlUi(burst.individual);
       return;
     }
     if (visible) {
@@ -8526,12 +8581,7 @@ class MovementExampleApp {
     } else {
       this.hiddenBurstIds.add(burst.burstId);
     }
-    if (this.individualReviewQueue.mode === "queue") {
-      this.renderIndividuals();
-    }
-    if (this.refs?.sideSheetTabs?.dataset.activeSheet === "table") {
-      this.renderTableSheet();
-    }
+    this.syncBurstControlUi(burst.individual);
     this.renderLayers();
     this.setStatus(
       visible
@@ -8573,15 +8623,7 @@ class MovementExampleApp {
     const selectedBurstIds = this.flagTargetKind === "bursts"
       ? this.manualFlagTarget.burstIds
       : new Set();
-    const currentTarget = entireSelected
-      ? "Entire individual selected"
-      : selectedBurstIds.size
-        ? `${formatCount(selectedBurstIds.size)} burst(s) selected`
-        : this.flagTargetKind === "segment"
-          ? "Track section selected"
-          : this.flagTargetKind === "fixes" && this.getSelectedFixes().length
-            ? `${formatCount(this.getSelectedFixes().length)} fix(es) checked`
-            : "Choose a target";
+    const currentTarget = this.queueFlagTargetSummaryText();
     return `
       <div class="movement-queue-flag-target">
         <div class="movement-queue-flag-target-head">
