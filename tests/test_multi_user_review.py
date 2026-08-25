@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import sys
+from unittest.mock import ANY
 
 import pytest
 from fastapi import FastAPI
@@ -24,7 +25,9 @@ from app import auth_cli
 from app.execution import create_step, undo_to_parent
 from app.reviews import (
     ReviewConflictError,
+    ReviewLockedError,
     assign_review,
+    authorize_persistent_change,
     finish_editor_control,
     review_coverage,
     review_profile,
@@ -244,6 +247,121 @@ def test_review_coverage_follows_dataset_update_and_undo(tmp_path):
         )
 
 
+def test_editor_can_be_assigned_as_review_owner_without_intervention_control(tmp_path):
+    project, baseline = _project(tmp_path)
+    editor, _ = _actors()
+    assignment = assign_review(
+        project,
+        editor=editor,
+        reviewer=editor,
+        expected_current_dataset_id=baseline,
+        expected_review_revision=0,
+        individuals=["alpha", "beta"],
+    )
+    review = assignment["review"]
+    assert review["reviewer_user_id"] == editor.user_id
+    assert review["reviewer"]["role"] == "editor"
+
+    profile = review_profile(project, editor, [])
+    assert profile["capabilities"]["can_review"] is True
+    assert profile["capabilities"]["can_intervene"] is False
+    assert profile["capabilities"]["can_update_dataset"] is False
+    assert authorize_persistent_change(
+        project,
+        editor,
+        expected_review_revision=assignment["state"]["revision"],
+        review_effect="annotation_only",
+    )["review_id"] == review["review_id"]
+    with pytest.raises(ReviewLockedError, match="Take editor control"):
+        authorize_persistent_change(
+            project,
+            editor,
+            expected_review_revision=assignment["state"]["revision"],
+            review_effect="changes_individual_scope",
+        )
+
+
+def test_assigned_editor_can_submit_review_decisions_without_taking_control(tmp_path):
+    data_root = tmp_path / "data"
+    study = data_root / "movement_raw" / "editor_assignment"
+    study.mkdir(parents=True)
+    (study / "movement.csv").write_text(
+        "eventid,individual,timestamp,longitude,latitude\n"
+        "a1,alpha,2024-01-01T00:00:00Z,-70,40\n"
+    )
+    manager = AuthManager(
+        [
+            build_user_record(
+                username="admin",
+                display_name="Admin Editor",
+                role="editor",
+                password="admin-password-long",
+                user_id="user_admin",
+            ),
+            build_user_record(
+                username="assigned-editor",
+                display_name="Assigned Editor",
+                role="editor",
+                password="assigned-editor-password-long",
+                user_id="user_assigned_editor",
+            ),
+        ]
+    )
+    static_root = Path(__file__).resolve().parents[1] / "examples" / "movement" / "static"
+    app = create_app(data_root=data_root, static_root=static_root, auth_manager=manager)
+    register_movement_routes(app, data_root=data_root, allowed_families={"movement_raw"})
+    admin_client = TestClient(app)
+    assignee_client = TestClient(app)
+    assert admin_client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "admin-password-long"},
+    ).status_code == 200
+    assert assignee_client.post(
+        "/api/auth/login",
+        json={
+            "username": "assigned-editor",
+            "password": "assigned-editor-password-long",
+        },
+    ).status_code == 200
+
+    loaded = admin_client.get(
+        "/api/apps/movement/family/movement_raw/study/editor_assignment/load"
+    ).json()
+    assigned = admin_client.post(
+        "/api/apps/movement/family/movement_raw/study/editor_assignment/review/assign",
+        json={
+            "reviewer_user_id": "user_assigned_editor",
+            "logical_name": "movement.csv",
+            "expected_current_dataset_id": loaded["dataset_id"],
+            "expected_review_revision": loaded["edit_profile"]["review_revision"],
+        },
+    )
+    assert assigned.status_code == 200, assigned.text
+    assignee_load = assignee_client.get(
+        "/api/apps/movement/family/movement_raw/study/editor_assignment/load"
+    ).json()
+    assert assignee_load["edit_profile"]["editable"] is True
+    assert assignee_load["edit_profile"]["capabilities"]["can_review"] is True
+    assert assignee_load["edit_profile"]["editor_control"] is None
+
+    decision = assignee_client.post(
+        "/api/apps/movement/family/movement_raw/study/editor_assignment/actions/review-individual",
+        json={
+            "dataset_id": assignee_load["dataset_id"],
+            "logical_name": "movement.csv",
+            "expected_current_dataset_id": assignee_load["dataset_id"],
+            "expected_review_revision": assignee_load["edit_profile"]["review_revision"],
+            "decision": {
+                "individual": "alpha",
+                "review_decision": "ok",
+                "needs_check": False,
+                "comment": "",
+            },
+        },
+    )
+    assert decision.status_code == 200, decision.text
+
+
 def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_path):
     data_root = tmp_path / "data"
     study = data_root / "movement_raw" / "study_one"
@@ -267,7 +385,14 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
         password="reviewer-password-long",
         user_id="user_reviewer",
     )
-    manager = AuthManager([editor_record, reviewer_record])
+    assignee_editor_record = build_user_record(
+        username="editor-reviewer",
+        display_name="Edda Editor Reviewer",
+        role="editor",
+        password="editor-reviewer-password-long",
+        user_id="user_editor_reviewer",
+    )
+    manager = AuthManager([editor_record, reviewer_record, assignee_editor_record])
     static_root = Path(__file__).resolve().parents[1] / "examples" / "movement" / "static"
     app = create_app(data_root=data_root, static_root=static_root, auth_manager=manager)
     register_movement_routes(app, data_root=data_root, allowed_families={"movement_raw"})
@@ -312,6 +437,16 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
     loaded = editor_client.get(
         "/api/apps/movement/family/movement_raw/study/study_one/load"
     ).json()
+    assignable_users = editor_client.get("/api/apps/movement/reviewers")
+    assert assignable_users.status_code == 200
+    assert {
+        (item["user_id"], item["role"])
+        for item in assignable_users.json()["reviewers"]
+    } == {
+        ("user_editor", "editor"),
+        ("user_editor_reviewer", "editor"),
+        ("user_reviewer", "reviewer"),
+    }
     profile = loaded["edit_profile"]
     assigned = editor_client.post(
         "/api/apps/movement/family/movement_raw/study/study_one/review/assign",
@@ -373,6 +508,43 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
     )
     assert first_result.status_code == 200, first_result.text
     first_output_id = first_result.json()["dataset"]["dataset_id"]
+    active_dashboard = editor_client.get("/api/apps/movement/admin/review-summary")
+    assert active_dashboard.status_code == 200
+    active_row = active_dashboard.json()["studies"][0]
+    assert active_row["review"]["status"] == "active"
+    assert active_row["current_dataset_id"] == first_output_id
+    assert active_row["counts"] == {
+        "required": 2,
+        "reviewed": 1,
+        "undecided": 1,
+        "ok": 1,
+        "fix_keep": 0,
+        "remove": 0,
+        "needs_check": 0,
+    }
+    active_dashboard_detail = editor_client.get(
+        "/api/apps/movement/admin/review-summary",
+        params={
+            "family": "movement_raw",
+            "study": "study_one",
+            "include_individuals": "true",
+        },
+    )
+    assert active_dashboard_detail.status_code == 200
+    assert active_dashboard_detail.json()["studies"][0]["individuals"] == [
+        {
+            "individual": "alpha",
+            "review_decision": "ok",
+            "needs_check": False,
+            "reviewed_at": ANY,
+        },
+        {
+            "individual": "beta",
+            "review_decision": "",
+            "needs_check": False,
+            "reviewed_at": "",
+        },
+    ]
     result = reviewer_client.post(
         "/api/apps/movement/family/movement_raw/study/study_one/actions/review-individual",
         json={

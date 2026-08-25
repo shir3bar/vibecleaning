@@ -2463,7 +2463,7 @@ def register_movement_routes(
         if actor is None or actor.role != "editor":
             return json_error("Only editors can list reviewers", 403)
         return JSONResponse(
-            {"reviewers": app.state.auth_manager.list_reviewers()},
+            {"reviewers": app.state.auth_manager.list_review_assignees()},
             headers={"Cache-Control": "no-store"},
         )
 

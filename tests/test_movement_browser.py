@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 import asyncio
+import json
 import shutil
 import socket
 import sys
@@ -666,6 +667,93 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         assert "unsaved" in page.locator(
             ".movement-card.queue-active .movement-review-state"
         ).text_content()
+        browser.close()
+
+
+def test_admin_dashboard_refreshes_active_review_without_rebuilding_rows(tmp_path):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    study_dir = tmp_path / "data" / "movement_clean" / "dashboard_live"
+    study_dir.mkdir(parents=True)
+    (study_dir / "movement.csv").write_text(CSV_BROWSER_FIXTURE, encoding="utf-8")
+    app = create_app(
+        data_root=tmp_path / "data",
+        static_root=STATIC_ROOT,
+        index_path=INDEX_PATH,
+        auth_manager=_auth_manager(),
+    )
+    register_movement_routes(
+        app,
+        data_root=tmp_path / "data",
+        overview_fix_limit=1,
+        overview_series_points=250,
+    )
+
+    summaries = [
+        {
+            "studies": [{
+                "family": "movement_clean",
+                "study": "dashboard_live",
+                "current_dataset_id": "dataset_one",
+                "review": {
+                    "review_id": "review_live",
+                    "status": "active",
+                    "reviewer": {"display_name": "Working Reviewer"},
+                },
+                "counts": {
+                    "required": 3, "reviewed": 0, "undecided": 3,
+                    "ok": 0, "fix_keep": 0, "remove": 0, "needs_check": 0,
+                },
+            }],
+        },
+        {
+            "studies": [{
+                "family": "movement_clean",
+                "study": "dashboard_live",
+                "current_dataset_id": "dataset_two",
+                "review": {
+                    "review_id": "review_live",
+                    "status": "active",
+                    "reviewer": {"display_name": "Working Reviewer"},
+                },
+                "counts": {
+                    "required": 3, "reviewed": 1, "undecided": 2,
+                    "ok": 1, "fix_keep": 0, "remove": 0, "needs_check": 0,
+                },
+            }],
+        },
+    ]
+    request_count = 0
+
+    def dashboard_route(route):
+        nonlocal request_count
+        payload = summaries[min(request_count, len(summaries) - 1)]
+        request_count += 1
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(payload))
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.route("**/api/apps/movement/admin/review-summary", dashboard_route)
+        _login_and_wait(page, base_url, "dashboard_live")
+        page.locator('[data-role="admin-dashboard"]').click()
+        progress = page.locator('[data-admin-field="progress"]')
+        progress.wait_for(state="visible", timeout=20_000)
+        assert progress.text_content() == "0/3"
+        page.evaluate("""() => {
+          window.__adminDashboardRow = document.querySelector('tr[data-admin-study-row]');
+        }""")
+
+        page.locator('[data-role="admin-dashboard-refresh"]').click()
+        page.wait_for_function(
+            """() => document.querySelector('[data-admin-field="progress"]')?.textContent === '1/3'""",
+            timeout=20_000,
+        )
+        assert page.locator('[data-admin-field="review"]').text_content() == "active"
+        assert page.locator('[data-admin-field="ok"]').text_content() == "1"
+        assert page.evaluate("""() => (
+          window.__adminDashboardRow === document.querySelector('tr[data-admin-study-row]')
+        )""")
+        assert request_count >= 2
         browser.close()
 
 

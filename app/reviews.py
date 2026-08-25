@@ -194,8 +194,8 @@ def assign_review(
 ) -> dict:
     if editor.role != "editor":
         raise ReviewForbiddenError("Only editors can assign reviews")
-    if reviewer.role != "reviewer":
-        raise ReviewStateError("Reviews must be assigned to a reviewer")
+    if reviewer.role not in {"reviewer", "editor"}:
+        raise ReviewStateError("Reviews must be assigned to a reviewer or editor")
     required = sorted({str(item).strip() for item in individuals if str(item).strip()})
     if not required:
         raise ReviewStateError("The study has no individuals to review")
@@ -628,7 +628,10 @@ def authorize_persistent_change(
     _check_expected_revision(state, expected_review_revision)
     review = active_review(state)
     control = state.get("editor_control")
+    assigned = bool(review and str(review.get("reviewer_user_id") or "") == actor.user_id)
     if actor.role == "editor":
+        if review is not None and assigned and review_effect != "changes_individual_scope" and not control:
+            return review
         if review is not None and (not control or control.get("owner_user_id") != actor.user_id):
             raise ReviewLockedError(
                 "Take editor control before changing an active review",
@@ -655,7 +658,7 @@ def review_profile(project_dir: Path, actor: Actor, annotations: Iterable[dict] 
     control = state.get("editor_control")
     editor_owns_control = bool(control and control.get("owner_user_id") == actor.user_id)
     can_review = (
-        (actor.role == "reviewer" and assigned and not control)
+        (assigned and not control)
         or (actor.role == "editor" and (review is None or editor_owns_control))
     )
     coverage = review_coverage(project_dir, review, annotation_list) if review else None
@@ -681,7 +684,7 @@ def review_profile(project_dir: Path, actor: Actor, annotations: Iterable[dict] 
             "can_analyze": actor.role == "editor" or (assigned and not control),
             "can_complete": bool(review and coverage and coverage["complete_allowed"] and (assigned or actor.role == "editor")),
             "can_manage_assignment": actor.role == "editor",
-            "can_intervene": actor.role == "editor" and review is not None,
+            "can_intervene": actor.role == "editor" and review is not None and not assigned,
             "can_update_dataset": actor.role == "editor" and (review is None or editor_owns_control),
             "can_undo": can_review,
         },

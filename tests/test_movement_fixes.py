@@ -2949,7 +2949,19 @@ def test_movement_frontend_has_lazy_editor_review_dashboard():
     assert 'include_individuals: "true"' in source
     assert "openAdminDashboard()" in source
     assert "handleAdminDashboardClick(event)" in source
-    assert "setInterval" not in source[source.index("  async openAdminDashboard() {"):source.index("  async assignCurrentReview() {")]
+    dashboard = source[
+        source.index("  async openAdminDashboard() {"):
+        source.index("  async assignCurrentReview() {")
+    ]
+    assert "ADMIN_DASHBOARD_REFRESH_MS" in dashboard
+    assert "scheduleAdminDashboardRefresh()" in dashboard
+    assert "refreshExpandedAdminDashboardDetails()" in dashboard
+    assert "updateAdminDashboardRow(row, item)" in dashboard
+    assert "arraysEqual(existingKeys, nextKeys)" in dashboard
+    assert 'data-role="admin-dashboard-refresh"' in source
+    assert "setInterval" not in dashboard
+    assert "reviewer or editor" in source
+    assert "item.role" in source
 
 
 def test_movement_individual_queue_explains_burst_ranking_availability():

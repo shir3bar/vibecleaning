@@ -20,6 +20,7 @@ const MOVEMENT_APP_CONFIG = Object.freeze({
   osmDerivedFeatures: MOVEMENT_APP_MODE === "movement",
   rdsSource: MOVEMENT_APP_MODE === "rds_movement",
 });
+const ADMIN_DASHBOARD_REFRESH_MS = 5000;
 const OSM_INTERACTION = (MOVEMENT_APP_MODE === "movement" || MOVEMENT_APP_MODE === "rds_movement")
   ? await import("/static/osm_layer.js")
   : null;
@@ -597,6 +598,8 @@ class MovementExampleApp {
     this.studyEvents = null;
     this.studyEventsKey = "";
     this.editorReleaseDatasetId = "";
+    this.adminDashboardRefreshTimer = null;
+    this.adminDashboardRefreshInFlight = false;
     this.focusedRankingBurst = null;
     this.tableSelection = {
       anchorFixKey: "",
@@ -3713,7 +3716,10 @@ class MovementExampleApp {
         <div class="movement-modal-card movement-admin-dashboard-card">
           <div class="movement-modal-head">
             <h3>Review dashboard</h3>
-            <button type="button" data-role="admin-dashboard-close">Close</button>
+            <div class="movement-admin-dashboard-actions">
+              <button type="button" data-role="admin-dashboard-refresh">Refresh</button>
+              <button type="button" data-role="admin-dashboard-close">Close</button>
+            </div>
           </div>
           <div class="movement-modal-body">
             <div class="movement-modal-status" data-role="admin-dashboard-status"></div>
@@ -3855,6 +3861,7 @@ class MovementExampleApp {
       issueModal: this.mountEl.querySelector('[data-role="issue-modal"]'),
       adminDashboardModal: this.mountEl.querySelector('[data-role="admin-dashboard-modal"]'),
       adminDashboardClose: this.mountEl.querySelector('[data-role="admin-dashboard-close"]'),
+      adminDashboardRefresh: this.mountEl.querySelector('[data-role="admin-dashboard-refresh"]'),
       adminDashboardStatus: this.mountEl.querySelector('[data-role="admin-dashboard-status"]'),
       adminDashboardContent: this.mountEl.querySelector('[data-role="admin-dashboard-content"]'),
       issueTitle: this.mountEl.querySelector('[data-role="issue-title"]'),
@@ -4007,8 +4014,12 @@ class MovementExampleApp {
       void this.loadReleasedEditorChanges();
     });
     this.refs.adminDashboard?.addEventListener("click", () => void this.openAdminDashboard());
-    this.refs.adminDashboardClose?.addEventListener("click", () => {
-      this.refs.adminDashboardModal.classList.add("hidden");
+    this.refs.adminDashboardClose?.addEventListener("click", () => this.closeAdminDashboard());
+    this.refs.adminDashboardRefresh?.addEventListener("click", () => {
+      void this.refreshAdminDashboard({ showLoading: true });
+    });
+    this.refs.adminDashboardModal?.addEventListener("click", event => {
+      if (event.target === this.refs.adminDashboardModal) this.closeAdminDashboard();
     });
     this.refs.adminDashboardContent?.addEventListener("click", event => {
       void this.handleAdminDashboardClick(event);
@@ -7117,7 +7128,12 @@ class MovementExampleApp {
       this.refs.cancelReview.hidden = !(actor.role === "editor" && review);
     }
     if (this.refs.editorControlStart) {
-      this.refs.editorControlStart.hidden = !(actor.role === "editor" && review && control?.owner_user_id !== actor.user_id);
+      this.refs.editorControlStart.hidden = !(
+        actor.role === "editor"
+        && review
+        && control?.owner_user_id !== actor.user_id
+        && (capabilities.can_intervene || Boolean(control))
+      );
       this.refs.editorControlStart.textContent = control ? "Take over editor control" : "Start editor control";
     }
     if (this.refs.editorControlFinish) {
@@ -7128,26 +7144,106 @@ class MovementExampleApp {
   async openAdminDashboard() {
     if (!this.refs.adminDashboardModal) return;
     this.refs.adminDashboardModal.classList.remove("hidden");
-    this.refs.adminDashboardStatus.textContent = "Loading study review summaries...";
+    await this.refreshAdminDashboard({ showLoading: true });
+  }
+
+  closeAdminDashboard() {
+    this.refs.adminDashboardModal?.classList.add("hidden");
+    if (this.adminDashboardRefreshTimer !== null) {
+      window.clearTimeout(this.adminDashboardRefreshTimer);
+      this.adminDashboardRefreshTimer = null;
+    }
+  }
+
+  scheduleAdminDashboardRefresh() {
+    if (this.adminDashboardRefreshTimer !== null) {
+      window.clearTimeout(this.adminDashboardRefreshTimer);
+    }
+    this.adminDashboardRefreshTimer = null;
+    if (this.refs.adminDashboardModal?.classList.contains("hidden")) return;
+    this.adminDashboardRefreshTimer = window.setTimeout(() => {
+      this.adminDashboardRefreshTimer = null;
+      void this.refreshAdminDashboard();
+    }, ADMIN_DASHBOARD_REFRESH_MS);
+  }
+
+  async refreshAdminDashboard({ showLoading = false } = {}) {
+    if (!this.refs.adminDashboardModal || this.adminDashboardRefreshInFlight) return;
+    if (this.adminDashboardRefreshTimer !== null) {
+      window.clearTimeout(this.adminDashboardRefreshTimer);
+      this.adminDashboardRefreshTimer = null;
+    }
+    this.adminDashboardRefreshInFlight = true;
+    if (this.refs.adminDashboardRefresh) this.refs.adminDashboardRefresh.disabled = true;
+    if (showLoading) {
+      this.refs.adminDashboardStatus.textContent = "Loading study review summaries...";
+    }
     this.refs.adminDashboardStatus.classList.remove("error");
-    this.refs.adminDashboardContent.innerHTML = "";
     try {
       const payload = await this.fetchJSON(
         "/api/apps/movement/admin/review-summary",
         { cache: "no-store" },
       );
       this.renderAdminDashboard(payload);
-      this.refs.adminDashboardStatus.textContent = "";
+      await this.refreshExpandedAdminDashboardDetails();
+      this.refs.adminDashboardStatus.textContent = (
+        `Live dashboard · updated ${new Date().toLocaleTimeString()}`
+      );
     } catch (error) {
       this.refs.adminDashboardStatus.textContent = `Could not load review dashboard: ${error.message}`;
       this.refs.adminDashboardStatus.classList.add("error");
+    } finally {
+      this.adminDashboardRefreshInFlight = false;
+      if (this.refs.adminDashboardRefresh) this.refs.adminDashboardRefresh.disabled = false;
+      this.scheduleAdminDashboardRefresh();
     }
+  }
+
+  updateAdminDashboardRow(row, item) {
+    const counts = item.counts || {};
+    const review = item.review || {};
+    const reviewer = review.reviewer?.display_name || review.reviewer?.username || "—";
+    const values = {
+      review: review.status || "Not reviewed",
+      reviewer,
+      progress: `${formatCount(counts.reviewed || 0)}/${formatCount(counts.required || 0)}`,
+      ok: formatCount(counts.ok || 0),
+      fix_keep: formatCount(counts.fix_keep || 0),
+      remove: formatCount(counts.remove || 0),
+      needs_check: formatCount(counts.needs_check || 0),
+      undecided: formatCount(counts.undecided || 0),
+    };
+    for (const [field, value] of Object.entries(values)) {
+      const cell = row.querySelector(`[data-admin-field="${field}"]`);
+      if (cell) cell.textContent = value;
+    }
+    row.dataset.reviewId = String(review.review_id || "");
+    row.dataset.currentDatasetId = String(item.current_dataset_id || "");
   }
 
   renderAdminDashboard(payload) {
     const studies = Array.isArray(payload?.studies) ? payload.studies : [];
     if (!studies.length) {
       this.refs.adminDashboardContent.innerHTML = '<div class="movement-empty">No movement studies are available.</div>';
+      return;
+    }
+    const studyKey = item => `${String(item.family || "")}\u0000${String(item.study || "")}`;
+    const existingRows = [...this.refs.adminDashboardContent.querySelectorAll("tr[data-admin-study-row]")];
+    const existingKeys = existingRows.map(row => (
+      `${String(row.dataset.family || "")}\u0000${String(row.dataset.study || "")}`
+    ));
+    const nextKeys = studies.map(studyKey);
+    if (arraysEqual(existingKeys, nextKeys)) {
+      for (let index = 0; index < studies.length; index += 1) {
+        const row = existingRows[index];
+        const detailRow = row.nextElementSibling;
+        const previousIdentity = `${row.dataset.reviewId || ""}\u0000${row.dataset.currentDatasetId || ""}`;
+        this.updateAdminDashboardRow(row, studies[index]);
+        const nextIdentity = `${row.dataset.reviewId || ""}\u0000${row.dataset.currentDatasetId || ""}`;
+        if (detailRow?.matches?.("tr[data-admin-detail-row]") && previousIdentity !== nextIdentity) {
+          detailRow.dataset.loaded = "false";
+        }
+      }
       return;
     }
     this.refs.adminDashboardContent.innerHTML = `
@@ -7164,14 +7260,14 @@ class MovementExampleApp {
             return `
               <tr data-admin-study-row data-family="${escapeHtml(item.family || "")}" data-study="${escapeHtml(item.study || "")}">
                 <td><strong>${escapeHtml(item.study || "")}</strong><br>${escapeHtml(item.family || "")}</td>
-                <td>${escapeHtml(review.status || "Not reviewed")}</td>
-                <td>${escapeHtml(reviewer)}</td>
-                <td>${escapeHtml(formatCount(counts.reviewed || 0))}/${escapeHtml(formatCount(counts.required || 0))}</td>
-                <td>${escapeHtml(formatCount(counts.ok || 0))}</td>
-                <td>${escapeHtml(formatCount(counts.fix_keep || 0))}</td>
-                <td>${escapeHtml(formatCount(counts.remove || 0))}</td>
-                <td>${escapeHtml(formatCount(counts.needs_check || 0))}</td>
-                <td>${escapeHtml(formatCount(counts.undecided || 0))}</td>
+                <td data-admin-field="review">${escapeHtml(review.status || "Not reviewed")}</td>
+                <td data-admin-field="reviewer">${escapeHtml(reviewer)}</td>
+                <td data-admin-field="progress">${escapeHtml(formatCount(counts.reviewed || 0))}/${escapeHtml(formatCount(counts.required || 0))}</td>
+                <td data-admin-field="ok">${escapeHtml(formatCount(counts.ok || 0))}</td>
+                <td data-admin-field="fix_keep">${escapeHtml(formatCount(counts.fix_keep || 0))}</td>
+                <td data-admin-field="remove">${escapeHtml(formatCount(counts.remove || 0))}</td>
+                <td data-admin-field="needs_check">${escapeHtml(formatCount(counts.needs_check || 0))}</td>
+                <td data-admin-field="undecided">${escapeHtml(formatCount(counts.undecided || 0))}</td>
                 <td><div class="movement-admin-dashboard-actions">
                   <button type="button" data-admin-action="expand">Individuals</button>
                   <button type="button" data-admin-action="open">Open study</button>
@@ -7185,6 +7281,10 @@ class MovementExampleApp {
         </tbody>
       </table>
     `;
+    const rows = [...this.refs.adminDashboardContent.querySelectorAll("tr[data-admin-study-row]")];
+    for (let index = 0; index < rows.length; index += 1) {
+      this.updateAdminDashboardRow(rows[index], studies[index]);
+    }
   }
 
   async handleAdminDashboardClick(event) {
@@ -7196,7 +7296,7 @@ class MovementExampleApp {
     if (!family || !study) return;
     if (button.dataset.adminAction === "open") {
       if (!this.confirmDiscardIndividualReviewDrafts()) return;
-      this.refs.adminDashboardModal.classList.add("hidden");
+      this.closeAdminDashboard();
       if (family !== this.currentFamily) {
         await this.switchFamily(family);
       }
@@ -7218,7 +7318,13 @@ class MovementExampleApp {
       return;
     }
     detailRow.hidden = false;
-    button.disabled = true;
+    await this.loadAdminDashboardDetails(family, study, detailRow, button);
+  }
+
+  async loadAdminDashboardDetails(family, study, detailRow, button = null) {
+    if (!detailRow || detailRow.dataset.loading === "true") return;
+    detailRow.dataset.loading = "true";
+    if (button) button.disabled = true;
     try {
       const query = new URLSearchParams({
         family,
@@ -7239,25 +7345,43 @@ class MovementExampleApp {
     } catch (error) {
       detailRow.querySelector(".movement-admin-individuals").textContent = `Could not load individuals: ${error.message}`;
     } finally {
-      button.disabled = false;
+      detailRow.dataset.loading = "false";
+      if (button) button.disabled = false;
     }
+  }
+
+  async refreshExpandedAdminDashboardDetails() {
+    const rows = [...this.refs.adminDashboardContent.querySelectorAll(
+      "tr[data-admin-detail-row]:not([hidden])",
+    )];
+    await Promise.all(rows.map(row => this.loadAdminDashboardDetails(
+      String(row.dataset.family || ""),
+      String(row.dataset.study || ""),
+      row,
+      row.previousElementSibling?.querySelector?.('button[data-admin-action="expand"]') || null,
+    )));
   }
 
   async assignCurrentReview() {
     if (!this.currentStudy) return;
     try {
       const payload = await this.fetchJSON("/api/apps/movement/reviewers", { cache: "no-store" });
-      const reviewers = Array.isArray(payload.reviewers) ? payload.reviewers : [];
-      if (!reviewers.length) {
-        this.setStatus("No enabled reviewer accounts are available.", true);
+      const assignees = Array.isArray(payload.reviewers) ? payload.reviewers : [];
+      if (!assignees.length) {
+        this.setStatus("No enabled reviewer or editor accounts are available.", true);
         return;
       }
-      const menu = reviewers.map(item => `${item.username} — ${item.display_name}`).join("\n");
-      const username = window.prompt(`Assign this review to which username?\n\n${menu}`, reviewers[0].username);
+      const menu = assignees
+        .map(item => `${item.username} — ${item.display_name} (${item.role})`)
+        .join("\n");
+      const username = window.prompt(
+        `Assign this review to which reviewer or editor?\n\n${menu}`,
+        assignees[0].username,
+      );
       if (username === null) return;
-      const reviewer = reviewers.find(item => item.username.toLowerCase() === username.trim().toLowerCase());
+      const reviewer = assignees.find(item => item.username.toLowerCase() === username.trim().toLowerCase());
       if (!reviewer) {
-        this.setStatus("That reviewer username is not available.", true);
+        this.setStatus("That reviewer or editor username is not available.", true);
         return;
       }
       await this.requestJSON(this.reviewActionUrl("review/assign"), {

@@ -265,6 +265,13 @@ class AuthManager:
             if user["enabled"] and user["role"] == "reviewer"
         ]
 
+    def list_review_assignees(self) -> list[dict[str, str]]:
+        return [
+            self.actor_for_user(user).as_dict()
+            for user in sorted(self._users_by_id.values(), key=lambda item: item["display_name"].lower())
+            if user["enabled"] and user["role"] in {"reviewer", "editor"}
+        ]
+
     def create_session(self, actor: Actor) -> tuple[str, float]:
         token = secrets.token_urlsafe(32)
         expires_at = time() + SESSION_SECONDS
