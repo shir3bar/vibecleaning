@@ -588,6 +588,20 @@ def _validate_status(value: object) -> str:
 def _validate_filter_scope(value: object) -> dict:
     if not isinstance(value, dict):
         raise ValueError("Filter definition is required")
+    raw_individuals = value.get("individuals", [])
+    if not isinstance(raw_individuals, list):
+        raise ValueError("Filter individuals must be a list")
+    individuals = list(
+        dict.fromkeys(_normalize_individual_name(item) for item in raw_individuals)
+    )
+    raw_set_names = value.get("set_names", [])
+    if not isinstance(raw_set_names, list):
+        raise ValueError("Filter track sets must be a list")
+    set_names = list(
+        dict.fromkeys(str(item or "").strip().lower() for item in raw_set_names)
+    )
+    if any(item not in {"train", "test"} for item in set_names):
+        raise ValueError("Filter track sets must contain train or test")
     filter_kind = str(value.get("kind") or "").strip().lower()
     if filter_kind == "gps_spike":
         try:
@@ -599,26 +613,6 @@ def _validate_filter_scope(value: object) -> dict:
             raise ValueError("GPS spike step threshold must be positive")
         if not isfinite(turn_threshold) or not 0.0 <= turn_threshold <= 180.0:
             raise ValueError("GPS spike turn threshold must be between 0 and 180 degrees")
-        raw_individuals = value.get("individuals")
-        if not isinstance(raw_individuals, list):
-            raise ValueError("GPS spike individuals must be a list")
-        individuals = list(
-            dict.fromkeys(
-                _normalize_individual_name(item) for item in raw_individuals
-            )
-        )
-        if not individuals:
-            raise ValueError("Choose at least one individual for GPS spike flagging")
-        raw_set_names = value.get("set_names")
-        if not isinstance(raw_set_names, list):
-            raise ValueError("GPS spike track sets must be a list")
-        set_names = list(
-            dict.fromkeys(
-                str(item or "").strip().lower() for item in raw_set_names
-            )
-        )
-        if not set_names or any(item not in {"train", "test"} for item in set_names):
-            raise ValueError("GPS spike track sets must contain train or test")
         return {
             "kind": "gps_spike",
             "step_length_threshold_m": step_threshold,
@@ -637,6 +631,8 @@ def _validate_filter_scope(value: object) -> dict:
     result: dict[str, object] = {
         "field_key": field_key,
         "field_kind": field_kind,
+        "individuals": individuals,
+        "set_names": set_names,
     }
     if field_kind == "numeric":
         raw_threshold = value.get("threshold_value")

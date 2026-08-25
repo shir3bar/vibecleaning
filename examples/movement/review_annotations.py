@@ -372,7 +372,10 @@ def _resolve_gps_spike_row_ranges(
                 continue
             individual = valid["individual"]
             set_name = valid["set_name"]
-            if individual not in selected_individuals or set_name not in selected_set_names:
+            if (
+                (selected_individuals and individual not in selected_individuals)
+                or (selected_set_names and set_name not in selected_set_names)
+            ):
                 continue
             fix_key = _make_fix_key(
                 row_index,

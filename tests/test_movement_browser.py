@@ -226,7 +226,11 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
         pytest.skip("RDS movement browser fixtures are unavailable")
     study_dir = tmp_path / "data" / "movement_rds" / "268904527"
     study_dir.mkdir(parents=True)
-    for sample in samples[:2]:
+    outlier_sample = RDS_SAMPLE_ROOT / "268904527_269302895.rds"
+    selected_samples = [*samples[:2]]
+    if outlier_sample.exists() and outlier_sample not in selected_samples:
+        selected_samples.append(outlier_sample)
+    for sample in selected_samples:
         shutil.copy2(sample, study_dir / sample.name)
     app = create_rds_movement_app(
         data_root=tmp_path / "data",
@@ -290,5 +294,23 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
         first.check()
         _wait_for_layer(page, "movement-binary-paths-individual-")
         assert len(binary_requests) == 1
+
+        if outlier_sample.exists():
+            outlier_individual = page.locator('[data-individual-checkbox="MF006"]')
+            outlier_individual.check()
+            page.locator('[data-role="color-by"]').select_option("is_outlier")
+            true_level = page.locator(
+                'input[data-action="toggle-threshold-level"][data-level="True"]'
+            )
+            true_level.wait_for(state="attached", timeout=20_000)
+            true_level.check()
+            flag_button = page.locator('[data-role="mark-suspected"]')
+            assert flag_button.is_enabled()
+            assert "threshold matches" in flag_button.text_content()
+            page.locator('button[data-action="check-above-threshold"]').click()
+            assert flag_button.is_enabled()
+            assert "threshold matches" in flag_button.text_content()
+            assert "checked fixes" not in flag_button.text_content()
+
         page.evaluate("window.__movementMonitorActive = false")
         browser.close()

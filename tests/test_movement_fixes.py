@@ -1106,14 +1106,19 @@ def test_movement_frontend_uses_one_scope_aware_flag_action():
     assert "Flag entire individual" in source
     assert "selected burst(s)" in source
     assert "Flag selected segment" in source
-    assert "Flag threshold matches" in source
+    assert '"threshold "}matches for selected individuals' in source
     assert "Flag checked fixes" in source
     assert 'this.flagTargetKind = "filter";' in source
     check_start = source.index("  checkAboveThresholdSelection() {")
     check_end = source.index("\n  getFixesForIndividualsFrom(", check_start)
-    assert 'this.flagTargetKind = "fixes";' in source[check_start:check_end]
-    assert "The main flag action applies the selected-level filter directly." in source
-    assert "Add matches to checked fixes" in source
+    check_source = source[check_start:check_end]
+    assert 'this.flagTargetKind = "filter";' in check_source
+    assert 'this.flagTargetKind = "fixes";' not in check_source
+    assert '["individual", "bursts", "filter"].includes(flagTarget.kind)' in source
+    assert "Checking matches only changes the local checked-fix preview." in source
+    assert source.count(">Select fixes</button>") == 2
+    assert "Check visible sample" not in source
+    assert "Add preview matches" not in source
     assert 'selectionMethod: "map_double_click"' in source
     assert 'selectionMethod: "table_shift_click"' in source
     assert "selection_method: context.selectionMethod" in source
@@ -1575,6 +1580,55 @@ fix_3,beta,2024-01-01T02:00:00Z,-70.2,40.2,test,20
     assert annotation["issue_threshold"] == "> 5"
 
 
+def test_is_outlier_filter_keeps_selected_individual_scope(tmp_path):
+    csv_content = """eventid,individual,timestamp,longitude,latitude,set,is_outlier
+fix_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train,true
+fix_2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,test,false
+fix_3,beta,2024-01-01T02:00:00Z,-70.2,40.2,train,true
+"""
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=csv_content)
+    response = client.post(
+        "/api/apps/movement/family/movement_clean/study/test_study/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "expected_current_dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {
+                "kind": "filter",
+                "filter": {
+                    "field_key": "is_outlier",
+                    "field_kind": "boolean",
+                    "selected_levels": ["True"],
+                    "individuals": ["alpha"],
+                    "set_names": [],
+                },
+            },
+            "status": "suspected",
+            "origin": "threshold",
+            "issue_type": "source outlier",
+            "issue_field": "is_outlier",
+            "issue_threshold": "is True",
+            "comment": "Review all source outliers for selected animals",
+            "owner_question": "Is this source flag valid?",
+            "user": "reviewer",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["step"]["summary"]["resolved_fix_count"] == 1
+    persisted_filter = payload["step"]["parameters"]["scope"]["filter"]
+    assert persisted_filter["individuals"] == ["alpha"]
+    assert persisted_filter["set_names"] == []
+    _, sidecar_path = get_dataset_artifact(
+        tmp_path / "data" / "movement_clean" / "test_study",
+        payload["dataset"]["dataset_id"],
+        "movement_review_annotations.json",
+    )
+    annotation = json.loads(sidecar_path.read_text(encoding="utf-8"))["annotations"][0]
+    assert annotation["scope"]["row_ranges"] == [[1, 1]]
+
+
 def test_derived_threshold_filter_preserves_chronological_track_semantics(tmp_path):
     csv_path = tmp_path / "movement.csv"
     csv_path.write_text(
@@ -1788,16 +1842,21 @@ def test_gps_spike_color_mode_is_visual_until_explicit_flagging():
     assert 'data-action="set-gps-spike-turn-angle"' in source
     assert "Math.abs(item.turnAngle) >= this.gpsSpikeTurnAngleDeg" in source
     assert '? "step_length_m"' in source
-    assert "Flag ${formatCount(flagFixes.length)} GPS-spike matches" in source
+    assert 'flagTarget.filterKind === "gps_spike" ? "GPS-spike "' in source
     assert 'kind: "gps_spike"' in source
     assert 'selectionMethods: isGpsSpikeTarget ? ["color_threshold"] : null' in source
     assert "this.openIssueModal(\"suspected\", target);" in source
 
 
-def test_threshold_issue_ui_sends_a_full_dataset_filter_scope():
+def test_threshold_issue_ui_defaults_to_selected_individuals_with_whole_study_option():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     assert 'kind: "filter"' in source
-    assert '"all matching fixes in the full dataset"' in source
+    assert 'this.thresholdFlagScope = "selected_individuals"' in source
+    assert 'data-action="set-threshold-flag-scope"' in source
+    assert '>Whole study</option>' in source
+    assert 'individuals: thresholdScope.individuals' in source
+    assert 'set_names: thresholdScope.setNames' in source
+    assert '"all matching fixes in the whole study"' in source
 
 
 def test_movement_history_locks_undo_and_resume_across_persistent_routes(tmp_path):

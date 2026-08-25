@@ -556,6 +556,7 @@ class MovementExampleApp {
       histogramMin: null,
       histogramMax: null,
     };
+    this.thresholdFlagScope = "selected_individuals";
     this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
     this.anomalyRankings = new Map();
@@ -12282,6 +12283,16 @@ class MovementExampleApp {
     return new Set(visibleSets(this.refs.showTrain.checked, this.refs.showTest.checked));
   }
 
+  getThresholdFlagScope() {
+    const wholeStudy = this.thresholdFlagScope === "whole_study";
+    return {
+      kind: wholeStudy ? "whole_study" : "selected_individuals",
+      individuals: wholeStudy ? [] : this.getSelectedIndividuals(),
+      // Flagging a filter applies across every track set for the chosen individuals.
+      setNames: [],
+    };
+  }
+
   getCurrentColorField() {
     if (!this.data) {
       return null;
@@ -12708,6 +12719,17 @@ class MovementExampleApp {
     const histogramInputMin = finiteOrNull(context?.histogramInputMin);
     const histogramInputMax = finiteOrNull(context?.histogramInputMax);
     const gpsSpikeMode = context?.gpsSpikeMode === true;
+    const thresholdFlagScope = this.getThresholdFlagScope();
+    const selectedIndividualCount = this.getSelectedIndividuals().length;
+    const thresholdScopeControl = `
+      <label class="movement-threshold-range-label">
+        <span>Apply filter to</span>
+        <select data-action="set-threshold-flag-scope">
+          <option value="selected_individuals" ${thresholdFlagScope.kind === "selected_individuals" ? "selected" : ""}>Selected individuals (${escapeHtml(formatCount(selectedIndividualCount))})</option>
+          <option value="whole_study" ${thresholdFlagScope.kind === "whole_study" ? "selected" : ""}>Whole study</option>
+        </select>
+      </label>
+    `;
     const gpsSpikeControl = gpsSpikeMode
       ? `
         <label class="movement-threshold-range-label">
@@ -12779,14 +12801,14 @@ class MovementExampleApp {
             </label>
           `).join("")}
         </div>
-        <div class="movement-threshold-note">${escapeHtml(selectionNote)} The main flag action applies the selected-level filter directly.</div>
+        <div class="movement-threshold-note">${escapeHtml(selectionNote)} Checking matches only changes the local checked-fix preview. Flagging resolves the selected-level filter across the scope below.</div>
+        ${thresholdScopeControl}
         <div class="movement-threshold-actions">
           <button
             type="button"
-            class="movement-emphasis"
             data-action="check-above-threshold"
             ${uncheckedCount === 0 ? "disabled" : ""}
-          >${previewTruncated ? "Add preview matches" : "Add matches to checked fixes"}${uncheckedCount > 0 ? ` (${escapeHtml(formatCount(uncheckedCount))})` : ""}</button>
+          >Select fixes</button>
           <button
             type="button"
             data-action="clear-threshold"
@@ -12915,14 +12937,14 @@ class MovementExampleApp {
           >
           Reverse threshold: highlight values below the line
         </label>`}
-        <div class="movement-threshold-note">${escapeHtml(selectionNote)}${previewTruncated ? " The main flag action still applies the full threshold filter." : ""}</div>
+        <div class="movement-threshold-note">${escapeHtml(selectionNote)} Checking matches only changes the local checked-fix preview. Flagging resolves the full threshold filter across the scope below.</div>
+        ${thresholdScopeControl}
         <div class="movement-threshold-actions">
           <button
             type="button"
-            class="movement-emphasis"
             data-action="check-above-threshold"
             ${uncheckedCount === 0 ? "disabled" : ""}
-          >${previewTruncated ? "Add preview matches" : "Add matches to checked fixes"}${previewTruncated ? ` (${escapeHtml(formatCount(uncheckedCount))})` : ""}</button>
+          >Select fixes</button>
           <button
             type="button"
             data-action="clear-threshold"
@@ -13057,6 +13079,15 @@ class MovementExampleApp {
     if (!target) {
       return;
     }
+    const flagScopeInput = target.closest('select[data-action="set-threshold-flag-scope"]');
+    if (flagScopeInput) {
+      this.thresholdFlagScope = flagScopeInput.value === "whole_study"
+        ? "whole_study"
+        : "selected_individuals";
+      this.renderThresholdPane();
+      this.updateActionButtons();
+      return;
+    }
     const turnAngleInput = target.closest('input[data-action="set-gps-spike-turn-angle"]');
     if (turnAngleInput) {
       this.thresholdInputPendingBlur = false;
@@ -13187,7 +13218,10 @@ class MovementExampleApp {
       nextSelected.add(fixKey);
     }
     this.data.selectedFixKeys = nextSelected;
-    this.flagTargetKind = "fixes";
+    // Checked fixes are only a bounded local preview of the active threshold.
+    // Keep the persistent action attached to the filter so compact binary data
+    // can resolve every match in the chosen scope on the server.
+    this.flagTargetKind = "filter";
     this.renderSelectedFixes();
     this.renderThresholdPane();
     this.renderLayers();
@@ -14518,6 +14552,7 @@ class MovementExampleApp {
             : "threshold",
           fixes,
           matchCount: Number(thresholdContext?.matchCount) || matchKeys.size,
+          thresholdScope: this.getThresholdFlagScope().kind,
           ready: fixes.length > 0,
         };
       }
@@ -14564,7 +14599,7 @@ class MovementExampleApp {
     const canEditFlagTarget = (
       hasDetail
       || flagFixesAreLoadedSuspicious
-      || ["individual", "bursts"].includes(flagTarget.kind)
+      || ["individual", "bursts", "filter"].includes(flagTarget.kind)
     );
     const canConfirmSelectedFixes = this.canConfirmFixes(selectedFixes);
     const suspiciousLoading = this.data?.suspiciousState === "loading";
@@ -14614,9 +14649,9 @@ class MovementExampleApp {
         ? `Flag selected segment (${formatCount(flagFixes.length)} fixes)`
         : "Select segment end"
       : flagTarget.kind === "filter"
-        ? flagTarget.filterKind === "gps_spike"
-          ? `Flag ${formatCount(flagFixes.length)} GPS-spike matches`
-          : `Flag threshold matches (${formatCount(flagFixes.length)})`
+        ? flagTarget.thresholdScope === "whole_study"
+          ? `Flag all ${flagTarget.filterKind === "gps_spike" ? "GPS-spike " : "threshold "}matches in whole study`
+          : `Flag all ${formatCount(flagTarget.matchCount || flagFixes.length)} ${flagTarget.filterKind === "gps_spike" ? "GPS-spike " : "threshold "}matches for selected individuals`
         : flagTarget.kind === "fixes"
           ? `Flag checked fixes (${formatCount(flagFixes.length)})`
           : "Choose what to flag";
@@ -15594,6 +15629,7 @@ class MovementExampleApp {
       && Boolean(this.candidateQueryPreview?.analysisId)
       && selectedFixes.every(fix => candidateKeys.has(fix.fixKey));
     const origin = isFilterTarget ? "threshold" : (candidateGenerated ? "algorithm" : "manual");
+    const thresholdScope = this.getThresholdFlagScope();
     const queueReviewIndividual = (
       !isFilterTarget
       && this.individualReviewQueue.mode === "queue"
@@ -15607,8 +15643,8 @@ class MovementExampleApp {
           kind: "gps_spike",
           step_length_threshold_m: this.thresholdState.value,
           minimum_abs_turn_angle_deg: this.gpsSpikeTurnAngleDeg,
-          individuals: this.getSelectedIndividuals(),
-          set_names: [...this.getVisibleSetNames()],
+          individuals: thresholdScope.individuals,
+          set_names: thresholdScope.setNames,
         }
       : isFilterTarget
         ? {
@@ -15621,8 +15657,8 @@ class MovementExampleApp {
           selected_levels: Array.isArray(this.thresholdState.selectedLevels)
             ? [...this.thresholdState.selectedLevels]
             : [],
-          individuals: this.getSelectedIndividuals(),
-          set_names: [...this.getVisibleSetNames()],
+          individuals: thresholdScope.individuals,
+          set_names: thresholdScope.setNames,
         }
         : null;
     this.pendingIssueStatus = status;
@@ -15649,7 +15685,7 @@ class MovementExampleApp {
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
       <div><strong>${isFilterTarget ? "Visible preview matches" : "Checked fixes"}:</strong> ${escapeHtml(formatCount(isFilterTarget ? target?.matchCount || selectedFixes.length : selectedFixes.length))}</div>
-      <div><strong>Flag scope:</strong> ${isGpsSpikeTarget ? "all matching fixes in the visible individual and track scope" : isFilterTarget ? "all matching fixes in the full dataset" : "checked fixes"}</div>
+      <div><strong>Flag scope:</strong> ${isFilterTarget ? (thresholdScope.kind === "whole_study" ? "all matching fixes in the whole study" : `all matching fixes for ${formatCount(thresholdScope.individuals.length)} selected individual(s), across all track sets`) : "checked fixes"}</div>
       <div><strong>Issue variable:</strong> ${escapeHtml(isGpsSpikeTarget ? "Step length + absolute turn angle" : field?.label || "Not set")}</div>
       <div><strong>Issue threshold:</strong> ${escapeHtml(issueThreshold || "Not set")}</div>
       <div><strong>Origin:</strong> ${escapeHtml(origin)}</div>

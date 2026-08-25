@@ -166,7 +166,7 @@ def test_binary_color_changes_do_not_cache_stale_attributes_under_the_new_state(
     assert "field.key === GPS_SPIKE_COLOR_FIELD_KEY" in loader
     assert '? "step_length_m"' in loader
     assert "the checked-fix preview is limited" in source
-    assert "The main flag action still applies the full threshold filter." in source
+    assert "Flagging resolves the full threshold filter across the scope below." in source
 
 
 def test_rds_adapter_matches_existing_csv_movement_model(tmp_path):

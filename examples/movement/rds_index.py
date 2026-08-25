@@ -1429,19 +1429,20 @@ def resolve_rds_review_scope(index_path: Path, raw_scope: dict) -> tuple[dict, i
         }
         values: list[object] = []
         if filter_kind == "gps_spike":
-            individuals = [str(item) for item in spec.get("individuals") or []]
-            placeholders = ",".join("?" for _ in individuals)
-            where = (
-                f"i.identifier IN ({placeholders}) "
-                "AND f.step_length_m > ? AND abs(f.turn_angle_deg) >= ?"
-            )
-            values.extend(individuals)
+            where = "f.step_length_m > ? AND abs(f.turn_angle_deg) >= ?"
             values.extend(
                 (
                     float(spec["step_length_threshold_m"]),
                     float(spec["minimum_abs_turn_angle_deg"]),
                 )
             )
+            if scoped_individuals:
+                where += (
+                    " AND i.identifier IN ("
+                    + ",".join("?" for _ in scoped_individuals)
+                    + ")"
+                )
+                values.extend(scoped_individuals)
         else:
             field_key = str(spec.get("field_key") or "")
             column = field_columns.get(field_key)
