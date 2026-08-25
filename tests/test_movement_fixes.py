@@ -2751,7 +2751,7 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert "saveActiveIndividualReviewDecision()" in source
     assert "flushIndividualReviewDecisions()" not in source
     assert 'id: "movement-active-individual-outline"' not in source
-    assert "return 0.25;" in source
+    assert "return 0.10;" in source
     assert "this.queueMapColor(" in source
     assert "queueFlagTargetControlsHtml(individual)" in source
     assert 'data-queue-flag-individual' in source
@@ -4748,5 +4748,7 @@ def test_movement_frontend_refreshes_queue_dimming_when_active_individual_change
         source.index("  renderLayers({ temporalOnly = false } = {}) {")
     ]
     assert "movement-binary-paths-${suffix}" in retained_renderer
-    assert "const opacity = queueIndividual" in retained_renderer
+    assert "const opacity = this.queueMapOpacity(individual);" in retained_renderer
+    assert "getColor: item => this.queueMapColor(item.color, item.individual)" in renderer
+    assert "getColor: queueDimKey" in renderer
     assert "movement-bursts" in layer_ids

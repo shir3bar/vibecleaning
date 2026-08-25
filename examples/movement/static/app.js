@@ -512,6 +512,7 @@ class MovementExampleApp {
       lastPreviewActivationMs: null,
       lastExactActivationMs: null,
       renderedLayerIds: [],
+      mapView: null,
     };
     window.__movementDiagnostics = this.movementDiagnostics;
     this.lastThresholdMatchKeys = new Set();
@@ -6576,7 +6577,7 @@ class MovementExampleApp {
   queueMapOpacity(individual) {
     const activeIndividual = this.queueActiveIndividual();
     if (activeIndividual && individual && individual !== activeIndividual) {
-      return 0.25;
+      return 0.10;
     }
     return 1;
   }
@@ -8741,7 +8742,7 @@ class MovementExampleApp {
       return;
     }
     this.individualReviewQueue.mapScope = scope;
-    await this.applyIndividualQueueMapScope();
+    await this.applyIndividualQueueMapScope({ zoom: scope === "solo" });
   }
 
   zoomToIndividualQueueActive() {
@@ -8762,10 +8763,13 @@ class MovementExampleApp {
     this.zoomToPath(fallback);
   }
 
-  async focusIndividualQueueItem(individual, { zoom = true, saveBeforeChange = true } = {}) {
+  async focusIndividualQueueItem(individual, { zoom = null, saveBeforeChange = true } = {}) {
     if (!this.data || !individual) {
       return false;
     }
+    const shouldZoom = typeof zoom === "boolean"
+      ? zoom
+      : this.individualReviewQueue.mapScope === "solo";
     const previousIndividual = this.individualReviewQueue.activeIndividual;
     if (
       saveBeforeChange
@@ -8796,13 +8800,13 @@ class MovementExampleApp {
       this.individualReviewQueue.mapScope === "solo"
       || (this.individualReviewQueue.mapScope === "group" && previousGroup !== nextGroup)
     ) {
-      await this.applyIndividualQueueMapScope({ zoom });
+      await this.applyIndividualQueueMapScope({ zoom: shouldZoom });
       return true;
     }
     this.renderIndividuals();
     this.renderLayers();
     await this.loadDetailForCurrentSelection();
-    if (zoom) {
+    if (shouldZoom) {
       this.zoomToIndividualQueueActive();
     }
     return true;
@@ -10659,8 +10663,19 @@ class MovementExampleApp {
     this.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     this.map.addControl(new maplibregl.ScaleControl({ unit: "metric", maxWidth: 120 }), "top-right");
     this.map.doubleClickZoom?.disable?.();
+    const recordMapView = () => {
+      const currentCenter = this.map?.getCenter?.();
+      if (!currentCenter) return;
+      this.movementDiagnostics.mapView = {
+        center: [currentCenter.lng, currentCenter.lat],
+        zoom: this.map.getZoom(),
+      };
+    };
+    recordMapView();
+    this.map.on("moveend", recordMapView);
     this.map.on("load", () => {
       this.mapLoaded = true;
+      recordMapView();
       this.renderLayers();
       this.updateActionButtons();
     });
@@ -11276,7 +11291,7 @@ class MovementExampleApp {
       const [pointStart, pointEnd] = pointRange;
       const [lineStart, lineEnd] = lineRange;
       const suffix = fullLayer ? "full" : `individual-${Math.max(0, this.data.individuals.indexOf(individual))}`;
-      const opacity = queueIndividual && individual && individual !== queueIndividual ? 0.25 : 1;
+      const opacity = this.queueMapOpacity(individual);
       const deckData = this.retainedBinaryDeckData(
         binary,
         attributes,
@@ -11635,10 +11650,13 @@ class MovementExampleApp {
         data: previewTracks,
         dataComparator: sameArrayItems,
         getPath: item => item.path,
-        getColor: item => item.color,
+        getColor: item => this.queueMapColor(item.color, item.individual),
         getWidth: 2,
         widthMinPixels: 1,
         pickable: false,
+        updateTriggers: {
+          getColor: queueDimKey,
+        },
       }));
     }
     if (confirmedPointData.length) {

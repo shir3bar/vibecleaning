@@ -501,6 +501,10 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         page.locator(
             'button[data-review-decision="ok"][data-individual="alpha"]'
         ).click()
+        page.wait_for_function("() => window.__movementDiagnostics.mapView !== null")
+        group_view_before = page.evaluate(
+            "() => structuredClone(window.__movementDiagnostics.mapView)"
+        )
         page.locator(".movement-card .movement-title", has_text="beta").click()
         page.wait_for_function(
             """() => document.querySelector(
@@ -512,6 +516,11 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         alpha_card = page.locator(".movement-card", has_text="alpha")
         assert "OK" in alpha_card.locator(".movement-review-state").text_content()
         assert "unsaved" not in alpha_card.locator(".movement-review-state").text_content()
+        group_view_after = page.evaluate(
+            "() => structuredClone(window.__movementDiagnostics.mapView)"
+        )
+        assert group_view_after["center"] == pytest.approx(group_view_before["center"])
+        assert group_view_after["zoom"] == pytest.approx(group_view_before["zoom"])
         assert page.evaluate("""() => (
           window.__queueIndividualsNode === document.querySelector('[data-role=individuals]')
           && window.__queueAlphaCard === document.querySelector('[data-queue-individual="alpha"]')
