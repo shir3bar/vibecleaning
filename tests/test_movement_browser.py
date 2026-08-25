@@ -415,6 +415,12 @@ def test_queue_decision_reuses_inflight_exact_blocks_across_review_step(tmp_path
         initial_dataset_id = page.locator('[data-role="dataset"]').input_value()
 
         page.locator('[data-role="individual-view-queue"]').click()
+        page.evaluate("""() => {
+          window.__queueIndividualsNode = document.querySelector('[data-role=individuals]');
+          window.__queueAlphaCard = document.querySelector('[data-queue-individual="alpha"]');
+          window.__queueBetaCard = document.querySelector('[data-queue-individual="beta"]');
+          window.__queueMapCanvas = document.querySelector('[data-role=map] canvas');
+        }""")
         page.locator(
             'button[data-review-decision="ok"][data-individual="alpha"]'
         ).click()
@@ -440,6 +446,12 @@ def test_queue_decision_reuses_inflight_exact_blocks_across_review_step(tmp_path
         assert final_dataset_id != initial_dataset_id
         assert len(binary_requests) == 1
         assert f"/dataset/{initial_dataset_id}/" in binary_requests[0]
+        assert page.evaluate("""() => (
+          window.__queueIndividualsNode === document.querySelector('[data-role=individuals]')
+          && window.__queueAlphaCard === document.querySelector('[data-queue-individual="alpha"]')
+          && window.__queueBetaCard === document.querySelector('[data-queue-individual="beta"]')
+          && window.__queueMapCanvas === document.querySelector('[data-role=map] canvas')
+        )""")
         browser.close()
 
 
@@ -479,6 +491,12 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
             state="attached", timeout=20_000
         )
         page.locator('[data-role="individual-view-queue"]').click()
+        page.evaluate("""() => {
+          window.__queueIndividualsNode = document.querySelector('[data-role=individuals]');
+          window.__queueAlphaCard = document.querySelector('[data-queue-individual="alpha"]');
+          window.__queueBetaCard = document.querySelector('[data-queue-individual="beta"]');
+          window.__queueMapCanvas = document.querySelector('[data-role=map] canvas');
+        }""")
 
         page.locator(
             'button[data-review-decision="ok"][data-individual="alpha"]'
@@ -494,6 +512,12 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         alpha_card = page.locator(".movement-card", has_text="alpha")
         assert "OK" in alpha_card.locator(".movement-review-state").text_content()
         assert "unsaved" not in alpha_card.locator(".movement-review-state").text_content()
+        assert page.evaluate("""() => (
+          window.__queueIndividualsNode === document.querySelector('[data-role=individuals]')
+          && window.__queueAlphaCard === document.querySelector('[data-queue-individual="alpha"]')
+          && window.__queueBetaCard === document.querySelector('[data-queue-individual="beta"]')
+          && window.__queueMapCanvas === document.querySelector('[data-role=map] canvas')
+        )""")
 
         page.locator(
             'button[data-review-decision="fix_keep"][data-individual="beta"]'

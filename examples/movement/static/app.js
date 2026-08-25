@@ -9204,7 +9204,6 @@ class MovementExampleApp {
   }
 
   renderIndividuals() {
-    this.refs.individuals.innerHTML = "";
     this.refs.sideSheetIndividuals.classList.toggle(
       "queue-mode",
       this.individualReviewQueue.mode === "queue",
@@ -9233,12 +9232,14 @@ class MovementExampleApp {
         : "Resize individual and checked-fix lists",
     );
     if (!this.data) {
+      this.refs.individuals.innerHTML = "";
       return;
     }
     if (this.individualReviewQueue.mode === "queue") {
       this.renderIndividualReviewQueue();
       return;
     }
+    this.refs.individuals.innerHTML = "";
     const filteredIndividuals = this.getFilteredIndividuals();
     const totalIndividuals = this.data.individuals.length;
     this.refs.individualHead.textContent = filteredIndividuals.length === totalIndividuals
@@ -9440,6 +9441,11 @@ class MovementExampleApp {
       this.refs.individuals.innerHTML = '<div class="movement-empty">No individuals are available.</div>';
       return;
     }
+    const existingCards = new Map(
+      [...this.refs.individuals.querySelectorAll("[data-queue-individual]")]
+        .map(card => [String(card.dataset.queueIndividual || ""), card]),
+    );
+    const desiredCards = [];
     for (const individual of position.page) {
       const stats = this.data.stats[individual] || {};
       const reviewState = this.getIndividualReviewState(individual);
@@ -9448,7 +9454,12 @@ class MovementExampleApp {
       const comment = queue.commentDrafts.has(individual)
         ? queue.commentDrafts.get(individual)
         : reviewState.comment || "";
-      const card = document.createElement("div");
+      let card = existingCards.get(individual);
+      const isNewCard = !card;
+      if (!card) {
+        card = document.createElement("div");
+        card.dataset.queueIndividual = individual;
+      }
       const unresolvedCount = Number(stats.unresolvedSuspectedCount) || 0;
       const origins = Array.isArray(stats.unresolvedIssueOrigins) ? stats.unresolvedIssueOrigins : [];
       const priorDecision = String(reviewState.priorDecision?.review_decision || "");
@@ -9481,7 +9492,7 @@ class MovementExampleApp {
           + `score ${escapeHtml(formatMaybeNumber(rankingScore, ""))}</span>`
         )
         : "";
-      card.innerHTML = `
+      const cardMarkup = `
         <div class="movement-row">
           <div class="movement-row-left">
             <div class="movement-queue-title-line">
@@ -9539,16 +9550,35 @@ class MovementExampleApp {
           >
         ` : ""}
       `;
-      card.addEventListener("click", event => {
-        if (
-          event.target.closest("button, input, label, select, textarea, [data-queue-burst-controls]")
-          || individual === this.individualReviewQueue.activeIndividual
-        ) {
-          return;
-        }
-        void this.focusIndividualQueueItem(individual);
-      });
-      this.refs.individuals.appendChild(card);
+      if (card.__movementQueueMarkup !== cardMarkup) {
+        card.innerHTML = cardMarkup;
+        card.__movementQueueMarkup = cardMarkup;
+      }
+      if (isNewCard) {
+        card.addEventListener("click", event => {
+          if (
+            event.target.closest("button, input, label, select, textarea, [data-queue-burst-controls]")
+            || individual === this.individualReviewQueue.activeIndividual
+          ) {
+            return;
+          }
+          void this.focusIndividualQueueItem(individual);
+        });
+      }
+      desiredCards.push(card);
+    }
+    const desiredSet = new Set(desiredCards);
+    for (const child of [...this.refs.individuals.children]) {
+      if (!desiredSet.has(child)) child.remove();
+    }
+    for (let index = 0; index < desiredCards.length; index += 1) {
+      const card = desiredCards[index];
+      if (this.refs.individuals.children[index] !== card) {
+        this.refs.individuals.insertBefore(
+          card,
+          this.refs.individuals.children[index] || null,
+        );
+      }
     }
   }
 
