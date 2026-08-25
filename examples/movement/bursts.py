@@ -1,7 +1,7 @@
 from math import isfinite
 from statistics import median
 
-from .movement_features import haversine_meters
+from .movement_features import geodesic_distance_meters
 
 
 DEFAULT_BURST_GAP_MODE = "manual"
@@ -168,7 +168,7 @@ def _finalize_auto_burst(
     burst_id = f"{individual}:{set_name}:burst_{int(burst_idx):06d}"
     path = [row["position"] for row in rows]
     step_lengths = [
-        haversine_meters(*path[index - 1], *path[index])
+        geodesic_distance_meters(*path[index - 1], *path[index])
         for index in range(1, len(path))
     ]
     return {

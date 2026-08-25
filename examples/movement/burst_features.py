@@ -1,7 +1,7 @@
 from math import isfinite
 from statistics import fmean, median, pstdev
 
-from .movement_features import haversine_meters
+from .movement_features import geodesic_distance_meters
 
 
 STEP_LENGTH_FIELD = "step_length_m"
@@ -126,7 +126,7 @@ def build_burst_feature_rows(fixes: list[dict], bursts: list[dict]) -> list[dict
         if len(burst_fixes) == 1:
             net_displacement_m = 0.0
         else:
-            net_displacement_m = haversine_meters(
+            net_displacement_m = geodesic_distance_meters(
                 float(burst_fixes[0]["lon"]),
                 float(burst_fixes[0]["lat"]),
                 float(burst_fixes[-1]["lon"]),

@@ -25,6 +25,7 @@ from examples.movement.rds_index import (
     ensure_rds_index,
     rds_burst_feature_rows,
     read_movement_rds,
+    resolve_rds_review_scope,
     source_outlier_ranking,
     validate_movement_rds,
 )
@@ -205,6 +206,41 @@ def test_rds_adapter_matches_existing_csv_movement_model(tmp_path):
                 assert rds_fix["attributes"][field] == pytest.approx(
                     csv_value
                 )
+
+
+def test_rds_numeric_filter_scope_keeps_selected_individuals(tmp_path):
+    study_dir = tmp_path / "study"
+    study_dir.mkdir()
+    for source in _sample_files():
+        shutil.copy2(source, study_dir / source.name)
+    state = ensure_project_state(study_dir)
+    _bundle, index_path = ensure_rds_index(study_dir, state["current_dataset_id"])
+    payload = build_rds_fixes(index_path)
+    selected = payload["fixes"][0]["individual"]
+    selected_fix_count = sum(
+        fix["individual"] == selected for fix in payload["fixes"]
+    )
+
+    scope, count = resolve_rds_review_scope(index_path, {
+        "kind": "filter",
+        "filter": {
+            "field_key": "time_delta_s",
+            "field_kind": "numeric",
+            "operator": "gt",
+            "threshold_value": -1,
+            "individuals": [selected],
+            "set_names": ["train"],
+        },
+    })
+
+    assert count == selected_fix_count - 1
+    assert {item["logical_name"] for item in scope["source_rows"]} == {
+        next(
+            fix["source_artifact"]
+            for fix in payload["fixes"]
+            if fix["individual"] == selected
+        )
+    }
 
 
 def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):

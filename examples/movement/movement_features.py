@@ -1,5 +1,7 @@
 import random
-from math import atan2, cos, degrees, pi, radians, sin, sqrt
+from math import degrees, isfinite, pi, radians
+
+from pyproj import Geod
 
 
 MAX_STAT_SAMPLES = 2000
@@ -9,17 +11,44 @@ STEP_FEATURE_FIELDS = (
     "time_delta_s",
     "turn_angle_deg",
 )
-EARTH_RADIUS_M = 6371000.0
+WGS84_GEOD = Geod(ellps="WGS84")
 
 
-def haversine_meters(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
-    phi1 = radians(lat1)
-    phi2 = radians(lat2)
-    delta_phi = radians(lat2 - lat1)
-    delta_lambda = radians(lon2 - lon1)
-    a = sin(delta_phi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(delta_lambda / 2) ** 2
-    bounded_a = min(1.0, max(0.0, a))
-    return EARTH_RADIUS_M * 2 * atan2(sqrt(bounded_a), sqrt(1 - bounded_a))
+def _wgs84_inverse(
+    lon1: float,
+    lat1: float,
+    lon2: float,
+    lat2: float,
+) -> tuple[float | None, float | None]:
+    """Return forward azimuth in radians and geodesic distance in metres.
+
+    PROJ's geodesic inverse is the Python equivalent of the WGS84 geodesic
+    calculation used by ``lwgeom::st_geod_azimuth()`` and by ``sf`` when its
+    ellipsoidal distance engine is active.
+    """
+    azimuth_degrees, _back_azimuth_degrees, distance_m = WGS84_GEOD.inv(
+        lon1,
+        lat1,
+        lon2,
+        lat2,
+    )
+    if not (isfinite(azimuth_degrees) and isfinite(distance_m)):
+        return None, None
+    bearing = None if distance_m == 0.0 else radians(azimuth_degrees)
+    return bearing, float(distance_m)
+
+
+def geodesic_distance_meters(
+    lon1: float,
+    lat1: float,
+    lon2: float,
+    lat2: float,
+) -> float:
+    """Return WGS84 geodesic distance, including across poles/dateline."""
+    _bearing, distance_m = _wgs84_inverse(lon1, lat1, lon2, lat2)
+    if distance_m is None:
+        raise ValueError("WGS84 geodesic distance is undefined for these coordinates")
+    return distance_m
 
 
 def step_movement_metrics(
@@ -30,15 +59,15 @@ def step_movement_metrics(
     current_lon: float,
     current_lat: float,
 ) -> dict[str, float | None]:
-    """Return canonical inbound movement metrics for two fixes."""
-    if current_time_ms <= previous_time_ms:
-        return {
-            "step_length_m": None,
-            "speed_mps": None,
-            "time_delta_s": None,
-        }
+    """Return move2-style metrics from the first fix to the next fix.
+
+    ``mt_distance()``, ``mt_time_lags()`` and ``mt_speed()`` attach the value
+    to the segment's starting fix.  A zero time lag retains distance and lag,
+    but speed is undefined (move2 rejects zero-lag tracks when asked for
+    speed).
+    """
     time_delta_s = (current_time_ms - previous_time_ms) / 1000.0
-    step_length_m = haversine_meters(
+    step_length_m = geodesic_distance_meters(
         previous_lon,
         previous_lat,
         current_lon,
@@ -46,7 +75,7 @@ def step_movement_metrics(
     )
     return {
         "step_length_m": step_length_m,
-        "speed_mps": step_length_m / time_delta_s,
+        "speed_mps": step_length_m / time_delta_s if time_delta_s > 0 else None,
         "time_delta_s": time_delta_s,
     }
 
@@ -58,16 +87,8 @@ def initial_bearing_radians(
     lat2: float,
 ) -> float | None:
     """Return the initial bearing from the first fix to the second."""
-    if lon1 == lon2 and lat1 == lat2:
-        return None
-    phi1 = radians(lat1)
-    phi2 = radians(lat2)
-    delta_lambda = radians(lon2 - lon1)
-    y = sin(delta_lambda) * cos(phi2)
-    x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(delta_lambda)
-    if x == 0.0 and y == 0.0:
-        return None
-    return atan2(y, x)
+    bearing, _distance_m = _wgs84_inverse(lon1, lat1, lon2, lat2)
+    return bearing
 
 
 def centered_turn_angle_degrees(
@@ -76,11 +97,6 @@ def centered_turn_angle_degrees(
     following: dict,
 ) -> float | None:
     """Return the signed direction change at the center of three fixes."""
-    if not (
-        center["time_ms"] > previous["time_ms"]
-        and following["time_ms"] > center["time_ms"]
-    ):
-        return None
     inbound = initial_bearing_radians(
         previous["lon"],
         previous["lat"],
@@ -96,6 +112,9 @@ def centered_turn_angle_degrees(
     if inbound is None or outbound is None:
         return None
     signed_turn = (outbound - inbound + pi) % (2.0 * pi) - pi
+    # move2 0.5 normalizes the ambiguous exact reversal to +pi rather than -pi.
+    if signed_turn == -pi:
+        signed_turn = pi
     return degrees(signed_turn)
 
 
@@ -129,31 +148,37 @@ def compute_track_movement(
     stat_samples: dict[str, dict[str, list[float] | int]] = {}
 
     for (_individual, _set_name), sorted_records in _sorted_track_records(records_by_group):
-        previous = None
+        if not sorted_records:
+            continue
+        individual = sorted_records[0]["individual"]
+        indiv_stats = stat_samples.setdefault(
+            individual,
+            {"seen_fix": 0, "seen_step": 0, "seen_speed": 0, "fix": [], "step": [], "speed": []},
+        )
         for record in sorted_records:
-            individual = record["individual"]
-            indiv_stats = stat_samples.setdefault(
-                individual,
-                {"seen_fix": 0, "seen_step": 0, "seen_speed": 0, "fix": [], "step": [], "speed": []},
-            )
-            movement = (
+            movement = {
+                "step_length_m": None,
+                "speed_mps": None,
+                "time_delta_s": None,
+                "turn_angle_deg": None,
+            }
+            movement_by_fix_key[record["fix_key"]] = movement
+
+        # move2 aligns distance, lag and speed with the segment's starting fix.
+        for index in range(len(sorted_records) - 1):
+            record = sorted_records[index]
+            following = sorted_records[index + 1]
+            movement = movement_by_fix_key[record["fix_key"]]
+            movement.update(
                 step_movement_metrics(
-                    previous["time_ms"],
-                    previous["lon"],
-                    previous["lat"],
                     record["time_ms"],
                     record["lon"],
                     record["lat"],
+                    following["time_ms"],
+                    following["lon"],
+                    following["lat"],
                 )
-                if previous
-                else {
-                    "step_length_m": None,
-                    "speed_mps": None,
-                    "time_delta_s": None,
-                    "turn_angle_deg": None,
-                }
             )
-            movement.setdefault("turn_angle_deg", None)
             step_length_m = movement["step_length_m"]
             speed_mps = movement["speed_mps"]
             time_delta_s = movement["time_delta_s"]
@@ -165,14 +190,6 @@ def compute_track_movement(
                 if speed_mps is not None:
                     indiv_stats["seen_speed"] += 1
                     _reservoir_append(indiv_stats["speed"], speed_mps, indiv_stats["seen_speed"], max_stat_samples)
-            movement_by_fix_key[record["fix_key"]] = {
-                "step_length_m": step_length_m,
-                "speed_mps": speed_mps,
-                "time_delta_s": time_delta_s,
-                "turn_angle_deg": movement["turn_angle_deg"],
-            }
-            previous = record
-
         for index in range(1, len(sorted_records) - 1):
             center = sorted_records[index]
             movement_by_fix_key[center["fix_key"]]["turn_angle_deg"] = (

@@ -143,16 +143,16 @@ def _filter_value_matches(value: object, filter_spec: dict) -> bool:
     return label in selected_levels
 
 
-def _derived_filter_value(previous: tuple | None, current: tuple, field_key: str):
-    if previous is None:
+def _derived_filter_value(current: tuple, following: tuple | None, field_key: str):
+    if following is None:
         return None
     return step_movement_metrics(
-        previous[1],
-        previous[2],
-        previous[3],
         current[1],
         current[2],
         current[3],
+        following[1],
+        following[2],
+        following[3],
     ).get(field_key)
 
 
@@ -199,6 +199,18 @@ def resolve_filter_row_ranges(
         raise ValueError("Filter field is required")
     confirmed_fix_key_set = set(confirmed_fix_keys or set())
     confirmed_individual_track_set = set(confirmed_individual_tracks or set())
+    selected_individuals = {
+        str(item) for item in filter_spec.get("individuals") or [] if str(item)
+    }
+    selected_set_names = {
+        str(item) for item in filter_spec.get("set_names") or [] if str(item)
+    }
+
+    def in_requested_scope(valid: dict) -> bool:
+        return (
+            (not selected_individuals or valid["individual"] in selected_individuals)
+            and (not selected_set_names or valid["set_name"] in selected_set_names)
+        )
 
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -214,6 +226,8 @@ def resolve_filter_row_ranges(
             for row_index, raw in enumerate(reader, start=1):
                 valid = _valid_movement_row(raw, columns)
                 if valid is None:
+                    continue
+                if not in_requested_scope(valid):
                     continue
                 fix_key = _make_fix_key(
                     row_index,
@@ -240,6 +254,8 @@ def resolve_filter_row_ranges(
         for row_index, raw in enumerate(reader, start=1):
             valid = _valid_movement_row(raw, columns)
             if valid is None:
+                continue
+            if not in_requested_scope(valid):
                 continue
             fix_key = _make_fix_key(
                 row_index,
@@ -270,9 +286,11 @@ def resolve_filter_row_ranges(
                     window.pop(0)
                 window.append(current)
             else:
-                value = _derived_filter_value(previous, current, field_key)
-                if _filter_value_matches(value, filter_spec):
-                    matched_rows.append(row_index)
+                # move2 attaches step metrics to the segment's starting fix.
+                if previous is not None:
+                    value = _derived_filter_value(previous, current, field_key)
+                    if _filter_value_matches(value, filter_spec):
+                        matched_rows.append(previous[0])
             previous_by_track[track_key] = current
 
     if not file_order_regressed:
@@ -285,6 +303,8 @@ def resolve_filter_row_ranges(
         for row_index, raw in enumerate(reader, start=1):
             valid = _valid_movement_row(raw, columns)
             if valid is None:
+                continue
+            if not in_requested_scope(valid):
                 continue
             fix_key = _make_fix_key(
                 row_index,
@@ -319,12 +339,12 @@ def resolve_filter_row_ranges(
                 if _filter_value_matches(value, filter_spec):
                     matched_rows.append(sorted_records[index][0])
             continue
-        previous = None
-        for current in sorted_records:
-            value = _derived_filter_value(previous, current, field_key)
+        for index in range(len(sorted_records) - 1):
+            current = sorted_records[index]
+            following = sorted_records[index + 1]
+            value = _derived_filter_value(current, following, field_key)
             if _filter_value_matches(value, filter_spec):
                 matched_rows.append(current[0])
-            previous = current
     return _compress_row_numbers(matched_rows), len(matched_rows)
 
 

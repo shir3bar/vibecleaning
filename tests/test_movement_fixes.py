@@ -52,6 +52,7 @@ from examples.movement.movement_features import (
     STEP_FEATURE_FIELDS,
     centered_turn_angle_degrees,
     compute_track_movement,
+    geodesic_distance_meters,
     initial_bearing_radians,
 )
 import examples.movement.summary as movement_summary
@@ -112,14 +113,18 @@ def test_compute_track_movement_exposes_only_canonical_step_features():
     features, stats = compute_track_movement(records_by_group)
 
     assert tuple(features["early"]) == STEP_FEATURE_FIELDS
-    assert features["early"] == {
+    assert features["early"]["time_delta_s"] == 3600.0
+    assert isclose(
+        features["early"]["speed_mps"],
+        features["early"]["step_length_m"] / 3600.0,
+        rel_tol=1e-12,
+    )
+    assert features["late"] == {
         "step_length_m": None,
         "speed_mps": None,
         "time_delta_s": None,
         "turn_angle_deg": None,
     }
-    assert features["late"]["time_delta_s"] == 3600.0
-    assert isclose(features["late"]["speed_mps"], features["late"]["step_length_m"] / 3600.0, rel_tol=1e-12)
     assert not any("anomaly" in key.lower() for row in features.values() for key in row)
     assert stats["alpha"]["seen_step"] == 1
 
@@ -134,7 +139,7 @@ def test_centered_turn_angle_is_signed_and_attached_to_middle_fix():
         1.5707963267948966
     )
     assert centered_turn_angle_degrees(previous, center, north) == pytest.approx(-90.0)
-    assert centered_turn_angle_degrees(previous, center, reverse) == pytest.approx(-180.0)
+    assert centered_turn_angle_degrees(previous, center, reverse) == pytest.approx(180.0)
     assert centered_turn_angle_degrees(previous, center, {**north, "lon": 1.0, "lat": 0.0}) is None
 
     records = {
@@ -151,12 +156,33 @@ def test_centered_turn_angle_is_signed_and_attached_to_middle_fix():
     assert features["c"]["turn_angle_deg"] is None
 
 
-def test_centered_turn_angle_requires_increasing_times():
+def test_wgs84_inverse_matches_lwgeom_reference_and_handles_high_latitudes():
+    # The first pair is the published lwgeom::st_geod_azimuth example.
+    assert initial_bearing_radians(7.0, 52.0, 8.0, 53.0) == pytest.approx(
+        0.5410385,
+        abs=5e-8,
+    )
+    assert geodesic_distance_meters(7.0, 52.0, 8.0, 53.0) == pytest.approx(
+        130_359.3,
+        abs=0.1,
+    )
+    # A route close to the pole and a dateline crossing remain finite geodesics.
+    assert geodesic_distance_meters(0.0, 89.0, 90.0, 89.0) == pytest.approx(
+        157_954.97,
+        abs=0.02,
+    )
+    assert geodesic_distance_meters(179.0, 70.0, -179.0, 70.0) == pytest.approx(
+        76_369.66,
+        abs=0.02,
+    )
+
+
+def test_centered_turn_angle_matches_move2_for_equal_timestamps():
     previous = {"time_ms": 0, "lon": 0.0, "lat": 0.0}
     center = {"time_ms": 0, "lon": 1.0, "lat": 0.0}
     following = {"time_ms": 1_000, "lon": 1.0, "lat": 1.0}
 
-    assert centered_turn_angle_degrees(previous, center, following) is None
+    assert centered_turn_angle_degrees(previous, center, following) == pytest.approx(-90.0)
 
 
 def test_build_auto_bursts_uses_strict_gap_threshold_and_preserves_mapping():
@@ -424,9 +450,9 @@ fix_b,beta,2024-01-01T00:00:00Z,-71.0,41.0,train
         "id:fix_1#row:3",
         "id:fix_2#row:1",
     ]
-    assert "time_delta_s" not in fixes[0].get("attributes", {})
+    assert fixes[0]["attributes"]["time_delta_s"] == 3600.0
     assert fixes[1]["attributes"]["time_delta_s"] == 3600.0
-    assert fixes[2]["attributes"]["time_delta_s"] == 3600.0
+    assert "time_delta_s" not in fixes[2].get("attributes", {})
     assert "turn_angle_deg" not in fixes[0].get("attributes", {})
     assert fixes[1]["attributes"]["turn_angle_deg"] == pytest.approx(0.0372, abs=0.01)
     assert "turn_angle_deg" not in fixes[2].get("attributes", {})
@@ -461,14 +487,14 @@ fix_c,alpha,2024-01-01T02:00:00Z,-70.2,40.2,true,
     )
     by_key = {fix["fix_key"]: fix for fix in same_burst["fixes"]}
     excluded = by_key["id:fix_b#row:2"]
-    after_exclusion = by_key["id:fix_c#row:3"]
+    before_exclusion = by_key["id:fix_a#row:1"]
 
     assert excluded["analytically_excluded"] is True
     assert "step_length_m" not in excluded.get("attributes", {})
-    assert after_exclusion["attributes"]["time_delta_s"] == 7200.0
+    assert before_exclusion["attributes"]["time_delta_s"] == 7200.0
     assert isclose(
-        after_exclusion["attributes"]["speed_mps"],
-        after_exclusion["attributes"]["step_length_m"] / 7200.0,
+        before_exclusion["attributes"]["speed_mps"],
+        before_exclusion["attributes"]["step_length_m"] / 7200.0,
         rel_tol=1e-12,
     )
     assert len(same_burst["auto_bursts"]) == 1
@@ -508,7 +534,7 @@ fix_c,alpha,2024-01-01T02:00:00Z,-70.2,40.2,true,
 
     assert "analytically_excluded" not in by_key["id:fix_b#row:2"]
     assert by_key["id:fix_b#row:2"]["attributes"]["time_delta_s"] == 3600.0
-    assert by_key["id:fix_c#row:3"]["attributes"]["time_delta_s"] == 3600.0
+    assert "time_delta_s" not in by_key["id:fix_c#row:3"].get("attributes", {})
     assert payload["auto_bursts"][0]["fix_keys"] == [
         "id:fix_a#row:1",
         "id:fix_b#row:2",
@@ -544,7 +570,7 @@ fix_c,alpha,2024-01-01T02:00:00Z,-70.2,40.2,true,false,true,
         "algorithm-marked-outlier=true",
     ]
     assert by_key["id:fix_b#row:2"]["attributes"]["time_delta_s"] == 3600.0
-    assert by_key["id:fix_c#row:3"]["attributes"]["time_delta_s"] == 3600.0
+    assert "time_delta_s" not in by_key["id:fix_c#row:3"].get("attributes", {})
     assert payload["auto_bursts"][0]["fix_keys"] == [
         "id:fix_a#row:1",
         "id:fix_b#row:2",
@@ -691,9 +717,10 @@ fix_3,alpha,2024-01-01T02:00:00Z,-70.3,40.3,train
         "id:fix_2#row:3",
         "id:fix_3#row:4",
     ]
-    assert fixes_by_key["id:fix_1#row:2"]["attributes"]["time_delta_s"] == 3600.0
-    assert "time_delta_s" not in fixes_by_key["id:fix_2#row:3"].get("attributes", {})
-    assert fixes_by_key["id:fix_3#row:4"]["attributes"]["time_delta_s"] == 3600.0
+    assert fixes_by_key["id:fix_1#row:2"]["attributes"]["time_delta_s"] == 0.0
+    assert "speed_mps" not in fixes_by_key["id:fix_1#row:2"]["attributes"]
+    assert fixes_by_key["id:fix_2#row:3"]["attributes"]["time_delta_s"] == 3600.0
+    assert "time_delta_s" not in fixes_by_key["id:fix_3#row:4"].get("attributes", {})
     assert diagnostics["duplicate_track_timestamp_count"] == 1
     assert diagnostics["max_fix_topological_degree"] == 2
 
@@ -944,7 +971,7 @@ def test_movement_frontend_includes_auto_burst_controls():
     assert "getVisibleAutoBursts({ requireOverlay: false })" in source
 
 
-def test_movement_frontend_colors_inbound_steps_above_burst_casing():
+def test_movement_frontend_colors_move2_outbound_steps_above_burst_casing():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     renderer = source[
         source.index("  renderLayers({ temporalOnly = false } = {}) {"):
@@ -956,7 +983,8 @@ def test_movement_frontend_colors_inbound_steps_above_burst_casing():
 
     assert "buildMovementTrackStepSegments" not in source
     assert "retainedBinaryDeckLayers(visibleIndividuals, showPoints)" in renderer
-    assert "const pointOffset = targetIndex * 4" in worker_source
+    assert "MOVE2_OUTBOUND_FIELDS.has" in worker_source
+    assert "? sourceIndex" in worker_source
     assert "lineColors[lineOffset] = pointColors[pointOffset]" in worker_source
     assert "suppressedBaseTrackKeys" not in source
     assert renderer.index('id: "movement-bursts"') < renderer.index(
@@ -1569,7 +1597,31 @@ middle,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
     )
 
     assert count == 2
-    assert ranges == [[1, 1], [3, 3]]
+    assert ranges == [[2, 3]]
+
+
+def test_derived_threshold_filter_keeps_visible_individual_scope(tmp_path):
+    csv_path = tmp_path / "movement.csv"
+    csv_path.write_text(
+        "eventid,individual,timestamp,longitude,latitude,set\n"
+        "a1,alpha,2024-01-01T00:00:00Z,0,0,train\n"
+        "a2,alpha,2024-01-01T01:00:00Z,1,0,train\n"
+        "b1,beta,2024-01-01T00:00:00Z,0,1,train\n"
+        "b2,beta,2024-01-01T01:00:00Z,1,1,train\n",
+        encoding="utf-8",
+    )
+
+    ranges, count = resolve_filter_row_ranges(csv_path, {
+        "field_key": "time_delta_s",
+        "field_kind": "numeric",
+        "operator": "gt",
+        "threshold_value": 0,
+        "individuals": ["alpha"],
+        "set_names": ["train"],
+    })
+
+    assert count == 1
+    assert ranges == [[1, 1]]
 
 
 def test_turn_angle_threshold_filter_targets_the_center_fix(tmp_path):
@@ -1587,8 +1639,8 @@ def test_turn_angle_threshold_filter_targets_the_center_fix(tmp_path):
         {
             "field_key": "turn_angle_deg",
             "field_kind": "numeric",
-            "operator": "lt",
-            "threshold_value": -150,
+            "operator": "gt",
+            "threshold_value": 150,
         },
     )
 
@@ -3892,8 +3944,9 @@ def test_report_features_recompute_across_confirmed_fix(tmp_path):
     assert records[1]["analytically_excluded"] is True
     assert records[1]["speed_mps"] is None
     assert records[2]["analytically_excluded"] is False
-    assert records[2]["time_delta_s"] == 7200.0
-    assert records[2]["step_length_m"] is not None
+    assert records[0]["time_delta_s"] == 7200.0
+    assert records[0]["step_length_m"] is not None
+    assert records[2]["time_delta_s"] is None
 
 
 def test_report_loader_retains_only_selected_individuals_with_source_row_keys(tmp_path):
@@ -3917,8 +3970,9 @@ def test_report_loader_retains_only_selected_individuals_with_source_row_keys(tm
         "id:fix_a#row:1",
         "id:fix_c#row:3",
     ]
-    assert records[1]["time_delta_s"] == 3600.0
-    assert records[1]["step_length_m"] is not None
+    assert records[0]["time_delta_s"] == 3600.0
+    assert records[0]["step_length_m"] is not None
+    assert records[1]["time_delta_s"] is None
 
 
 def test_build_individual_profile_html_report_omits_optional_fields_when_missing():

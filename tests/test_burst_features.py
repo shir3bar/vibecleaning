@@ -8,7 +8,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from examples.movement.burst_features import build_burst_feature_rows
-from examples.movement.movement_features import haversine_meters
+from examples.movement.movement_features import geodesic_distance_meters
 
 
 def _fix(
@@ -53,7 +53,7 @@ def _burst(
 
 
 def test_build_burst_feature_rows_are_ordered_and_summarize_movement():
-    step_m = haversine_meters(0.0, 0.0, 0.001, 0.0)
+    step_m = geodesic_distance_meters(0.0, 0.0, 0.001, 0.0)
     fixes = [
         _fix("fix_0", 0, 0.0),
         _fix(

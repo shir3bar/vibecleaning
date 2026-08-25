@@ -1,5 +1,11 @@
 const movements = new Map();
 const GPS_SPIKE_FIELD_KEY = "gps_spike_step_turn";
+const MOVE2_OUTBOUND_FIELDS = new Set([
+  "step_length_m",
+  "speed_mps",
+  "time_delta_s",
+  GPS_SPIKE_FIELD_KEY,
+]);
 
 function parseMovementBinary(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -155,7 +161,10 @@ function buildAttributes(movement, spec) {
       pointFilter[targetIndex]
       && Number(arrays.burst_values[sourceIndex]) === Number(arrays.burst_values[targetIndex])
     ) ? 1 : 0;
-    const pointOffset = targetIndex * 4;
+    const colorIndex = MOVE2_OUTBOUND_FIELDS.has(String(spec.field?.key || ""))
+      ? sourceIndex
+      : targetIndex;
+    const pointOffset = colorIndex * 4;
     const lineOffset = index * 4;
     lineColors[lineOffset] = pointColors[pointOffset];
     lineColors[lineOffset + 1] = pointColors[pointOffset + 1];

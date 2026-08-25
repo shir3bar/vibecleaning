@@ -34,11 +34,15 @@ from rdata.conversion import DEFAULT_CLASS_MAP, dataframe_constructor
 
 from app.state import ProjectStateError, load_dataset, resolve_artifact_path
 
-from .movement_features import compute_track_movement, haversine_meters, step_movement_metrics
+from .movement_features import (
+    compute_track_movement,
+    geodesic_distance_meters,
+    step_movement_metrics,
+)
 from .summary import DERIVED_FIELDS, quantile, span_to_zoom
 
 
-RDS_INDEX_SCHEMA_VERSION = 2
+RDS_INDEX_SCHEMA_VERSION = 3
 RDS_SOURCE_FORMAT = "rds"
 RDS_IMPLICIT_SET = "train"
 RDS_REQUIRED_COLUMNS = {
@@ -663,7 +667,7 @@ def _source_bursts(rows: Sequence[sqlite3.Row]) -> list[dict]:
         ordered = sorted(group, key=lambda row: (int(row["time_ms"]), int(row["source_row"])))
         path = [[float(row["lon"]), float(row["lat"])] for row in ordered]
         step_lengths = [
-            haversine_meters(*path[index - 1], *path[index])
+            geodesic_distance_meters(*path[index - 1], *path[index])
             for index in range(1, len(path))
         ]
         bursts.append(
@@ -1090,7 +1094,7 @@ def rds_burst_feature_rows(
             last = eligible_rows[-1]
             path_length = float(sum(step_lengths))
             net_displacement = (
-                0.0 if len(eligible_rows) == 1 else haversine_meters(
+                0.0 if len(eligible_rows) == 1 else geodesic_distance_meters(
                     float(first["lon"]), float(first["lat"]),
                     float(last["lon"]), float(last["lat"]),
                 )
@@ -1413,6 +1417,9 @@ def resolve_rds_review_scope(index_path: Path, raw_scope: dict) -> tuple[dict, i
     if kind == "filter":
         spec = dict(raw_scope.get("filter") or {})
         filter_kind = str(spec.get("kind") or "").strip().lower()
+        scoped_individuals = [
+            str(item) for item in spec.get("individuals") or [] if str(item)
+        ]
         field_columns = {
             "step_length_m": "f.step_length_m",
             "speed_mps": "f.speed_mps",
@@ -1458,6 +1465,13 @@ def resolve_rds_review_scope(index_path: Path, raw_scope: dict) -> tuple[dict, i
                 values.extend(accepted)
             else:
                 raise ValueError(f"Unsupported RDS filter field: {field_key}")
+            if scoped_individuals:
+                where += (
+                    " AND i.identifier IN ("
+                    + ",".join("?" for _ in scoped_individuals)
+                    + ")"
+                )
+                values.extend(scoped_individuals)
         source_rows, fix_keys = _source_rows_from_query(index_path, where, values)
         return {
             "kind": "filter",

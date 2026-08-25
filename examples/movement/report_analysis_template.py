@@ -342,7 +342,6 @@ def load_rows_with_context(source_path, selected_individuals=None):
 
 
 def recompute_analytical_movement_context(valid_records):
-    previous_by_group = {}
     eligible_by_group = {}
     for record in sorted(
         valid_records,
@@ -359,20 +358,20 @@ def recompute_analytical_movement_context(valid_records):
         record["analytically_excluded"] = False
         group_key = (record["individual"], record.get("set_name", "train"))
         eligible_by_group.setdefault(group_key, []).append(record)
-        previous = previous_by_group.get(group_key)
-        if previous:
+    for records in eligible_by_group.values():
+        for index in range(len(records) - 1):
+            record = records[index]
+            following = records[index + 1]
             record.update(
                 step_movement_metrics(
-                    previous["time_ms"],
-                    previous["lon"],
-                    previous["lat"],
                     record["time_ms"],
                     record["lon"],
                     record["lat"],
+                    following["time_ms"],
+                    following["lon"],
+                    following["lat"],
                 )
             )
-        previous_by_group[group_key] = record
-    for records in eligible_by_group.values():
         for index in range(1, len(records) - 1):
             records[index]["turn_angle_deg"] = centered_turn_angle_degrees(
                 records[index - 1],

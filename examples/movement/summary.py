@@ -220,7 +220,7 @@ def parse_time_ms(raw_value: object) -> int | None:
 
 
 def try_float(raw_value: object) -> float | None:
-    value = str(raw_value or "").strip()
+    value = str("" if raw_value is None else raw_value).strip()
     if not value:
         return None
     try:

@@ -313,7 +313,7 @@ def test_numeric_candidate_query_evaluator_uses_movement_fixes(tmp_path):
     assert result["run_digest"]
     assert result["candidate_count"] == 1
     assert result["returned_count"] == 1
-    assert result["candidates"][0]["fix_key"] == "id:fix_2#row:2"
+    assert result["candidates"][0]["fix_key"] == "id:fix_1#row:1"
     assert result["candidates"][0]["scope_id"] == "whole_study"
     assert result["candidates"][0]["candidate_id"].startswith("cq:")
     evidence = result["candidates"][0]["evidence"]
@@ -1066,7 +1066,7 @@ def test_run_candidate_query_route_creates_analysis_artifact(tmp_path):
     summary = payload["summary"]
     assert summary["run_status"] == "success"
     assert summary["candidate_count"] == 1
-    assert summary["match_row_ranges"] == [[2, 2]]
+    assert summary["match_row_ranges"] == [[1, 1]]
     assert summary["run_digest"]
     assert summary["execution_scope"]["resolved"]["type"] == "whole_study"
     assert summary["scope_results"][0]["scope_id"] == "whole_study"
@@ -1076,7 +1076,7 @@ def test_run_candidate_query_route_creates_analysis_artifact(tmp_path):
     assert analysis["output_artifacts"] == ["candidate_query_results.json"]
     assert payload["step"]["parameters"]["action"] == "annotate_scope"
     assert payload["step"]["parameters"]["source_analysis_id"] == analysis["analysis_id"]
-    assert payload["step"]["parameters"]["scope"]["row_ranges"] == [[2, 2]]
+    assert payload["step"]["parameters"]["scope"]["row_ranges"] == [[1, 1]]
     assert payload["dataset"]["parent_dataset_id"] == dataset_id
     assert load_project_state(study_dir)["current_dataset_id"] == payload["dataset"]["dataset_id"]
     _, sidecar_path = get_dataset_artifact(
@@ -1087,7 +1087,7 @@ def test_run_candidate_query_route_creates_analysis_artifact(tmp_path):
     annotation = json.loads(sidecar_path.read_text(encoding="utf-8"))["annotations"][-1]
     assert annotation["status"] == "suspected"
     assert annotation["source_analysis_id"] == analysis["analysis_id"]
-    assert annotation["scope"]["row_ranges"] == [[2, 2]]
+    assert annotation["scope"]["row_ranges"] == [[1, 1]]
     assert (study_dir / "movement.csv").read_text(encoding="utf-8") == FAST_MOVEMENT_CSV
     output_path = (
         project_paths(study_dir)["analyses"]
@@ -1097,7 +1097,7 @@ def test_run_candidate_query_route_creates_analysis_artifact(tmp_path):
     )
     assert output_path.exists()
     output_payload = json.loads(output_path.read_text())
-    assert output_payload["candidates"][0]["fix_key"] == "id:fix_2#row:2"
+    assert output_payload["candidates"][0]["fix_key"] == "id:fix_1#row:1"
     assert output_payload["run_digest"] == summary["run_digest"]
     assert output_payload["execution_scope"]["resolved"]["type"] == "whole_study"
     assert output_payload["scope_results"][0]["scope_id"] == "whole_study"
@@ -1167,8 +1167,8 @@ def test_candidate_query_preview_cap_does_not_truncate_persisted_match_ranges(tm
     payload = response.json()
     assert payload["summary"]["candidate_count"] == 3
     assert payload["summary"]["returned_count"] == 1
-    assert payload["summary"]["match_row_ranges"] == [[2, 3], [5, 5]]
-    assert payload["step"]["parameters"]["scope"]["row_ranges"] == [[2, 3], [5, 5]]
+    assert payload["summary"]["match_row_ranges"] == [[1, 2], [4, 4]]
+    assert payload["step"]["parameters"]["scope"]["row_ranges"] == [[1, 2], [4, 4]]
 
 
 def test_empty_candidate_query_creates_analysis_without_advancing_head(tmp_path):

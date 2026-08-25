@@ -10877,6 +10877,12 @@ class MovementExampleApp {
     const lineColors = new Uint8Array(lineCount * 4);
     const lineFilter = new Uint8Array(lineCount);
     const burstFilter = new Uint8Array(lineCount);
+    const move2OutboundField = [
+      "step_length_m",
+      "speed_mps",
+      "time_delta_s",
+      GPS_SPIKE_COLOR_FIELD_KEY,
+    ].includes(String(field?.key || ""));
     for (let index = 0; index < lineCount; index += 1) {
       const sourceIndex = Number(arrays.line_source_indexes[index]);
       const targetIndex = Number(arrays.line_target_indexes[index]);
@@ -10886,7 +10892,7 @@ class MovementExampleApp {
         && Number(arrays.burst_values[sourceIndex]) === Number(arrays.burst_values[targetIndex])
       ) ? 1 : 0;
       const colorOffset = index * 4;
-      const pointOffset = targetIndex * 4;
+      const pointOffset = (move2OutboundField ? sourceIndex : targetIndex) * 4;
       lineColors[colorOffset] = pointColors[pointOffset];
       lineColors[colorOffset + 1] = pointColors[pointOffset + 1];
       lineColors[colorOffset + 2] = pointColors[pointOffset + 2];
@@ -11524,9 +11530,8 @@ class MovementExampleApp {
       layers.push(...this.retainedBinaryDeckLayers(visibleIndividuals, showPoints));
     }
 
-    // Each derived step value belongs to its destination fix, so the inbound
-    // segment uses that fix's selected-variable color. Drawing it above the
-    // optional burst casing keeps speed and other step fields legible.
+    // move2 step values belong to a segment's starting fix. Binary track lines
+    // therefore use their source fix for step/time/speed colors.
     if (visibleFlaggedSteps.length) {
       layers.push(
         new deck.PathLayer({
@@ -15616,7 +15621,9 @@ class MovementExampleApp {
           selected_levels: Array.isArray(this.thresholdState.selectedLevels)
             ? [...this.thresholdState.selectedLevels]
             : [],
-          }
+          individuals: this.getSelectedIndividuals(),
+          set_names: [...this.getVisibleSetNames()],
+        }
         : null;
     this.pendingIssueStatus = status;
     this.pendingIssueContext = {
