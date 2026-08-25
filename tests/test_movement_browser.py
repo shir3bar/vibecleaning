@@ -498,6 +498,23 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
           window.__queueMapCanvas = document.querySelector('[data-role=map] canvas');
         }""")
 
+        page.wait_for_function("() => window.__movementDiagnostics.mapView !== null")
+        scope_view_before = page.evaluate(
+            "() => structuredClone(window.__movementDiagnostics.mapView)"
+        )
+        page.locator('button[data-queue-scope="solo"]').click()
+        page.wait_for_function(
+            """() => document.querySelector(
+              'button[data-queue-scope="solo"]'
+            )?.classList.contains('is-active')"""
+        )
+        scope_view_after = page.evaluate(
+            "() => structuredClone(window.__movementDiagnostics.mapView)"
+        )
+        assert scope_view_after["center"] == pytest.approx(scope_view_before["center"])
+        assert scope_view_after["zoom"] == pytest.approx(scope_view_before["zoom"])
+        page.locator('button[data-queue-scope="group"]').click()
+
         page.locator(
             'button[data-review-decision="ok"][data-individual="alpha"]'
         ).click()

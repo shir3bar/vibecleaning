@@ -2734,6 +2734,18 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
     assert 'data-queue-scope="solo">Only current</button>' in source
     assert 'data-queue-scope="group">Group view</button>' in source
     assert 'data-queue-scope="all"' not in source
+    scope_setter = source[
+        source.index("  async setIndividualQueueMapScope(scope) {"):
+        source.index("  zoomToIndividualQueueActive() {")
+    ]
+    assert "const preservedMapView = this.captureCurrentMapView();" in scope_setter
+    assert "this.applyIndividualQueueMapScope({ zoom: false })" in scope_setter
+    assert "this.map.jumpTo(preservedMapView);" in scope_setter
+    queue_mode_setter = source[
+        source.index("  async setIndividualViewMode(mode) {"):
+        source.index("  getIndividualQueueMapIndividuals() {")
+    ]
+    assert "this.applyIndividualQueueMapScope({ zoom: false })" in queue_mode_setter
     assert '.movement-side-tabs.hidden,' in source
     assert 'data-role="individual-search-control"' in source
     assert "this.refs.individualSearchControl.hidden = this.individualReviewQueue.mode === \"queue\"" in source

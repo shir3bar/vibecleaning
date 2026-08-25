@@ -8662,7 +8662,7 @@ class MovementExampleApp {
       if (this.individualQueueListHeightPx !== null) {
         this.applyIndividualListHeight(this.individualQueueListHeightPx, { save: false });
       }
-      await this.applyIndividualQueueMapScope({ zoom: !queue.queueMapView });
+      await this.applyIndividualQueueMapScope({ zoom: false });
       if (queue.queueMapView && this.map) {
         this.map.jumpTo(queue.queueMapView);
       }
@@ -8741,8 +8741,12 @@ class MovementExampleApp {
     if (!["solo", "group"].includes(scope)) {
       return;
     }
+    const preservedMapView = this.captureCurrentMapView();
     this.individualReviewQueue.mapScope = scope;
-    await this.applyIndividualQueueMapScope({ zoom: scope === "solo" });
+    await this.applyIndividualQueueMapScope({ zoom: false });
+    if (preservedMapView && this.map) {
+      this.map.jumpTo(preservedMapView);
+    }
   }
 
   zoomToIndividualQueueActive() {
