@@ -3540,7 +3540,7 @@ class MovementExampleApp {
             <label>Issue description
               <textarea data-role="issue-note" placeholder="Describe why these fixes look problematic."></textarea>
             </label>
-            <label>Question for data owner
+            <label>Question for data owner (optional)
               <textarea data-role="issue-question" placeholder="What do you want the data owner to confirm or explain?"></textarea>
             </label>
             <div class="movement-modal-status" data-role="issue-status"></div>
@@ -15524,22 +15524,11 @@ class MovementExampleApp {
     this.renderIssueBurstPicker();
 
     const previousDefaultType = context.defaultIssueType || "";
-    const previousDefaultQuestion = context.defaultOwnerQuestion || "";
     const defaultIssueType = useBurst ? "burst review" : "individual review";
-    const defaultOwnerQuestion = useBurst
-      ? "Could you confirm whether these bursts should be treated as outliers?"
-      : "Could you confirm whether this individual's track should be treated as an outlier?";
     if (!this.refs.issueType.value.trim() || this.refs.issueType.value === previousDefaultType) {
       this.refs.issueType.value = defaultIssueType;
     }
-    if (
-      !this.refs.issueQuestion.value.trim()
-      || this.refs.issueQuestion.value === previousDefaultQuestion
-    ) {
-      this.refs.issueQuestion.value = defaultOwnerQuestion;
-    }
     context.defaultIssueType = defaultIssueType;
-    context.defaultOwnerQuestion = defaultOwnerQuestion;
     context.mode = useBurst ? "bursts" : "individual";
     context.individual = individual;
     context.setName = "";
@@ -15624,6 +15613,12 @@ class MovementExampleApp {
     const isFilterTarget = target?.kind === "filter";
     const isGpsSpikeTarget = isFilterTarget && field?.key === GPS_SPIKE_COLOR_FIELD_KEY;
     const issueThreshold = isFilterTarget ? this.getCurrentIssueThreshold() : "";
+    const filterVariable = isGpsSpikeTarget
+      ? GPS_SPIKE_COLOR_FIELD.label
+      : String(field?.label || field?.key || "threshold");
+    const filterDescription = isFilterTarget
+      ? `Filter applied: ${filterVariable}${issueThreshold ? ` ${issueThreshold}` : ""}.`
+      : "";
     const candidateKeys = this.getCandidateQueryReturnedMatchKeys();
     const candidateGenerated = !isFilterTarget
       && Boolean(this.candidateQueryPreview?.analysisId)
@@ -15695,9 +15690,9 @@ class MovementExampleApp {
       .map(fix => `${fix.individual} • ${formatTimestamp(fix.timeMs)} • ${fix.fixKey}`)
       .join("\n");
     this.refs.issueUser.value = this.getUser();
-    this.refs.issueType.value = "";
-    this.refs.issueNote.value = "";
-    this.refs.issueQuestion.value = "Could you confirm whether these fixes should be treated as outliers and explain the likely error source?";
+    this.refs.issueType.value = isFilterTarget ? `Filter ${filterVariable}` : "";
+    this.refs.issueNote.value = filterDescription;
+    this.refs.issueQuestion.value = "";
     this.refs.issueStatus.textContent = "";
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
@@ -15754,7 +15749,7 @@ class MovementExampleApp {
     this.refs.issueUser.value = this.getUser();
     this.refs.issueType.value = "";
     this.refs.issueNote.value = "";
-    this.refs.issueQuestion.value = "Could you confirm whether this contiguous track segment reflects collar removal, transport, or another non-animal movement event?";
+    this.refs.issueQuestion.value = "";
     this.refs.issueStatus.textContent = "";
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
@@ -15787,7 +15782,6 @@ class MovementExampleApp {
       ) ? individual : "",
       workflowContext: this.buildIssueWorkflowContext("individual"),
       defaultIssueType: "individual review",
-      defaultOwnerQuestion: "Could you confirm whether this individual's track should be treated as an outlier?",
     };
     this.refs.issueTitle.textContent = "Flag entire individual";
     this.refs.issueMeta.innerHTML = `
@@ -15801,7 +15795,7 @@ class MovementExampleApp {
     this.refs.issueUser.value = this.getUser();
     this.refs.issueType.value = "individual review";
     this.refs.issueNote.value = "";
-    this.refs.issueQuestion.value = "Could you confirm whether this individual's track should be treated as an outlier?";
+    this.refs.issueQuestion.value = "";
     this.refs.issueStatus.textContent = "";
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
@@ -15841,7 +15835,6 @@ class MovementExampleApp {
       ) ? individual : "",
       workflowContext: this.buildIssueWorkflowContext("bursts"),
       defaultIssueType: origin === "algorithm" ? "burst anomaly" : "burst review",
-      defaultOwnerQuestion: "Could you confirm whether these bursts should be treated as outliers?",
     };
     this.refs.issueTitle.textContent = "Flag bursts for review";
     this.refs.issueMeta.innerHTML = `
@@ -15858,7 +15851,7 @@ class MovementExampleApp {
     this.refs.issueUser.value = this.getUser();
     this.refs.issueType.value = origin === "algorithm" ? "burst anomaly" : "burst review";
     this.refs.issueNote.value = "";
-    this.refs.issueQuestion.value = "Could you confirm whether these bursts should be treated as outliers?";
+    this.refs.issueQuestion.value = "";
     this.refs.issueStatus.textContent = "";
     this.refs.issueStatus.classList.remove("error");
     this.refs.issueSubmit.disabled = false;
@@ -15946,8 +15939,8 @@ class MovementExampleApp {
       this.refs.issueStatus.classList.add("error");
       return;
     }
-    if (!user || !issueType || !issueNote || !ownerQuestion) {
-      this.refs.issueStatus.textContent = "User, issue type, description, and owner question are required.";
+    if (!user || !issueType || !issueNote) {
+      this.refs.issueStatus.textContent = "User, issue type, and description are required.";
       this.refs.issueStatus.classList.add("error");
       return;
     }

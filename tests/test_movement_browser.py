@@ -311,6 +311,13 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
             assert flag_button.is_enabled()
             assert flag_button.text_content() == "Flag thresholded fixes"
             assert "checked fixes" not in flag_button.text_content()
+            flag_button.click()
+            page.locator('[data-role="issue-modal"]').wait_for(state="visible")
+            assert page.locator('[data-role="issue-type"]').input_value() == "Filter is_outlier"
+            assert page.locator('[data-role="issue-note"]').input_value() == (
+                "Filter applied: is_outlier = True."
+            )
+            assert page.locator('[data-role="issue-question"]').input_value() == ""
 
         page.evaluate("window.__movementMonitorActive = false")
         browser.close()

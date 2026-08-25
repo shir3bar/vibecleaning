@@ -1610,7 +1610,6 @@ fix_3,beta,2024-01-01T02:00:00Z,-70.2,40.2,train,true
             "issue_field": "is_outlier",
             "issue_threshold": "is True",
             "comment": "Review all source outliers for selected animals",
-            "owner_question": "Is this source flag valid?",
             "user": "reviewer",
         },
     )
@@ -1628,6 +1627,7 @@ fix_3,beta,2024-01-01T02:00:00Z,-70.2,40.2,train,true
     )
     annotation = json.loads(sidecar_path.read_text(encoding="utf-8"))["annotations"][0]
     assert annotation["scope"]["row_ranges"] == [[1, 1]]
+    assert annotation["owner_question"] == ""
 
 
 def test_derived_threshold_filter_preserves_chronological_track_semantics(tmp_path):
@@ -1858,6 +1858,11 @@ def test_threshold_issue_ui_defaults_to_whole_study_with_selected_individuals_op
     assert 'individuals: thresholdScope.individuals' in source
     assert 'set_names: thresholdScope.setNames' in source
     assert '"all matching fixes in the whole study"' in source
+    assert 'isFilterTarget ? `Filter ${filterVariable}` : ""' in source
+    assert '`Filter applied: ${filterVariable}${issueThreshold ? ` ${issueThreshold}` : ""}.`' in source
+    assert "Question for data owner (optional)" in source
+    assert "User, issue type, and description are required." in source
+    assert "owner question are required" not in source
 
 
 def test_movement_history_locks_undo_and_resume_across_persistent_routes(tmp_path):
