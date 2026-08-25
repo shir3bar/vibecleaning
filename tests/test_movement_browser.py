@@ -443,6 +443,106 @@ def test_queue_decision_reuses_inflight_exact_blocks_across_review_step(tmp_path
         browser.close()
 
 
+def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    study_dir = tmp_path / "data" / "movement_clean" / "queue_auto_save"
+    study_dir.mkdir(parents=True)
+    (study_dir / "movement.csv").write_text(
+        CSV_QUEUE_TRANSITION_FIXTURE,
+        encoding="utf-8",
+    )
+    app = create_app(
+        data_root=tmp_path / "data",
+        static_root=STATIC_ROOT,
+        index_path=INDEX_PATH,
+        auth_manager=_auth_manager(),
+    )
+    register_movement_routes(
+        app,
+        data_root=tmp_path / "data",
+        overview_fix_limit=1,
+        overview_series_points=250,
+    )
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        review_requests = []
+        page.on(
+            "request",
+            lambda request: review_requests.append(request.url)
+            if request.method == "POST" and request.url.endswith("/actions/review-individual")
+            else None,
+        )
+        _login_and_wait(page, base_url, "queue_auto_save")
+        page.locator('[data-individual-checkbox="alpha"]').wait_for(
+            state="attached", timeout=20_000
+        )
+        page.locator('[data-role="individual-view-queue"]').click()
+
+        page.locator(
+            'button[data-review-decision="ok"][data-individual="alpha"]'
+        ).click()
+        page.locator(".movement-card .movement-title", has_text="beta").click()
+        page.wait_for_function(
+            """() => document.querySelector(
+              '.movement-card.queue-active .movement-title'
+            )?.textContent === 'beta'""",
+            timeout=20_000,
+        )
+        assert len(review_requests) == 1
+        alpha_card = page.locator(".movement-card", has_text="alpha")
+        assert "OK" in alpha_card.locator(".movement-review-state").text_content()
+        assert "unsaved" not in alpha_card.locator(".movement-review-state").text_content()
+
+        page.locator(
+            'button[data-review-decision="fix_keep"][data-individual="beta"]'
+        ).click()
+        page.locator('button[data-queue-nav="next-individual"]').wait_for(
+            state="visible", timeout=20_000
+        )
+        page.wait_for_function(
+            """() => !document.querySelector(
+              'button[data-queue-nav="next-individual"]'
+            )?.disabled""",
+            timeout=20_000,
+        )
+        page.locator('button[data-queue-nav="next-individual"]').click()
+        page.wait_for_function(
+            """() => document.querySelector(
+              '.movement-card.queue-active .movement-title'
+            )?.textContent === 'delta'""",
+            timeout=20_000,
+        )
+        assert len(review_requests) == 2
+
+        page.route(
+            "**/actions/review-individual",
+            lambda route: route.fulfill(
+                status=500,
+                content_type="application/json",
+                body='{"error":"forced review save failure"}',
+            ),
+        )
+        page.locator(
+            'button[data-review-decision="ok"][data-individual="delta"]'
+        ).click()
+        page.locator(".movement-card .movement-title", has_text="epsilon").click()
+        page.wait_for_function(
+            """() => document.querySelector('[data-role=status]')?.textContent.includes(
+              'Could not save the individual review decision'
+            )""",
+            timeout=20_000,
+        )
+        assert page.locator(
+            ".movement-card.queue-active .movement-title"
+        ).text_content() == "delta"
+        assert "unsaved" in page.locator(
+            ".movement-card.queue-active .movement-review-state"
+        ).text_content()
+        browser.close()
+
+
 def test_dataset_dropdown_restores_rewound_forward_tip(tmp_path):
     playwright_api = pytest.importorskip("playwright.sync_api")
     study_dir = tmp_path / "data" / "movement_clean" / "forward_tip"
