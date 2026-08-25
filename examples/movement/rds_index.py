@@ -724,6 +724,16 @@ def build_rds_fixes(
         clauses.append(f"i.identifier IN ({placeholders})")
         values.extend(selected)
     normalized_status = str(review_status or "").strip().lower()
+    if normalized_status in {"reviewed", "suspected", "confirmed"}:
+        return _build_rds_review_fixes(
+            index_path,
+            individuals=selected,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            review_status=normalized_status,
+            limit=limit,
+            annotations=annotations,
+        )
     query = FIX_SELECT
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
@@ -969,23 +979,34 @@ def _index_review_status(
     connection: sqlite3.Connection,
     annotations: list[dict] | None,
 ) -> np.ndarray:
-    count = int(connection.execute("SELECT COUNT(*) FROM fixes").fetchone()[0])
+    count = int(connection.execute("SELECT COALESCE(MAX(ordinal), -1) + 1 FROM fixes").fetchone()[0])
     artifacts = connection.execute(
-        "SELECT artifact_id, logical_name, row_count FROM artifacts ORDER BY artifact_id"
+        """
+        SELECT a.artifact_id, a.logical_name, a.row_count, MIN(f.ordinal) ordinal_start
+        FROM artifacts a JOIN fixes f ON f.artifact_id=a.artifact_id
+        GROUP BY a.artifact_id, a.logical_name, a.row_count
+        ORDER BY a.artifact_id
+        """
     ).fetchall()
     source_status = np.zeros(count, dtype=np.uint8)
     artifact_rows = {
-        str(row["logical_name"]): np.full(int(row["row_count"]) + 1, -1, dtype=np.int64)
+        str(row["logical_name"]): np.concatenate((
+            np.array([-1], dtype=np.int64),
+            np.arange(
+                int(row["ordinal_start"]),
+                int(row["ordinal_start"]) + int(row["row_count"]),
+                dtype=np.int64,
+            ),
+        ))
         for row in artifacts
     }
     for row in connection.execute(
         """
-        SELECT f.ordinal, f.source_row, f.source_outlier_status, a.logical_name
-        FROM fixes f JOIN artifacts a ON a.artifact_id=f.artifact_id
+        SELECT ordinal, source_outlier_status FROM fixes
+        WHERE lower(source_outlier_status) IN ('suspected','confirmed')
         """
     ):
         ordinal = int(row["ordinal"])
-        artifact_rows[str(row["logical_name"])][int(row["source_row"])] = ordinal
         status = str(row["source_outlier_status"] or "").lower()
         source_status[ordinal] = 2 if status == "confirmed" else 1 if status == "suspected" else 0
     return _review_projection(
@@ -993,6 +1014,188 @@ def _index_review_status(
         annotations=list(annotations or []),
         artifact_rows=artifact_rows,
     )
+
+
+def _contiguous_value_ranges(values: np.ndarray, target: int) -> list[list[int]]:
+    indexes = np.flatnonzero(values == target)
+    if not len(indexes):
+        return []
+    ranges: list[list[int]] = []
+    start = previous = int(indexes[0])
+    for raw_index in indexes[1:]:
+        index = int(raw_index)
+        if index != previous + 1:
+            ranges.append([start + 1, previous + 1])
+            start = index
+        previous = index
+    ranges.append([start + 1, previous + 1])
+    return ranges
+
+
+def _rds_artifact_review_slices(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT a.artifact_id, a.logical_name, a.row_count, i.identifier,
+               MIN(f.ordinal) ordinal_start
+        FROM artifacts a
+        JOIN individuals i ON i.artifact_id=a.artifact_id
+        JOIN fixes f ON f.artifact_id=a.artifact_id
+        GROUP BY a.artifact_id, a.logical_name, a.row_count, i.identifier
+        ORDER BY a.artifact_id
+        """
+    ).fetchall()
+
+
+def build_rds_review_projection(
+    index_path: Path,
+    *,
+    annotations: list[dict] | None = None,
+    individuals: Iterable[str] | None = None,
+) -> dict:
+    selected = {str(item).strip() for item in individuals or [] if str(item).strip()}
+    with closing(_connect(index_path)) as connection:
+        projected_status = _index_review_status(connection, annotations)
+        artifacts = _rds_artifact_review_slices(connection)
+    stats: dict[str, dict[str, int]] = {}
+    status_ranges = []
+    for artifact in artifacts:
+        individual = str(artifact["identifier"])
+        start = int(artifact["ordinal_start"])
+        row_count = int(artifact["row_count"])
+        values = projected_status[start : start + row_count]
+        stats[individual] = {
+            "suspected_count": int(np.count_nonzero(values == 1)),
+            "confirmed_count": int(np.count_nonzero(values == 2)),
+        }
+        if individual not in selected:
+            continue
+        for code, label in ((1, "suspected"), (2, "confirmed")):
+            row_ranges = _contiguous_value_ranges(values, code)
+            if row_ranges:
+                status_ranges.append({
+                    "logical_name": str(artifact["logical_name"]),
+                    "individual": individual,
+                    "status": label,
+                    "row_ranges": row_ranges,
+                })
+    return {
+        "fixes": [],
+        "segments": [],
+        "stats": stats,
+        "review_counts": {
+            "suspected": int(np.count_nonzero(projected_status == 1)),
+            "confirmed": int(np.count_nonzero(projected_status == 2)),
+        },
+        "projected_individuals": sorted(selected),
+        "review_status_ranges": status_ranges,
+        # The projection intentionally contains only compact review state.
+        "truncated": True,
+        "source_format": RDS_SOURCE_FORMAT,
+    }
+
+
+def _build_rds_review_fixes(
+    index_path: Path,
+    *,
+    individuals: Iterable[str] | None,
+    start_ms: int | None,
+    end_ms: int | None,
+    review_status: str,
+    limit: int | None,
+    annotations: list[dict] | None,
+) -> dict:
+    selected = {str(item).strip() for item in individuals or [] if str(item).strip()}
+    with closing(_connect(index_path)) as connection:
+        projected_status = _index_review_status(connection, annotations)
+        ordinal_ranges: list[tuple[int, int]] = []
+        for artifact in _rds_artifact_review_slices(connection):
+            if selected and str(artifact["identifier"]) not in selected:
+                continue
+            start = int(artifact["ordinal_start"])
+            row_count = int(artifact["row_count"])
+            values = projected_status[start : start + row_count]
+            accepted = (
+                values != 0
+                if review_status == "reviewed"
+                else values == (1 if review_status == "suspected" else 2)
+            )
+            indexes = np.flatnonzero(accepted)
+            if not len(indexes):
+                continue
+            range_start = previous = start + int(indexes[0])
+            for raw_index in indexes[1:]:
+                ordinal = start + int(raw_index)
+                if ordinal != previous + 1:
+                    ordinal_ranges.append((range_start, previous))
+                    range_start = ordinal
+                previous = ordinal
+            ordinal_ranges.append((range_start, previous))
+        if not ordinal_ranges:
+            return {
+                "fixes": [], "segments": [], "auto_bursts": [],
+                "matching_fix_count": 0, "returned_fix_count": 0,
+                "truncated": False, "burst_source": "burst_",
+                "detail_scope": {
+                    "individual": "", "individuals": sorted(selected),
+                    "start_ms": start_ms, "end_ms": end_ms,
+                    "review_status": review_status, "limit": limit,
+                    "burst_source": "burst_",
+                },
+                "detail_loaded": True,
+            }
+        connection.execute(
+            "CREATE TEMP TABLE requested_review_ranges (start_ordinal INTEGER, end_ordinal INTEGER)"
+        )
+        connection.executemany(
+            "INSERT INTO requested_review_ranges VALUES (?, ?)", ordinal_ranges
+        )
+        time_clauses = []
+        time_values: list[object] = []
+        if start_ms is not None:
+            time_clauses.append("f.time_ms >= ?")
+            time_values.append(int(start_ms))
+        if end_ms is not None:
+            time_clauses.append("f.time_ms <= ?")
+            time_values.append(int(end_ms))
+        where = (" WHERE " + " AND ".join(time_clauses)) if time_clauses else ""
+        from_sql = """
+            FROM fixes f
+            JOIN requested_review_ranges r
+              ON f.ordinal BETWEEN r.start_ordinal AND r.end_ordinal
+            JOIN artifacts a ON a.artifact_id=f.artifact_id
+            JOIN individuals i ON i.individual_key=f.individual_key
+        """
+        matching = int(connection.execute(
+            "SELECT COUNT(*) " + from_sql + where,
+            time_values,
+        ).fetchone()[0])
+        query = "SELECT f.*, a.logical_name, i.identifier, i.individual_id, i.study_id " + from_sql + where
+        query += " ORDER BY i.identifier, f.time_ms, f.source_row"
+        query_values = list(time_values)
+        if limit is not None:
+            query += " LIMIT ?"
+            query_values.append(max(0, int(limit)))
+        rows = connection.execute(query, query_values).fetchall()
+    fixes = [_fix_from_row(row) for row in rows]
+    return {
+        "fixes": fixes,
+        "segments": [],
+        "auto_bursts": [],
+        "matching_fix_count": matching,
+        "returned_fix_count": len(fixes),
+        "truncated": len(fixes) < matching,
+        "burst_source": "burst_",
+        "detail_scope": {
+            "individual": next(iter(selected)) if len(selected) == 1 else "",
+            "individuals": sorted(selected),
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "review_status": review_status,
+            "limit": limit,
+            "burst_source": "burst_",
+        },
+        "detail_loaded": True,
+    }
 
 
 def source_outlier_ranking(

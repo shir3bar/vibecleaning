@@ -414,6 +414,39 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
         {"logical_name": name, "row_ranges": [[1, 1]]}
         for name in sorted(header["artifacts"][:2])
     ]
+    projection_params = [("logical_name", logical_name)] + [
+        ("individuals", individual) for individual in overview["individuals"]
+    ]
+    review_projection = client.get(
+        f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{reviewed_dataset_id}/review-projection",
+        params=projection_params,
+    )
+    assert review_projection.status_code == 200, review_projection.text
+    review_projection_payload = review_projection.json()
+    assert review_projection_payload["review_counts"] == {
+        "suspected": 2,
+        "confirmed": 0,
+    }
+    assert sum(
+        end - start + 1
+        for item in review_projection_payload["review_status_ranges"]
+        if item["status"] == "suspected"
+        for start, end in item["row_ranges"]
+    ) == 2
+    suspicious = client.get(
+        f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{reviewed_dataset_id}/fixes",
+        params={
+            "logical_name": logical_name,
+            "review_status": "suspected",
+            "limit": 1,
+        },
+    )
+    assert suspicious.status_code == 200, suspicious.text
+    suspicious_payload = suspicious.json()
+    assert suspicious_payload["matching_fix_count"] == 2
+    assert suspicious_payload["returned_fix_count"] == 1
+    assert suspicious_payload["truncated"] is True
+    assert suspicious_payload["fixes"][0]["review"]["status"] == "suspected"
 
     refreshed = client.get(
         "/api/apps/movement/family/movement_rds/study/268904527/load"

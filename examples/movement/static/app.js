@@ -444,6 +444,17 @@ function requestMovementBinaryAttributes(binary, spec) {
   }).then(result => result.attributes);
 }
 
+function updateMovementBinaryWorkerReviewStatus(binary) {
+  const client = movementBinaryWorkerClient;
+  if (!client || !binary?.workerBlockId || !binary.arrays?.review_status) {
+    return Promise.resolve();
+  }
+  return client.request("review_status", {
+    blockId: binary.workerBlockId,
+    reviewStatus: binary.arrays.review_status,
+  }).then(() => undefined);
+}
+
 function releaseMovementBinaryBlock(binary) {
   const blockId = binary?.workerBlockId;
   if (!blockId) return;
@@ -10751,6 +10762,7 @@ class MovementExampleApp {
       ? { ...fieldStyle, categories: [...fieldStyle.categories.entries()] }
       : fieldStyle || null;
     const cacheKey = JSON.stringify({
+      reviewDataset: this.currentDatasetId || "",
       field: field?.key || "",
       fieldStyle: serializedFieldStyle,
       hiddenBurstIds: [...this.hiddenBurstIds].sort(),
@@ -11361,6 +11373,7 @@ class MovementExampleApp {
       for (const fix of this.data.fixes || []) {
         if (
           fix.review?.status !== "suspected"
+          || this.data.binaryBlocks?.has(fix.individual)
           || !visibleIndividuals.has(fix.individual)
           || !visibleSetNames.has(fix.setName)
           || hiddenBurstFixKeys.has(fix.fixKey)
@@ -11623,7 +11636,7 @@ class MovementExampleApp {
           }),
         );
       }
-      layers.push(
+      if (suspectedPointData.length) layers.push(
         new deck.ScatterplotLayer({
           id: "movement-suspected-outline",
           data: suspectedPointData,
@@ -11649,7 +11662,7 @@ class MovementExampleApp {
           pickable: true,
         }),
       );
-      layers.push(
+      if (thresholdPointData.length) layers.push(
         new deck.ScatterplotLayer({
           id: "movement-threshold-points",
           data: thresholdPointData,
@@ -11667,7 +11680,7 @@ class MovementExampleApp {
           pickable: true,
         }),
       );
-      layers.push(
+      if (selectedThresholdPointData.length) layers.push(
         new deck.ScatterplotLayer({
           id: "movement-selected-threshold-points",
           data: selectedThresholdPointData,
@@ -15946,7 +15959,9 @@ class MovementExampleApp {
     }
     this.refs.issueSubmit.disabled = true;
     this.refs.issueClose.disabled = true;
-    this.refs.issueStatus.textContent = context.mode === "segment"
+    this.refs.issueStatus.textContent = context.thresholdFilter
+      ? "Flagging fixes that match the saved threshold filter..."
+      : context.mode === "segment"
       ? `Marking ${formatCount(selectedFixes.length)} fixes as one ${this.pendingIssueStatus} segment...`
       : context.mode === "individual"
         ? `Flagging individual ${context.individual} for review...`
@@ -16042,7 +16057,12 @@ class MovementExampleApp {
       if (queueReviewIndividual) {
         this.stageIndividualReviewDecision(queueReviewIndividual, "fix_keep");
       }
-      this.setStatus(`Created ${result.step.title} in ${result.dataset.dataset_id}.`);
+      const resolvedFixCount = Number(result?.step?.summary?.resolved_fix_count) || 0;
+      this.setStatus(
+        resolvedFixCount
+          ? `Flagged ${formatCount(resolvedFixCount)} fixes as suspicious in ${result.dataset.dataset_id}.`
+          : `Created ${result.step.title} in ${result.dataset.dataset_id}.`,
+      );
     } catch (error) {
       await this.handleEditRequestError(error);
       this.refs.issueStatus.textContent = error.message;
@@ -16363,8 +16383,81 @@ class MovementExampleApp {
     };
   }
 
-  applyReviewProjection(projection) {
+  async applyBinaryReviewProjection(projection) {
+    if (!this.data?.binaryBlocks?.size) return;
+    const projectedIndividuals = new Set(
+      Array.isArray(projection.projected_individuals)
+        ? projection.projected_individuals.map(String)
+        : [],
+    );
+    if (!projectedIndividuals.size) return;
+    const rangesByArtifact = new Map();
+    for (const item of projection.review_status_ranges || []) {
+      const logicalName = String(item?.logical_name || "");
+      const status = item?.status === "confirmed" ? 2 : item?.status === "suspected" ? 1 : 0;
+      if (!logicalName || !status) continue;
+      const ranges = rangesByArtifact.get(logicalName) || [];
+      for (const rawRange of item.row_ranges || []) {
+        const start = Number(rawRange?.[0]);
+        const end = Number(rawRange?.[1]);
+        if (Number.isInteger(start) && Number.isInteger(end) && start > 0 && end >= start) {
+          ranges.push([start, end, status]);
+        }
+      }
+      rangesByArtifact.set(logicalName, ranges);
+    }
+    for (const ranges of rangesByArtifact.values()) {
+      ranges.sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+    }
+    const statusForRow = (ranges, sourceRow) => {
+      let low = 0;
+      let high = ranges.length - 1;
+      while (low <= high) {
+        const middle = Math.floor((low + high) / 2);
+        const range = ranges[middle];
+        if (sourceRow < range[0]) high = middle - 1;
+        else if (sourceRow > range[1]) low = middle + 1;
+        else return range[2];
+      }
+      return 0;
+    };
+    const binaries = new Set(this.data.binaryBlocks.values());
+    if (this.data.fullBinaryMovement) binaries.add(this.data.fullBinaryMovement);
+    const workerUpdates = [];
+    for (const binary of binaries) {
+      const arrays = binary.arrays;
+      let changed = false;
+      for (let index = 0; index < Number(binary.header.row_count); index += 1) {
+        const individual = String(
+          binary.header.individuals?.[Number(arrays.individual_codes[index])] || "",
+        );
+        if (!projectedIndividuals.has(individual)) continue;
+        const logicalName = String(
+          binary.header.artifacts?.[Number(arrays.artifact_codes[index])] || "",
+        );
+        const status = statusForRow(
+          rangesByArtifact.get(logicalName) || [],
+          Number(arrays.source_rows[index]),
+        );
+        if (Number(arrays.review_status[index]) !== status) {
+          arrays.review_status[index] = status;
+          changed = true;
+        }
+      }
+      if (!changed) continue;
+      binary.renderCaches?.clear?.();
+      binary.deckDataCaches?.clear?.();
+      binary.attributePromises?.clear?.();
+      binary.lastRenderAttributes = null;
+      binary.lastRenderCacheKey = "";
+      workerUpdates.push(updateMovementBinaryWorkerReviewStatus(binary));
+    }
+    await Promise.all(workerUpdates);
+  }
+
+  async applyReviewProjection(projection) {
     if (!this.data) return;
+    await this.applyBinaryReviewProjection(projection);
     const projectedFixes = parseMovementFixes(projection.fixes || []);
     const projectedIndividuals = new Set(
       Array.isArray(projection.projected_individuals)
@@ -16437,6 +16530,10 @@ class MovementExampleApp {
     this.data.flaggedStepOverlays = buildFlaggedStepOverlays(this.data);
     this.data.segments = projectedSegments;
     this.data.segmentById = new Map(projectedSegments.map(segment => [segment.segmentId, segment]));
+    const suspiciousCount = Number(this.data.suspiciousMatchingFixCount) || 0;
+    this.refs.selectSuspicious.textContent = suspiciousCount
+      ? `Review suspicious fixes (${formatCount(suspiciousCount)})`
+      : "Review suspicious fixes";
 
     const projectedStats = projection.stats || {};
     const individualReviews = projection.individual_reviews || {};
@@ -16525,7 +16622,6 @@ class MovementExampleApp {
       this.rememberDatasetMetadata(projection.dataset);
       const compatible = Boolean(
         this.data
-        && !this.data.binaryBlocks?.size
         && this.currentArtifact
         && this.data.sourceSignature
         && this.data.exclusionSignature
@@ -16554,6 +16650,10 @@ class MovementExampleApp {
           this.updateActionButtons();
           throw new Error("The requested version could not be prepared; the previous view is still open.");
         }
+        this.clearCompletedFlagTarget(clearTarget);
+        this.renderThresholdPane();
+        this.renderLayers();
+        this.updateActionButtons();
         return;
       }
 
@@ -16565,7 +16665,7 @@ class MovementExampleApp {
       this.editLockProfile = projection.edit_profile || this.editLockProfile;
       this.data.sourceSignature = String(projection.source_signature || "");
       this.data.exclusionSignature = String(projection.exclusion_signature || "");
-      this.applyReviewProjection(projection);
+      await this.applyReviewProjection(projection);
       this.clearCompletedFlagTarget(clearTarget);
       this.refreshDatasetOptions(datasetId);
       this.restoreAnnotationReloadContext(viewContext);

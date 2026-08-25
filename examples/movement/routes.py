@@ -98,6 +98,7 @@ from .sources import (
 from .rds_index import (
     build_rds_report_inputs,
     build_rds_binary_columns,
+    build_rds_review_projection,
     ensure_rds_index,
     rds_burst_feature_rows,
     rds_report_row_ranges,
@@ -1772,15 +1773,20 @@ def register_movement_routes(
                 request.query_params.getlist("individuals")
             )
             if configured_source.bundle_scoped:
-                bundle, _index_path = await run_in_threadpool(
+                bundle, index_path = await run_in_threadpool(
                     ensure_rds_index, study_dir, dataset_id
                 )
-                projection = {
-                    "fixes": [],
-                    "segments": [],
-                    "stats": {},
-                    "source_format": "rds",
-                }
+                projection = await run_in_threadpool(
+                    build_rds_review_projection,
+                    index_path,
+                    annotations=visible_annotations,
+                    individuals=individuals,
+                )
+                projection = apply_review_annotations(
+                    projection,
+                    visible_annotations,
+                    source_artifact="",
+                )
                 current_source_signature = bundle.signature
             else:
                 projection = await run_in_threadpool(
@@ -1880,7 +1886,11 @@ def register_movement_routes(
                 start_ms=parse_optional_int(start_ms, label="start_ms"),
                 end_ms=parse_optional_int(end_ms, label="end_ms"),
                 review_status=normalized_review_status,
-                limit=None if normalized_review_status else requested_limit,
+                limit=(
+                    requested_limit
+                    if configured_source.bundle_scoped or not normalized_review_status
+                    else None
+                ),
                 burst_gap_mode=parse_burst_gap_mode(burst_gap_mode),
                 burst_gap_seconds=parse_burst_gap_seconds(burst_gap_seconds),
                 burst_gap_quantile=parse_burst_gap_quantile(burst_gap_quantile),
@@ -1901,7 +1911,7 @@ def register_movement_routes(
                     visible_annotations,
                     source_artifact=logical_name,
                 )
-            if normalized_review_status:
+            if normalized_review_status and not configured_source.bundle_scoped:
                 payload = _filter_review_status_payload(
                     payload,
                     review_status=normalized_review_status,

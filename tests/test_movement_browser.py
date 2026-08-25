@@ -318,6 +318,35 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
                 "Filter applied: is_outlier = True."
             )
             assert page.locator('[data-role="issue-question"]').input_value() == ""
+            requests_before_flag = len(binary_requests)
+            page.locator('[data-role="issue-submit"]').click()
+            page.locator('[data-role="issue-modal"]').wait_for(
+                state="hidden", timeout=20_000
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-role=status]').textContent.includes('Flagged 3 fixes')",
+                timeout=20_000,
+            )
+            assert len(binary_requests) == requests_before_flag
+            assert outlier_individual.is_checked()
+            layer_ids = _layer_ids(page)
+            assert not any("movement-binary-threshold" in layer_id for layer_id in layer_ids)
+            assert "movement-suspected-outline" not in layer_ids
+            assert sum("movement-binary-suspected" in layer_id for layer_id in layer_ids) == 1
+            page.wait_for_function(
+                "() => document.querySelector('[data-role=select-suspicious]').textContent.includes('(3)')"
+            )
+
+            page.locator('[data-role="undo"]').click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-role=status]').textContent.startsWith('Undid to')",
+                timeout=20_000,
+            )
+            assert len(binary_requests) == requests_before_flag
+            assert outlier_individual.is_checked()
+            assert not any(
+                "movement-binary-suspected" in layer_id for layer_id in _layer_ids(page)
+            )
 
         page.evaluate("window.__movementMonitorActive = false")
         browser.close()

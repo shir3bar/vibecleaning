@@ -220,6 +220,17 @@ self.addEventListener("message", event => {
       movements.delete(String(event.data.blockId || ""));
       return;
     }
+    if (event.data?.type === "review_status") {
+      const movement = movements.get(String(event.data.blockId || ""));
+      if (!movement) throw new Error("Movement block is not initialized.");
+      const reviewStatus = new Uint8Array(event.data.reviewStatus || []);
+      if (reviewStatus.length !== movement.arrays.review_status.length) {
+        throw new Error("Movement review status length does not match the block.");
+      }
+      movement.arrays.review_status.set(reviewStatus);
+      self.postMessage({ type: "review_status", requestId });
+      return;
+    }
     if (event.data?.type === "attributes") {
       const movement = movements.get(String(event.data.blockId || ""));
       if (!movement) throw new Error("Movement block is not initialized.");
