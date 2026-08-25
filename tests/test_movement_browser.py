@@ -37,6 +37,21 @@ c1,gamma,2024-01-01T00:45:00Z,-72.0,42.0,train
 c2,gamma,2024-01-01T01:45:00Z,-72.1,42.1,train
 """
 
+CSV_QUEUE_TRANSITION_FIXTURE = """eventid,individual,timestamp,longitude,latitude,set
+a1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
+a2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train
+b1,beta,2024-01-01T00:00:00Z,-71.0,41.0,train
+b2,beta,2024-01-01T01:00:00Z,-71.1,41.1,train
+c1,gamma,2024-01-01T00:00:00Z,-72.0,42.0,train
+c2,gamma,2024-01-01T01:00:00Z,-72.1,42.1,train
+d1,delta,2024-01-01T00:00:00Z,-73.0,43.0,train
+d2,delta,2024-01-01T01:00:00Z,-73.1,43.1,train
+e1,epsilon,2024-01-01T00:00:00Z,-74.0,44.0,train
+e2,epsilon,2024-01-01T01:00:00Z,-74.1,44.1,train
+z1,zeta,2024-01-01T00:00:00Z,-75.0,45.0,train
+z2,zeta,2024-01-01T01:00:00Z,-75.1,45.1,train
+"""
+
 
 def _create_browser_ranking(study_dir: Path) -> None:
     dataset_id = ensure_project_state(study_dir)["current_dataset_id"]
@@ -347,6 +362,69 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path):
         )
 
         page.evaluate("window.__movementMonitorActive = false")
+        browser.close()
+
+
+def test_queue_decision_retries_exact_blocks_on_the_new_dataset(tmp_path):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    study_dir = tmp_path / "data" / "movement_clean" / "queue_transition"
+    study_dir.mkdir(parents=True)
+    (study_dir / "movement.csv").write_text(
+        CSV_QUEUE_TRANSITION_FIXTURE,
+        encoding="utf-8",
+    )
+    app = create_app(
+        data_root=tmp_path / "data",
+        static_root=STATIC_ROOT,
+        index_path=INDEX_PATH,
+        auth_manager=_auth_manager(),
+    )
+    register_movement_routes(
+        app,
+        data_root=tmp_path / "data",
+        overview_fix_limit=1,
+        overview_series_points=250,
+    )
+    _delay_binary_responses(app, seconds=1.0)
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        binary_requests = []
+        page.on(
+            "request",
+            lambda request: binary_requests.append(request.url)
+            if "/fixes-binary?" in request.url else None,
+        )
+        _login_and_wait(page, base_url, "queue_transition")
+        page.locator('[data-individual-checkbox="alpha"]').wait_for(
+            state="attached", timeout=20_000
+        )
+
+        page.locator('[data-role="individual-view-queue"]').click()
+        page.locator(
+            'button[data-review-decision="ok"][data-individual="alpha"]'
+        ).click()
+        save = page.locator('[data-role="individual-queue-save"]')
+        save.wait_for(state="visible", timeout=20_000)
+        assert save.is_enabled()
+        save.click()
+
+        page.wait_for_function(
+            """() => document.querySelector(
+              '.movement-card.queue-active .movement-title'
+            )?.textContent === 'beta'""",
+            timeout=20_000,
+        )
+        _wait_for_layer(page, "movement-binary-points-individual-1")
+        page.wait_for_function(
+            """() => !window.__movementDiagnostics.renderedLayerIds.includes(
+              'movement-overview-preview-1'
+            )""",
+            timeout=20_000,
+        )
+        assert len(binary_requests) >= 2
+        assert len({url.split("/dataset/")[1].split("/")[0] for url in binary_requests}) >= 2
         browser.close()
 
 

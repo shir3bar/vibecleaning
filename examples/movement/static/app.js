@@ -8777,6 +8777,7 @@ class MovementExampleApp {
     }
     this.renderIndividuals();
     this.renderLayers();
+    await this.loadDetailForCurrentSelection();
     if (zoom) {
       this.zoomToIndividualQueueActive();
     }
@@ -13598,7 +13599,7 @@ class MovementExampleApp {
     const missingBinaryIndividuals = unresolvedBinaryIndividuals.filter(
       individual => !this.data.binaryPendingIndividuals.has(individual),
     );
-    if (!requireObjects && unresolvedBinaryIndividuals.length) {
+    if (unresolvedBinaryIndividuals.length) {
       this.cancelRequest("detail");
       this.data.detailState = "loading";
       this.data.detailIndividuals = [...selectedIndividuals];
@@ -13610,75 +13611,76 @@ class MovementExampleApp {
       this.updateActionButtons();
       if (!missingBinaryIndividuals.length) {
         this.renderLayers();
-        return;
-      }
-      this.setStatus(
-        wholeStudySelected
-          ? `Loading all ${formatCount(this.data.totalRows)} exact fixes across ${formatCount(selectedIndividuals.length)} individuals...`
-          : `Loading exact points and colors for ${formatCount(missingBinaryIndividuals.length)} individual${missingBinaryIndividuals.length === 1 ? "" : "s"}...`,
-      );
-      const pendingToken = {};
-      const requestedBinaryIndividuals = wholeStudySelected
-        ? selectedIndividuals
-        : missingBinaryIndividuals;
-      try {
-        if (wholeStudySelected) {
-          this.cancelBinaryRequests();
-          this.data.binaryPendingIndividuals.clear();
+        if (!requireObjects) return;
+      } else {
+        this.setStatus(
+          wholeStudySelected
+            ? `Loading all ${formatCount(this.data.totalRows)} exact fixes across ${formatCount(selectedIndividuals.length)} individuals...`
+            : `Loading exact points and colors for ${formatCount(missingBinaryIndividuals.length)} individual${missingBinaryIndividuals.length === 1 ? "" : "s"}...`,
+        );
+        const pendingToken = {};
+        const requestedBinaryIndividuals = wholeStudySelected
+          ? selectedIndividuals
+          : missingBinaryIndividuals;
+        try {
+          if (wholeStudySelected) {
+            this.cancelBinaryRequests();
+            this.data.binaryPendingIndividuals.clear();
+          }
+          for (const individual of requestedBinaryIndividuals) {
+            this.data.binaryPendingIndividuals.set(individual, pendingToken);
+          }
+          await this.loadBinaryMovement({
+            familyName: this.currentFamily,
+            studyName: this.currentStudy,
+            datasetId: this.currentDatasetId,
+            individuals: wholeStudySelected ? [] : missingBinaryIndividuals,
+          });
+        } catch (error) {
+          if (!this.data) return;
+          for (const individual of requestedBinaryIndividuals) {
+            if (this.data.binaryPendingIndividuals.get(individual) === pendingToken) {
+              this.data.binaryPendingIndividuals.delete(individual);
+            }
+          }
+          if (this.isAbortError(error)) {
+            return;
+          }
+          for (const individual of requestedBinaryIndividuals) {
+            this.data.detailFailedIndividuals.add(individual);
+          }
+          this.data.detailLoadingIndividuals = this.getSelectedIndividuals().filter(
+            individual => this.data.binaryPendingIndividuals.has(individual),
+          );
+          this.data.detailState = this.data.detailLoadingIndividuals.length ? "loading" : "error";
+          this.updateActionButtons();
+          this.syncIndividualSelectionUi(this.getSelectedIndividuals());
+          this.renderLayers();
+          this.setStatus(`Could not load exact map fixes: ${error.message}`, true);
+          return;
         }
-        for (const individual of requestedBinaryIndividuals) {
-          this.data.binaryPendingIndividuals.set(individual, pendingToken);
-        }
-        await this.loadBinaryMovement({
-          familyName: this.currentFamily,
-          studyName: this.currentStudy,
-          datasetId: this.currentDatasetId,
-          individuals: wholeStudySelected ? [] : missingBinaryIndividuals,
-        });
-      } catch (error) {
-        if (!this.data) return;
         for (const individual of requestedBinaryIndividuals) {
           if (this.data.binaryPendingIndividuals.get(individual) === pendingToken) {
             this.data.binaryPendingIndividuals.delete(individual);
           }
         }
-        if (this.isAbortError(error)) {
-          return;
-        }
+        const currentSelection = this.getSelectedIndividuals();
+        const stillMissing = currentSelection.filter(individual => !this.data.binaryBlocks.has(individual));
+        this.data.detailLoadingIndividuals = stillMissing;
         for (const individual of requestedBinaryIndividuals) {
-          this.data.detailFailedIndividuals.add(individual);
+          this.data.detailFailedIndividuals.delete(individual);
         }
-        this.data.detailLoadingIndividuals = this.getSelectedIndividuals().filter(
-          individual => this.data.binaryPendingIndividuals.has(individual),
-        );
-        this.data.detailState = this.data.detailLoadingIndividuals.length ? "loading" : "error";
-        this.updateActionButtons();
-        this.syncIndividualSelectionUi(this.getSelectedIndividuals());
+        this.data.detailState = stillMissing.length ? "loading" : "map_loaded";
+        this.data.detailIndividuals = [...currentSelection];
+        this.syncIndividualSelectionUi(currentSelection);
+        this.renderBurstCountIndicator();
         this.renderLayers();
-        this.setStatus(`Could not load exact map fixes: ${error.message}`, true);
-        return;
+        this.updateActionButtons();
+        this.setStatus(stillMissing.length
+          ? `Showing available exact tracks; ${formatCount(stillMissing.length)} individual${stillMissing.length === 1 ? " is" : "s are"} still loading.`
+          : `Showing exact points and tracks for ${formatCount(currentSelection.length)} visible individual${currentSelection.length === 1 ? "" : "s"}.`);
+        if (!requireObjects) return;
       }
-      for (const individual of requestedBinaryIndividuals) {
-        if (this.data.binaryPendingIndividuals.get(individual) === pendingToken) {
-          this.data.binaryPendingIndividuals.delete(individual);
-        }
-      }
-      const currentSelection = this.getSelectedIndividuals();
-      const stillMissing = currentSelection.filter(individual => !this.data.binaryBlocks.has(individual));
-      this.data.detailLoadingIndividuals = stillMissing;
-      for (const individual of requestedBinaryIndividuals) {
-        this.data.detailFailedIndividuals.delete(individual);
-      }
-      this.data.detailState = stillMissing.length ? "loading" : "map_loaded";
-      this.data.detailIndividuals = [...currentSelection];
-      this.syncIndividualSelectionUi(currentSelection);
-      this.renderBurstCountIndicator();
-      this.renderLayers();
-      this.updateActionButtons();
-      this.setStatus(stillMissing.length
-        ? `Showing available exact tracks; ${formatCount(stillMissing.length)} individual${stillMissing.length === 1 ? " is" : "s are"} still loading.`
-        : `Showing exact points and tracks for ${formatCount(currentSelection.length)} visible individual${currentSelection.length === 1 ? "" : "s"}.`);
-      return;
     }
 
     if (!requireObjects) {
@@ -16705,7 +16707,14 @@ class MovementExampleApp {
     } = {},
   ) {
     const transitionId = ++this.viewTransitionId;
-    const detailLoadWasInterrupted = this.data?.detailState === "loading";
+    const binaryLoadWasInterrupted = Boolean(
+      this.data?.binaryPendingIndividuals?.size
+      || Object.keys(this.requestControllers).some(name => name.startsWith("binaryFixes:")),
+    );
+    const detailLoadWasInterrupted = (
+      this.data?.detailState === "loading"
+      || binaryLoadWasInterrupted
+    );
     for (const requestName of [
       "dataset",
       "overview",
@@ -16716,6 +16725,7 @@ class MovementExampleApp {
     ]) {
       this.cancelRequest(requestName);
     }
+    this.cancelBinaryRequests();
     const viewContext = this.captureDatasetViewContext();
     if (viewContext && preserveAnnotationContext) {
       viewContext.annotationReloadContext = this.captureAnnotationReloadContext();
@@ -16799,6 +16809,7 @@ class MovementExampleApp {
       if (detailLoadWasInterrupted) {
         void this.loadDetailForCurrentSelection({
           preservedFixKeys: new Set(this.data.selectedFixKeys),
+          requireObjects: this.individualReviewQueue.mode === "queue",
         });
       }
     } catch (error) {
