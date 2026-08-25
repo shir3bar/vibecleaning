@@ -233,6 +233,44 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path):
         assert page.locator('[data-role="mark-suspected"]').text_content() == "Choose what to flag"
         assert page.locator('[data-role="mark-suspected"]').is_disabled()
 
+        page.locator('[data-role="ranking-method"]').select_option(
+            "isolation_forest",
+            force=True,
+        )
+        page.locator('[data-role="individual-queue-order"]').select_option(
+            "isolation_forest_decision_margin"
+        )
+        page.wait_for_function("""
+          () => Object.values(localStorage).some(raw => {
+            try {
+              const state = JSON.parse(raw);
+              return state.individualQueueOrder === 'ranking'
+                && state.individualQueueRankingMethod === 'isolation_forest_decision_margin'
+                && state.rankingMethod === 'isolation_forest';
+            } catch {
+              return false;
+            }
+          })
+        """)
+        page.reload(wait_until="domcontentloaded")
+        page.locator(".movement-root").wait_for(state="visible", timeout=20_000)
+        page.locator('[data-role="map"] canvas').first.wait_for(
+            state="attached", timeout=20_000
+        )
+        page.locator(
+            '[data-role="study"] option[value="browser_study"]'
+        ).wait_for(state="attached", timeout=20_000)
+        page.locator('[data-role="study"]').select_option("browser_study")
+        page.locator('[data-individual-checkbox="alpha"]').wait_for(
+            state="attached", timeout=20_000
+        )
+        assert page.locator('[data-role="ranking-method"]').input_value() == (
+            "isolation_forest"
+        )
+        assert page.locator('[data-role="individual-queue-order"]').input_value() == (
+            "isolation_forest_decision_margin"
+        )
+
         page.evaluate("window.__movementMonitorActive = false")
         browser.close()
 

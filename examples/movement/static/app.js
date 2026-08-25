@@ -640,7 +640,9 @@ class MovementExampleApp {
       saving: false,
       appliedRankingAnalysisId: "",
       pendingRankingAnalysisId: "",
-      rankingMethod: this.uiState.rankingMethod || "isolation_forest",
+      rankingMethod: this.uiState.individualQueueRankingMethod
+        || this.uiState.rankingMethod
+        || "isolation_forest",
     };
     this.handleWindowResize = () => this.handleLayoutResize();
     this.handleSidePanePointerMove = event => this.onSidePanePointerMove(event);
@@ -710,6 +712,7 @@ class MovementExampleApp {
         individualQueueListHeightPx: null,
         individualViewMode: "browse",
         individualQueueOrder: "dataset",
+        individualQueueRankingMethod: "isolation_forest",
         individualQueuePage: 0,
       };
     }
@@ -742,6 +745,8 @@ class MovementExampleApp {
       individualQueueListHeightPx: this.individualQueueListHeightPx,
       individualViewMode: this.individualReviewQueue?.mode || "browse",
       individualQueueOrder: this.individualReviewQueue?.orderMode || "dataset",
+      individualQueueRankingMethod: this.individualReviewQueue?.rankingMethod
+        || this.getRankingMethod(),
       individualQueuePage: this.individualReviewQueue?.pageIndex || 0,
     };
     localStorage.setItem(MOVEMENT_APP_CONFIG.storageKey, JSON.stringify(this.uiState));
@@ -5244,6 +5249,7 @@ class MovementExampleApp {
   makeEmptyAnomalyRanking() {
     return {
       analysisId: "",
+      analysisDatasetId: "",
       status: "idle",
       rankedIndividuals: [],
       burstScores: new Map(),
@@ -5262,6 +5268,7 @@ class MovementExampleApp {
   rankingResultsFromArtifact(artifact, metadata = {}) {
     const shared = {
       analysisId: String(metadata.analysisId || ""),
+      analysisDatasetId: String(metadata.analysisDatasetId || ""),
       status: String(artifact?.run_status || "completed"),
       burstScores: this.makeBurstScoreMap(artifact?.scored_bursts),
       warnings: Array.isArray(artifact?.warnings) ? artifact.warnings : [],
@@ -5313,7 +5320,7 @@ class MovementExampleApp {
     return results;
   }
 
-  clearAnomalyRanking({ render = true } = {}) {
+  clearAnomalyRanking({ render = true, preserveQueueOrder = false } = {}) {
     this.cancelRequest("anomalyRanking");
     this.cancelRequest("issueBurstScores");
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
@@ -5322,7 +5329,10 @@ class MovementExampleApp {
     if (this.individualReviewQueue) {
       this.individualReviewQueue.appliedRankingAnalysisId = "";
       this.individualReviewQueue.pendingRankingAnalysisId = "";
-      if (this.individualReviewQueue.orderMode === "ranking") {
+      if (
+        !preserveQueueOrder
+        && this.individualReviewQueue.orderMode === "ranking"
+      ) {
         this.individualReviewQueue.orderMode = "dataset";
       }
     }
@@ -5421,6 +5431,9 @@ class MovementExampleApp {
         )
           ? {
             ...loadedRanking,
+            analysisDatasetId: String(
+              ranking.dataset_id || loadedRanking.analysisDatasetId || "",
+            ),
             createdAt: String(ranking.created_at || loadedRanking.createdAt || ""),
             user: String(ranking.user || loadedRanking.user || ""),
             loadedFromHistory: true,
@@ -5428,6 +5441,7 @@ class MovementExampleApp {
           : {
             ...this.makeEmptyAnomalyRanking(),
             analysisId: rankingAnalysisId,
+            analysisDatasetId: String(ranking.dataset_id || ""),
             status: "available",
             rankingMethod: String(
               rankingMethod,
@@ -5447,7 +5461,7 @@ class MovementExampleApp {
         this.anomalyRankings.set(rankingMethod, unavailableRanking);
         if (activateRanking) this.anomalyRanking = unavailableRanking;
       }
-      if (featureSpace && MOVEMENT_APP_CONFIG.featureSpace) {
+      if (featureSpace && MOVEMENT_APP_CONFIG.featureSpace && activateRanking) {
         tasks.push(this.restoreSavedBurstFeatureSpace(featureSpace, controller.signal).then(() => {
           restored.push(`feature space from ${formatDateTime(featureSpace.created_at)}`);
         }));
@@ -5469,8 +5483,13 @@ class MovementExampleApp {
       if (restored.length) {
         this.setStatus(`Restored saved ${restored.join(" and ")}.`);
       }
+      const rankingNeededForQueue = (
+        this.individualReviewQueue.orderMode === "ranking"
+        && this.individualReviewQueue.rankingMethod === rankingMethod
+      );
       if (ranking && (
         !activateRanking
+        || rankingNeededForQueue
         || (
           this.individualReviewQueue.mode === "browse"
           && this.refs.sideSheetTabs?.dataset.activeSheet === "ranking"
@@ -5501,6 +5520,26 @@ class MovementExampleApp {
       if (this.requestControllers.analysisHistory === controller) {
         this.requestControllers.analysisHistory = null;
       }
+    }
+  }
+
+  async restoreSavedRankingSelections() {
+    const displayedMethod = this.getRankingMethod();
+    await this.restoreSavedAnalyses({
+      rankingMethod: displayedMethod,
+      activateRanking: true,
+    });
+    const queueMethod = String(
+      this.individualReviewQueue?.rankingMethod || displayedMethod,
+    );
+    if (
+      this.individualReviewQueue?.orderMode === "ranking"
+      && queueMethod !== displayedMethod
+    ) {
+      await this.restoreSavedAnalyses({
+        rankingMethod: queueMethod,
+        activateRanking: false,
+      });
     }
   }
 
@@ -5547,6 +5586,7 @@ class MovementExampleApp {
       }
       this.cacheRankingArtifact(artifact, {
         analysisId,
+        analysisDatasetId: metadata.analysisDatasetId,
         rankingMethod: metadata.rankingMethod || this.getRankingMethod(),
         createdAt: metadata.createdAt,
         user: metadata.user,
@@ -5687,6 +5727,9 @@ class MovementExampleApp {
         const summary = result.summary || {};
         this.cacheRankingArtifact(summary, {
           analysisId: String(result?.analysis_id || result?.analysis?.analysis_id || ""),
+          analysisDatasetId: String(
+            result?.analysis?.dataset_id || this.currentDatasetId || "",
+          ),
           rankingMethod: providers[index],
           createdAt: String(result?.analysis?.created_at || ""),
           user: String(result?.analysis?.user || ""),
@@ -6661,8 +6704,14 @@ class MovementExampleApp {
       const created = result.createdAt
         ? ` from ${formatDateTime(result.createdAt)}`
         : "";
+      const inherited = (
+        result.analysisDatasetId
+        && result.analysisDatasetId !== this.currentDatasetId
+      )
+        ? ` on version ${result.analysisDatasetId}`
+        : "";
       this.refs.anomalyRanking.innerHTML = (
-        `<div class="movement-table-empty">A compatible saved burst ranking${escapeHtml(created)} is available. `
+        `<div class="movement-table-empty">A compatible saved burst ranking${escapeHtml(created)}${escapeHtml(inherited)} is available. `
         + '<button type="button" data-action="load-saved-ranking">Load saved ranking</button></div>'
       );
       return;
@@ -6706,6 +6755,9 @@ class MovementExampleApp {
         : "Worst burst score";
     const metadata = [
       result.analysisId ? `Analysis: ${result.analysisId}` : "",
+      result.analysisDatasetId && result.analysisDatasetId !== this.currentDatasetId
+        ? `Reused from version: ${result.analysisDatasetId}`
+        : "",
       result.createdAt ? `${result.loadedFromHistory ? "Restored" : "Created"}: ${formatDateTime(result.createdAt)}${result.user ? ` by ${result.user}` : ""}` : "",
       burstGapLabel ? `Burst gap: ${burstGapLabel}` : "",
       modelFit.model ? `Model: ${modelFit.model}` : "",
@@ -7573,7 +7625,7 @@ class MovementExampleApp {
     this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
     this.clearOsmContext({ render: false });
     this.clearCandidateQueryPreview({ render: false });
-    this.clearAnomalyRanking({ render: false });
+    this.clearAnomalyRanking({ render: false, preserveQueueOrder: true });
     this.clearBurstFeatureSpace({ render: false });
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
@@ -7875,7 +7927,7 @@ class MovementExampleApp {
       this.renderThresholdPane();
       this.updateTimeLabel();
       this.hideOverlay();
-      void this.restoreSavedAnalyses();
+      void this.restoreSavedRankingSelections();
       await this.rebuildMap(false);
       this.restoreDatasetMapView(viewContext);
       this.updateActionButtons();
@@ -7995,7 +8047,7 @@ class MovementExampleApp {
   async loadArtifact(viewContext = this.captureDatasetViewContext()) {
     this.cancelSelectionRequests("artifact");
     this.cancelBinaryRequests();
-    this.clearAnomalyRanking();
+    this.clearAnomalyRanking({ preserveQueueOrder: true });
     this.clearBurstFeatureSpace();
     const familyName = this.currentFamily;
     const studyName = this.currentStudy;
@@ -8063,7 +8115,7 @@ class MovementExampleApp {
       this.renderThresholdPane();
       this.updateTimeLabel();
       this.hideOverlay();
-      void this.restoreSavedAnalyses();
+      void this.restoreSavedRankingSelections();
       await this.rebuildMap(false);
       this.restoreDatasetMapView(viewContext);
       this.updateActionButtons();
@@ -16690,7 +16742,7 @@ class MovementExampleApp {
       this.updateActionButtons();
       this.saveUiState();
       if (reason === "dataset_switch" || reason === "editor_release") {
-        void this.restoreSavedAnalyses();
+        void this.restoreSavedRankingSelections();
       }
       if (reason === "editor_release") {
         void this.refreshGraphMetadata(datasetId);

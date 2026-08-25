@@ -17,7 +17,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.auth import AuthManager
-from app.state import ensure_project_state, get_dataset_artifact
+from app.execution import create_analysis
+from app.state import ensure_project_state, get_dataset_artifact, load_dataset
+from examples.movement.analysis_history import review_exclusion_signature
 from examples.movement.rds_export import export_reviewed_rds_bundle
 from examples.movement.routes import _ranking_definition_matches
 from examples.movement.rds_index import (
@@ -75,6 +77,69 @@ def _binary_header(content: bytes) -> dict:
     return json.loads(content[8 : 8 + length])
 
 
+def _create_saved_rds_source_ranking(
+    study_dir: Path,
+    *,
+    dataset_id: str,
+    logical_name: str,
+    bundle_signature: str,
+) -> dict:
+    dataset = load_dataset(study_dir, dataset_id)
+    script = '''import json
+import os
+from pathlib import Path
+
+spec = json.loads(Path(os.environ["VIBECLEANING_SPEC_PATH"]).read_text())
+output = next(
+    item for item in spec["output_artifacts"]
+    if item["logical_name"] == "burst_anomaly_ranking.json"
+)
+Path(output["path"]).write_text(json.dumps({
+    "run_status": "completed",
+    "ranking_method": "source_is_outlier",
+    "ranked_individuals": [],
+    "scored_bursts": [],
+}))
+Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text(
+    json.dumps({"run_status": "completed"})
+)
+'''
+    return create_analysis(
+        study_dir,
+        {
+            "user": "rds-reviewer",
+            "title": "Saved RDS source ranking",
+            "kind": "python",
+            "script": script,
+            "dataset_id": dataset_id,
+            "input_artifacts": [
+                str(item.get("logical_name") or "")
+                for item in dataset.get("artifacts") or []
+                if str(item.get("logical_name") or "").lower().endswith(".rds")
+            ],
+            "output_artifacts": ["burst_anomaly_ranking.json"],
+            "parameters": {
+                "app": "movement",
+                "action": "run_burst_anomaly_ranking",
+                "target_artifact": logical_name,
+                "ranking_method": "source_is_outlier",
+                "ranking_provider": "source_is_outlier",
+                "ranking_schema_version": 1,
+                "ranking_definition_signature": "source_is_outlier:sum_fix_counts:v1",
+                "burst_gap_mode": "manual",
+                "burst_gap_seconds": 3600,
+                "burst_gap_quantile": 0.999,
+                "feature_set": "movement_only",
+                "source_bundle_signature": bundle_signature,
+                "burst_definition_signature": "source:burst_:v1",
+                "review_exclusion_signature": review_exclusion_signature(
+                    study_dir, dataset_id, logical_name
+                ),
+            },
+        },
+    )
+
+
 def test_sample_rds_preserves_lossless_identifiers_and_source_schema():
     source = SAMPLE_ROOT / "481458_6898572515.rds"
     if not source.exists():
@@ -123,6 +188,74 @@ def test_pre_sum_source_ranking_is_not_treated_as_a_source_total_ranking():
         "source_is_outlier:sum_fix_counts:v1",
     ) is True
     assert _ranking_definition_matches("isolation_forest", "") is True
+
+
+def test_rds_ranking_survives_individual_review_decision_steps(tmp_path):
+    client, study_dir = _client(tmp_path)
+    loaded = client.get(
+        "/api/apps/movement/family/movement_rds/study/268904527/load"
+    ).json()
+    dataset_id = loaded["dataset_id"]
+    logical_name = loaded["logical_name"]
+    overview = client.get(
+        f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{dataset_id}/overview",
+        params={"logical_name": logical_name},
+    ).json()
+    saved = _create_saved_rds_source_ranking(
+        study_dir,
+        dataset_id=dataset_id,
+        logical_name=logical_name,
+        bundle_signature=overview["source_bundle_signature"],
+    )
+    analysis_id = saved["analysis"]["analysis_id"]
+    individuals = list(overview["individuals"])
+    assert individuals
+
+    for index, review_decision in enumerate(("ok", "fix_keep", "remove")):
+        profile = client.get(
+            "/api/apps/movement/family/movement_rds/study/268904527/edit-profile",
+            params={"dataset_id": dataset_id},
+        ).json()
+        response = client.post(
+            "/api/apps/movement/family/movement_rds/study/268904527/actions/review-individual",
+            json={
+                "dataset_id": dataset_id,
+                "expected_current_dataset_id": dataset_id,
+                "expected_review_revision": profile["review_revision"],
+                "logical_name": logical_name,
+                "source_bundle_signature": overview["source_bundle_signature"],
+                "decision": {
+                    "individual": individuals[index % len(individuals)],
+                    "review_decision": review_decision,
+                    "needs_check": False,
+                    "comment": "",
+                },
+            },
+        )
+        assert response.status_code == 200, response.text
+        dataset_id = response.json()["dataset"]["dataset_id"]
+        history = client.get(
+            "/api/apps/movement/family/movement_rds/study/268904527/analyses",
+            params={
+                "dataset_id": dataset_id,
+                "logical_name": logical_name,
+                "burst_gap_mode": "manual",
+                "burst_gap_seconds": "3600",
+                "burst_gap_quantile": "0.999",
+                "feature_set": "movement_only",
+                "ranking_method": "source_is_outlier",
+            },
+        )
+        assert history.status_code == 200, history.text
+        payload = history.json()
+        assert payload["latest_compatible_by_action"][
+            "run_burst_anomaly_ranking"
+        ] == analysis_id
+        inherited = next(
+            item for item in payload["items"] if item["analysis_id"] == analysis_id
+        )
+        assert inherited["dataset_id"] != dataset_id
+        assert inherited["compatible"] is True
 
 
 def test_rds_binary_renderer_reuses_attributes_and_omits_empty_overlays():

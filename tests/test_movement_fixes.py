@@ -2333,6 +2333,60 @@ Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text("{}\\n")
     assert item["compatible"] is True
 
 
+def test_movement_analysis_history_survives_individual_review_decision_steps(tmp_path):
+    client, dataset_id = create_movement_test_client(tmp_path)
+    saved = create_saved_movement_analysis(tmp_path, dataset_id=dataset_id)
+    analysis_id = saved["analysis"]["analysis_id"]
+    descendant_ids = []
+
+    for individual, review_decision in (
+        ("alpha", "ok"),
+        ("beta", "fix_keep"),
+        ("gamma", "remove"),
+    ):
+        response = client.post(
+            "/api/apps/movement/family/movement_clean/study/test_study/actions/review-individual",
+            json={
+                "dataset_id": dataset_id,
+                "logical_name": "movement.csv",
+                "user": "reviewer",
+                "decision": {
+                    "individual": individual,
+                    "review_decision": review_decision,
+                    "needs_check": False,
+                    "comment": "",
+                },
+            },
+        )
+        assert response.status_code == 200, response.text
+        dataset_id = response.json()["dataset"]["dataset_id"]
+        descendant_ids.append(dataset_id)
+
+    for descendant_id in descendant_ids:
+        history = client.get(
+            "/api/apps/movement/family/movement_clean/study/test_study/analyses",
+            params={
+                "dataset_id": descendant_id,
+                "logical_name": "movement.csv",
+                "burst_gap_mode": "manual",
+                "burst_gap_seconds": "60",
+                "burst_gap_quantile": "0.75",
+                "feature_set": "movement_only",
+                "ranking_method": "isolation_forest",
+            },
+        )
+        assert history.status_code == 200, history.text
+        payload = history.json()
+        assert payload["latest_compatible_by_action"][
+            "run_burst_anomaly_ranking"
+        ] == analysis_id
+        inherited = next(
+            item for item in payload["items"] if item["analysis_id"] == analysis_id
+        )
+        assert inherited["dataset_id"] != descendant_id
+        assert inherited["compatible"] is True
+
+
 def test_movement_analysis_history_invalidates_saved_run_after_confirmation(tmp_path):
     client, dataset_id = create_movement_test_client(tmp_path)
     saved = create_saved_movement_analysis(tmp_path, dataset_id=dataset_id)
@@ -2453,6 +2507,60 @@ Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text("{}\\n")
     }
 
 
+def test_movement_analysis_history_does_not_leak_across_sibling_branches(tmp_path):
+    client, root_dataset_id = create_movement_test_client(tmp_path)
+    study_dir = tmp_path / "data" / "movement_clean" / "test_study"
+
+    def child_dataset(title: str) -> str:
+        result = create_step(
+            study_dir,
+            {
+                "user": "reviewer",
+                "title": title,
+                "kind": "python",
+                "script": '''import json
+import os
+from pathlib import Path
+
+spec = json.loads(Path(os.environ["VIBECLEANING_SPEC_PATH"]).read_text())
+Path(spec["output_artifacts"][0]["path"]).write_text('{"annotations": []}\\n')
+Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text("{}\\n")
+''',
+                "parent_dataset_id": root_dataset_id,
+                "input_artifacts": [],
+                "output_artifacts": ["movement_review_annotations.json"],
+                "parameters": {"app": "movement", "action": "branch"},
+                "set_as_head": False,
+            },
+        )
+        return result["dataset"]["dataset_id"]
+
+    left_dataset_id = child_dataset("Left branch")
+    right_dataset_id = child_dataset("Right branch")
+    left_analysis = create_saved_movement_analysis(
+        tmp_path,
+        dataset_id=left_dataset_id,
+    )
+
+    response = client.get(
+        "/api/apps/movement/family/movement_clean/study/test_study/analyses",
+        params={
+            "dataset_id": right_dataset_id,
+            "logical_name": "movement.csv",
+            "burst_gap_mode": "manual",
+            "burst_gap_seconds": "60",
+            "burst_gap_quantile": "0.75",
+            "feature_set": "movement_only",
+            "ranking_method": "isolation_forest",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert left_analysis["analysis"]["analysis_id"] not in {
+        item["analysis_id"] for item in response.json()["items"]
+    }
+
+
 def test_movement_frontend_restores_saved_burst_analyses():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
@@ -2466,6 +2574,12 @@ def test_movement_frontend_restores_saved_burst_analyses():
     assert 'status: "restoring"' in source
     assert "const loadedRanking = this.anomalyRankings.get(rankingMethod)" in source
     assert "rankingAnalysisId === loadedRankingAnalysisId" in source
+    assert "analysisDatasetId: String(ranking.dataset_id || \"\")" in source
+    assert "Reused from version:" in source
+    assert "restoreSavedRankingSelections" in source
+    assert "individualQueueRankingMethod" in source
+    assert 'this.individualReviewQueue.orderMode === "ranking"' in source
+    assert "queueMethod !== displayedMethod" in source
     assert "createdAt: String(ranking.created_at || loadedRanking.createdAt || \"\")" in source
     assert "const failedRanking = loadedRanking || {" in source
     assert "Checking for a compatible saved burst ranking" in source
