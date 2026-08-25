@@ -1124,6 +1124,15 @@ def test_movement_frontend_uses_one_scope_aware_flag_action():
     assert 'selectionMethod: "table_shift_click"' in source
     assert "selection_method: context.selectionMethod" in source
     assert 'data-queue-flag-individual' in source
+    individual_target = source[
+        source.index("  selectEntireIndividualFlagTarget(individual) {"):
+        source.index("\n  setBurstFlagTargetIncluded(", source.index("  selectEntireIndividualFlagTarget(individual) {"))
+    ]
+    assert 'this.flagTargetKind === "individual"' in individual_target
+    assert "this.manualFlagTarget.individual === individual" in individual_target
+    assert "if (alreadySelected)" in individual_target
+    assert "this.resetManualFlagTarget();" in individual_target
+    assert "Cleared ${individual} as the flag target." in individual_target
     assert 'data-queue-flag-burst=' in source
     assert 'data-table-check-fix=' in source
     assert 'data-table-check-burst=' in source

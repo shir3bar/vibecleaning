@@ -8343,6 +8343,18 @@ class MovementExampleApp {
   selectEntireIndividualFlagTarget(individual) {
     individual = String(individual || "");
     if (!this.data?.individuals?.includes(individual)) return;
+    const alreadySelected = (
+      this.flagTargetKind === "individual"
+      && this.manualFlagTarget.individual === individual
+    );
+    if (alreadySelected) {
+      this.resetManualFlagTarget();
+      this.renderIndividuals();
+      this.renderLayers();
+      this.updateActionButtons();
+      this.setStatus(`Cleared ${individual} as the flag target.`);
+      return;
+    }
     this.resetManualFlagTarget({ resetKind: false });
     this.data.selectedFixKeys = new Set();
     this.setTableSelection();

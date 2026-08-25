@@ -215,6 +215,24 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path):
         _wait_for_layer(page, "movement-binary-paths-full")
         assert len(binary_requests) == 3
         assert page.evaluate("window.__movementDiagnostics.binaryAttributeBuilds") == builds_after_full
+
+        page.locator('[data-role="individual-view-queue"]').click()
+        entire_individual = page.locator('button[data-queue-flag-individual]').first
+        entire_individual.wait_for(state="visible", timeout=20_000)
+        entire_individual.click()
+        page.wait_for_function(
+            "() => document.querySelector('button[data-queue-flag-individual]')?.classList.contains('is-active')"
+        )
+        assert "Flag entire individual" in page.locator(
+            '[data-role="mark-suspected"]'
+        ).text_content()
+        page.locator('button[data-queue-flag-individual]').first.click()
+        page.wait_for_function(
+            "() => !document.querySelector('button[data-queue-flag-individual]')?.classList.contains('is-active')"
+        )
+        assert page.locator('[data-role="mark-suspected"]').text_content() == "Choose what to flag"
+        assert page.locator('[data-role="mark-suspected"]').is_disabled()
+
         page.evaluate("window.__movementMonitorActive = false")
         browser.close()
 
