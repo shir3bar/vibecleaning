@@ -9,6 +9,7 @@ from app.edit_locks import (
     EditLockedError,
     build_edit_lock_profile,
     create_guarded_step,
+    restore_forward_head_guarded,
     resume_from_dataset,
     undo_guarded,
 )
@@ -105,6 +106,25 @@ def test_edit_profile_locks_historical_and_rewound_versions(tmp_path):
     )
     assert undone_again["dataset"]["dataset_id"] == root_id
     assert build_edit_lock_profile(project_dir, root_id)["resume"]["discard_dataset_count"] == 2
+
+
+def test_restore_forward_head_moves_rewound_pointer_without_discarding_history(tmp_path):
+    project_dir, root_id = _project(tmp_path)
+    first_id = _step(project_dir, root_id, "one")["dataset"]["dataset_id"]
+    second_id = _step(project_dir, first_id, "two")["dataset"]["dataset_id"]
+    history_before = list_history(project_dir)
+
+    undo_guarded(project_dir, expected_current_dataset_id=second_id)
+    restored = restore_forward_head_guarded(
+        project_dir,
+        selected_dataset_id=second_id,
+        expected_current_dataset_id=first_id,
+    )
+
+    assert restored["dataset"]["dataset_id"] == second_id
+    assert load_project_state(project_dir)["current_dataset_id"] == second_id
+    assert restored["history"] == history_before
+    assert build_edit_lock_profile(project_dir, second_id)["editable"] is True
 
 
 def test_guarded_step_rejects_locked_or_stale_parent_without_orphans(tmp_path):

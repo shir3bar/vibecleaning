@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.auth import AuthManager
-from app.execution import create_analysis
+from app.execution import create_analysis, create_step
 from app.state import ensure_project_state
 from app.web import create_app
 from examples.movement.routes import register_movement_routes
@@ -51,6 +51,18 @@ e2,epsilon,2024-01-01T01:00:00Z,-74.1,44.1,train
 z1,zeta,2024-01-01T00:00:00Z,-75.0,45.0,train
 z2,zeta,2024-01-01T01:00:00Z,-75.1,45.1,train
 """
+
+FORWARD_HEAD_STEP_SCRIPT = '''import json
+import os
+from pathlib import Path
+
+spec = json.loads(Path(os.environ["VIBECLEANING_SPEC_PATH"]).read_text())
+output = Path(spec["output_artifacts"][0]["path"])
+output.write_text("forward history")
+Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text(
+    json.dumps({"restorable": True})
+)
+'''
 
 
 def _create_browser_ranking(study_dir: Path) -> None:
@@ -428,6 +440,75 @@ def test_queue_decision_reuses_inflight_exact_blocks_across_review_step(tmp_path
         assert final_dataset_id != initial_dataset_id
         assert len(binary_requests) == 1
         assert f"/dataset/{initial_dataset_id}/" in binary_requests[0]
+        browser.close()
+
+
+def test_dataset_dropdown_restores_rewound_forward_tip(tmp_path):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    study_dir = tmp_path / "data" / "movement_clean" / "forward_tip"
+    study_dir.mkdir(parents=True)
+    (study_dir / "movement.csv").write_text(CSV_BROWSER_FIXTURE, encoding="utf-8")
+    root_id = ensure_project_state(study_dir)["current_dataset_id"]
+    latest_id = create_step(
+        study_dir,
+        {
+            "user": "browser-reviewer",
+            "title": "Restorable forward step",
+            "kind": "python",
+            "script": FORWARD_HEAD_STEP_SCRIPT,
+            "parent_dataset_id": root_id,
+            "input_artifacts": ["movement.csv"],
+            "output_artifacts": ["forward.txt"],
+            "parameters": {"value": "forward"},
+            "set_as_head": True,
+        },
+    )["dataset"]["dataset_id"]
+    app = create_app(
+        data_root=tmp_path / "data",
+        static_root=STATIC_ROOT,
+        index_path=INDEX_PATH,
+        auth_manager=_auth_manager(),
+    )
+    register_movement_routes(
+        app,
+        data_root=tmp_path / "data",
+        overview_fix_limit=1,
+        overview_series_points=250,
+    )
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        head_requests = []
+        page.on(
+            "request",
+            lambda request: head_requests.append(request.url)
+            if request.url.endswith("/head") else None,
+        )
+        _login_and_wait(page, base_url, "forward_tip")
+        page.locator(f'[data-role="dataset"] option[value="{latest_id}"]').wait_for(
+            state="attached", timeout=20_000
+        )
+        page.locator('[data-role="undo"]').click()
+        page.wait_for_function(
+            "rootId => document.querySelector('[data-role=dataset]')?.value === rootId",
+            arg=root_id,
+            timeout=20_000,
+        )
+        page.locator('[data-role="edit-lock-profile"]').wait_for(
+            state="visible", timeout=20_000
+        )
+
+        page.locator('[data-role="dataset"]').select_option(latest_id)
+        page.wait_for_function(
+            "latestId => document.querySelector('[data-role=dataset]')?.value === latestId",
+            arg=latest_id,
+            timeout=20_000,
+        )
+        page.locator('[data-role="edit-lock-profile"]').wait_for(
+            state="hidden", timeout=20_000
+        )
+        assert len(head_requests) == 1
         browser.close()
 
 

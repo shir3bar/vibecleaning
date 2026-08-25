@@ -2018,6 +2018,26 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
         == "forward_history_pending"
     )
 
+    restored_head = client.post(
+        f"{base_url}/head",
+        json={
+            "dataset_id": confirmed_dataset_id,
+            "expected_current_dataset_id": suspected_dataset_id,
+        },
+    )
+    assert restored_head.status_code == 200
+    assert restored_head.json()["dataset"]["dataset_id"] == confirmed_dataset_id
+    assert restored_head.json()["edit_profile"]["editable"] is True
+    assert restored_head.json()["edit_profile"]["resume"]["allowed"] is False
+    assert client.get(f"{base_url}/graph").json() == graph_before
+
+    undo_restored_head = client.post(
+        f"{base_url}/undo",
+        json={"expected_current_dataset_id": confirmed_dataset_id},
+    )
+    assert undo_restored_head.status_code == 200
+    assert undo_restored_head.json()["dataset"]["dataset_id"] == suspected_dataset_id
+
     second_undo = client.post(
         f"{base_url}/undo",
         json={"expected_current_dataset_id": suspected_dataset_id},

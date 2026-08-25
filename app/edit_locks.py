@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 from typing import Callable, Iterator
 
-from .execution import create_step, undo_to_parent
+from .execution import create_step, set_current_head, undo_to_parent
 from .state import (
     ProjectStateError,
     list_datasets,
@@ -273,6 +273,42 @@ def undo_guarded(
         if preflight is not None:
             preflight()
         return undo_to_parent(project_dir)
+
+
+def restore_forward_head_guarded(
+    project_dir: Path,
+    *,
+    selected_dataset_id: str,
+    expected_current_dataset_id: str,
+    preflight: Callable[[], None] | None = None,
+) -> dict:
+    """Move a rewound current pointer to an existing descendant graph tip."""
+    project_dir = project_dir.resolve()
+    with project_mutation_lock(project_dir):
+        state = load_project_state(project_dir)
+        current_dataset_id = str(state["current_dataset_id"])
+        if current_dataset_id != str(expected_current_dataset_id or ""):
+            raise EditConflictError("Current dataset changed; reload before restoring history")
+
+        selected_dataset_id = str(selected_dataset_id or "").strip()
+        datasets, dataset_by_id = _dataset_index(project_dir)
+        if selected_dataset_id not in dataset_by_id:
+            raise ProjectStateError("Unknown dataset")
+        if selected_dataset_id == current_dataset_id:
+            raise ProjectStateError("Selected dataset is already current")
+        if current_dataset_id not in _ancestor_ids(dataset_by_id, selected_dataset_id):
+            raise ProjectStateError("Selected dataset is not forward history of the current version")
+        if any(
+            str(dataset.get("parent_dataset_id") or "") == selected_dataset_id
+            for dataset in datasets
+        ):
+            raise ProjectStateError("Selected dataset is not a graph tip")
+        if preflight is not None:
+            preflight()
+        return {
+            "dataset": set_current_head(project_dir, selected_dataset_id),
+            "history": list_history(project_dir),
+        }
 
 
 def _file_inventory(path: Path, project_dir: Path) -> list[dict]:

@@ -4183,7 +4183,20 @@ class MovementExampleApp {
         return;
       }
       this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
-      await this.transitionToDataset(nextDatasetId, { reason: "dataset_switch" });
+      try {
+        let result = null;
+        if (this.isForwardGraphTip(nextDatasetId)) {
+          result = await this.restoreForwardGraphTip(nextDatasetId);
+        }
+        await this.transitionToDataset(nextDatasetId, {
+          reason: "dataset_switch",
+          result,
+        });
+      } catch (error) {
+        this.refs.dataset.value = this.currentDatasetId;
+        await this.handleEditRequestError(error);
+        this.setStatus(`Could not change version: ${error.message}`, true);
+      }
     });
     this.refs.artifact.addEventListener("change", async () => {
       const nextArtifact = this.refs.artifact.value;
@@ -16703,6 +16716,40 @@ class MovementExampleApp {
     } else if (["individual", "bursts"].includes(clearTarget)) {
       this.resetManualFlagTarget();
     }
+  }
+
+  isForwardGraphTip(datasetId) {
+    const targetId = String(datasetId || "");
+    const currentHeadId = String(this.graph?.current_dataset_id || "");
+    if (!targetId || !currentHeadId || targetId === currentHeadId) return false;
+    const datasets = Array.isArray(this.allDatasets) ? this.allDatasets : [];
+    const byId = new Map(datasets.map(dataset => [String(dataset.dataset_id || ""), dataset]));
+    if (!byId.has(targetId)) return false;
+    if (datasets.some(dataset => String(dataset.parent_dataset_id || "") === targetId)) {
+      return false;
+    }
+    const seen = new Set();
+    let cursor = targetId;
+    while (cursor && !seen.has(cursor)) {
+      if (cursor === currentHeadId) return true;
+      seen.add(cursor);
+      cursor = String(byId.get(cursor)?.parent_dataset_id || "");
+    }
+    return false;
+  }
+
+  async restoreForwardGraphTip(datasetId) {
+    return this.requestJSON(
+      `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/head`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          dataset_id: datasetId,
+          expected_current_dataset_id: this.expectedCurrentDatasetId(),
+          expected_review_revision: this.expectedReviewRevision(),
+        }),
+      },
+    );
   }
 
   async transitionToDataset(

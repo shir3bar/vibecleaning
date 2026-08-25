@@ -19,6 +19,7 @@ from app.edit_locks import (
     EditLockedError,
     build_edit_lock_profile,
     create_guarded_step,
+    restore_forward_head_guarded,
     resume_from_dataset,
     undo_guarded,
 )
@@ -1448,6 +1449,61 @@ def register_movement_routes(
                     "An editor must change history containing editor, update, or earlier-review steps"
                 )
 
+    def require_forward_head_restore(
+        study_dir: Path,
+        actor: Actor,
+        *,
+        expected_review_revision: object,
+        selected_dataset_id: str,
+    ) -> None:
+        review = authorize_persistent_change(
+            study_dir,
+            actor,
+            expected_review_revision=expected_review_revision,
+            review_effect="annotation_only",
+        )
+        if actor.role == "editor":
+            return
+        if review is None:
+            raise ReviewForbiddenError("The reviewer has no active assignment")
+
+        current_id = str(load_project_state(study_dir)["current_dataset_id"])
+        baseline_id = str(review.get("baseline_dataset_id") or "")
+        cursor = current_id
+        while cursor and cursor != baseline_id:
+            cursor = str(load_dataset(study_dir, cursor).get("parent_dataset_id") or "")
+        if cursor != baseline_id:
+            raise ReviewForbiddenError("Current history is outside the assigned review")
+
+        forward_ids: list[str] = []
+        cursor = selected_dataset_id
+        seen: set[str] = set()
+        while cursor and cursor != current_id:
+            if cursor in seen:
+                raise ProjectStateError("Dataset lineage contains a cycle")
+            seen.add(cursor)
+            forward_ids.append(cursor)
+            cursor = str(load_dataset(study_dir, cursor).get("parent_dataset_id") or "")
+        if cursor != current_id:
+            raise ReviewForbiddenError("Reviewers may only restore forward history from the current version")
+
+        steps_by_output = {
+            str(step.get("output_dataset_id") or ""): step
+            for step in list_history(study_dir)["steps"]
+        }
+        for dataset_id in forward_ids:
+            step = steps_by_output.get(dataset_id) or {}
+            actor_snapshot = step.get("actor") or {}
+            workflow = (step.get("parameters") or {}).get("workflow") or {}
+            if (
+                actor_snapshot.get("user_id") != actor.user_id
+                or workflow.get("review_id") != review.get("review_id")
+                or workflow.get("review_effect") != "annotation_only"
+            ):
+                raise ReviewForbiddenError(
+                    "An editor must restore history containing editor, update, or earlier-review steps"
+                )
+
     def parse_optional_int(raw_value: object, *, label: str) -> int | None:
         if raw_value in (None, ""):
             return None
@@ -2738,6 +2794,61 @@ def register_movement_routes(
                 study_dir,
                 reason="dataset_head_undone",
                 actor=actor,
+            )
+            return JSONResponse(result)
+        except EditConflictError as exc:
+            return _edit_conflict_response(exc)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/head")
+    async def post_movement_study_head(
+        family_name: str,
+        study_name: str,
+        request: Request,
+    ):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            expected_current_dataset_id = validate_path_part(
+                body.get("expected_current_dataset_id"),
+                label="expected current dataset",
+            )
+            actor = current_actor(request)
+            preflight = None
+            if actor is not None:
+                expected_review_revision = body.get("expected_review_revision")
+
+                def preflight() -> None:
+                    require_forward_head_restore(
+                        study_dir,
+                        actor,
+                        expected_review_revision=expected_review_revision,
+                        selected_dataset_id=dataset_id,
+                    )
+
+            result = restore_forward_head_guarded(
+                study_dir,
+                selected_dataset_id=dataset_id,
+                expected_current_dataset_id=expected_current_dataset_id,
+                preflight=preflight,
+            )
+            publish_state_event(
+                family_name,
+                study_name,
+                study_dir,
+                reason="dataset_head_restored",
+                actor=actor,
+            )
+            result["edit_profile"] = combined_edit_profile(
+                study_dir,
+                dataset_id,
+                actor,
             )
             return JSONResponse(result)
         except EditConflictError as exc:
