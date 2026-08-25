@@ -8767,13 +8767,13 @@ class MovementExampleApp {
       return false;
     }
     const previousIndividual = this.individualReviewQueue.activeIndividual;
-    if (saveBeforeChange && previousIndividual && previousIndividual !== individual) {
-      const saveResult = await this.saveIndividualReviewDecisionBeforeNavigation(
-        individual,
-        { zoom },
-      );
-      if (!saveResult.allowed) return false;
-      if (saveResult.navigationHandled) return true;
+    if (
+      saveBeforeChange
+      && previousIndividual
+      && previousIndividual !== individual
+      && !(await this.saveIndividualReviewDecisionBeforeNavigation())
+    ) {
+      return false;
     }
     const previousGroup = this.getIndividualQueuePosition().group.join("\u0000");
     const ordered = this.getIndividualQueueOrder();
@@ -8968,11 +8968,11 @@ class MovementExampleApp {
     this.setSideSheet("table");
   }
 
-  async saveIndividualReviewDecisionBeforeNavigation(targetIndividual, { zoom = true } = {}) {
+  async saveIndividualReviewDecisionBeforeNavigation() {
     const queue = this.individualReviewQueue;
     const individual = queue.activeIndividual;
     if (!individual || !this.individualReviewDraftDiffers(individual)) {
-      return { allowed: true, navigationHandled: false };
+      return true;
     }
     const decision = queue.stagedDecisions.get(individual);
     if (!decision?.review_decision) {
@@ -8980,21 +8980,12 @@ class MovementExampleApp {
         `Choose OK, Fix & Keep, or Remove for ${individual} before leaving it.`,
         true,
       );
-      return { allowed: false, navigationHandled: false };
+      return false;
     }
-    const saved = await this.saveActiveIndividualReviewDecision({
-      advance: false,
-      navigationTarget: targetIndividual,
-      navigationZoom: zoom,
-    });
-    return { allowed: saved, navigationHandled: saved };
+    return this.saveActiveIndividualReviewDecision({ advance: false });
   }
 
-  async saveActiveIndividualReviewDecision({
-    advance = true,
-    navigationTarget = "",
-    navigationZoom = false,
-  } = {}) {
+  async saveActiveIndividualReviewDecision({ advance = true } = {}) {
     const queue = this.individualReviewQueue;
     const individual = queue.activeIndividual;
     const decision = queue.stagedDecisions.get(individual);
@@ -9011,7 +9002,6 @@ class MovementExampleApp {
     const position = this.getIndividualQueuePosition();
     const currentIndex = position.page.indexOf(individual);
     const nextIndividual = position.page[currentIndex + 1] || "";
-    const targetIndividual = navigationTarget || (advance ? nextIndividual : "");
     try {
       const result = await this.requestJSON(
         `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/review-individual`,
@@ -9042,9 +9032,9 @@ class MovementExampleApp {
         result.dataset.dataset_id,
         { preserveAnnotationContext: true, result },
       );
-      if (targetIndividual && targetIndividual !== individual) {
-        await this.focusIndividualQueueItem(targetIndividual, {
-          zoom: navigationTarget ? navigationZoom : false,
+      if (advance && nextIndividual && nextIndividual !== individual) {
+        await this.focusIndividualQueueItem(nextIndividual, {
+          zoom: false,
           saveBeforeChange: false,
         });
       }
