@@ -8869,10 +8869,11 @@ class MovementExampleApp {
   }
 
   handleIndividualQueueKeydown(event) {
+    const supportedKeys = ["ArrowLeft", "ArrowRight", "1", "2", "3", "4"];
     if (
       !this.data
       || this.individualReviewQueue.mode !== "queue"
-      || !["ArrowLeft", "ArrowRight"].includes(event.key)
+      || !supportedKeys.includes(event.key)
       || event.defaultPrevented
       || event.repeat
       || event.isComposing
@@ -8891,10 +8892,30 @@ class MovementExampleApp {
       return false;
     }
     event.preventDefault();
-    if (!this.individualReviewQueue.saving) {
+    if (this.individualReviewQueue.saving) {
+      return true;
+    }
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       void this.navigateIndividualQueue(
         event.key === "ArrowRight" ? "next-individual" : "previous-individual",
       );
+      return true;
+    }
+    this.getIndividualQueuePosition();
+    const individual = this.individualReviewQueue.activeIndividual;
+    if (!individual) {
+      return true;
+    }
+    const reviewDecision = {
+      "1": "ok",
+      "2": "fix_keep",
+      "3": "remove",
+    }[event.key];
+    if (reviewDecision) {
+      this.stageIndividualReviewDecision(individual, reviewDecision);
+    } else if (event.key === "4") {
+      const reviewState = this.getIndividualReviewState(individual);
+      this.stageIndividualNeedsCheck(individual, !reviewState.needsCheck);
     }
     return true;
   }

@@ -2750,8 +2750,14 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
         source.index("  handleIndividualQueueKeydown(event) {"):
         source.index("  stageIndividualReviewDecision(")
     ]
-    assert '!["ArrowLeft", "ArrowRight"].includes(event.key)' in keyboard_handler
+    assert '["ArrowLeft", "ArrowRight", "1", "2", "3", "4"]' in keyboard_handler
+    assert "!supportedKeys.includes(event.key)" in keyboard_handler
     assert 'event.key === "ArrowRight" ? "next-individual" : "previous-individual"' in keyboard_handler
+    assert '"1": "ok"' in keyboard_handler
+    assert '"2": "fix_keep"' in keyboard_handler
+    assert '"3": "remove"' in keyboard_handler
+    assert 'event.key === "4"' in keyboard_handler
+    assert "this.stageIndividualNeedsCheck(individual, !reviewState.needsCheck);" in keyboard_handler
     assert "event.repeat" in keyboard_handler
     assert 'target?.closest?.("input, textarea, select,' in keyboard_handler
     assert 'this.mountEl.querySelector(".movement-modal:not(.hidden)")' in keyboard_handler

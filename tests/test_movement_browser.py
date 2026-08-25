@@ -421,9 +421,13 @@ def test_queue_decision_reuses_inflight_exact_blocks_across_review_step(tmp_path
           window.__queueBetaCard = document.querySelector('[data-queue-individual="beta"]');
           window.__queueMapCanvas = document.querySelector('[data-role=map] canvas');
         }""")
-        page.locator(
-            'button[data-review-decision="ok"][data-individual="alpha"]'
-        ).click()
+        page.keyboard.press("1")
+        assert "OK" in page.locator(
+            '[data-queue-individual="alpha"] .movement-review-state'
+        ).text_content()
+        assert "unsaved" in page.locator(
+            '[data-queue-individual="alpha"] .movement-review-state'
+        ).text_content()
         save = page.locator('[data-role="individual-queue-save"]')
         save.wait_for(state="visible", timeout=20_000)
         assert save.is_enabled()
@@ -567,15 +571,24 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         comment_input.wait_for(state="visible", timeout=20_000)
         comment_input.focus()
         page.keyboard.press("ArrowLeft")
+        page.keyboard.press("1")
         assert page.locator(
             ".movement-card.queue-active .movement-title"
         ).text_content() == "beta"
         assert len(review_requests) == 1
+        assert comment_input.input_value() == "1"
         beta_card.locator("button[data-queue-comment]").click()
 
-        page.locator(
-            'button[data-review-decision="fix_keep"][data-individual="beta"]'
-        ).click()
+        page.keyboard.press("4")
+        assert beta_card.locator("input[data-review-needs-check]").is_checked()
+        page.keyboard.press("4")
+        assert not beta_card.locator("input[data-review-needs-check]").is_checked()
+        page.keyboard.press("4")
+        assert beta_card.locator("input[data-review-needs-check]").is_checked()
+        page.keyboard.press("2")
+        assert "Fix & Keep" in beta_card.locator(
+            ".movement-review-state"
+        ).text_content()
         page.locator('button[data-queue-nav="next-individual"]').wait_for(
             state="visible", timeout=20_000
         )
@@ -602,9 +615,10 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
                 body='{"error":"forced review save failure"}',
             ),
         )
-        page.locator(
-            'button[data-review-decision="ok"][data-individual="delta"]'
-        ).click()
+        page.keyboard.press("3")
+        assert "Remove" in page.locator(
+            '[data-queue-individual="delta"] .movement-review-state'
+        ).text_content()
         page.locator(".movement-card .movement-title", has_text="epsilon").click()
         page.wait_for_function(
             """() => document.querySelector('[data-role=status]')?.textContent.includes(
