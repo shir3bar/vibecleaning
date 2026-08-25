@@ -2746,6 +2746,16 @@ def test_movement_frontend_exposes_lightweight_individual_review_queue():
         source.index("  getIndividualQueueMapIndividuals() {")
     ]
     assert "this.applyIndividualQueueMapScope({ zoom: false })" in queue_mode_setter
+    keyboard_handler = source[
+        source.index("  handleIndividualQueueKeydown(event) {"):
+        source.index("  stageIndividualReviewDecision(")
+    ]
+    assert '!["ArrowLeft", "ArrowRight"].includes(event.key)' in keyboard_handler
+    assert 'event.key === "ArrowRight" ? "next-individual" : "previous-individual"' in keyboard_handler
+    assert "event.repeat" in keyboard_handler
+    assert 'target?.closest?.("input, textarea, select,' in keyboard_handler
+    assert 'this.mountEl.querySelector(".movement-modal:not(.hidden)")' in keyboard_handler
+    assert "this.handleIndividualQueueKeydown(event)" in source
     assert '.movement-side-tabs.hidden,' in source
     assert 'data-role="individual-search-control"' in source
     assert "this.refs.individualSearchControl.hidden = this.individualReviewQueue.mode === \"queue\"" in source

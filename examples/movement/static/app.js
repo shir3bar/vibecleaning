@@ -4397,6 +4397,9 @@ class MovementExampleApp {
     this.refs.tableWrap.addEventListener("click", event => this.handleTableWrapClick(event));
     this.refs.tableWrap.addEventListener("scroll", () => this.handleTableWrapScroll());
     document.addEventListener("keydown", event => {
+      if (this.handleIndividualQueueKeydown(event)) {
+        return;
+      }
       if (event.key === "Escape" && this.mapRangeAwaitingEnd) {
         this.clearTableSelection();
         this.setStatus("Track range selection cancelled.");
@@ -8863,6 +8866,37 @@ class MovementExampleApp {
     const pageIndex = position.page.indexOf(this.individualReviewQueue.activeIndividual);
     const nextPageIndex = clamp(pageIndex + direction, 0, Math.max(0, position.page.length - 1));
     await this.focusIndividualQueueItem(position.page[nextPageIndex]);
+  }
+
+  handleIndividualQueueKeydown(event) {
+    if (
+      !this.data
+      || this.individualReviewQueue.mode !== "queue"
+      || !["ArrowLeft", "ArrowRight"].includes(event.key)
+      || event.defaultPrevented
+      || event.repeat
+      || event.isComposing
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.shiftKey
+    ) {
+      return false;
+    }
+    const target = event.target;
+    if (
+      target?.closest?.("input, textarea, select, [contenteditable]:not([contenteditable=\"false\"])")
+      || this.mountEl.querySelector(".movement-modal:not(.hidden)")
+    ) {
+      return false;
+    }
+    event.preventDefault();
+    if (!this.individualReviewQueue.saving) {
+      void this.navigateIndividualQueue(
+        event.key === "ArrowRight" ? "next-individual" : "previous-individual",
+      );
+    }
+    return true;
   }
 
   stageIndividualReviewDecision(individual, reviewDecision) {

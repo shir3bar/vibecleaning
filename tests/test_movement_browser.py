@@ -522,7 +522,7 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         group_view_before = page.evaluate(
             "() => structuredClone(window.__movementDiagnostics.mapView)"
         )
-        page.locator(".movement-card .movement-title", has_text="beta").click()
+        page.keyboard.press("ArrowRight")
         page.wait_for_function(
             """() => document.querySelector(
               '.movement-card.queue-active .movement-title'
@@ -544,6 +544,34 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
           && window.__queueBetaCard === document.querySelector('[data-queue-individual="beta"]')
           && window.__queueMapCanvas === document.querySelector('[data-role=map] canvas')
         )""")
+
+        page.keyboard.press("ArrowLeft")
+        page.wait_for_function(
+            """() => document.querySelector(
+              '.movement-card.queue-active .movement-title'
+            )?.textContent === 'alpha'""",
+            timeout=20_000,
+        )
+        page.keyboard.press("ArrowRight")
+        page.wait_for_function(
+            """() => document.querySelector(
+              '.movement-card.queue-active .movement-title'
+            )?.textContent === 'beta'""",
+            timeout=20_000,
+        )
+        assert len(review_requests) == 1
+
+        beta_card = page.locator('[data-queue-individual="beta"]')
+        beta_card.locator("button[data-queue-comment]").click()
+        comment_input = beta_card.locator("input[data-queue-comment-input]")
+        comment_input.wait_for(state="visible", timeout=20_000)
+        comment_input.focus()
+        page.keyboard.press("ArrowLeft")
+        assert page.locator(
+            ".movement-card.queue-active .movement-title"
+        ).text_content() == "beta"
+        assert len(review_requests) == 1
+        beta_card.locator("button[data-queue-comment]").click()
 
         page.locator(
             'button[data-review-decision="fix_keep"][data-individual="beta"]'
