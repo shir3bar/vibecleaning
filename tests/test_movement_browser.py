@@ -365,7 +365,7 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path):
         browser.close()
 
 
-def test_queue_decision_retries_exact_blocks_on_the_new_dataset(tmp_path):
+def test_queue_decision_reuses_inflight_exact_blocks_across_review_step(tmp_path):
     playwright_api = pytest.importorskip("playwright.sync_api")
     study_dir = tmp_path / "data" / "movement_clean" / "queue_transition"
     study_dir.mkdir(parents=True)
@@ -400,6 +400,7 @@ def test_queue_decision_retries_exact_blocks_on_the_new_dataset(tmp_path):
         page.locator('[data-individual-checkbox="alpha"]').wait_for(
             state="attached", timeout=20_000
         )
+        initial_dataset_id = page.locator('[data-role="dataset"]').input_value()
 
         page.locator('[data-role="individual-view-queue"]').click()
         page.locator(
@@ -423,8 +424,10 @@ def test_queue_decision_retries_exact_blocks_on_the_new_dataset(tmp_path):
             )""",
             timeout=20_000,
         )
-        assert len(binary_requests) >= 2
-        assert len({url.split("/dataset/")[1].split("/")[0] for url in binary_requests}) >= 2
+        final_dataset_id = page.locator('[data-role="dataset"]').input_value()
+        assert final_dataset_id != initial_dataset_id
+        assert len(binary_requests) == 1
+        assert f"/dataset/{initial_dataset_id}/" in binary_requests[0]
         browser.close()
 
 

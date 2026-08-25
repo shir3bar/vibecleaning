@@ -4511,7 +4511,7 @@ class MovementExampleApp {
       this.requestControllers[requestName] !== controller
       || familyName !== this.currentFamily
       || studyName !== this.currentStudy
-      || datasetId !== this.currentDatasetId
+      || data !== this.data
     ) {
       releaseMovementBinaryBlock(binary);
       return;
@@ -4573,7 +4573,7 @@ class MovementExampleApp {
       this.requestControllers[requestName] !== controller
       || familyName !== this.currentFamily
       || studyName !== this.currentStudy
-      || datasetId !== this.currentDatasetId
+      || data !== this.data
     ) {
       releaseMovementBinaryBlock(binary);
       return;
@@ -4598,6 +4598,9 @@ class MovementExampleApp {
       if (!retainedBlocks.has(replaced)) releaseMovementBinaryBlock(replaced);
     }
     if (data === this.data) {
+      if (data.reviewProjection) {
+        await this.applyBinaryReviewProjection(data.reviewProjection);
+      }
       this.beginPreviewHandoff(loadedIndividuals);
     }
     this.requestControllers[requestName] = null;
@@ -16571,6 +16574,11 @@ class MovementExampleApp {
 
   async applyReviewProjection(projection) {
     if (!this.data) return;
+    // Keep the newest annotation projection with the immutable movement blocks.
+    // A compatible review step can complete while an exact block from its parent
+    // dataset is still in flight; loadBinaryMovement reapplies this projection
+    // before handing that block to the renderer.
+    this.data.reviewProjection = projection;
     await this.applyBinaryReviewProjection(projection);
     const projectedFixes = parseMovementFixes(projection.fixes || []);
     const projectedIndividuals = new Set(
@@ -16725,7 +16733,6 @@ class MovementExampleApp {
     ]) {
       this.cancelRequest(requestName);
     }
-    this.cancelBinaryRequests();
     const viewContext = this.captureDatasetViewContext();
     if (viewContext && preserveAnnotationContext) {
       viewContext.annotationReloadContext = this.captureAnnotationReloadContext();
@@ -16751,6 +16758,7 @@ class MovementExampleApp {
         && this.data.exclusionSignature === String(projection.exclusion_signature || "")
       );
       if (!compatible) {
+        this.cancelBinaryRequests();
         this.currentDatasetId = datasetId;
         if (reason === "editor_release") {
           await this.refreshGraphMetadata(datasetId);
