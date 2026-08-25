@@ -17,6 +17,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.auth import AuthManager
+from app.execution import create_analysis
+from app.state import ensure_project_state
 from app.web import create_app
 from examples.movement.routes import register_movement_routes
 from examples.rds_movement.app import create_rds_movement_app
@@ -34,6 +36,64 @@ b2,beta,2024-01-01T01:30:00Z,-71.1,41.1,train
 c1,gamma,2024-01-01T00:45:00Z,-72.0,42.0,train
 c2,gamma,2024-01-01T01:45:00Z,-72.1,42.1,train
 """
+
+
+def _create_browser_ranking(study_dir: Path) -> None:
+    dataset_id = ensure_project_state(study_dir)["current_dataset_id"]
+    script = '''import json
+import os
+from pathlib import Path
+
+spec = json.loads(Path(os.environ["VIBECLEANING_SPEC_PATH"]).read_text())
+output = next(
+    item for item in spec["output_artifacts"]
+    if item["logical_name"] == "burst_anomaly_ranking.json"
+)
+individuals = ["alpha", "beta", "gamma"]
+worst = [
+    {"rank": index + 1, "individual": individual, "individual_score": score, "top_burst_score": score}
+    for index, (individual, score) in enumerate(zip(individuals, [0.9, 0.6, 0.3]))
+]
+margin = [
+    {"rank": index + 1, "individual": individual, "individual_score": score, "top_burst_score": score}
+    for index, (individual, score) in enumerate(zip(individuals, [0.75, 0.5, 0.25]))
+]
+Path(output["path"]).write_text(json.dumps({
+    "run_status": "completed",
+    "ranking_method": "isolation_forest",
+    "scored_bursts": [],
+    "individual_rankings": {
+        "isolation_forest": {"ranked_individuals": worst},
+        "isolation_forest_decision_margin": {"ranked_individuals": margin},
+    },
+}))
+Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text(
+    json.dumps({"run_status": "completed"})
+)
+'''
+    create_analysis(
+        study_dir,
+        {
+            "user": "browser-reviewer",
+            "title": "Browser ranking fixture",
+            "kind": "python",
+            "script": script,
+            "dataset_id": dataset_id,
+            "input_artifacts": ["movement.csv"],
+            "output_artifacts": ["burst_anomaly_ranking.json"],
+            "parameters": {
+                "app": "movement",
+                "action": "run_burst_anomaly_ranking",
+                "target_artifact": "movement.csv",
+                "burst_gap_mode": "quantile",
+                "burst_gap_seconds": 3600,
+                "burst_gap_quantile": 0.999,
+                "feature_set": "movement_only",
+                "ranking_method": "isolation_forest",
+                "ranking_provider": "isolation_forest",
+            },
+        },
+    )
 
 
 def _auth_manager() -> AuthManager:
@@ -115,6 +175,7 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path):
     study_dir = tmp_path / "data" / "movement_clean" / "browser_study"
     study_dir.mkdir(parents=True)
     (study_dir / "movement.csv").write_text(CSV_BROWSER_FIXTURE, encoding="utf-8")
+    _create_browser_ranking(study_dir)
     app = create_app(
         data_root=tmp_path / "data",
         static_root=STATIC_ROOT,
@@ -240,6 +301,13 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path):
         page.locator('[data-role="individual-queue-order"]').select_option(
             "isolation_forest_decision_margin"
         )
+        page.locator("[data-queue-ranking-score]").first.wait_for(
+            state="visible", timeout=20_000
+        )
+        assert page.locator("[data-queue-ranking-score]").count() == 3
+        assert page.locator("[data-queue-ranking-score]").first.text_content() == (
+            "#1 · score 0.75"
+        )
         page.wait_for_function("""
           () => Object.values(localStorage).some(raw => {
             try {
@@ -269,6 +337,13 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path):
         )
         assert page.locator('[data-role="individual-queue-order"]').input_value() == (
             "isolation_forest_decision_margin"
+        )
+        page.locator('[data-role="individual-view-queue"]').click()
+        page.locator("[data-queue-ranking-score]").first.wait_for(
+            state="visible", timeout=20_000
+        )
+        assert page.locator("[data-queue-ranking-score]").first.text_content() == (
+            "#1 · score 0.75"
         )
 
         page.evaluate("window.__movementMonitorActive = false")

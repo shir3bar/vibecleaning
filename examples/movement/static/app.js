@@ -2622,6 +2622,27 @@ class MovementExampleApp {
           margin-bottom: 6px;
           padding: 7px 9px;
         }
+        .movement-queue-title-line {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 5px;
+          min-width: 0;
+        }
+        .movement-queue-ranking-score {
+          display: inline-flex;
+          align-items: center;
+          padding: 2px 5px;
+          border: 1px solid rgba(125, 211, 252, 0.3);
+          border-radius: 999px;
+          background: rgba(125, 211, 252, 0.1);
+          color: #bae6fd;
+          font-size: 9px;
+          font-variant-numeric: tabular-nums;
+          font-weight: 700;
+          line-height: 1.2;
+          white-space: nowrap;
+        }
         .movement-queue-card-meta {
           overflow: hidden;
           color: #8fa4b9;
@@ -9325,6 +9346,18 @@ class MovementExampleApp {
   renderIndividualReviewQueue() {
     const position = this.getIndividualQueuePosition();
     const queue = this.individualReviewQueue;
+    const queueRanking = this.getIndividualQueueRanking();
+    const showRankingScores = (
+      queue.orderMode === "ranking"
+      && this.hasCompatibleIndividualQueueRanking(queueRanking)
+      && queue.appliedRankingAnalysisId === queueRanking.analysisId
+    );
+    const rankingRowsByIndividual = new Map(
+      showRankingScores
+        ? queueRanking.rankedIndividuals.map(row => [String(row?.individual || ""), row])
+        : [],
+    );
+    const rankingLabel = this.rankingMethodLabel(queue.rankingMethod);
     this.syncIndividualQueueRankingOptions();
     this.refs.individualHead.textContent = (
       `Individual review queue (${formatCount(position.ordered.length)})`
@@ -9390,10 +9423,25 @@ class MovementExampleApp {
         ? ` ${reviewDecisionClass(reviewState.reviewDecision)}`
         : "";
       const selectedDecision = String(reviewState.reviewDecision || "");
+      const rankingRow = rankingRowsByIndividual.get(individual);
+      const rankingScore = finiteOrNull(
+        rankingRow?.individual_score ?? rankingRow?.top_burst_score,
+      );
+      const rankingRank = Number(rankingRow?.rank);
+      const rankingBadge = rankingRow && rankingScore !== null
+        ? (
+          `<span class="movement-queue-ranking-score" data-queue-ranking-score title="${escapeHtml(`${rankingLabel}; rank ${Number.isFinite(rankingRank) ? rankingRank : "n/a"}; score ${formatMaybeNumber(rankingScore, "")}`)}">`
+          + `${Number.isFinite(rankingRank) ? `#${escapeHtml(formatCount(rankingRank))} · ` : ""}`
+          + `score ${escapeHtml(formatMaybeNumber(rankingScore, ""))}</span>`
+        )
+        : "";
       card.innerHTML = `
         <div class="movement-row">
           <div class="movement-row-left">
-            <div class="movement-title">${escapeHtml(individual)}</div>
+            <div class="movement-queue-title-line">
+              <div class="movement-title">${escapeHtml(individual)}</div>
+              ${rankingBadge}
+            </div>
             <span class="movement-review-state${stateClass}">${escapeHtml(stateLabel)}${reviewState.needsCheck ? " • Needs check" : ""}${reviewState.staged ? " • unsaved" : ""}</span>
           </div>
           <div class="movement-queue-card-actions">
