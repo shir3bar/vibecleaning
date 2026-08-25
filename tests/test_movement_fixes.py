@@ -1106,7 +1106,8 @@ def test_movement_frontend_uses_one_scope_aware_flag_action():
     assert "Flag entire individual" in source
     assert "selected burst(s)" in source
     assert "Flag selected segment" in source
-    assert '"threshold "}matches for selected individuals' in source
+    assert '"Flag thresholded fixes"' in source
+    assert '"Flag GPS-spike fixes"' in source
     assert "Flag checked fixes" in source
     assert 'this.flagTargetKind = "filter";' in source
     check_start = source.index("  checkAboveThresholdSelection() {")
@@ -1842,16 +1843,16 @@ def test_gps_spike_color_mode_is_visual_until_explicit_flagging():
     assert 'data-action="set-gps-spike-turn-angle"' in source
     assert "Math.abs(item.turnAngle) >= this.gpsSpikeTurnAngleDeg" in source
     assert '? "step_length_m"' in source
-    assert 'flagTarget.filterKind === "gps_spike" ? "GPS-spike "' in source
+    assert '"Flag GPS-spike fixes"' in source
     assert 'kind: "gps_spike"' in source
     assert 'selectionMethods: isGpsSpikeTarget ? ["color_threshold"] : null' in source
     assert "this.openIssueModal(\"suspected\", target);" in source
 
 
-def test_threshold_issue_ui_defaults_to_selected_individuals_with_whole_study_option():
+def test_threshold_issue_ui_defaults_to_whole_study_with_selected_individuals_option():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     assert 'kind: "filter"' in source
-    assert 'this.thresholdFlagScope = "selected_individuals"' in source
+    assert 'this.thresholdFlagScope = "whole_study"' in source
     assert 'data-action="set-threshold-flag-scope"' in source
     assert '>Whole study</option>' in source
     assert 'individuals: thresholdScope.individuals' in source

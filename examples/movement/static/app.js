@@ -556,7 +556,7 @@ class MovementExampleApp {
       histogramMin: null,
       histogramMax: null,
     };
-    this.thresholdFlagScope = "selected_individuals";
+    this.thresholdFlagScope = "whole_study";
     this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
     this.anomalyRankings = new Map();
@@ -14649,9 +14649,9 @@ class MovementExampleApp {
         ? `Flag selected segment (${formatCount(flagFixes.length)} fixes)`
         : "Select segment end"
       : flagTarget.kind === "filter"
-        ? flagTarget.thresholdScope === "whole_study"
-          ? `Flag all ${flagTarget.filterKind === "gps_spike" ? "GPS-spike " : "threshold "}matches in whole study`
-          : `Flag all ${formatCount(flagTarget.matchCount || flagFixes.length)} ${flagTarget.filterKind === "gps_spike" ? "GPS-spike " : "threshold "}matches for selected individuals`
+        ? flagTarget.filterKind === "gps_spike"
+          ? "Flag GPS-spike fixes"
+          : "Flag thresholded fixes"
         : flagTarget.kind === "fixes"
           ? `Flag checked fixes (${formatCount(flagFixes.length)})`
           : "Choose what to flag";

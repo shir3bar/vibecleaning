@@ -306,10 +306,10 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
             true_level.check()
             flag_button = page.locator('[data-role="mark-suspected"]')
             assert flag_button.is_enabled()
-            assert "threshold matches" in flag_button.text_content()
+            assert flag_button.text_content() == "Flag thresholded fixes"
             page.locator('button[data-action="check-above-threshold"]').click()
             assert flag_button.is_enabled()
-            assert "threshold matches" in flag_button.text_content()
+            assert flag_button.text_content() == "Flag thresholded fixes"
             assert "checked fixes" not in flag_button.text_content()
 
         page.evaluate("window.__movementMonitorActive = false")
