@@ -1087,6 +1087,34 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
         _wait_for_layer(page, "movement-binary-paths-individual-")
         assert len(binary_requests) == 1
 
+        page.locator('[data-role="color-by"]').select_option("gps_spike_step_turn")
+        turn_angle = page.locator(
+            'input[data-action="set-gps-spike-turn-angle"]'
+        )
+        turn_angle.wait_for(state="visible", timeout=20_000)
+        turn_angle.fill("0")
+        turn_angle.press("Tab")
+        threshold_chart = page.locator('[data-role="threshold-chart"]')
+        threshold_chart.wait_for(state="visible", timeout=20_000)
+        threshold_value = float(threshold_chart.get_attribute("data-min"))
+        threshold_input = page.locator(
+            'input[data-action="set-threshold-value"]'
+        )
+        threshold_input.fill(str(threshold_value))
+        threshold_input.press("Tab")
+        page.wait_for_function(
+            "() => window.__movementDiagnostics.binaryThresholdMatchCount > 0",
+            timeout=20_000,
+        )
+        highlighted_count = page.evaluate(
+            "window.__movementDiagnostics.binaryThresholdMatchCount"
+        )
+        page.locator('button[data-action="check-above-threshold"]').click()
+        selected_count = page.evaluate(
+            "window.__movementDiagnosticsSnapshot().selectedFixCount"
+        )
+        assert selected_count == min(highlighted_count, 5_000)
+
         if outlier_sample.exists():
             outlier_individual = page.locator('[data-individual-checkbox="MF006"]')
             outlier_individual.check()
@@ -1104,6 +1132,9 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
                 for layer_id in _layer_ids(page)
             )
             page.locator('button[data-action="check-above-threshold"]').click()
+            assert page.evaluate(
+                "window.__movementDiagnosticsSnapshot().selectedFixCount"
+            ) == 3
             assert flag_button.is_enabled()
             assert flag_button.text_content() == "Flag thresholded fixes"
             assert "checked fixes" not in flag_button.text_content()
@@ -1125,6 +1156,7 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
             )
             assert len(binary_requests) == requests_before_flag
             assert outlier_individual.is_checked()
+            _wait_for_layer(page, "movement-binary-suspected")
             layer_ids = _layer_ids(page)
             assert not any("movement-binary-threshold" in layer_id for layer_id in layer_ids)
             assert "movement-suspected-outline" not in layer_ids

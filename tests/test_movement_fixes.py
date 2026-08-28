@@ -1934,6 +1934,26 @@ def test_gps_spike_color_mode_is_visual_until_explicit_flagging():
     assert "this.openIssueModal(\"suspected\", target);" in source
 
 
+def test_gps_spike_checked_preview_matches_binary_highlight_and_reuses_context():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "gpsSpikeTurnAngleDeg: this.gpsSpikeTurnAngleDeg" in source
+    assert (
+        "this.hiddenBurstIds.has(this.binaryBurstIdAt(binary, index, individual))"
+        in source
+    )
+    assert "this.binaryThresholdContextCache.get(contextCacheKey)" in source
+    assert "this.data.selectedFixKeys = new Set(context.matchKeys);" in source
+    assert "const nextSelected = new Set(this.data.selectedFixKeys);" not in source[
+        source.index("  checkAboveThresholdSelection() {") :
+        source.index(
+            "\n  getFixesForIndividualsFrom(",
+            source.index("  checkAboveThresholdSelection() {"),
+        )
+    ]
+    assert "Select fixes will replace the checked-fix preview" in source
+
+
 def test_threshold_issue_ui_defaults_to_whole_study_with_selected_individuals_option():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     assert 'kind: "filter"' in source

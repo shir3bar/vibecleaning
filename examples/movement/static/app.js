@@ -537,6 +537,7 @@ class MovementExampleApp {
       datasetTransitionMaxMs: 0,
       queueContextGrayCount: 0,
       queueContextColoredCount: 0,
+      binaryThresholdMatchCount: 0,
       previewActivations: 0,
       exactActivations: 0,
       lastPreviewActivationMs: null,
@@ -598,6 +599,7 @@ class MovementExampleApp {
       histogramMin: null,
       histogramMax: null,
     };
+    this.binaryThresholdContextCache = new Map();
     this.thresholdFlagScope = "whole_study";
     this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
@@ -4675,6 +4677,7 @@ class MovementExampleApp {
       focusedObjectEntries: focusedEntries.length,
       focusedObjectFixCount: focusedFixes,
       materializedFixCount: data?.fixes?.length || 0,
+      selectedFixCount: data?.selectedFixKeys?.size || 0,
       detailFixCount: data?.detailFixes?.length || 0,
       reviewIssueAnnotationCount: data?.reviewIssueAnnotations?.length || 0,
       graphDatasetCount: this.allDatasets?.length || 0,
@@ -11587,6 +11590,7 @@ class MovementExampleApp {
         reverse: this.thresholdState.reverse === true,
         selectedLevels: [...(this.thresholdState.selectedLevels || [])].sort(),
       },
+      gpsSpikeTurnAngleDeg: this.gpsSpikeTurnAngleDeg,
     });
     const categoryColors = fieldStyle?.categories instanceof Map
       ? Object.fromEntries(fieldStyle.categories)
@@ -11836,6 +11840,9 @@ class MovementExampleApp {
     ) || 0;
     this.movementDiagnostics.queueContextColoredCount = Number(
       attributes?.queueContextColoredCount,
+    ) || 0;
+    this.movementDiagnostics.binaryThresholdMatchCount = Number(
+      attributes?.thresholdCount,
     ) || 0;
   }
 
@@ -13417,21 +13424,54 @@ class MovementExampleApp {
   }
 
   getBinaryThresholdContext(field) {
+    const visibleIndividuals = this.getSelectedIndividuals();
+    const visibleSetNames = this.getVisibleSetNames();
+    const { cacheKey: renderCacheKey } = this.binaryRenderSpecification();
+    const blockKeys = visibleIndividuals.map(individual => {
+      const binary = this.data?.binaryBlocks?.get(individual);
+      if (!binary) return [individual, ""];
+      const code = (binary.header.individuals || []).indexOf(individual);
+      const range = binary.individualRanges?.get(code) || [0, 0];
+      return [
+        individual,
+        String(binary.workerBlockId || binary.header.source_bundle_signature || binary.header.source_signature || "binary"),
+        Number(range[0]) || 0,
+        Number(range[1]) || 0,
+      ];
+    });
+    const contextCacheKey = JSON.stringify({
+      datasetId: this.currentDatasetId || "",
+      renderCacheKey,
+      blockKeys,
+      visibleSetNames: [...visibleSetNames].sort(),
+      histogramMode: this.thresholdState.histogramMode || "full",
+      histogramMin: finiteOrNull(this.thresholdState.histogramMin),
+      histogramMax: finiteOrNull(this.thresholdState.histogramMax),
+    });
+    const cached = this.binaryThresholdContextCache.get(contextCacheKey);
+    if (cached) {
+      return this.withThresholdSelectionState(cached);
+    }
     const visibleRefs = [];
-    for (const individual of this.getSelectedIndividuals()) {
+    for (const individual of visibleIndividuals) {
       const binary = this.data?.binaryBlocks?.get(individual);
       if (!binary) continue;
       const code = (binary.header.individuals || []).indexOf(individual);
       const [start, end] = binary.individualRanges?.get(code) || [0, 0];
       for (let index = start; index < end; index += 1) {
-        if (Number(binary.arrays.review_status[index]) !== 2) {
-          visibleRefs.push({ binary, index });
-        }
+        if (Number(binary.arrays.review_status[index]) === 2) continue;
+        const setCode = Number(binary.arrays.set_codes?.[index]);
+        const setName = binary.arrays.set_codes
+          ? String(binary.header.sets?.[setCode] || "")
+          : String(binary.header.implicit_set || "train");
+        if (!visibleSetNames.has(setName)) continue;
+        if (this.hiddenBurstIds.has(this.binaryBurstIdAt(binary, index, individual))) continue;
+        visibleRefs.push({ binary, index });
       }
     }
     const emptyKeys = new Set();
     if (!field || field.key === INDIVIDUAL_COLOR_FIELD_KEY) {
-      return {
+      return this.cacheBinaryThresholdContext(contextCacheKey, {
         field,
         visibleFixes: { length: visibleRefs.length },
         numericFixes: { length: 0 },
@@ -13447,9 +13487,8 @@ class MovementExampleApp {
           ? "Threshold selection is unavailable when coloring by individual ID. Use the Individuals panel to filter tracks instead."
           : "",
         matchKeys: emptyKeys,
-        uncheckedMatchKeys: new Set(),
         matchCount: 0,
-      };
+      });
     }
     const reverse = this.thresholdState.fieldKey === field.key && this.thresholdState.reverse === true;
     const selectedLevels = this.thresholdState.fieldKey === field.key
@@ -13483,7 +13522,7 @@ class MovementExampleApp {
         .map(({ binary, index }) => this.binaryFixAt(index, { binary }))
         .filter(Boolean);
       const matchKeys = new Set(fixes.map(fix => fix.fixKey));
-      return {
+      return this.cacheBinaryThresholdContext(contextCacheKey, {
         field,
         visibleFixes: { length: visibleRefs.length },
         numericFixes: { length: 0 },
@@ -13497,10 +13536,9 @@ class MovementExampleApp {
         levelOptions: [...levelCounts].map(([level, count]) => ({ level, count }))
           .sort((left, right) => right.count - left.count || left.level.localeCompare(right.level)),
         matchKeys,
-        uncheckedMatchKeys: new Set([...matchKeys].filter(key => !this.data.selectedFixKeys.has(key))),
         matchCount,
         previewTruncated: matchCount > matchKeys.size,
-      };
+      });
     }
     const sourceKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY ? "step_length_m" : field.key;
     const gpsSpikeMode = field.key === GPS_SPIKE_COLOR_FIELD_KEY;
@@ -13560,7 +13598,7 @@ class MovementExampleApp {
       .map(({ binary, index }) => this.binaryFixAt(index, { binary }))
       .filter(Boolean);
     const matchKeys = new Set(fixes.map(fix => fix.fixKey));
-    return {
+    return this.cacheBinaryThresholdContext(contextCacheKey, {
       field,
       visibleFixes: { length: visibleRefs.length },
       numericFixes: { length: numericValues.length },
@@ -13573,11 +13611,40 @@ class MovementExampleApp {
       selectedLevels: [],
       levelOptions: [],
       matchKeys,
-      uncheckedMatchKeys: new Set([...matchKeys].filter(key => !this.data.selectedFixKeys.has(key))),
       matchCount,
       previewTruncated: matchCount > matchKeys.size,
       gpsSpikeMode,
       turnAngleThreshold: this.gpsSpikeTurnAngleDeg,
+    });
+  }
+
+  cacheBinaryThresholdContext(cacheKey, context) {
+    if (!(this.binaryThresholdContextCache instanceof Map)) {
+      this.binaryThresholdContextCache = new Map();
+    }
+    this.binaryThresholdContextCache.set(cacheKey, context);
+    while (this.binaryThresholdContextCache.size > 3) {
+      this.binaryThresholdContextCache.delete(this.binaryThresholdContextCache.keys().next().value);
+    }
+    return this.withThresholdSelectionState(context);
+  }
+
+  withThresholdSelectionState(context) {
+    const matchKeys = context?.matchKeys instanceof Set ? context.matchKeys : new Set();
+    const selectedFixKeys = this.data?.selectedFixKeys instanceof Set
+      ? this.data.selectedFixKeys
+      : new Set();
+    const uncheckedMatchKeys = new Set(
+      [...matchKeys].filter(fixKey => !selectedFixKeys.has(fixKey)),
+    );
+    const selectionMatchesPreview = (
+      selectedFixKeys.size === matchKeys.size
+      && [...matchKeys].every(fixKey => selectedFixKeys.has(fixKey))
+    );
+    return {
+      ...context,
+      uncheckedMatchKeys,
+      selectionMatchesPreview,
     };
   }
 
@@ -13814,7 +13881,7 @@ class MovementExampleApp {
     const levelOptions = context?.levelOptions || [];
     const disabledReason = context?.disabledReason || "";
     const matchCount = Number(context?.matchCount) || context?.matchKeys?.size || 0;
-    const uncheckedCount = context?.uncheckedMatchKeys?.size || 0;
+    const selectionMatchesPreview = context?.selectionMatchesPreview === true;
     const previewTruncated = context?.previewTruncated === true;
     const histogram = context?.histogram;
     const histogramMode = context?.histogramMode === "clipped" ? "clipped" : "full";
@@ -13874,12 +13941,12 @@ class MovementExampleApp {
       const meta = selectedLevels.length
         ? `${formatCount(matchCount)} fixes match ${formatCount(selectedLevels.length)} selected levels.`
         : "Choose one or more levels to highlight matching fixes.";
-      const selectionNote = uncheckedCount > 0
-        ? previewTruncated
-          ? `${formatCount(matchCount)} fixes match; the first ${formatCount(uncheckedCount)} can optionally be added to the checked-fix preview.`
-          : `${formatCount(uncheckedCount)} matching fixes can optionally be added to the checked-fix list.`
+      const selectionNote = selectionMatchesPreview
+        ? "The checked-fix preview exactly matches the highlighted fixes."
         : matchCount > 0
-          ? "All matching fixes are already in the checked-fix list."
+          ? previewTruncated
+            ? `${formatCount(matchCount)} fixes match; Select fixes will replace the checked-fix preview with its first ${formatCount(context.matchKeys.size)} matches.`
+            : `Select fixes will replace the checked-fix preview with these ${formatCount(matchCount)} matches.`
           : "No levels are selected yet.";
       body = `
         <div class="movement-threshold-head">
@@ -13909,7 +13976,7 @@ class MovementExampleApp {
           <button
             type="button"
             data-action="check-above-threshold"
-            ${uncheckedCount === 0 ? "disabled" : ""}
+            ${matchCount === 0 || selectionMatchesPreview ? "disabled" : ""}
           >Select fixes</button>
           <button
             type="button"
@@ -13958,11 +14025,11 @@ class MovementExampleApp {
         ? "No threshold set"
         : matchCount === 0
           ? "No matches"
-          : previewTruncated
-            ? `${formatCount(matchCount)} matches • the checked-fix preview is limited to ${formatCount(context.matchKeys.size)}`
-          : uncheckedCount > 0
-            ? `${formatCount(matchCount)} matches • ${formatCount(uncheckedCount)} not in checked fixes`
-            : `${formatCount(matchCount)} matches • all in checked fixes`;
+          : selectionMatchesPreview
+            ? `${formatCount(matchCount)} matches • checked-fix preview matches exactly`
+            : previewTruncated
+              ? `${formatCount(matchCount)} matches • Select fixes replaces the checked-fix preview with its first ${formatCount(context.matchKeys.size)}`
+              : `${formatCount(matchCount)} matches • Select fixes replaces the checked-fix preview`;
       body = `
         ${gpsSpikeControl}
         <div class="movement-threshold-head">
@@ -14045,7 +14112,7 @@ class MovementExampleApp {
           <button
             type="button"
             data-action="check-above-threshold"
-            ${uncheckedCount === 0 ? "disabled" : ""}
+            ${matchCount === 0 || selectionMatchesPreview ? "disabled" : ""}
           >Select fixes</button>
           <button
             type="button"
@@ -14312,14 +14379,13 @@ class MovementExampleApp {
       return;
     }
     const context = this.getThresholdContext();
-    if (!context?.uncheckedMatchKeys?.size) {
+    if (!context?.matchKeys?.size || context.selectionMatchesPreview) {
       return;
     }
-    const nextSelected = new Set(this.data.selectedFixKeys);
-    for (const fixKey of context.uncheckedMatchKeys) {
-      nextSelected.add(fixKey);
-    }
-    this.data.selectedFixKeys = nextSelected;
+    // The checked preview must correspond exactly to the fixes currently
+    // colored as threshold matches. Retaining checks from an older filter made
+    // unrelated gray fixes appear to belong to the active spike selection.
+    this.data.selectedFixKeys = new Set(context.matchKeys);
     // Checked fixes are only a bounded local preview of the active threshold.
     // Keep the persistent action attached to the filter so compact binary data
     // can resolve every match in the chosen scope on the server.
@@ -17569,6 +17635,9 @@ class MovementExampleApp {
       binary.lastRenderAttributes = null;
       binary.lastRenderCacheKey = "";
       workerUpdates.push(updateMovementBinaryWorkerReviewStatus(binary));
+    }
+    if (workerUpdates.length) {
+      this.binaryThresholdContextCache?.clear?.();
     }
     await Promise.all(workerUpdates);
     this.movementDiagnostics.binaryReviewLastMs = Math.max(
