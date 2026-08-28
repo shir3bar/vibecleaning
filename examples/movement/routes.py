@@ -79,6 +79,7 @@ from .review_annotations import (
     compress_fix_keys,
     confirmed_exclusion_scopes,
     load_review_annotations,
+    resolve_filter_row_ranges,
     row_tokens_for_scope,
 )
 from .script_bundle import build_self_contained_script
@@ -3075,6 +3076,65 @@ def register_movement_routes(
             return _edit_conflict_response(exc)
         except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
             return _review_error_response(exc)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/preview-filter")
+    async def post_movement_preview_filter(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            load_dataset(study_dir, dataset_id)
+            _artifact, artifact_path = get_dataset_artifact(
+                study_dir, dataset_id, logical_name
+            )
+            filter_spec = _validate_filter_scope(body.get("filter"))
+            if configured_source.bundle_scoped:
+                bundle, index_path = await run_in_threadpool(
+                    ensure_rds_index, study_dir, dataset_id
+                )
+                validate_requested_bundle(body, bundle.signature)
+                _resolved_scope, match_count = await run_in_threadpool(
+                    resolve_rds_review_scope,
+                    index_path,
+                    {"kind": "filter", "filter": filter_spec},
+                )
+                source_signature = bundle.signature
+            else:
+                annotations = _load_dataset_review_annotations(
+                    study_dir, dataset_id=dataset_id
+                )
+                confirmed_fix_keys, confirmed_individual_tracks = (
+                    confirmed_exclusion_scopes(
+                        annotations,
+                        source_artifact=logical_name,
+                    )
+                )
+                _row_ranges, match_count = await run_in_threadpool(
+                    resolve_filter_row_ranges,
+                    artifact_path,
+                    filter_spec,
+                    confirmed_fix_keys=confirmed_fix_keys,
+                    confirmed_individual_tracks=confirmed_individual_tracks,
+                )
+                source_signature = artifact_signature(_artifact)
+            return JSONResponse({
+                "match_count": int(match_count),
+                "scope": (
+                    "selected_individuals"
+                    if filter_spec.get("individuals")
+                    else "whole_study"
+                ),
+                "individual_count": len(filter_spec.get("individuals") or []),
+                "source_signature": source_signature,
+            })
+        except ReviewForbiddenError as exc:
+            return json_error(str(exc), 404)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 

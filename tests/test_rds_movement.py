@@ -181,6 +181,53 @@ def test_rds_frontend_loads_full_binary_only_after_selecting_all():
     assert source.count("await this.loadBinaryMovement({") == 1
 
 
+def test_rds_filter_preview_returns_exact_scope_count_without_creating_step(tmp_path):
+    client, study_dir = _client(tmp_path)
+    loaded = client.get(
+        "/api/apps/movement/family/movement_rds/study/268904527/load"
+    ).json()
+    dataset_id = loaded["dataset_id"]
+    logical_name = loaded["logical_name"]
+    overview = client.get(
+        f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{dataset_id}/overview",
+        params={"logical_name": logical_name},
+    ).json()
+    bundle, index_path = ensure_rds_index(study_dir, dataset_id)
+    base_filter = {
+        "field_key": "is_outlier",
+        "field_kind": "boolean",
+        "selected_levels": ["True"],
+        "set_names": [],
+    }
+    before = ensure_project_state(study_dir)
+    step_count_before = len(list((study_dir / ".vibecleaning" / "steps").glob("*/step.json")))
+
+    for individuals in ([], [overview["individuals"][0]]):
+        filter_spec = {**base_filter, "individuals": individuals}
+        _scope, expected_count = resolve_rds_review_scope(
+            index_path,
+            {"kind": "filter", "filter": filter_spec},
+        )
+        response = client.post(
+            "/api/apps/movement/family/movement_rds/study/268904527/actions/preview-filter",
+            json={
+                "dataset_id": dataset_id,
+                "logical_name": logical_name,
+                "source_bundle_signature": bundle.signature,
+                "filter": filter_spec,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["match_count"] == expected_count
+        assert response.json()["scope"] == (
+            "whole_study" if not individuals else "selected_individuals"
+        )
+
+    after = ensure_project_state(study_dir)
+    assert after["current_dataset_id"] == before["current_dataset_id"]
+    assert len(list((study_dir / ".vibecleaning" / "steps").glob("*/step.json"))) == step_count_before
+
+
 def test_pre_sum_source_ranking_is_not_treated_as_a_source_total_ranking():
     assert _ranking_definition_matches("source_is_outlier", "") is False
     assert _ranking_definition_matches(

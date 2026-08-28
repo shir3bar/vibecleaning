@@ -1313,9 +1313,9 @@ def test_rds_whole_study_filter_updates_hidden_retained_individuals(tmp_path):
         page.locator('button[data-action="check-above-threshold"]').click()
         page.locator('[data-role="mark-suspected"]').click()
         page.locator('[data-role="issue-modal"]').wait_for(state="visible")
-        assert "all matching fixes in the whole study" in page.locator(
-            '[data-role="issue-meta"]'
-        ).text_content()
+        issue_meta = page.locator('[data-role="issue-meta"]').text_content()
+        assert "Exact fixes to flag: 26" in issue_meta
+        assert "all matching fixes in the whole study" in issue_meta
         page.locator('[data-role="issue-submit"]').click()
         page.locator('[data-role="issue-modal"]').wait_for(
             state="hidden", timeout=20_000

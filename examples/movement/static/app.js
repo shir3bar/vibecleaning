@@ -4466,7 +4466,7 @@ class MovementExampleApp {
     });
     this.refs.clearCandidates.addEventListener("click", () => this.clearCandidateQueryPreview({ announce: true }));
     this.refs.resetView.addEventListener("click", () => this.resetView());
-    this.refs.markSuspected.addEventListener("click", () => this.openActiveFlagModal());
+    this.refs.markSuspected.addEventListener("click", () => void this.openActiveFlagModal());
     this.refs.markConfirmed.addEventListener("click", () => this.openConfirmModal());
     this.refs.dismissSuspected.addEventListener("click", () => this.openDismissModal());
     this.refs.runAnomalyRanking.addEventListener("click", () => {
@@ -13375,6 +13375,34 @@ class MovementExampleApp {
     };
   }
 
+  currentThresholdFilterDefinition() {
+    const field = this.getCurrentColorField();
+    const thresholdScope = this.getThresholdFlagScope();
+    if (!field || !this.hasActiveThreshold(field)) return null;
+    if (field.key === GPS_SPIKE_COLOR_FIELD_KEY) {
+      return {
+        kind: "gps_spike",
+        step_length_threshold_m: this.thresholdState.value,
+        minimum_abs_turn_angle_deg: this.gpsSpikeTurnAngleDeg,
+        individuals: thresholdScope.individuals,
+        set_names: thresholdScope.setNames,
+      };
+    }
+    return {
+      field_key: field.key,
+      field_kind: field.kind,
+      operator: this.thresholdState.reverse === true ? "lt" : "gt",
+      threshold_value: typeof this.thresholdState.value === "number"
+        ? this.thresholdState.value
+        : null,
+      selected_levels: Array.isArray(this.thresholdState.selectedLevels)
+        ? [...this.thresholdState.selectedLevels]
+        : [],
+      individuals: thresholdScope.individuals,
+      set_names: thresholdScope.setNames,
+    };
+  }
+
   getCurrentColorField() {
     if (!this.data) {
       return null;
@@ -16841,7 +16869,40 @@ class MovementExampleApp {
     }
   }
 
-  openActiveFlagModal() {
+  async previewThresholdFilterCount(filter) {
+    const datasetId = this.currentDatasetId;
+    const signature = this.thresholdSelectionSignature();
+    const controller = this.beginRequest("filterPreview");
+    try {
+      const payload = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/preview-filter`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            dataset_id: datasetId,
+            logical_name: this.currentArtifact,
+            source_bundle_signature: this.data?.sourceSignature || "",
+            filter,
+          }),
+        },
+      );
+      if (
+        this.requestControllers.filterPreview !== controller
+        || datasetId !== this.currentDatasetId
+        || signature !== this.thresholdSelectionSignature()
+      ) {
+        throw new DOMException("Filter preview was superseded", "AbortError");
+      }
+      return Math.max(0, Number(payload.match_count) || 0);
+    } finally {
+      if (this.requestControllers.filterPreview === controller) {
+        this.requestControllers.filterPreview = null;
+      }
+    }
+  }
+
+  async openActiveFlagModal() {
     const target = this.getActiveFlagTarget();
     if (!target.ready) return;
     if (target.kind === "individual") {
@@ -16855,6 +16916,29 @@ class MovementExampleApp {
     if (target.kind === "segment") {
       this.openSegmentModal("suspected");
       return;
+    }
+    if (target.kind === "filter") {
+      const filter = this.currentThresholdFilterDefinition();
+      if (!filter) return;
+      const previousLabel = this.refs.markSuspected.textContent;
+      this.refs.markSuspected.disabled = true;
+      this.refs.markSuspected.textContent = "Counting exact filter matches...";
+      try {
+        target.resolvedMatchCount = await this.previewThresholdFilterCount(filter);
+        target.thresholdFilter = filter;
+        if (!target.resolvedMatchCount) {
+          this.setStatus("The saved filter does not match any eligible fixes in that scope.", true);
+          return;
+        }
+      } catch (error) {
+        if (!this.isAbortError(error)) {
+          this.setStatus(`Could not count filter matches: ${error.message}`, true);
+        }
+        return;
+      } finally {
+        this.refs.markSuspected.textContent = previousLabel;
+        this.updateActionButtons();
+      }
     }
     this.openIssueModal("suspected", target);
   }
@@ -16892,29 +16976,9 @@ class MovementExampleApp {
         fix => fix.individual === this.individualReviewQueue.activeIndividual,
       )
     ) ? this.individualReviewQueue.activeIndividual : "";
-    const thresholdFilter = isGpsSpikeTarget
-      ? {
-          kind: "gps_spike",
-          step_length_threshold_m: this.thresholdState.value,
-          minimum_abs_turn_angle_deg: this.gpsSpikeTurnAngleDeg,
-          individuals: thresholdScope.individuals,
-          set_names: thresholdScope.setNames,
-        }
-      : isFilterTarget
-        ? {
-          field_key: field?.key || "",
-          field_kind: field?.kind || "",
-          operator: this.thresholdState.reverse === true ? "lt" : "gt",
-          threshold_value: typeof this.thresholdState.value === "number"
-            ? this.thresholdState.value
-            : null,
-          selected_levels: Array.isArray(this.thresholdState.selectedLevels)
-            ? [...this.thresholdState.selectedLevels]
-            : [],
-          individuals: thresholdScope.individuals,
-          set_names: thresholdScope.setNames,
-        }
-        : null;
+    const thresholdFilter = isFilterTarget
+      ? target?.thresholdFilter || this.currentThresholdFilterDefinition()
+      : null;
     this.pendingIssueStatus = status;
     this.pendingIssueContext = {
       mode: "fixes",
@@ -16939,6 +17003,7 @@ class MovementExampleApp {
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
       <div><strong>${isFilterTarget ? "Visible preview matches" : "Checked fixes"}:</strong> ${escapeHtml(formatCount(isFilterTarget ? target?.matchCount || selectedFixes.length : selectedFixes.length))}</div>
+      ${isFilterTarget ? `<div><strong>Exact fixes to flag:</strong> ${escapeHtml(formatCount(target?.resolvedMatchCount || 0))}</div>` : ""}
       <div><strong>Flag scope:</strong> ${isFilterTarget ? (thresholdScope.kind === "whole_study" ? "all matching fixes in the whole study" : `all matching fixes for ${formatCount(thresholdScope.individuals.length)} selected individual(s), across all track sets`) : "checked fixes"}</div>
       <div><strong>Issue variable:</strong> ${escapeHtml(isGpsSpikeTarget ? "Step length + absolute turn angle" : field?.label || "Not set")}</div>
       <div><strong>Issue threshold:</strong> ${escapeHtml(issueThreshold || "Not set")}</div>
