@@ -241,6 +241,8 @@ const GPS_SPIKE_COLOR_FIELD = Object.freeze({
   kind: "numeric",
   source: "derived",
 });
+const CONTEXT_GRAY_POINT = Object.freeze([112, 122, 133, 175]);
+const CONTEXT_GRAY_LINE = Object.freeze([112, 122, 133, 155]);
 
 let assetPromise = null;
 
@@ -508,6 +510,8 @@ class MovementExampleApp {
       binaryRequests: 0,
       binaryCacheHits: 0,
       binaryAttributeBuilds: 0,
+      queueContextGrayCount: 0,
+      queueContextColoredCount: 0,
       previewActivations: 0,
       exactActivations: 0,
       lastPreviewActivationMs: null,
@@ -516,7 +520,6 @@ class MovementExampleApp {
       mapView: null,
     };
     window.__movementDiagnostics = this.movementDiagnostics;
-    this.lastThresholdMatchKeys = new Set();
     this.lastCandidateMatchKeys = new Set();
     this.loadRequestId = 0;
     this.studyLoadId = 0;
@@ -628,12 +631,12 @@ class MovementExampleApp {
     };
     this.individualReviewQueue = {
       mode: "browse",
-      orderMode: this.uiState.individualQueueOrder === "ranking" ? "ranking" : "dataset",
+      orderMode: "dataset",
       filterMode: "all",
       pageIndex: Math.max(0, Number(this.uiState.individualQueuePage) || 0),
       groupIndex: 0,
       activeIndividual: "",
-      mapScope: "group",
+      mapScope: "solo",
       browseContext: null,
       browseSideSheet: this.uiState.sideSheet || "individuals",
       queueMapView: null,
@@ -644,9 +647,9 @@ class MovementExampleApp {
       saving: false,
       appliedRankingAnalysisId: "",
       pendingRankingAnalysisId: "",
-      rankingMethod: this.uiState.individualQueueRankingMethod
-        || this.uiState.rankingMethod
-        || "isolation_forest",
+      rankingMethod: "isolation_forest",
+      priorOkLast: true,
+      priorOkLastReviewId: "",
     };
     this.handleWindowResize = () => this.handleLayoutResize();
     this.handleSidePanePointerMove = event => this.onSidePanePointerMove(event);
@@ -700,6 +703,7 @@ class MovementExampleApp {
         showPoints: true,
         showBursts: true,
         showConfirmed: true,
+        hideSuspected: false,
         burstGapMode: DEFAULT_BURST_GAP_MODE,
         burstGapSeconds: DEFAULT_BURST_GAP_SECONDS,
         burstGapQuantile: DEFAULT_BURST_GAP_QUANTILE,
@@ -733,6 +737,7 @@ class MovementExampleApp {
       showPoints: this.refs.showPoints.checked,
       showBursts: this.refs.showBursts.checked,
       showConfirmed: this.refs.showConfirmed.checked,
+      hideSuspected: this.refs.hideSuspected.checked,
       burstGapMode: this.getBurstGapMode(),
       burstGapSeconds: this.getBurstGapSeconds(),
       burstGapQuantile: this.getBurstGapQuantile(),
@@ -815,7 +820,7 @@ class MovementExampleApp {
       ? String(this.individualReviewQueue.rankingMethod || this.getRankingMethod())
       : "dataset";
     this.refs.individualQueueOrder.innerHTML = [
-      ["dataset", "Dataset order"],
+      ["dataset", "Dataset source"],
       ...this.rankingMethodOptions(),
     ].map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
     this.refs.individualQueueOrder.value = selectedValue;
@@ -1394,6 +1399,8 @@ class MovementExampleApp {
     }
     if (MOVEMENT_APP_CONFIG.rdsSource) {
       this.refs.exportReviewedCsv.textContent = "Export reviewed RDS ZIP";
+      this.refs.burstCount.hidden = true;
+      this.refs.burstCount.classList.add("movement-profile-hidden");
     }
     this.refs.sideTabRanking.textContent = "Ranking";
     const overlayTitle = this.mountEl.querySelector(".movement-overlay-card h3");
@@ -1831,6 +1838,9 @@ class MovementExampleApp {
           gap: 2px;
         }
         .movement-threshold-title {
+          display: flex;
+          align-items: center;
+          gap: 5px;
           font-size: 12px;
           font-weight: 600;
           color: #eef4fb;
@@ -2023,9 +2033,53 @@ class MovementExampleApp {
           gap: 2px;
         }
         .movement-legend-title {
+          display: flex;
+          align-items: center;
+          gap: 5px;
           font-size: 12px;
           font-weight: 600;
           color: #eef4fb;
+        }
+        .movement-field-help {
+          position: relative;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 15px;
+          height: 15px;
+          padding: 0;
+          border: 1px solid rgba(143, 165, 188, 0.48);
+          border-radius: 999px;
+          color: #aebfd0;
+          background: rgba(15, 23, 42, 0.82);
+          font: 600 10px/1 "Segoe UI", sans-serif;
+          cursor: help;
+        }
+        .movement-field-help::after {
+          content: attr(data-tooltip);
+          position: absolute;
+          z-index: 15;
+          left: 50%;
+          bottom: calc(100% + 8px);
+          width: min(280px, 70vw);
+          padding: 8px 10px;
+          border: 1px solid rgba(143, 165, 188, 0.28);
+          border-radius: 8px;
+          background: rgba(5, 11, 20, 0.98);
+          color: #e5edf7;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+          font-size: 11px;
+          font-weight: 400;
+          line-height: 1.4;
+          text-align: left;
+          transform: translateX(-50%);
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 100ms ease;
+        }
+        .movement-field-help:hover::after,
+        .movement-field-help:focus-visible::after {
+          opacity: 1;
         }
         .movement-legend-subtitle {
           font-size: 11px;
@@ -2076,6 +2130,20 @@ class MovementExampleApp {
           border-radius: 999px;
           border: 1px solid rgba(255, 255, 255, 0.16);
           box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+        }
+        .movement-legend-review-key {
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          font-size: 10px;
+          color: #9db0c3;
+        }
+        .movement-legend-suspicious-ring {
+          width: 13px;
+          height: 13px;
+          border: 2px solid rgba(255, 204, 40, 0.62);
+          border-radius: 999px;
+          box-sizing: border-box;
         }
         .movement-overlay {
           position: absolute;
@@ -3344,6 +3412,7 @@ class MovementExampleApp {
           <label class="movement-toggle"><input type="checkbox" data-role="show-points"> Points</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-bursts"> Bursts</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-confirmed"> Confirmed exclusions</label>
+          <label class="movement-toggle"><input type="checkbox" data-role="hide-suspected"> Hide suspicious fixes</label>
           <label data-role="burst-definition-control">Burst definition
             <select data-role="burst-gap-mode">
               <option value="quantile">Gap quantile</option>
@@ -3359,7 +3428,7 @@ class MovementExampleApp {
           <span class="movement-burst-count" data-role="burst-count">No bursts loaded</span>
           <button type="button" data-role="select-all">All individuals</button>
           <button type="button" data-role="select-none">No individuals</button>
-          <button type="button" data-role="select-suspicious">Review suspicious fixes</button>
+          <button type="button" data-role="select-suspicious">Select all suspicious</button>
           <button type="button" data-role="clear-fixes">Clear checked fixes</button>
           <div class="movement-candidate-query-control" data-role="candidate-query-control">
             <label>Candidate query <select data-role="candidate-query-select"></select></label>
@@ -3379,7 +3448,7 @@ class MovementExampleApp {
           <button type="button" data-role="reset-view">Reset view</button>
           <button type="button" class="movement-emphasis" data-role="mark-suspected">Flag checked fixes</button>
           <button type="button" class="movement-emphasis" data-role="mark-confirmed">Mark confirmed</button>
-          <button type="button" data-role="dismiss-suspected">Not suspicious</button>
+          <button type="button" data-role="dismiss-suspected">Unflag suspicious</button>
           <label data-role="anomaly-feature-set-control">Ranking features
             <select data-role="anomaly-feature-set">
               <option value="movement_only">Movement only</option>
@@ -3440,11 +3509,15 @@ class MovementExampleApp {
                   <div class="movement-queue-controls hidden" data-role="individual-queue-controls">
                     <label class="movement-queue-order">Review order
                       <select data-role="individual-queue-order">
-                        <option value="dataset">Dataset order</option>
+                        <option value="dataset">Dataset source</option>
                         <option value="isolation_forest">Isolation forest — worst burst</option>
                         <option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>
                         <option value="source_is_outlier">Source is_outlier — total flagged fixes</option>
                       </select>
+                    </label>
+                    <label class="movement-toggle" data-role="individual-queue-prior-ok-last-control" hidden>
+                      <input type="checkbox" data-role="individual-queue-prior-ok-last" checked>
+                      Prior OK last
                     </label>
                     <label class="movement-queue-order">Queue
                       <select data-role="individual-queue-filter">
@@ -3620,7 +3693,7 @@ class MovementExampleApp {
       <div class="movement-modal hidden" data-role="dismiss-modal">
         <div class="movement-modal-card">
           <div class="movement-modal-head">
-            <h3>Mark as not suspicious</h3>
+            <h3>Unflag suspicious fixes</h3>
             <button type="button" data-role="dismiss-close">Close</button>
           </div>
           <div class="movement-modal-body">
@@ -3630,13 +3703,13 @@ class MovementExampleApp {
               <input type="text" data-role="dismiss-user" placeholder="Name used for attribution">
             </label>
             <label>Dismissal note (optional)
-              <textarea data-role="dismiss-note" placeholder="Why are these fixes not suspicious?"></textarea>
+              <textarea data-role="dismiss-note" placeholder="Why should these suspicions be withdrawn?"></textarea>
             </label>
             <div class="movement-modal-status" data-role="dismiss-status"></div>
           </div>
           <div class="movement-modal-foot">
             <span>Each selected originating suspicion will be resolved for these fixes.</span>
-            <button type="button" class="movement-emphasis" data-role="dismiss-submit">Dismiss selected suspicions</button>
+            <button type="button" class="movement-emphasis" data-role="dismiss-submit">Unflag selected suspicions</button>
           </div>
         </div>
       </div>
@@ -3768,6 +3841,7 @@ class MovementExampleApp {
       showPoints: this.mountEl.querySelector('[data-role="show-points"]'),
       showBursts: this.mountEl.querySelector('[data-role="show-bursts"]'),
       showConfirmed: this.mountEl.querySelector('[data-role="show-confirmed"]'),
+      hideSuspected: this.mountEl.querySelector('[data-role="hide-suspected"]'),
       burstGapMode: this.mountEl.querySelector('[data-role="burst-gap-mode"]'),
       burstDefinitionControl: this.mountEl.querySelector('[data-role="burst-definition-control"]'),
       burstGapQuantileControl: this.mountEl.querySelector('[data-role="burst-gap-quantile-control"]'),
@@ -3831,6 +3905,8 @@ class MovementExampleApp {
       individualViewQueue: this.mountEl.querySelector('[data-role="individual-view-queue"]'),
       individualQueueControls: this.mountEl.querySelector('[data-role="individual-queue-controls"]'),
       individualQueueOrder: this.mountEl.querySelector('[data-role="individual-queue-order"]'),
+      individualQueuePriorOkLastControl: this.mountEl.querySelector('[data-role="individual-queue-prior-ok-last-control"]'),
+      individualQueuePriorOkLast: this.mountEl.querySelector('[data-role="individual-queue-prior-ok-last"]'),
       individualQueueFilter: this.mountEl.querySelector('[data-role="individual-queue-filter"]'),
       individualQueueRankingState: this.mountEl.querySelector('[data-role="individual-queue-ranking-state"]'),
       individualQueueProgress: this.mountEl.querySelector('[data-role="individual-queue-progress"]'),
@@ -3950,6 +4026,7 @@ class MovementExampleApp {
     this.refs.showPoints.checked = this.uiState.showPoints !== false;
     this.refs.showBursts.checked = this.uiState.showBursts !== false;
     this.refs.showConfirmed.checked = this.uiState.showConfirmed !== false;
+    this.refs.hideSuspected.checked = this.uiState.hideSuspected === true;
     this.refs.burstGapMode.value = ["manual", "quantile"].includes(this.uiState.burstGapMode)
       ? this.uiState.burstGapMode
       : DEFAULT_BURST_GAP_MODE;
@@ -4043,6 +4120,11 @@ class MovementExampleApp {
     });
     this.refs.individualQueueOrder.addEventListener("change", () => {
       void this.changeIndividualQueueOrder(this.refs.individualQueueOrder.value);
+    });
+    this.refs.individualQueuePriorOkLast.addEventListener("change", () => {
+      this.individualReviewQueue.priorOkLast = this.refs.individualQueuePriorOkLast.checked;
+      this.repositionIndividualQueueAroundActive();
+      this.renderIndividuals();
     });
     this.refs.individualQueueFilter.addEventListener("change", () => {
       const filterMode = this.refs.individualQueueFilter.value;
@@ -4261,6 +4343,11 @@ class MovementExampleApp {
       if (this.refs.showConfirmed.checked && this.data?.confirmedState === "idle") {
         void this.loadConfirmedFixes();
       }
+    });
+    this.refs.hideSuspected.addEventListener("change", () => {
+      this.saveUiState();
+      this.renderLegend();
+      this.renderLayers();
     });
     this.refs.burstGapMode.addEventListener("change", () => this.handleBurstGapSettingsChange());
     this.refs.burstGapSeconds.addEventListener("change", () => this.handleBurstGapSettingsChange());
@@ -4686,6 +4773,25 @@ class MovementExampleApp {
     const sourceBurst = binary.header.source_format === "csv"
       ? String(binary.header.burst_ids?.[Math.max(0, burstCode - 1)] || "")
       : burstCode;
+    const binaryReview = this.binaryReviewForSource({
+      artifact,
+      sourceRow,
+      statusCode,
+    });
+    const existingReview = this.data?.fixByKey?.get(fixKey)?.review || null;
+    const binaryHasIssueProvenance = (
+      (binaryReview.effectiveIssues || []).length > 0
+      || (binaryReview.issues || []).length > 0
+    );
+    const existingHasIssueProvenance = (
+      (existingReview?.effectiveIssues || []).length > 0
+      || (existingReview?.issues || []).length > 0
+    );
+    const review = (
+      !binaryHasIssueProvenance
+      && existingHasIssueProvenance
+      && String(existingReview?.status || "") === String(binaryReview.status || "")
+    ) ? existingReview : binaryReview;
     const fix = {
       fixKey,
       individual,
@@ -4693,7 +4799,7 @@ class MovementExampleApp {
       timeMs: Number(arrays.time_ms[pointIndex]),
       position: [Number(arrays.positions[pointIndex * 2]), Number(arrays.positions[(pointIndex * 2) + 1])],
       attributes,
-      review: { status: statusCode === 2 ? "confirmed" : statusCode === 1 ? "suspected" : "", issues: [], effectiveIssues: [] },
+      review,
       segments: [],
       analyticallyExcluded: statusCode === 2,
       sourceFlags,
@@ -4707,6 +4813,96 @@ class MovementExampleApp {
       this.data.fixByKey.set(fixKey, fix);
     }
     return fix;
+  }
+
+  binaryReviewForSource({ artifact, sourceRow, statusCode }) {
+    const matching = (this.data?.reviewIssueAnnotations || []).filter(item => {
+      const sources = item?.scope?.source_rows || [];
+      return sources.some(source => (
+        String(source?.logical_name || "") === artifact
+        && (source?.row_ranges || []).some(rowRange => (
+          Number(rowRange?.[0]) <= sourceRow && sourceRow <= Number(rowRange?.[1])
+        ))
+      ));
+    });
+    if (!matching.length) {
+      return {
+        ...this.emptyFixReview(),
+        status: statusCode === 2 ? "confirmed" : statusCode === 1 ? "suspected" : "",
+      };
+    }
+    const issues = normalizeReviewIssues({
+      issues: matching.map(item => ({
+        status: item.status,
+        issue_id: item.annotation_id,
+        issue_type: item.issue_type,
+        issue_field: item.issue_field,
+        issue_threshold: item.issue_threshold,
+        issue_note: item.comment,
+        owner_question: item.owner_question,
+        review_user: item.user,
+        reviewed_at: item.created_at,
+        origin: item.origin,
+        step_id: item.step_id,
+        source_analysis_id: item.source_analysis_id,
+        scope_kind: item.scope?.kind,
+        scope_burst_id: item.scope?.burst_id,
+        parent_annotation_id: item.parent_annotation_id,
+        annotation_kind: item.annotation_kind,
+      })),
+    });
+    const parents = new Map();
+    const resolutions = new Map();
+    for (const issue of issues) {
+      if (issue.parentAnnotationId) {
+        const children = resolutions.get(issue.parentAnnotationId) || [];
+        children.push(issue);
+        resolutions.set(issue.parentAnnotationId, children);
+      } else if (["suspected", "confirmed"].includes(issue.status) && issue.issueId) {
+        parents.set(issue.issueId, issue);
+      }
+    }
+    const effectiveIssues = [];
+    for (const [parentId, parent] of parents) {
+      const children = resolutions.get(parentId) || [];
+      const confirmation = [...children].reverse().find(item => item.status === "confirmed") || null;
+      const dismissal = [...children].reverse().find(item => item.status === "dismissed") || null;
+      const resolution = confirmation || dismissal;
+      effectiveIssues.push({
+        ...parent,
+        status: confirmation || parent.status === "confirmed"
+          ? "confirmed"
+          : dismissal ? "dismissed" : "suspected",
+        parentIssueId: parentId,
+        resolutionIssueId: resolution?.issueId || "",
+        resolutionStepId: resolution?.stepId || "",
+        resolutionUser: resolution?.reviewUser || "",
+        resolutionNote: resolution?.issueNote || "",
+        resolvedAt: resolution?.reviewedAt || "",
+      });
+    }
+    const visible = effectiveIssues.filter(item => item.status !== "dismissed");
+    const latest = visible[visible.length - 1]
+      || effectiveIssues[effectiveIssues.length - 1]
+      || issues[issues.length - 1];
+    const status = effectiveIssues.some(item => item.status === "confirmed")
+      ? "confirmed"
+      : effectiveIssues.some(item => item.status === "suspected")
+        ? "suspected"
+        : "";
+    return {
+      status,
+      issueId: latest?.parentIssueId || latest?.issueId || "",
+      issueType: latest?.issueType || "",
+      issueField: latest?.issueField || "",
+      issueThreshold: latest?.issueThreshold || "",
+      issues,
+      effectiveIssues,
+      issueNote: latest?.issueNote || "",
+      ownerQuestion: latest?.ownerQuestion || "",
+      reviewUser: latest?.reviewUser || "",
+      reviewedAt: latest?.reviewedAt || "",
+    };
   }
 
   async requestJSON(url, options) {
@@ -7384,14 +7580,17 @@ class MovementExampleApp {
         this.setStatus("That reviewer or editor username is not available.", true);
         return;
       }
-      await this.requestJSON(this.reviewActionUrl("review/assign"), {
+      const result = await this.requestJSON(this.reviewActionUrl("review/assign"), {
         method: "POST",
         body: JSON.stringify(this.reviewMutationBody({
           reviewer_user_id: reviewer.user_id,
           logical_name: this.currentArtifact,
         })),
       });
-      await this.loadStudy({ preferredDatasetId: this.expectedCurrentDatasetId(), viewContext: this.captureDatasetViewContext() });
+      await this.loadStudy({
+        preferredDatasetId: String(result.current_dataset_id || this.expectedCurrentDatasetId()),
+        viewContext: this.captureDatasetViewContext(),
+      });
       this.setStatus(`Assigned this review to ${reviewer.display_name}.`);
     } catch (error) {
       await this.handleEditRequestError(error);
@@ -7728,7 +7927,7 @@ class MovementExampleApp {
     queue.activeIndividual = String(queueState.activeIndividual || "");
     queue.mapScope = ["solo", "group"].includes(queueState.mapScope)
       ? queueState.mapScope
-      : "group";
+      : "solo";
     queue.appliedRankingAnalysisId = String(
       queueState.appliedRankingAnalysisId || "",
     );
@@ -7826,7 +8025,7 @@ class MovementExampleApp {
     this.currentTimeMs = 0;
     this.lastReportLinks = [];
     this.refs.outputLinks.innerHTML = "";
-    this.refs.selectSuspicious.textContent = "Review suspicious fixes";
+    this.refs.selectSuspicious.textContent = "Select all suspicious";
     this.refs.individuals.innerHTML = "";
     this.refs.selectedFixes.innerHTML = "";
     this.renderAnomalyRanking();
@@ -8385,6 +8584,7 @@ class MovementExampleApp {
         reviewOk: draft.review_decision === "ok",
         needsCheck: draft.needs_check === true,
         comment: draft.comment || "",
+        decisionOrigin: "manual",
         staged: true,
       };
     }
@@ -8405,6 +8605,8 @@ class MovementExampleApp {
       priorDecision,
       priorNeedsCheck: priorDecision?.needs_check === true,
       comment: stats.reviewComment || "",
+      decisionOrigin: stats.reviewDecisionOrigin || "",
+      reviewRound: Number(stats.reviewRound || 0),
       staged: false,
     };
   }
@@ -8456,6 +8658,47 @@ class MovementExampleApp {
     );
   }
 
+  syncPriorOkLastControl() {
+    const review = this.editLockProfile?.review || null;
+    const reviewId = String(review?.review_id || "");
+    const reviewRound = Number(review?.review_round || 1);
+    if (reviewId !== this.individualReviewQueue.priorOkLastReviewId) {
+      this.individualReviewQueue.priorOkLastReviewId = reviewId;
+      this.individualReviewQueue.priorOkLast = true;
+    }
+    const available = Boolean(reviewId) && reviewRound > 1;
+    this.refs.individualQueuePriorOkLastControl.hidden = !available;
+    this.refs.individualQueuePriorOkLast.checked = available
+      && this.individualReviewQueue.priorOkLast;
+  }
+
+  priorReviewOkPartition(individual) {
+    if (
+      !this.individualReviewQueue.priorOkLast
+      || Number(this.editLockProfile?.review?.review_round || 1) <= 1
+    ) {
+      return 0;
+    }
+    const prior = this.editLockProfile?.coverage?.prior_decisions_by_individual?.[individual];
+    return (
+      String(prior?.review_decision || "") === "ok"
+      && prior?.needs_check !== true
+    ) ? 1 : 0;
+  }
+
+  repositionIndividualQueueAroundActive() {
+    const active = this.individualReviewQueue.activeIndividual;
+    if (!active) return;
+    const ordered = this.getIndividualQueueOrder();
+    const index = ordered.indexOf(active);
+    if (index < 0) return;
+    this.individualReviewQueue.pageIndex = Math.floor(index / INDIVIDUAL_QUEUE_PAGE_SIZE);
+    const pageIndex = index % INDIVIDUAL_QUEUE_PAGE_SIZE;
+    this.individualReviewQueue.groupIndex = Math.floor(
+      pageIndex / INDIVIDUAL_QUEUE_GROUP_SIZE,
+    );
+  }
+
   getIndividualQueueOrder() {
     const individuals = this.data?.individuals || [];
     const visibleIndividuals = individuals.filter(individual => {
@@ -8479,6 +8722,11 @@ class MovementExampleApp {
       && this.individualReviewQueue.appliedRankingAnalysisId === queueRanking.analysisId
     );
     return [...visibleIndividuals].sort((left, right) => {
+      const partitionDifference = this.priorReviewOkPartition(left)
+        - this.priorReviewOkPartition(right);
+      if (partitionDifference) {
+        return partitionDifference;
+      }
       if (useRanking) {
         const leftRank = rankingIndex.get(left) ?? Number.MAX_SAFE_INTEGER;
         const rightRank = rankingIndex.get(right) ?? Number.MAX_SAFE_INTEGER;
@@ -8737,8 +8985,14 @@ class MovementExampleApp {
         || left.burstId.localeCompare(right.burstId)
       ));
     const burstDetailsLoading = (
-      this.data?.detailState === "loading"
-      && (this.data?.detailIndividuals || []).includes(individual)
+      (
+        this.data?.detailState === "loading"
+        && (this.data?.detailIndividuals || []).includes(individual)
+      )
+      || (
+        MOVEMENT_APP_CONFIG.rdsSource
+        && !ensureFocusedMovementCache(this.data).has(individual)
+      )
     );
     const entireSelected = (
       this.flagTargetKind === "individual"
@@ -8825,7 +9079,7 @@ class MovementExampleApp {
       this.hiddenBurstIds.clear();
       this.resetManualFlagTarget();
       this.flagTargetKind = "none";
-      queue.mapScope = "group";
+      queue.mapScope = "solo";
       this.setSideSheet("individuals", { save: false });
       this.renderIndividuals();
       if (this.individualQueueListHeightPx !== null) {
@@ -8978,7 +9232,7 @@ class MovementExampleApp {
     }
     this.renderIndividuals();
     this.renderLayers();
-    await this.loadDetailForCurrentSelection();
+    await this.loadDetailForCurrentSelection({ requireObjects: true });
     if (shouldZoom) {
       this.zoomToIndividualQueueActive();
     }
@@ -9311,11 +9565,9 @@ class MovementExampleApp {
         this.individualReviewQueue.appliedRankingAnalysisId = "";
       }
     }
-    this.individualReviewQueue.pageIndex = 0;
-    this.individualReviewQueue.groupIndex = 0;
-    this.individualReviewQueue.activeIndividual = "";
+    this.repositionIndividualQueueAroundActive();
     this.saveUiState();
-    await this.applyIndividualQueueMapScope();
+    this.renderIndividuals();
   }
 
   noteCompletedIndividualQueueRanking() {
@@ -9620,6 +9872,7 @@ class MovementExampleApp {
   }
 
   renderIndividualReviewQueue() {
+    this.syncPriorOkLastControl();
     const position = this.getIndividualQueuePosition();
     const queue = this.individualReviewQueue;
     const queueRanking = this.getIndividualQueueRanking();
@@ -9728,7 +9981,7 @@ class MovementExampleApp {
               <div class="movement-title">${escapeHtml(individual)}</div>
               ${rankingBadge}
             </div>
-            <span class="movement-review-state${stateClass}">${escapeHtml(stateLabel)}${reviewState.needsCheck ? " • Needs check" : ""}${reviewState.staged ? " • unsaved" : ""}</span>
+            <span class="movement-review-state${stateClass}">${escapeHtml(stateLabel)}${reviewState.decisionOrigin === "carried_forward" ? " • carried forward" : ""}${reviewState.needsCheck ? " • Needs check" : ""}${reviewState.staged ? " • unsaved" : ""}</span>
           </div>
           <div class="movement-queue-card-actions">
             <button type="button" data-queue-comment data-individual="${escapeHtml(individual)}">${comment ? "Note ✓" : "Note"}</button>
@@ -9896,7 +10149,7 @@ class MovementExampleApp {
         const dismissButton = document.createElement("button");
         dismissButton.type = "button";
         dismissButton.className = "movement-fix-dismiss";
-        dismissButton.textContent = "Not suspicious";
+        dismissButton.textContent = "Unflag suspicious";
         dismissButton.disabled = !this.canPersistEdits();
         dismissButton.addEventListener("click", () => this.openDismissModal([fix]));
         cardActions.appendChild(dismissButton);
@@ -10770,7 +11023,7 @@ class MovementExampleApp {
 
     const header = `
       <div class="movement-legend-head">
-        <div class="movement-legend-title">${escapeHtml(field.label)}</div>
+        <div class="movement-legend-title">${escapeHtml(field.label)}${movementColorFieldHelp(field)}</div>
         <div class="movement-legend-subtitle">${escapeHtml(field.source)} | ${escapeHtml(field.kind)}</div>
       </div>
     `;
@@ -10845,7 +11098,12 @@ class MovementExampleApp {
     const sourceFlagNote = sourceFlaggedCount
       ? `<div class="movement-legend-note">Thin faded sections were flagged in the source data (${escapeHtml(formatCount(sourceFlaggedCount))} loaded fixes); they remain analytically included until confirmed in Vibecleaning.</div>`
       : "";
-    legendEl.innerHTML = `${header}${body}${sourceFlagNote}`;
+    const suspiciousCount = Number(this.data.suspiciousMatchingFixCount)
+      || (this.data.fixes || []).filter(fix => fix.review?.status === "suspected").length;
+    const suspiciousKey = suspiciousCount
+      ? `<div class="movement-legend-review-key"><span class="movement-legend-suspicious-ring"></span><span>${this.refs.hideSuspected.checked ? "Suspicious fixes hidden" : "Amber outline = saved suspicious fix"}</span></div>`
+      : "";
+    legendEl.innerHTML = `${header}${body}${suspiciousKey}${sourceFlagNote}`;
     legendEl.classList.remove("hidden");
   }
 
@@ -11035,7 +11293,9 @@ class MovementExampleApp {
           individual,
           setName,
           path: series.positions,
-          color: splitColor(this.data.individualPalette[individual], setName, 150),
+          color: this.individualReviewQueue.mode === "queue"
+            ? [...CONTEXT_GRAY_LINE]
+            : splitColor(this.data.individualPalette[individual], setName, 150),
         });
       }
     }
@@ -11100,7 +11360,8 @@ class MovementExampleApp {
             ? candidate : best
         ), candidates[0]);
         for (let index = Math.max(start, focalIndex - 1); index <= Math.min(end - 1, focalIndex + 1); index += 1) {
-          if (Number(binary.arrays.review_status[index]) === 2) continue;
+          const reviewStatus = Number(binary.arrays.review_status[index]);
+          if (reviewStatus === 2 || (reviewStatus === 1 && this.refs.hideSuspected.checked)) continue;
           const burstId = this.binaryBurstIdAt(binary, index, individual);
           if (this.hiddenBurstIds.has(burstId)) continue;
           const fix = this.binaryFixAt(index, { remember: false, binary });
@@ -11132,11 +11393,12 @@ class MovementExampleApp {
       const endIndex = Math.min(fixes.length - 1, focusIndex + 1);
       for (let index = startIndex; index <= endIndex; index += 1) {
         const fix = fixes[index];
+        if (this.refs.hideSuspected.checked && fix.review?.status === "suspected") continue;
         points.push({
           fixKey: fix.fixKey,
           individual: fix.individual,
           position: fix.position,
-          color: this.colorForFix(fix),
+          color: this.baseColorForFix(fix),
           focal: index === focusIndex,
         });
       }
@@ -11193,6 +11455,7 @@ class MovementExampleApp {
       reviewDataset: this.currentDatasetId || "",
       field: field?.key || "",
       fieldStyle: serializedFieldStyle,
+      queueFlagContext: this.individualReviewQueue.mode === "queue",
       hiddenBurstIds: [...this.hiddenBurstIds].sort(),
       threshold: {
         fieldKey: this.thresholdState.fieldKey || "",
@@ -11211,9 +11474,10 @@ class MovementExampleApp {
         range: fieldStyle?.range || null,
         categoryColors,
         individualColors: this.data.individualPalette || {},
+        queueFlagContext: this.individualReviewQueue.mode === "queue",
         hiddenBurstIds: [...this.hiddenBurstIds],
         threshold: {
-          active: this.thresholdState.fieldKey === field?.key,
+          active: this.hasActiveThreshold(field),
           value: finiteOrNull(this.thresholdState.value),
           reverse: this.thresholdState.reverse === true,
           selectedLevels: [...(this.thresholdState.selectedLevels || [])],
@@ -11226,7 +11490,9 @@ class MovementExampleApp {
   async prepareRetainedBinaryAttributes(binary) {
     const { cacheKey, spec } = this.binaryRenderSpecification();
     if (binary.renderCaches?.has(cacheKey)) {
-      return binary.renderCaches.get(cacheKey);
+      const cached = binary.renderCaches.get(cacheKey);
+      this.recordQueueContextAttributeCounts(cached);
+      return cached;
     }
     if (binary.workerBlockId) {
       if (!(binary.attributePromises instanceof Map)) binary.attributePromises = new Map();
@@ -11237,6 +11503,7 @@ class MovementExampleApp {
         binary.attributePromises.delete(cacheKey);
         if (!attributes) return null;
         this.movementDiagnostics.binaryAttributeBuilds += 1;
+        this.recordQueueContextAttributeCounts(attributes);
         binary.renderCaches.set(cacheKey, attributes);
         binary.lastRenderAttributes = attributes;
         binary.lastRenderCacheKey = cacheKey;
@@ -11257,7 +11524,9 @@ class MovementExampleApp {
   buildRetainedBinaryAttributes(binary) {
     const { cacheKey } = this.binaryRenderSpecification();
     if (binary.renderCaches?.has(cacheKey)) {
-      return binary.renderCaches.get(cacheKey);
+      const cached = binary.renderCaches.get(cacheKey);
+      this.recordQueueContextAttributeCounts(cached);
+      return cached;
     }
     this.movementDiagnostics.binaryAttributeBuilds += 1;
     const field = this.getCurrentColorField();
@@ -11266,15 +11535,22 @@ class MovementExampleApp {
     const lineCount = Number(binary.header.line_count) || 0;
     const pointColors = new Uint8Array(rowCount * 4);
     const pointFilter = new Uint8Array(rowCount);
+    const pointFilterWithoutSuspected = new Uint8Array(rowCount);
     const suspectedFilter = new Uint8Array(rowCount);
     const confirmedFilter = new Uint8Array(rowCount);
     const thresholdFilter = new Uint8Array(rowCount);
-    const thresholdActive = this.thresholdState.fieldKey === field?.key;
+    const thresholdActive = this.hasActiveThreshold(field);
+    const queueFlagContext = (
+      this.individualReviewQueue.mode === "queue"
+      && !thresholdActive
+    );
     const thresholdValue = thresholdActive ? finiteOrNull(this.thresholdState.value) : null;
     const thresholdLevels = new Set(thresholdActive ? this.thresholdState.selectedLevels || [] : []);
     let suspectedCount = 0;
     let confirmedCount = 0;
     let thresholdCount = 0;
+    let queueContextGrayCount = 0;
+    let queueContextColoredCount = 0;
     for (let index = 0; index < rowCount; index += 1) {
       const individual = String(
         binary.header.individuals?.[Number(arrays.individual_codes[index])] || "",
@@ -11283,32 +11559,52 @@ class MovementExampleApp {
       const hidden = this.hiddenBurstIds.has(burstId);
       const status = Number(arrays.review_status[index]);
       pointFilter[index] = !hidden && status !== 2 ? 1 : 0;
+      pointFilterWithoutSuspected[index] = !hidden && status === 0 ? 1 : 0;
       suspectedFilter[index] = !hidden && status === 1 ? 1 : 0;
       confirmedFilter[index] = !hidden && status === 2 ? 1 : 0;
       if (!hidden && status !== 2 && thresholdActive) {
         if (field.kind === "boolean") {
           const column = binary.header.color_columns?.[field.key];
           const value = Number(arrays[column?.array || field.key]?.[index]);
-          thresholdFilter[index] = thresholdLevels.has(value ? "True" : "False") ? 1 : 0;
+          const level = value === 1 ? "True" : value === 0 ? "False" : "Missing";
+          thresholdFilter[index] = thresholdLevels.has(level) ? 1 : 0;
+        } else if (field.kind === "categorical") {
+          const column = binary.header.color_columns?.[field.key];
+          const code = Number(arrays[column?.array || field.key]?.[index]);
+          const level = code > 0 ? String(column?.levels?.[code - 1] || "Missing") : "Missing";
+          thresholdFilter[index] = thresholdLevels.has(level) ? 1 : 0;
         } else if (field.kind === "numeric" && thresholdValue !== null) {
           const sourceKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY ? "step_length_m" : field.key;
           const column = binary.header.color_columns?.[sourceKey];
           const value = Number(arrays[column?.array || sourceKey]?.[index]);
+          const inboundStepLength = binaryInboundStepLength(binary, index);
           const validGpsTurn = field.key !== GPS_SPIKE_COLOR_FIELD_KEY
             || (
               Number.isFinite(Number(arrays.turn_angle_deg?.[index]))
               && Math.abs(Number(arrays.turn_angle_deg[index])) >= this.gpsSpikeTurnAngleDeg
             );
+          const validGpsInboundStep = field.key !== GPS_SPIKE_COLOR_FIELD_KEY
+            || (
+              Number.isFinite(inboundStepLength)
+              && inboundStepLength > thresholdValue
+            );
           const matches = this.thresholdState.reverse === true
             ? value < thresholdValue
             : value > thresholdValue;
-          thresholdFilter[index] = Number.isFinite(value) && validGpsTurn && matches ? 1 : 0;
+          thresholdFilter[index] = Number.isFinite(value) && validGpsTurn && validGpsInboundStep && matches ? 1 : 0;
         }
       }
       suspectedCount += suspectedFilter[index];
       confirmedCount += confirmedFilter[index];
       thresholdCount += thresholdFilter[index];
-      const color = this.binaryColorForIndex(binary, index, field);
+      const queueContextGray = queueFlagContext && status !== 1;
+      if (queueFlagContext && status !== 2) {
+        if (status === 1) queueContextColoredCount += 1;
+        else queueContextGrayCount += 1;
+      }
+      const color = (thresholdActive && !thresholdFilter[index]) || queueContextGray
+        ? CONTEXT_GRAY_POINT
+        : this.binaryColorForIndex(binary, index, field);
       const offset = index * 4;
       pointColors[offset] = color[0];
       pointColors[offset + 1] = color[1];
@@ -11317,7 +11613,9 @@ class MovementExampleApp {
     }
     const lineColors = new Uint8Array(lineCount * 4);
     const lineFilter = new Uint8Array(lineCount);
+    const lineFilterWithoutSuspected = new Uint8Array(lineCount);
     const burstFilter = new Uint8Array(lineCount);
+    const burstFilterWithoutSuspected = new Uint8Array(lineCount);
     const move2OutboundField = [
       "step_length_m",
       "speed_mps",
@@ -11328,8 +11626,16 @@ class MovementExampleApp {
       const sourceIndex = Number(arrays.line_source_indexes[index]);
       const targetIndex = Number(arrays.line_target_indexes[index]);
       lineFilter[index] = pointFilter[targetIndex];
+      lineFilterWithoutSuspected[index] = (
+        pointFilterWithoutSuspected[sourceIndex]
+        && pointFilterWithoutSuspected[targetIndex]
+      ) ? 1 : 0;
       burstFilter[index] = (
         pointFilter[targetIndex]
+        && Number(arrays.burst_values[sourceIndex]) === Number(arrays.burst_values[targetIndex])
+      ) ? 1 : 0;
+      burstFilterWithoutSuspected[index] = (
+        lineFilterWithoutSuspected[index]
         && Number(arrays.burst_values[sourceIndex]) === Number(arrays.burst_values[targetIndex])
       ) ? 1 : 0;
       const colorOffset = index * 4;
@@ -11345,15 +11651,20 @@ class MovementExampleApp {
     const attributes = {
       pointColors,
       pointFilter,
+      pointFilterWithoutSuspected,
       suspectedFilter,
       confirmedFilter,
       thresholdFilter,
       lineColors,
       lineFilter,
+      lineFilterWithoutSuspected,
       burstFilter,
+      burstFilterWithoutSuspected,
       suspectedCount,
       confirmedCount,
       thresholdCount,
+      queueContextGrayCount,
+      queueContextColoredCount,
     };
     if (!(binary.renderCaches instanceof Map)) binary.renderCaches = new Map();
     binary.renderCaches.set(cacheKey, attributes);
@@ -11362,7 +11673,17 @@ class MovementExampleApp {
     while (binary.renderCaches.size > 3) {
       binary.renderCaches.delete(binary.renderCaches.keys().next().value);
     }
+    this.recordQueueContextAttributeCounts(attributes);
     return attributes;
+  }
+
+  recordQueueContextAttributeCounts(attributes) {
+    this.movementDiagnostics.queueContextGrayCount = Number(
+      attributes?.queueContextGrayCount,
+    ) || 0;
+    this.movementDiagnostics.queueContextColoredCount = Number(
+      attributes?.queueContextColoredCount,
+    ) || 0;
   }
 
   binaryBurstIdAt(binary, index, individual = "") {
@@ -11406,8 +11727,42 @@ class MovementExampleApp {
         },
       },
     };
+    const pointDataWithoutSuspected = {
+      length: pointEnd - pointStart,
+      attributes: {
+        getPosition: pointPosition,
+        getFillColor: pointColor,
+        getFilterValue: {
+          value: attributes.pointFilterWithoutSuspected.subarray(pointStart, pointEnd),
+          size: 1,
+        },
+      },
+    };
+    const temporalPointData = {
+      length: pointEnd - pointStart,
+      attributes: {
+        getPosition: pointPosition,
+        getFilterValue: {
+          value: attributes.pointFilter.subarray(pointStart, pointEnd),
+          size: 1,
+        },
+      },
+    };
+    const temporalPointDataWithoutSuspected = {
+      length: pointEnd - pointStart,
+      attributes: {
+        getPosition: pointPosition,
+        getFilterValue: {
+          value: attributes.pointFilterWithoutSuspected.subarray(pointStart, pointEnd),
+          size: 1,
+        },
+      },
+    };
     const result = {
       pointData,
+      pointDataWithoutSuspected,
+      temporalPointData,
+      temporalPointDataWithoutSuspected,
       pathData: {
         length: lineEnd - lineStart,
         attributes: {
@@ -11423,6 +11778,43 @@ class MovementExampleApp {
           },
         },
       },
+      pathDataWithoutSuspected: {
+        length: lineEnd - lineStart,
+        attributes: {
+          getSourcePosition: lineSourcePosition,
+          getTargetPosition: lineTargetPosition,
+          getColor: {
+            value: attributes.lineColors.subarray(lineStart * 4, lineEnd * 4),
+            size: 4,
+          },
+          getFilterValue: {
+            value: attributes.lineFilterWithoutSuspected.subarray(lineStart, lineEnd),
+            size: 1,
+          },
+        },
+      },
+      temporalPathData: {
+        length: lineEnd - lineStart,
+        attributes: {
+          getSourcePosition: lineSourcePosition,
+          getTargetPosition: lineTargetPosition,
+          getFilterValue: {
+            value: attributes.lineFilter.subarray(lineStart, lineEnd),
+            size: 1,
+          },
+        },
+      },
+      temporalPathDataWithoutSuspected: {
+        length: lineEnd - lineStart,
+        attributes: {
+          getSourcePosition: lineSourcePosition,
+          getTargetPosition: lineTargetPosition,
+          getFilterValue: {
+            value: attributes.lineFilterWithoutSuspected.subarray(lineStart, lineEnd),
+            size: 1,
+          },
+        },
+      },
       burstData: {
         length: lineEnd - lineStart,
         attributes: {
@@ -11430,6 +11822,17 @@ class MovementExampleApp {
           getTargetPosition: lineTargetPosition,
           getFilterValue: {
             value: attributes.burstFilter.subarray(lineStart, lineEnd),
+            size: 1,
+          },
+        },
+      },
+      burstDataWithoutSuspected: {
+        length: lineEnd - lineStart,
+        attributes: {
+          getSourcePosition: lineSourcePosition,
+          getTargetPosition: lineTargetPosition,
+          getFilterValue: {
+            value: attributes.burstFilterWithoutSuspected.subarray(lineStart, lineEnd),
             size: 1,
           },
         },
@@ -11489,6 +11892,9 @@ class MovementExampleApp {
     const manualFlagIndividual = this.flagTargetKind === "individual"
       ? String(this.manualFlagTarget.individual || "")
       : "";
+    const hideSuspected = this.refs.hideSuspected.checked;
+    const temporalContext = this.temporalSliderEngaged;
+    const mutedSuspicious = this.getCurrentColorField()?.key !== INDIVIDUAL_COLOR_FIELD_KEY;
     const useFullLayer = allSelected && !queueIndividual && !manualFlagIndividual;
     const appendLayers = ({ binary, individual = "", fullLayer = false, visible = false }) => {
       const { cacheKey } = this.binaryRenderSpecification();
@@ -11524,11 +11930,27 @@ class MovementExampleApp {
         pointRange,
         lineRange,
       );
-      const pointData = deckData.pointData;
+      const pointData = temporalContext
+        ? hideSuspected
+          ? deckData.temporalPointDataWithoutSuspected
+          : deckData.temporalPointData
+        : hideSuspected
+          ? deckData.pointDataWithoutSuspected
+          : deckData.pointData;
+      const pathData = temporalContext
+        ? hideSuspected
+          ? deckData.temporalPathDataWithoutSuspected
+          : deckData.temporalPathData
+        : hideSuspected
+          ? deckData.pathDataWithoutSuspected
+          : deckData.pathData;
+      const burstData = hideSuspected
+        ? deckData.burstDataWithoutSuspected
+        : deckData.burstData;
       if (manualFlagIndividual && individual === manualFlagIndividual) {
         layers.push(new deck.LineLayer({
           id: `movement-binary-manual-flag-outline-${suffix}`,
-          data: deckData.pathData,
+          data: pathData,
           getColor: [255, 204, 40, 210],
           getWidth: 9,
           widthMinPixels: 5,
@@ -11541,7 +11963,7 @@ class MovementExampleApp {
       if (this.refs.showBursts.checked) {
         layers.push(new deck.LineLayer({
           id: `movement-binary-burst-casing-${suffix}`,
-          data: deckData.burstData,
+          data: burstData,
           getColor: BURST_CASING_RGB,
           getWidth: 9,
           widthUnits: "meters",
@@ -11555,7 +11977,8 @@ class MovementExampleApp {
       }
       layers.push(new deck.LineLayer({
         id: `movement-binary-paths-${suffix}`,
-        data: deckData.pathData,
+        data: pathData,
+        ...(temporalContext ? { getColor: CONTEXT_GRAY_LINE } : {}),
         getWidth: 3,
         widthUnits: "meters",
         widthMinPixels: 2,
@@ -11567,6 +11990,7 @@ class MovementExampleApp {
       }));
       if (!showPoints) return;
       const commonPointProps = {
+        ...(temporalContext ? { getFillColor: CONTEXT_GRAY_POINT } : {}),
         getRadius: 68,
         radiusMinPixels: 3,
         radiusMaxPixels: 8,
@@ -11582,17 +12006,20 @@ class MovementExampleApp {
         data: pointData,
         ...commonPointProps,
       }));
-      if (attributes.suspectedCount) {
+      if (!hideSuspected && attributes.suspectedCount) {
         layers.push(new deck.ScatterplotLayer({
           id: `movement-binary-suspected-${suffix}`,
           data: deckData.suspectedData,
           ...commonPointProps,
-          getLineColor: [255, 204, 40, 255],
+          getLineColor: mutedSuspicious
+            ? [255, 204, 40, 135]
+            : [255, 204, 40, 235],
+          filled: true,
           stroked: true,
-          lineWidthMinPixels: 3,
-          getRadius: 135,
-          radiusMinPixels: 8,
-          radiusMaxPixels: 17,
+          lineWidthMinPixels: mutedSuspicious ? 1.5 : 2.5,
+          getRadius: mutedSuspicious ? 150 : 165,
+          radiusMinPixels: mutedSuspicious ? 9 : 10,
+          radiusMaxPixels: mutedSuspicious ? 18 : 20,
         }));
       }
       if (this.refs.showConfirmed.checked && attributes.confirmedCount) {
@@ -11607,20 +12034,6 @@ class MovementExampleApp {
           getRadius: 52,
           radiusMinPixels: 3,
           radiusMaxPixels: 6,
-        }));
-      }
-      if (attributes.thresholdCount && this.thresholdState.fieldKey === this.getCurrentColorField()?.key) {
-        layers.push(new deck.ScatterplotLayer({
-          id: `movement-binary-threshold-${suffix}`,
-          data: deckData.thresholdData,
-          ...commonPointProps,
-          getLineColor: [255, 236, 148, 255],
-          filled: false,
-          stroked: true,
-          lineWidthMinPixels: 2.5,
-          getRadius: 108,
-          radiusMinPixels: 6,
-          radiusMaxPixels: 12,
         }));
       }
     };
@@ -11670,6 +12083,8 @@ class MovementExampleApp {
     const visibleIndividuals = new Set(this.data.selectedIndividuals);
     const visibleSetNames = this.getVisibleSetNames();
     const showPoints = this.refs.showPoints.checked;
+    const hideSuspected = this.refs.hideSuspected.checked;
+    const mutedSuspicious = this.getCurrentColorField()?.key !== INDIVIDUAL_COLOR_FIELD_KEY;
     const overviewPreviewTracks = this.getOverviewPreviewTracks(
       visibleIndividuals,
       visibleSetNames,
@@ -11691,14 +12106,12 @@ class MovementExampleApp {
         point => !hiddenBurstFixKeys.has(point.fixKey),
       );
     }
-    const thresholdPointData = [];
-    const selectedThresholdPointData = [];
     const candidatePointData = [];
     const selectedCandidatePointData = [];
     const selectedPointData = [];
     const suspectedPointData = [];
     const confirmedPointData = [];
-    const showSuspectedOutlines = this.data.suspiciousState === "loaded";
+    const showSuspectedOutlines = this.data.suspiciousState === "loaded" && !hideSuspected;
     if (this.refs.showConfirmed.checked) {
       const seenConfirmed = new Set();
       for (const fix of this.data.confirmedPointFixes || []) {
@@ -11727,6 +12140,7 @@ class MovementExampleApp {
       && visibleSetNames.has(step.setName)
       && !hiddenBurstFixKeys.has(step.fixKey)
       && (step.status !== "confirmed" || this.refs.showConfirmed.checked)
+      && (step.status !== "suspected" || !hideSuspected)
     ));
     const visibleAutoBursts = this.getVisibleAutoBursts();
     const drawableAutoBursts = visibleAutoBursts.filter(burst => burst.path.length >= 2);
@@ -11758,6 +12172,7 @@ class MovementExampleApp {
     const visibleTableSelection = this.getVisibleTableSelectionFixes();
     const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
     const tableSelectedPointData = visibleTableSelection
+      .filter(fix => !hideSuspected || fix.review?.status !== "suspected")
       .filter((fix, index, fixes) => index === 0 || index === fixes.length - 1)
       .map(fix => ({
         fixKey: fix.fixKey,
@@ -11770,17 +12185,14 @@ class MovementExampleApp {
     const tableSelectionPath = segmentSelection?.fixes
       ?.filter(fix => visibleTableSelectionKeys.has(fix.fixKey))
       .map(fix => fix.position) || [];
-    const thresholdMatchKeys = showPoints
-      ? temporalOnly ? this.lastThresholdMatchKeys : this.getActiveThresholdMatchKeys()
-      : new Set();
     const candidateMatchKeys = showPoints
       ? temporalOnly ? this.lastCandidateMatchKeys : this.getCandidateQueryMatchKeys()
       : new Set();
     if (!temporalOnly) {
-      this.lastThresholdMatchKeys = thresholdMatchKeys;
       this.lastCandidateMatchKeys = candidateMatchKeys;
     }
-    const focusedRankingBurstFixes = this.getFocusedRankingBurstFixes();
+    const focusedRankingBurstFixes = this.getFocusedRankingBurstFixes()
+      .filter(fix => !hideSuspected || fix.review?.status !== "suspected");
     const focusedRankingBurstPoints = focusedRankingBurstFixes.map(fix => ({
       fixKey: fix.fixKey,
       position: fix.position,
@@ -11826,6 +12238,7 @@ class MovementExampleApp {
         return fix
           && !fix.analyticallyExcluded
           && fix.review?.status !== "confirmed"
+          && (!hideSuspected || fix.review?.status !== "suspected")
           && visibleIndividuals.has(fix.individual)
           && visibleSetNames.has(fix.setName)
           ? fix
@@ -11842,14 +12255,6 @@ class MovementExampleApp {
           color: this.colorForFix(fix),
         };
         selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
-      }
-      for (const fixKey of thresholdMatchKeys) {
-        const fix = visibleFix(fixKey);
-        if (!fix) continue;
-        const target = this.data.selectedFixKeys.has(fixKey)
-          ? selectedThresholdPointData
-          : thresholdPointData;
-        target.push({ fixKey, individual: fix.individual, position: fix.position });
       }
       for (const fixKey of candidateMatchKeys) {
         const fix = visibleFix(fixKey);
@@ -11875,7 +12280,10 @@ class MovementExampleApp {
         data: previewTracks,
         dataComparator: sameArrayItems,
         getPath: item => item.path,
-        getColor: item => this.queueMapColor(item.color, item.individual),
+        getColor: item => this.queueMapColor(
+          this.temporalSliderEngaged ? CONTEXT_GRAY_LINE : item.color,
+          item.individual,
+        ),
         getWidth: 2,
         widthMinPixels: 1,
         pickable: false,
@@ -11931,11 +12339,15 @@ class MovementExampleApp {
           data: visibleAutoBurstPaths,
           dataComparator: sameArrayItems,
           getPath: item => item.path,
-          getColor: item => this.burstFillColor(item, focusedBurstId),
+          getColor: item => this.temporalSliderEngaged
+            ? this.queueMapColor(CONTEXT_GRAY_LINE, item.burst?.individual || "")
+            : this.individualReviewQueue.mode === "queue"
+              ? this.queueMapColor(CONTEXT_GRAY_LINE, item.burst?.individual || "")
+            : this.burstFillColor(item, focusedBurstId),
           getWidth: item => this.burstFillWidth(item),
           widthMinPixels: 1,
           updateTriggers: {
-            getColor: [focusedBurstId, queueDimKey],
+            getColor: [focusedBurstId, queueDimKey, this.temporalSliderEngaged],
           },
           pickable: true,
         }),
@@ -11986,8 +12398,10 @@ class MovementExampleApp {
           getPath: item => item.path,
           getColor: item => item.status === "confirmed"
             ? [92, 101, 110, 115]
-            : [255, 204, 40, 235],
-          getWidth: item => item.status === "confirmed" ? 3 : 5,
+            : mutedSuspicious
+              ? [255, 204, 40, 120]
+              : [255, 204, 40, 220],
+          getWidth: item => item.status === "confirmed" ? 3 : mutedSuspicious ? 2.5 : 4,
           widthMinPixels: 2,
           pickable: false,
         }),
@@ -12077,56 +12491,22 @@ class MovementExampleApp {
             item.individual,
           ),
           getLineColor: item => this.queueMapColor(
-            [255, 204, 40, 255],
+            mutedSuspicious
+              ? [255, 204, 40, 135]
+              : [255, 204, 40, 235],
             item.individual,
           ),
           filled: true,
           stroked: true,
-          lineWidthMinPixels: 3,
-          getRadius: 135,
-          radiusMinPixels: 8,
-          radiusMaxPixels: 17,
+          lineWidthMinPixels: mutedSuspicious ? 1.5 : 2.5,
+          getRadius: mutedSuspicious ? 150 : 165,
+          radiusMinPixels: mutedSuspicious ? 9 : 10,
+          radiusMaxPixels: mutedSuspicious ? 18 : 20,
           updateTriggers: {
             getFillColor: [this.refs.colorBy.value, queueDimKey],
-            getLineColor: queueDimKey,
+            getLineColor: [this.refs.colorBy.value, queueDimKey],
           },
           pickable: true,
-        }),
-      );
-      if (thresholdPointData.length) layers.push(
-        new deck.ScatterplotLayer({
-          id: "movement-threshold-points",
-          data: thresholdPointData,
-          getPosition: item => item.position,
-          getLineColor: item => this.queueMapColor(
-            [255, 236, 148, 255],
-            item.individual,
-          ),
-          filled: false,
-          stroked: true,
-          lineWidthMinPixels: 2.5,
-          getRadius: 108,
-          radiusMinPixels: 6,
-          radiusMaxPixels: 12,
-          pickable: true,
-        }),
-      );
-      if (selectedThresholdPointData.length) layers.push(
-        new deck.ScatterplotLayer({
-          id: "movement-selected-threshold-points",
-          data: selectedThresholdPointData,
-          getPosition: item => item.position,
-          getLineColor: item => this.queueMapColor(
-            [255, 236, 148, 255],
-            item.individual,
-          ),
-          filled: false,
-          stroked: true,
-          lineWidthMinPixels: 3,
-          getRadius: 156,
-          radiusMinPixels: 9,
-          radiusMaxPixels: 18,
-          pickable: false,
         }),
       );
       layers.push(
@@ -12230,11 +12610,22 @@ class MovementExampleApp {
     }
 
     layers.push(...this.getOsmDeckLayers());
+    const isSuspiciousPointLayer = layer => {
+      const layerId = String(layer?.id || "");
+      return layerId === "movement-suspected-outline"
+        || layerId.startsWith("movement-binary-suspected-");
+    };
+    const orderedLayers = [
+      ...layers.filter(layer => !isSuspiciousPointLayer(layer)),
+      ...layers.filter(isSuspiciousPointLayer),
+    ];
 
     try {
-      this.movementDiagnostics.renderedLayerIds = layers.map(layer => String(layer?.id || ""));
+      this.movementDiagnostics.renderedLayerIds = orderedLayers.map(
+        layer => String(layer?.id || ""),
+      );
       this.overlay.setProps({
-        layers,
+        layers: orderedLayers,
         useDevicePixels: (
           this.getVisibleExactPointCount(visibleIndividuals)
           || selectedPointData.length
@@ -12250,7 +12641,7 @@ class MovementExampleApp {
     return isSourceOnlyFlaggedBurstFromData(this.data, burst);
   }
 
-  colorForFix(fix) {
+  baseColorForFix(fix) {
     const field = this.data.colorFieldByKey.get(this.refs.colorBy.value) || this.data.colorFields[0];
     if (!field) {
       return [124, 210, 255, POINT_ALPHA];
@@ -12276,6 +12667,21 @@ class MovementExampleApp {
       return [120, 136, 153, 120];
     }
     return style.categories.get(String(value ?? "Missing")) || [120, 136, 153, 150];
+  }
+
+  colorForFix(fix) {
+    const field = this.getCurrentColorField();
+    if (this.hasActiveThreshold(field) && !this.fixMatchesActiveThreshold(fix, field)) {
+      return [...CONTEXT_GRAY_POINT];
+    }
+    if (
+      this.individualReviewQueue.mode === "queue"
+      && !this.hasActiveThreshold(field)
+      && fix.review?.status !== "suspected"
+    ) {
+      return [...CONTEXT_GRAY_POINT];
+    }
+    return this.baseColorForFix(fix);
   }
 
   toggleFixSelection(fixKey) {
@@ -12525,6 +12931,9 @@ class MovementExampleApp {
     if (fix.analyticallyExcluded || fix.review?.status === "confirmed") {
       return this.refs.showConfirmed.checked;
     }
+    if (fix.review?.status === "suspected" && this.refs.hideSuspected.checked) {
+      return false;
+    }
     const visibleIndividuals = this.data.selectedIndividuals instanceof Set
       ? this.data.selectedIndividuals
       : new Set();
@@ -12744,6 +13153,39 @@ class MovementExampleApp {
     return this.data.colorFieldByKey.get(this.refs.colorBy.value) || this.data.colorFields[0] || null;
   }
 
+  hasActiveThreshold(field = this.getCurrentColorField()) {
+    if (!field || this.thresholdState.fieldKey !== field.key) return false;
+    if (field.kind === "numeric") return Number.isFinite(this.thresholdState.value);
+    return Array.isArray(this.thresholdState.selectedLevels)
+      && this.thresholdState.selectedLevels.length > 0;
+  }
+
+  fixMatchesActiveThreshold(fix, field = this.getCurrentColorField()) {
+    if (!this.hasActiveThreshold(field)) return true;
+    const value = movementColorFieldValue(fix, field);
+    if (field.kind !== "numeric") {
+      const selected = new Set(this.thresholdState.selectedLevels || []);
+      return selected.has(discreteFieldLevelLabel(field, value));
+    }
+    const number = finiteOrNull(value);
+    const threshold = finiteOrNull(this.thresholdState.value);
+    if (number === null || threshold === null) return false;
+    if (field.key === GPS_SPIKE_COLOR_FIELD_KEY) {
+      const inboundStep = movementInboundStepLength(this.data, fix);
+      const turnAngle = finiteOrNull(fix.attributes?.turn_angle_deg);
+      return (
+        inboundStep !== null
+        && inboundStep > threshold
+        && number > threshold
+        && turnAngle !== null
+        && Math.abs(turnAngle) >= this.gpsSpikeTurnAngleDeg
+      );
+    }
+    return this.thresholdState.reverse === true
+      ? number < threshold
+      : number > threshold;
+  }
+
   getVisibleReviewFixes() {
     if (!this.data) {
       return [];
@@ -12879,9 +13321,20 @@ class MovementExampleApp {
       const column = ref.binary.header.color_columns?.[sourceKey];
       const value = Number(ref.binary.arrays[column?.array || sourceKey]?.[ref.index]);
       const turnAngle = Number(ref.binary.arrays.turn_angle_deg?.[ref.index]);
-      if (!Number.isFinite(value) || (gpsSpikeMode && (!Number.isFinite(turnAngle) || Math.abs(turnAngle) < this.gpsSpikeTurnAngleDeg))) continue;
+      const inboundStepLength = binaryInboundStepLength(ref.binary, ref.index);
+      if (
+        !Number.isFinite(value)
+        || (
+          gpsSpikeMode
+          && (
+            !Number.isFinite(inboundStepLength)
+            || !Number.isFinite(turnAngle)
+            || Math.abs(turnAngle) < this.gpsSpikeTurnAngleDeg
+          )
+        )
+      ) continue;
       numericValues.push(value);
-      eligibleRefs.push(ref);
+      eligibleRefs.push({ ...ref, inboundStepLength });
     }
     const styleRange = this.data.colorStyles.get(field.key)?.range
       || this.data.colorStyles.get(sourceKey)?.range
@@ -12903,7 +13356,12 @@ class MovementExampleApp {
       ? null : clampThresholdValue(rawThreshold, histogram.min, histogram.max);
     if (thresholdValue !== null) {
       eligibleRefs.forEach((ref, position) => {
-        const matches = reverse ? numericValues[position] < thresholdValue : numericValues[position] > thresholdValue;
+        const matches = reverse
+          ? numericValues[position] < thresholdValue
+          : (
+            numericValues[position] > thresholdValue
+            && (!gpsSpikeMode || ref.inboundStepLength > thresholdValue)
+          );
         if (!matches) return;
         matchCount += 1;
         if (matchRefs.length < MAX_SELECTED_FIXES_SHOWN) matchRefs.push(ref);
@@ -13030,6 +13488,9 @@ class MovementExampleApp {
       .map(fix => ({
         fix,
         value: finiteOrNull(movementColorFieldValue(fix, field)),
+        inboundStepLength: gpsSpikeMode
+          ? finiteOrNull(movementInboundStepLength(this.data, fix))
+          : null,
         turnAngle: finiteOrNull(fix.attributes?.turn_angle_deg),
       }))
       .filter(item => (
@@ -13037,7 +13498,8 @@ class MovementExampleApp {
         && (
           !gpsSpikeMode
           || (
-            typeof item.turnAngle === "number"
+            typeof item.inboundStepLength === "number"
+            && typeof item.turnAngle === "number"
             && Math.abs(item.turnAngle) >= this.gpsSpikeTurnAngleDeg
           )
         )
@@ -13080,7 +13542,14 @@ class MovementExampleApp {
       : clampThresholdValue(thresholdValue, histogram.min, histogram.max);
     const matchItems = activeThresholdValue === null
       ? []
-      : numericFixes.filter(item => (reverse ? item.value < activeThresholdValue : item.value > activeThresholdValue));
+      : numericFixes.filter(item => (
+        reverse
+          ? item.value < activeThresholdValue
+          : (
+            item.value > activeThresholdValue
+            && (!gpsSpikeMode || item.inboundStepLength > activeThresholdValue)
+          )
+      ));
     const matchKeys = new Set(matchItems.map(item => item.fix.fixKey));
     const uncheckedMatchKeys = new Set(
       matchItems
@@ -13188,7 +13657,7 @@ class MovementExampleApp {
             value="${escapeHtml(String(this.gpsSpikeTurnAngleDeg))}"
           >
         </label>
-        <div class="movement-threshold-note">All fixes remain colored by step length. The histogram includes only fixes with |turn angle| ≥ ${escapeHtml(formatColorValue(this.gpsSpikeTurnAngleDeg, "numeric"))}°.</div>
+        <div class="movement-threshold-note">All fixes remain colored by outbound step length. A match requires both inbound and outbound steps above the selected threshold and |turn angle| ≥ ${escapeHtml(formatColorValue(this.gpsSpikeTurnAngleDeg, "numeric"))}°.</div>
       `
       : "";
 
@@ -13226,7 +13695,7 @@ class MovementExampleApp {
       body = `
         <div class="movement-threshold-head">
           <div>
-            <div class="movement-threshold-title">${escapeHtml(field.label)}</div>
+            <div class="movement-threshold-title">${escapeHtml(field.label)}${movementColorFieldHelp(field)}</div>
             <div class="movement-threshold-subtitle">${escapeHtml(field.source)} | ${escapeHtml(subtitle)}</div>
           </div>
           <div class="movement-threshold-meta">${escapeHtml(meta)}</div>
@@ -13309,7 +13778,7 @@ class MovementExampleApp {
         ${gpsSpikeControl}
         <div class="movement-threshold-head">
           <div>
-            <div class="movement-threshold-title">${escapeHtml(field.label)}</div>
+            <div class="movement-threshold-title">${escapeHtml(field.label)}${movementColorFieldHelp(field)}</div>
             <div class="movement-threshold-subtitle">${escapeHtml(field.source)} | ${escapeHtml(subtitle)}</div>
           </div>
           <div class="movement-threshold-meta">
@@ -13780,7 +14249,7 @@ class MovementExampleApp {
     }
     this.data.suspiciousState = "loading";
     this.refs.selectSuspicious.textContent = focus
-      ? "Loading suspicious fixes..."
+      ? "Selecting suspicious fixes..."
       : "Loading suspicious overlay...";
     this.updateActionButtons();
     if (focus) {
@@ -13873,8 +14342,8 @@ class MovementExampleApp {
       if (this.data && this.data.suspiciousState !== "loading") {
         const count = Number(this.data.suspiciousMatchingFixCount) || this.data.suspiciousFixes.length;
         this.refs.selectSuspicious.textContent = count
-          ? `Review suspicious fixes (${formatCount(count)})`
-          : "Review suspicious fixes";
+          ? `Select all suspicious (${formatCount(count)})`
+          : "Select all suspicious";
       }
     }
   }
@@ -15322,7 +15791,7 @@ class MovementExampleApp {
     const selectedFixes = Array.isArray(fixes) ? fixes.filter(Boolean) : [];
     const groups = this.getUnresolvedSuspectedIssueGroups(selectedFixes);
     if (!selectedFixes.length || !groups.length) {
-      this.setStatus("Select fixes with unresolved suspected issues before dismissing them.", true);
+      this.setStatus("Select fixes with unresolved suspected issues before unflagging them.", true);
       return;
     }
     this.pendingDismissalGroups = groups;
@@ -15384,7 +15853,7 @@ class MovementExampleApp {
     }
     this.refs.dismissSubmit.disabled = true;
     this.refs.dismissClose.disabled = true;
-    this.refs.dismissStatus.textContent = `Dismissing ${formatCount(selectedGroups.length)} suspicion group(s)...`;
+    this.refs.dismissStatus.textContent = `Unflagging ${formatCount(selectedGroups.length)} suspicion group(s)...`;
     this.refs.dismissStatus.classList.remove("error");
     try {
       const result = await this.requestJSON(
@@ -15413,7 +15882,7 @@ class MovementExampleApp {
         result,
         clearTarget: "fixes",
       });
-      this.setStatus(`Recorded not-suspicious decisions in ${result.dataset.dataset_id}.`);
+      this.setStatus(`Unflagged selected suspicions in ${result.dataset.dataset_id}.`);
     } catch (error) {
       await this.handleEditRequestError(error);
       this.refs.dismissStatus.textContent = error.message;
@@ -16108,7 +16577,7 @@ class MovementExampleApp {
       origin,
       sourceAnalysisId: candidateGenerated ? this.candidateQueryPreview.analysisId : "",
       issueField: isGpsSpikeTarget
-        ? "step_length_m + abs(turn_angle_deg)"
+        ? "inbound_step_length_m + outbound_step_length_m + abs(turn_angle_deg)"
         : field?.key || "",
       issueThreshold,
       thresholdFilter,
@@ -16352,7 +16821,7 @@ class MovementExampleApp {
       field?.key === GPS_SPIKE_COLOR_FIELD_KEY
       && Number.isFinite(this.thresholdState.value)
     ) {
-      return `step > ${this.thresholdState.value} m and |turn| >= ${this.gpsSpikeTurnAngleDeg}°`;
+      return `both steps > ${this.thresholdState.value} m and |turn| >= ${this.gpsSpikeTurnAngleDeg}°`;
     }
     return getIssueThresholdFromState(field, this.thresholdState);
   }
@@ -16894,6 +17363,9 @@ class MovementExampleApp {
     // dataset is still in flight; loadBinaryMovement reapplies this projection
     // before handing that block to the renderer.
     this.data.reviewProjection = projection;
+    this.data.reviewIssueAnnotations = Array.isArray(projection.review_issue_annotations)
+      ? projection.review_issue_annotations
+      : [];
     await this.applyBinaryReviewProjection(projection);
     const projectedFixes = parseMovementFixes(projection.fixes || []);
     const projectedIndividuals = new Set(
@@ -16969,8 +17441,8 @@ class MovementExampleApp {
     this.data.segmentById = new Map(projectedSegments.map(segment => [segment.segmentId, segment]));
     const suspiciousCount = Number(this.data.suspiciousMatchingFixCount) || 0;
     this.refs.selectSuspicious.textContent = suspiciousCount
-      ? `Review suspicious fixes (${formatCount(suspiciousCount)})`
-      : "Review suspicious fixes";
+      ? `Select all suspicious (${formatCount(suspiciousCount)})`
+      : "Select all suspicious";
 
     const projectedStats = projection.stats || {};
     const individualReviews = projection.individual_reviews || {};
@@ -16994,6 +17466,8 @@ class MovementExampleApp {
       stats.reviewUser = String(decision.review_user || "");
       stats.reviewedAt = String(decision.reviewed_at || "");
       stats.reviewComment = String(decision.review_comment || "");
+      stats.reviewDecisionOrigin = String(decision.decision_origin || "");
+      stats.reviewRound = Number(decision.review_round || 0);
     }
   }
 
@@ -17360,6 +17834,8 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
       reviewUser: String(item?.review_user || ""),
       reviewedAt: String(item?.reviewed_at || ""),
       reviewComment: String(item?.review_comment || ""),
+      reviewDecisionOrigin: String(item?.decision_origin || ""),
+      reviewRound: Number(item?.review_round || 0),
     };
   });
 
@@ -17394,6 +17870,8 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
         reviewUser: "",
         reviewedAt: "",
         reviewComment: "",
+        reviewDecisionOrigin: "",
+        reviewRound: 0,
       };
     }
   });
@@ -17434,6 +17912,8 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     binaryPendingIndividuals: new Map(),
     detailFailedIndividuals: new Set(),
     binaryMapReady: false,
+    reviewProjection: null,
+    reviewIssueAnnotations: [],
     candidateFixes: [],
     suspiciousFixes: [],
     suspiciousState: "idle",
@@ -17975,26 +18455,42 @@ function composeFocusedMovementSelection(data, individuals) {
 
 function seedFocusedMovementCacheFromCurrentData(data) {
   if (!data) return;
-  data.focusedObjectCache = new Map();
+  const cache = ensureFocusedMovementCache(data);
+  for (const [individual, entry] of cache.entries()) {
+    if (
+      !(entry?.fixes || []).length
+      && !(entry?.segments || []).length
+      && !(entry?.autoBursts || []).length
+    ) {
+      cache.delete(individual);
+    }
+  }
   const individuals = uniqueNonEmpty([
-    ...(data.detailIndividuals || []),
     ...(data.detailFixes || []).map(fix => fix.individual),
     ...(data.detailSegments || []).map(segment => segment.individual),
     ...(data.detailAutoBursts || []).map(burst => burst.individual),
   ]);
   for (const individual of individuals) {
     const fixes = (data.detailFixes || []).filter(fix => fix.individual === individual);
-    data.focusedObjectCache.set(individual, {
+    const segments = (data.detailSegments || []).filter(
+      segment => segment.individual === individual,
+    );
+    const autoBursts = (data.detailAutoBursts || []).filter(
+      burst => burst.individual === individual,
+    );
+    const previous = cache.get(individual);
+    cache.set(individual, {
       fixes,
-      segments: (data.detailSegments || []).filter(segment => segment.individual === individual),
-      autoBursts: (data.detailAutoBursts || []).filter(burst => burst.individual === individual),
-      matchingFixCount: fixes.length,
-      returnedFixCount: fixes.length,
-      truncated: false,
-      limit: null,
+      segments,
+      autoBursts,
+      matchingFixCount: Number(previous?.matchingFixCount) || fixes.length,
+      returnedFixCount: Number(previous?.returnedFixCount) || fixes.length,
+      truncated: Boolean(previous?.truncated),
+      limit: previous?.limit ?? null,
     });
   }
-  data.detailRenderedIndividuals = individuals;
+  data.detailRenderedIndividuals = uniqueNonEmpty(data.detailRenderedIndividuals || [])
+    .filter(individual => cache.has(individual));
   data.detailLoadingIndividuals = [];
 }
 
@@ -18166,6 +18662,26 @@ function buildMovementColorFields(fields) {
   });
 }
 
+function movementColorFieldDescription(field) {
+  const key = String(field?.key || "");
+  const descriptions = {
+    [INDIVIDUAL_COLOR_FIELD_KEY]: "Assigns each individual its own categorical track color.",
+    step_length_m: "WGS84 geodesic distance from this fix to the following fix, attached to the segment's starting fix.",
+    speed_mps: "Step length divided by the positive time interval to the following fix, attached to the segment's starting fix.",
+    time_delta_s: "Elapsed seconds from this fix to the following fix, attached to the segment's starting fix.",
+    turn_angle_deg: "Signed change in WGS84 geodesic bearing at this fix, using the preceding and following fixes.",
+    [GPS_SPIKE_COLOR_FIELD_KEY]: `Colors outbound step length. A filter match requires both adjacent steps above the distance threshold and |turn angle| at least ${DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG}° unless changed.`,
+    is_outlier: "Raw boolean outlier result supplied by move2utils. It is source data, not Vibecleaning review state.",
+  };
+  if (descriptions[key]) return descriptions[key];
+  return `Source column ${field?.label || key || "value"}, displayed without changing its source meaning.`;
+}
+
+function movementColorFieldHelp(field) {
+  const description = movementColorFieldDescription(field);
+  return `<span class="movement-field-help" tabindex="0" role="img" aria-label="${escapeHtml(description)}" data-tooltip="${escapeHtml(description)}">?</span>`;
+}
+
 function computeMovementColorStyles(colorFields, fixes) {
   const colorStyles = new Map();
   for (const field of colorFields) {
@@ -18213,6 +18729,28 @@ function movementColorFieldValue(fix, field) {
     ? "step_length_m"
     : field.key;
   return fix.attributes?.[attributeKey];
+}
+
+function binaryInboundStepLength(binary, index) {
+  if (!binary?.arrays || index <= 0) return null;
+  const arrays = binary.arrays;
+  if (Number(arrays.individual_codes?.[index - 1]) !== Number(arrays.individual_codes?.[index])) {
+    return null;
+  }
+  if (
+    arrays.set_codes
+    && Number(arrays.set_codes[index - 1]) !== Number(arrays.set_codes[index])
+  ) {
+    return null;
+  }
+  return finiteOrNull(arrays.step_length_m?.[index - 1]);
+}
+
+function movementInboundStepLength(data, fix) {
+  const position = data?.eligibleTrackPositionByFixKey?.get(fix?.fixKey);
+  if (!position || position.index <= 0) return null;
+  const previous = data.eligibleFixesByTrack?.get(position.trackKey)?.[position.index - 1];
+  return finiteOrNull(previous?.attributes?.step_length_m);
 }
 
 function computeNumericRange(values) {

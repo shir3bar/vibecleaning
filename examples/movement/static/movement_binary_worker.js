@@ -6,6 +6,7 @@ const MOVE2_OUTBOUND_FIELDS = new Set([
   "time_delta_s",
   GPS_SPIKE_FIELD_KEY,
 ]);
+const CONTEXT_GRAY_POINT = [112, 122, 133, 175];
 
 function parseMovementBinary(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -99,21 +100,40 @@ function colorAt(movement, index, spec) {
   return spec.categoryColors?.[level] || [120, 136, 153, 150];
 }
 
+function inboundStepLengthAt(movement, index) {
+  if (index <= 0) return Number.NaN;
+  const arrays = movement.arrays;
+  if (Number(arrays.individual_codes?.[index - 1]) !== Number(arrays.individual_codes?.[index])) {
+    return Number.NaN;
+  }
+  if (
+    arrays.set_codes
+    && Number(arrays.set_codes[index - 1]) !== Number(arrays.set_codes[index])
+  ) {
+    return Number.NaN;
+  }
+  return Number(arrays.step_length_m?.[index - 1]);
+}
+
 function buildAttributes(movement, spec) {
   const arrays = movement.arrays;
   const rowCount = Number(movement.header.row_count) || 0;
   const lineCount = Number(movement.header.line_count) || 0;
   const hiddenBursts = new Set(spec.hiddenBurstIds || []);
   const threshold = spec.threshold || {};
+  const queueFlagContext = spec.queueFlagContext === true && !threshold.active;
   const thresholdLevels = new Set(threshold.selectedLevels || []);
   const pointColors = new Uint8Array(rowCount * 4);
   const pointFilter = new Uint8Array(rowCount);
+  const pointFilterWithoutSuspected = new Uint8Array(rowCount);
   const suspectedFilter = new Uint8Array(rowCount);
   const confirmedFilter = new Uint8Array(rowCount);
   const thresholdFilter = new Uint8Array(rowCount);
   let suspectedCount = 0;
   let confirmedCount = 0;
   let thresholdCount = 0;
+  let queueContextGrayCount = 0;
+  let queueContextColoredCount = 0;
   for (let index = 0; index < rowCount; index += 1) {
     const individual = String(
       movement.header.individuals?.[Number(arrays.individual_codes[index])] || "",
@@ -121,6 +141,7 @@ function buildAttributes(movement, spec) {
     const hidden = hiddenBursts.has(burstIdAt(movement, index, individual));
     const status = Number(arrays.review_status[index]);
     pointFilter[index] = !hidden && status !== 2 ? 1 : 0;
+    pointFilterWithoutSuspected[index] = !hidden && status === 0 ? 1 : 0;
     suspectedFilter[index] = !hidden && status === 1 ? 1 : 0;
     confirmedFilter[index] = !hidden && status === 2 ? 1 : 0;
     if (!hidden && status !== 2 && threshold.active) {
@@ -138,27 +159,47 @@ function buildAttributes(movement, spec) {
       } else if (field.kind === "numeric" && Number.isFinite(Number(threshold.value))) {
         const number = Number(value);
         const turn = Number(arrays.turn_angle_deg?.[index]);
+        const inboundStep = inboundStepLengthAt(movement, index);
         const validTurn = field.key !== GPS_SPIKE_FIELD_KEY
           || (Number.isFinite(turn) && Math.abs(turn) >= Number(spec.gpsSpikeTurnAngleDeg));
+        const validInboundStep = field.key !== GPS_SPIKE_FIELD_KEY
+          || (Number.isFinite(inboundStep) && inboundStep > Number(threshold.value));
         const matches = threshold.reverse ? number < Number(threshold.value) : number > Number(threshold.value);
-        thresholdFilter[index] = Number.isFinite(number) && validTurn && matches ? 1 : 0;
+        thresholdFilter[index] = Number.isFinite(number) && validTurn && validInboundStep && matches ? 1 : 0;
       }
     }
     suspectedCount += suspectedFilter[index];
     confirmedCount += confirmedFilter[index];
     thresholdCount += thresholdFilter[index];
-    const color = colorAt(movement, index, spec);
+    const queueContextGray = queueFlagContext && status !== 1;
+    if (queueFlagContext && status !== 2) {
+      if (status === 1) queueContextColoredCount += 1;
+      else queueContextGrayCount += 1;
+    }
+    const color = (threshold.active && !thresholdFilter[index]) || queueContextGray
+      ? CONTEXT_GRAY_POINT
+      : colorAt(movement, index, spec);
     pointColors.set(color, index * 4);
   }
   const lineColors = new Uint8Array(lineCount * 4);
   const lineFilter = new Uint8Array(lineCount);
+  const lineFilterWithoutSuspected = new Uint8Array(lineCount);
   const burstFilter = new Uint8Array(lineCount);
+  const burstFilterWithoutSuspected = new Uint8Array(lineCount);
   for (let index = 0; index < lineCount; index += 1) {
     const sourceIndex = Number(arrays.line_source_indexes[index]);
     const targetIndex = Number(arrays.line_target_indexes[index]);
     lineFilter[index] = pointFilter[targetIndex];
+    lineFilterWithoutSuspected[index] = (
+      pointFilterWithoutSuspected[sourceIndex]
+      && pointFilterWithoutSuspected[targetIndex]
+    ) ? 1 : 0;
     burstFilter[index] = (
       pointFilter[targetIndex]
+      && Number(arrays.burst_values[sourceIndex]) === Number(arrays.burst_values[targetIndex])
+    ) ? 1 : 0;
+    burstFilterWithoutSuspected[index] = (
+      lineFilterWithoutSuspected[index]
       && Number(arrays.burst_values[sourceIndex]) === Number(arrays.burst_values[targetIndex])
     ) ? 1 : 0;
     const colorIndex = MOVE2_OUTBOUND_FIELDS.has(String(spec.field?.key || ""))
@@ -177,15 +218,20 @@ function buildAttributes(movement, spec) {
   return {
     pointColors,
     pointFilter,
+    pointFilterWithoutSuspected,
     suspectedFilter,
     confirmedFilter,
     thresholdFilter,
     lineColors,
     lineFilter,
+    lineFilterWithoutSuspected,
     burstFilter,
+    burstFilterWithoutSuspected,
     suspectedCount,
     confirmedCount,
     thresholdCount,
+    queueContextGrayCount,
+    queueContextColoredCount,
   };
 }
 
@@ -238,12 +284,15 @@ self.addEventListener("message", event => {
       const transfer = [
         attributes.pointColors.buffer,
         attributes.pointFilter.buffer,
+        attributes.pointFilterWithoutSuspected.buffer,
         attributes.suspectedFilter.buffer,
         attributes.confirmedFilter.buffer,
         attributes.thresholdFilter.buffer,
         attributes.lineColors.buffer,
         attributes.lineFilter.buffer,
+        attributes.lineFilterWithoutSuspected.buffer,
         attributes.burstFilter.buffer,
+        attributes.burstFilterWithoutSuspected.buffer,
       ];
       self.postMessage({ type: "attributes", requestId, attributes }, transfer);
     }

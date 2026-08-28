@@ -258,6 +258,92 @@ def test_rds_ranking_survives_individual_review_decision_steps(tmp_path):
         assert inherited["compatible"] is True
 
 
+def test_rds_second_round_carries_only_effective_ok_without_needs_check(tmp_path):
+    client, study_dir = _client(tmp_path)
+    loaded = client.get(
+        "/api/apps/movement/family/movement_rds/study/268904527/load"
+    ).json()
+    dataset_id = loaded["dataset_id"]
+    logical_name = loaded["logical_name"]
+    overview = client.get(
+        f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{dataset_id}/overview",
+        params={"logical_name": logical_name},
+    ).json()
+    individuals = list(overview["individuals"])
+    assert len(individuals) == 2
+    reviewer = client.get("/api/apps/movement/reviewers").json()["reviewers"][0]
+    profile = loaded["edit_profile"]
+    assigned = client.post(
+        "/api/apps/movement/family/movement_rds/study/268904527/review/assign",
+        json={
+            "reviewer_user_id": reviewer["user_id"],
+            "logical_name": logical_name,
+            "expected_current_dataset_id": dataset_id,
+            "expected_review_revision": profile["review_revision"],
+        },
+    ).json()
+    review_revision = assigned["state"]["revision"]
+    for index, individual in enumerate(individuals):
+        response = client.post(
+            "/api/apps/movement/family/movement_rds/study/268904527/actions/review-individual",
+            json={
+                "dataset_id": dataset_id,
+                "expected_current_dataset_id": dataset_id,
+                "expected_review_revision": review_revision,
+                "logical_name": logical_name,
+                "source_bundle_signature": overview["source_bundle_signature"],
+                "decision": {
+                    "individual": individual,
+                    "review_decision": "ok",
+                    "needs_check": index == 1,
+                    "comment": "",
+                },
+            },
+        )
+        assert response.status_code == 200, response.text
+        dataset_id = response.json()["dataset"]["dataset_id"]
+    current_profile = client.get(
+        "/api/apps/movement/family/movement_rds/study/268904527/edit-profile",
+        params={"dataset_id": dataset_id},
+    ).json()
+    completed = client.post(
+        "/api/apps/movement/family/movement_rds/study/268904527/review/complete",
+        json={
+            "expected_current_dataset_id": dataset_id,
+            "expected_review_revision": current_profile["review_revision"],
+        },
+    ).json()
+    second = client.post(
+        "/api/apps/movement/family/movement_rds/study/268904527/review/assign",
+        json={
+            "reviewer_user_id": reviewer["user_id"],
+            "logical_name": logical_name,
+            "expected_current_dataset_id": dataset_id,
+            "expected_review_revision": completed["state"]["revision"],
+        },
+    )
+    assert second.status_code == 200, second.text
+    second_payload = second.json()
+    assert second_payload["review"]["review_round"] == 2
+    second_dataset_id = second_payload["current_dataset_id"]
+    second_profile = client.get(
+        "/api/apps/movement/family/movement_rds/study/268904527/edit-profile",
+        params={"dataset_id": second_dataset_id},
+    ).json()
+    assert second_profile["coverage"]["reviewed_count"] == 1
+    assert second_profile["coverage"]["remaining_individuals"] == [individuals[1]]
+    _, sidecar_path = get_dataset_artifact(
+        study_dir, second_dataset_id, "movement_review_annotations.json"
+    )
+    annotations = json.loads(sidecar_path.read_text())["annotations"]
+    carried = [
+        item for item in annotations
+        if item.get("review_id") == second_payload["review"]["review_id"]
+    ]
+    assert [item["scope"]["individual"] for item in carried] == [individuals[0]]
+    assert carried[0]["scope"]["source_rows"]
+
+
 def test_rds_binary_renderer_reuses_attributes_and_omits_empty_overlays():
     source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
     worker_source = (MOVEMENT_STATIC_ROOT / "movement_binary_worker.js").read_text(
@@ -272,7 +358,8 @@ def test_rds_binary_renderer_reuses_attributes_and_omits_empty_overlays():
     assert "binary.lastRenderCacheKey = cacheKey" in source
     assert "attributeCacheKey = binary.lastRenderCacheKey" in binary_layers
     assert "this.binaryFilterExtension = new deck.DataFilterExtension" in binary_layers
-    assert "attributes.thresholdCount" in binary_layers
+    assert "attributes.thresholdCount" not in binary_layers
+    assert "CONTEXT_GRAY_POINT" in binary_layers
     assert "attributes.suspectedCount" in binary_layers
     assert "attributes.confirmedCount" in binary_layers
     assert 'const GPS_SPIKE_FIELD_KEY = "gps_spike_step_turn"' in worker_source
@@ -566,6 +653,11 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
         if item["status"] == "suspected"
         for start, end in item["row_ranges"]
     ) == 2
+    compact_issues = review_projection_payload["review_issue_annotations"]
+    assert len(compact_issues) == 1
+    assert compact_issues[0]["annotation_id"] == annotation["annotation_id"]
+    assert compact_issues[0]["status"] == "suspected"
+    assert compact_issues[0]["scope"]["source_rows"] == annotation["scope"]["source_rows"]
     suspicious = client.get(
         f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{reviewed_dataset_id}/fixes",
         params={

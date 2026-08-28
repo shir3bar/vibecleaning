@@ -308,6 +308,9 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path):
         page.locator('[data-role="individual-view-queue"]').click()
         entire_individual = page.locator('button[data-queue-flag-individual]').first
         entire_individual.wait_for(state="visible", timeout=20_000)
+        assert "is-active" in (
+            page.locator('button[data-queue-scope="solo"]').get_attribute("class") or ""
+        )
         entire_individual.click()
         page.wait_for_function(
             "() => document.querySelector('button[data-queue-flag-individual]')?.classList.contains('is-active')"
@@ -363,22 +366,21 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path):
         assert page.locator('[data-role="ranking-method"]').input_value() == (
             "isolation_forest"
         )
-        assert page.locator('[data-role="individual-queue-order"]').input_value() == (
-            "isolation_forest_decision_margin"
-        )
+        assert page.locator('[data-role="individual-queue-order"]').input_value() == "dataset"
         page.locator('[data-role="individual-view-queue"]').click()
-        page.locator("[data-queue-ranking-score]").first.wait_for(
+        page.locator('button[data-queue-scope="solo"]').wait_for(
             state="visible", timeout=20_000
         )
-        assert page.locator("[data-queue-ranking-score]").first.text_content() == (
-            "#1 · score 0.75"
+        assert "is-active" in (
+            page.locator('button[data-queue-scope="solo"]').get_attribute("class") or ""
         )
+        assert page.locator("[data-queue-ranking-score]").count() == 0
 
         page.evaluate("window.__movementMonitorActive = false")
         browser.close()
 
 
-def test_queue_decision_reuses_inflight_exact_blocks_across_review_step(tmp_path):
+def test_queue_decision_retains_exact_blocks_across_review_step(tmp_path):
     playwright_api = pytest.importorskip("playwright.sync_api")
     study_dir = tmp_path / "data" / "movement_clean" / "queue_transition"
     study_dir.mkdir(parents=True)
@@ -449,8 +451,9 @@ def test_queue_decision_reuses_inflight_exact_blocks_across_review_step(tmp_path
         )
         final_dataset_id = page.locator('[data-role="dataset"]').input_value()
         assert final_dataset_id != initial_dataset_id
-        assert len(binary_requests) == 1
-        assert f"/dataset/{initial_dataset_id}/" in binary_requests[0]
+        assert len(binary_requests) == 2
+        assert sum("individuals=alpha" in url for url in binary_requests) == 1
+        assert sum("individuals=beta" in url for url in binary_requests) == 1
         assert page.evaluate("""() => (
           window.__queueIndividualsNode === document.querySelector('[data-role=individuals]')
           && window.__queueAlphaCard === document.querySelector('[data-queue-individual="alpha"]')
@@ -572,6 +575,14 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         alpha_card = page.locator(".movement-card", has_text="alpha")
         assert "OK" in alpha_card.locator(".movement-review-state").text_content()
         assert "unsaved" not in alpha_card.locator(".movement-review-state").text_content()
+        beta_bursts = page.locator(
+            '[data-queue-individual="beta"] input[data-queue-burst-visible]'
+        )
+        beta_bursts.first.wait_for(state="visible", timeout=20_000)
+        assert beta_bursts.count() > 0
+        assert "No bursts are available" not in page.locator(
+            '[data-queue-individual="beta"]'
+        ).text_content()
         group_view_after = page.evaluate(
             "() => structuredClone(window.__movementDiagnostics.mapView)"
         )
@@ -641,6 +652,14 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
             timeout=20_000,
         )
         assert len(review_requests) == 2
+        delta_bursts = page.locator(
+            '[data-queue-individual="delta"] input[data-queue-burst-visible]'
+        )
+        delta_bursts.first.wait_for(state="visible", timeout=20_000)
+        assert delta_bursts.count() > 0
+        assert "No bursts are available" not in page.locator(
+            '[data-queue-individual="delta"]'
+        ).text_content()
 
         page.route(
             "**/actions/review-individual",
@@ -667,6 +686,142 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         assert "unsaved" in page.locator(
             ".movement-card.queue-active .movement-review-state"
         ).text_content()
+        browser.close()
+
+
+def test_second_round_prior_ok_order_toggle_does_not_touch_map(tmp_path):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    study_dir = tmp_path / "data" / "movement_clean" / "second_round_queue"
+    study_dir.mkdir(parents=True)
+    (study_dir / "movement.csv").write_text(
+        CSV_QUEUE_TRANSITION_FIXTURE,
+        encoding="utf-8",
+    )
+    app = create_app(
+        data_root=tmp_path / "data",
+        static_root=STATIC_ROOT,
+        index_path=INDEX_PATH,
+        auth_manager=_auth_manager(),
+    )
+    register_movement_routes(
+        app,
+        data_root=tmp_path / "data",
+        overview_fix_limit=1,
+        overview_series_points=250,
+    )
+
+    from fastapi.testclient import TestClient
+
+    setup = TestClient(app)
+    assert setup.post(
+        "/api/auth/login",
+        json={"username": "browser-reviewer", "password": "test-password-long"},
+    ).status_code == 200
+    loaded = setup.get(
+        "/api/apps/movement/family/movement_clean/study/second_round_queue/load"
+    ).json()
+    reviewer = setup.get("/api/apps/movement/reviewers").json()["reviewers"][0]
+    assigned = setup.post(
+        "/api/apps/movement/family/movement_clean/study/second_round_queue/review/assign",
+        json={
+            "reviewer_user_id": reviewer["user_id"],
+            "logical_name": "movement.csv",
+            "expected_current_dataset_id": loaded["dataset_id"],
+            "expected_review_revision": loaded["edit_profile"]["review_revision"],
+        },
+    ).json()
+    dataset_id = loaded["dataset_id"]
+    decisions = {
+        "alpha": "ok",
+        "beta": "fix_keep",
+        "gamma": "ok",
+        "delta": "remove",
+        "epsilon": "ok",
+        "zeta": "fix_keep",
+    }
+    for individual, decision in decisions.items():
+        response = setup.post(
+            "/api/apps/movement/family/movement_clean/study/second_round_queue/actions/review-individual",
+            json={
+                "dataset_id": dataset_id,
+                "expected_current_dataset_id": dataset_id,
+                "expected_review_revision": assigned["state"]["revision"],
+                "logical_name": "movement.csv",
+                "decision": {
+                    "individual": individual,
+                    "review_decision": decision,
+                    "needs_check": False,
+                    "comment": "",
+                },
+            },
+        )
+        assert response.status_code == 200, response.text
+        dataset_id = response.json()["dataset"]["dataset_id"]
+    profile = setup.get(
+        "/api/apps/movement/family/movement_clean/study/second_round_queue/edit-profile",
+        params={"dataset_id": dataset_id},
+    ).json()
+    completed = setup.post(
+        "/api/apps/movement/family/movement_clean/study/second_round_queue/review/complete",
+        json={
+            "expected_current_dataset_id": dataset_id,
+            "expected_review_revision": profile["review_revision"],
+        },
+    ).json()
+    second = setup.post(
+        "/api/apps/movement/family/movement_clean/study/second_round_queue/review/assign",
+        json={
+            "reviewer_user_id": reviewer["user_id"],
+            "logical_name": "movement.csv",
+            "expected_current_dataset_id": dataset_id,
+            "expected_review_revision": completed["state"]["revision"],
+        },
+    )
+    assert second.status_code == 200, second.text
+    setup.close()
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _login_and_wait(page, base_url, "second_round_queue")
+        page.locator('[data-individual-checkbox="alpha"]').wait_for(
+            state="attached", timeout=20_000
+        )
+        page.locator('[data-role="individual-view-queue"]').click()
+        toggle = page.locator('[data-role="individual-queue-prior-ok-last"]')
+        toggle.wait_for(state="visible", timeout=20_000)
+        assert toggle.is_checked()
+        assert page.locator(".movement-card .movement-title").first.text_content() == "beta"
+        _wait_for_layer(page, "movement-binary-paths-individual-")
+        page.wait_for_timeout(300)
+        before = page.evaluate("""() => ({
+          canvas: document.querySelector('[data-role=map] canvas'),
+          map: document.querySelector('[data-role=map]'),
+          mapView: structuredClone(window.__movementDiagnostics.mapView),
+          layerIds: [...window.__movementDiagnostics.renderedLayerIds],
+          binaryRequests: window.__movementDiagnostics.binaryRequests,
+          active: document.querySelector('.movement-card.queue-active .movement-title')?.textContent,
+        })""")
+        page.evaluate("""() => {
+          window.__secondRoundCanvas = document.querySelector('[data-role=map] canvas');
+          window.__secondRoundMap = document.querySelector('[data-role=map]');
+        }""")
+        toggle.uncheck()
+        assert page.locator(".movement-card .movement-title").first.text_content() == "alpha"
+        after = page.evaluate("""() => ({
+          sameCanvas: window.__secondRoundCanvas === document.querySelector('[data-role=map] canvas'),
+          sameMap: window.__secondRoundMap === document.querySelector('[data-role=map]'),
+          mapView: structuredClone(window.__movementDiagnostics.mapView),
+          layerIds: [...window.__movementDiagnostics.renderedLayerIds],
+          binaryRequests: window.__movementDiagnostics.binaryRequests,
+          active: document.querySelector('.movement-card.queue-active .movement-title')?.textContent,
+        })""")
+        assert after["sameCanvas"] is True
+        assert after["sameMap"] is True
+        assert after["mapView"] == before["mapView"]
+        assert after["layerIds"] == before["layerIds"]
+        assert after["binaryRequests"] == before["binaryRequests"]
+        assert after["active"] == before["active"] == "beta"
         browser.close()
 
 
@@ -810,7 +965,10 @@ def test_dataset_dropdown_restores_rewound_forward_tip(tmp_path):
             timeout=20_000,
         )
         page.locator('[data-role="edit-lock-profile"]').wait_for(
-            state="visible", timeout=20_000
+            state="hidden", timeout=20_000
+        )
+        page.locator('[data-role="resume-history"]').wait_for(
+            state="hidden", timeout=20_000
         )
 
         page.locator('[data-role="dataset"]').select_option(latest_id)
@@ -914,6 +1072,10 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
             flag_button = page.locator('[data-role="mark-suspected"]')
             assert flag_button.is_enabled()
             assert flag_button.text_content() == "Flag thresholded fixes"
+            assert not any(
+                "movement-binary-threshold" in layer_id
+                for layer_id in _layer_ids(page)
+            )
             page.locator('button[data-action="check-above-threshold"]').click()
             assert flag_button.is_enabled()
             assert flag_button.text_content() == "Flag thresholded fixes"
@@ -940,10 +1102,85 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
             assert not any("movement-binary-threshold" in layer_id for layer_id in layer_ids)
             assert "movement-suspected-outline" not in layer_ids
             assert sum("movement-binary-suspected" in layer_id for layer_id in layer_ids) == 1
+            assert layer_ids[-1].startswith("movement-binary-suspected-")
             page.wait_for_function(
                 "() => document.querySelector('[data-role=select-suspicious]').textContent.includes('(3)')"
             )
 
+            page.locator('[data-role="individual-view-queue"]').click()
+            queue_outlier = page.locator('[data-queue-individual="MF006"]')
+            queue_outlier.wait_for(state="visible", timeout=20_000)
+            queue_outlier.click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-queue-individual=\"MF006\"]')?.classList.contains('queue-active')",
+                timeout=20_000,
+            )
+            page.wait_for_function(
+                "() => window.__movementDiagnostics.queueContextColoredCount === 3"
+                " && window.__movementDiagnostics.queueContextGrayCount > 0",
+                timeout=20_000,
+            )
+            queue_true_level = page.locator(
+                'input[data-action="toggle-threshold-level"][data-level="True"]'
+            )
+            queue_true_level.wait_for(state="attached", timeout=20_000)
+            queue_true_level.check()
+            page.locator('button[data-action="check-above-threshold"]').click()
+            queue_unflag_button = page.locator('[data-role="dismiss-suspected"]')
+            page.wait_for_function(
+                "() => !document.querySelector('[data-role=dismiss-suspected]').disabled",
+                timeout=20_000,
+            )
+            queue_unflag_button.click()
+            page.locator('[data-role="dismiss-modal"]').wait_for(state="visible")
+            page.locator('[data-role="dismiss-close"]').click()
+            page.locator('[data-role="individual-view-browse"]').click()
+            page.locator('[data-individual-checkbox="MF006"]').wait_for(
+                state="attached", timeout=20_000
+            )
+
+            page.evaluate("window.__suspiciousMapNode = document.querySelector('[data-role=map]')")
+            hide_suspicious = page.locator('[data-role="hide-suspected"]')
+            hide_suspicious.check()
+            page.wait_for_function(
+                "() => !window.__movementDiagnostics.renderedLayerIds.some(id => id.includes('movement-binary-suspected'))"
+            )
+            assert len(binary_requests) == requests_before_flag
+            assert page.evaluate(
+                "window.__suspiciousMapNode === document.querySelector('[data-role=map]')"
+            )
+            hide_suspicious.uncheck()
+            _wait_for_layer(page, "movement-binary-suspected")
+            assert len(binary_requests) == requests_before_flag
+
+            page.locator('[data-role="select-suspicious"]').click()
+            unflag_button = page.locator('[data-role="dismiss-suspected"]')
+            page.wait_for_function(
+                "() => !document.querySelector('[data-role=dismiss-suspected]').disabled",
+                timeout=20_000,
+            )
+            assert unflag_button.text_content() == "Unflag suspicious"
+            unflag_button.click()
+            page.locator('[data-role="dismiss-modal"]').wait_for(state="visible")
+            page.locator('[data-role="dismiss-submit"]').click()
+            page.locator('[data-role="dismiss-modal"]').wait_for(
+                state="hidden", timeout=20_000
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-role=status]').textContent.includes('Unflagged selected suspicions')",
+                timeout=20_000,
+            )
+            assert not any(
+                "movement-binary-suspected" in layer_id for layer_id in _layer_ids(page)
+            )
+            assert len(binary_requests) == requests_before_flag
+
+            page.locator('[data-role="undo"]').click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-role=status]').textContent.startsWith('Undid to')",
+                timeout=20_000,
+            )
+            _wait_for_layer(page, "movement-binary-suspected")
             page.locator('[data-role="undo"]').click()
             page.wait_for_function(
                 "() => document.querySelector('[data-role=status]').textContent.startsWith('Undid to')",

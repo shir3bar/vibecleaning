@@ -1007,7 +1007,7 @@ def test_movement_frontend_distinguishes_source_flags_from_review_status():
     assert ") ? 52 : 185" in worker_source
     assert 'id: "movement-source-flagged-points"' not in source
     assert 'id: "movement-suspected-outline"' in source
-    assert 'const showSuspectedOutlines = this.data.suspiciousState === "loaded";' in source
+    assert 'const showSuspectedOutlines = this.data.suspiciousState === "loaded" && !hideSuspected;' in source
     assert "for (const fix of this.data.fixes || [])" in source
     assert 'fix.review?.status !== "suspected"' in source
     assert "they remain analytically included until confirmed in Vibecleaning" in source
@@ -1026,17 +1026,41 @@ def test_movement_frontend_clears_checked_fix_halos_and_enlarges_suspicious_fixe
     ]
     suspected_layer = source[
         source.index('          id: "movement-suspected-outline"'):
-        source.index('          id: "movement-threshold-points"', source.index('          id: "movement-suspected-outline"'))
+        source.index('          id: "movement-candidate-query-points"', source.index('          id: "movement-suspected-outline"'))
+    ]
+    binary_suspected_layer = source[
+        source.index("          id: `movement-binary-suspected-${suffix}`"):
+        source.index("      if (this.refs.showConfirmed.checked", source.index("          id: `movement-binary-suspected-${suffix}`"))
     ]
 
     assert "this.setTableSelection();" in clear_handler
     assert "this.mapRangeAwaitingEnd = false;" in clear_handler
     assert "this.renderTableSheet();" in clear_handler
     assert "applyTableSelectionInteraction" not in single_click
+    assert "mutedSuspicious" in suspected_layer
     assert "this.colorForFix(item.fix)" in suspected_layer
     assert "filled: true" in suspected_layer
-    assert "radiusMinPixels: 8" in suspected_layer
+    assert "radiusMinPixels: mutedSuspicious ? 9 : 10" in suspected_layer
     assert "pickable: true" in suspected_layer
+    assert "getFillColor: pointColor" in source
+    assert "filled: true" in binary_suspected_layer
+    assert "radiusMinPixels: mutedSuspicious ? 9 : 10" in binary_suspected_layer
+
+
+def test_movement_frontend_uses_gray_context_without_threshold_halos():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    worker_source = MOVEMENT_APP_JS.with_name("movement_binary_worker.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CONTEXT_GRAY_POINT" in source
+    assert "CONTEXT_GRAY_LINE" in source
+    assert "threshold.active && !thresholdFilter[index]" in worker_source
+    assert 'id: `movement-binary-threshold-${suffix}`' not in source
+    assert 'id: "movement-threshold-points"' not in source
+    assert 'id: "movement-selected-threshold-points"' not in source
+    assert "temporalPointDataWithoutSuspected" in source
+    assert "temporalPathDataWithoutSuspected" in source
 
 
 def test_movement_frontend_excludes_confirmed_audit_fixes_from_color_scale():
@@ -1062,7 +1086,8 @@ def test_movement_frontend_uses_on_demand_individual_loading_for_truncated_overv
     assert "initialMovementVisibleIndividuals(this.data)" in source
     assert "if (data.overviewTruncated) {" in source
     assert "getActiveThresholdMatchKeys()" in source
-    assert "temporalOnly ? this.lastThresholdMatchKeys : this.getActiveThresholdMatchKeys()" in source
+    assert "temporalOnly ? this.lastCandidateMatchKeys : this.getCandidateQueryMatchKeys()" in source
+    assert "lastThresholdMatchKeys" not in source
 
 
 def test_movement_frontend_map_click_does_not_force_table_reveal():
@@ -1186,11 +1211,12 @@ def test_movement_frontend_uses_cached_binary_searched_temporal_focus():
     assert 'id: "movement-temporal-focal-points"' in renderer
     assert 'this.refs.slider.addEventListener("pointerdown"' in source
     assert 'this.refs.slider.addEventListener("pointerup"' in source
-    assert "this.colorForFix(item.fix)" in renderer
+    assert "this.baseColorForFix(fix)" in source
+    assert "temporalPathDataWithoutSuspected" in source
     assert "Math.max(0, focusIndex - 1)" in source
     assert "Math.min(fixes.length - 1, focusIndex + 1)" in source
     assert "for (const fix of this.data.fixes)" not in renderer
-    assert "temporalOnly ? this.lastThresholdMatchKeys" in renderer
+    assert "lastThresholdMatchKeys" not in renderer
 
 
 def test_movement_frontend_loads_ephemeral_osm_helpers_only_in_dev_mode():
@@ -1995,28 +2021,9 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
         f"{base_url}/edit-profile",
         params={"dataset_id": suspected_dataset_id},
     ).json()
-    assert rewound_profile["editable"] is False
-    assert rewound_profile["blockers"][0]["code"] == "forward_history_pending"
-
-    blocked_rewound_edit = client.post(
-        f"{base_url}/actions/review-individual",
-        json={
-            "dataset_id": suspected_dataset_id,
-            "expected_current_dataset_id": suspected_dataset_id,
-            "logical_name": "movement.csv",
-            "decision": {
-                "individual": "alpha",
-                "review_decision": "ok",
-                "needs_check": False,
-            },
-            "user": "reviewer",
-        },
-    )
-    assert blocked_rewound_edit.status_code == 423
-    assert (
-        blocked_rewound_edit.json()["edit_profile"]["blockers"][0]["code"]
-        == "forward_history_pending"
-    )
+    assert rewound_profile["editable"] is True
+    assert rewound_profile["blockers"] == []
+    assert rewound_profile["resume"]["allowed"] is False
 
     restored_head = client.post(
         f"{base_url}/head",
@@ -2048,15 +2055,32 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
         f"{base_url}/edit-profile",
         params={"dataset_id": root_id},
     ).json()
-    assert root_profile["resume"]["discard_dataset_count"] == 2
-    assert root_profile["resume"]["discard_step_count"] == 2
+    assert root_profile["editable"] is True
+    assert root_profile["resume"]["allowed"] is False
+
+    restore_before_explicit_resume = client.post(
+        f"{base_url}/head",
+        json={
+            "dataset_id": confirmed_dataset_id,
+            "expected_current_dataset_id": root_id,
+        },
+    )
+    assert restore_before_explicit_resume.status_code == 200
+    historical_root_profile = client.get(
+        f"{base_url}/edit-profile",
+        params={"dataset_id": root_id},
+    ).json()
+    assert historical_root_profile["editable"] is False
+    assert historical_root_profile["resume"]["allowed"] is True
+    assert historical_root_profile["resume"]["discard_dataset_count"] == 2
+    assert historical_root_profile["resume"]["discard_step_count"] == 2
 
     resumed = client.post(
         f"{base_url}/resume",
         json={
             "dataset_id": root_id,
-            "expected_current_dataset_id": root_id,
-            "resume_token": root_profile["resume"]["token"],
+            "expected_current_dataset_id": confirmed_dataset_id,
+            "resume_token": historical_root_profile["resume"]["token"],
             "user": "reviewer",
         },
     )
@@ -2629,12 +2653,12 @@ def test_movement_frontend_restores_saved_burst_analyses():
 def test_movement_frontend_loads_suspicious_fixes_as_passive_overlay_with_focus_action():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
 
-    assert 'data-role="select-suspicious">Review suspicious fixes</button>' in source
+    assert 'data-role="select-suspicious">Select all suspicious</button>' in source
     assert "async loadSuspiciousFixes({ focus = true } = {})" in source
     assert "loadSuspiciousFixes({ focus: false })" in source
     assert 'this.cancelRequest("detail");' in source
     assert "if (focus)" in source
-    assert "Review suspicious fixes" in source
+    assert "Select all suspicious" in source
     assert 'reviewStatus: "suspected"' in source
     assert "this.data.suspiciousFixes = suspiciousFixes" in source
     assert "this.data.selectedIndividuals = new Set(suspiciousFixes.map" in source
@@ -4794,6 +4818,7 @@ def test_movement_frontend_refreshes_queue_dimming_when_active_individual_change
     ]
     assert "movement-binary-paths-${suffix}" in retained_renderer
     assert "const opacity = this.queueMapOpacity(individual);" in retained_renderer
-    assert "getColor: item => this.queueMapColor(item.color, item.individual)" in renderer
+    assert "this.temporalSliderEngaged ? CONTEXT_GRAY_LINE : item.color" in renderer
+    assert "this.queueMapColor(" in renderer
     assert "getColor: queueDimKey" in renderer
     assert "movement-bursts" in layer_ids

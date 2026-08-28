@@ -1088,10 +1088,62 @@ def build_rds_review_projection(
         },
         "projected_individuals": sorted(selected),
         "review_status_ranges": status_ranges,
+        "review_issue_annotations": _compact_review_issue_annotations(annotations or []),
         # The projection intentionally contains only compact review state.
         "truncated": True,
         "source_format": RDS_SOURCE_FORMAT,
     }
+
+
+def _compact_review_issue_annotations(annotations: list[dict]) -> list[dict]:
+    """Return range-scoped issue provenance needed by binary map selections."""
+    result = []
+    for item in annotations:
+        if str(item.get("annotation_kind") or "issue") == "individual_review":
+            continue
+        status = str(item.get("status") or "")
+        if status not in {"suspected", "confirmed", "dismissed"}:
+            continue
+        scope = item.get("scope") or {}
+        source_rows = []
+        for source in scope.get("source_rows") or []:
+            logical_name = str(source.get("logical_name") or "")
+            row_ranges = [
+                [int(row_range[0]), int(row_range[1])]
+                for row_range in source.get("row_ranges") or []
+                if len(row_range) == 2
+                and int(row_range[0]) > 0
+                and int(row_range[1]) >= int(row_range[0])
+            ]
+            if logical_name and row_ranges:
+                source_rows.append({
+                    "logical_name": logical_name,
+                    "row_ranges": row_ranges,
+                })
+        if not source_rows:
+            continue
+        result.append({
+            "annotation_id": str(item.get("annotation_id") or ""),
+            "parent_annotation_id": str(item.get("parent_annotation_id") or ""),
+            "annotation_kind": str(item.get("annotation_kind") or "issue"),
+            "status": status,
+            "issue_type": str(item.get("issue_type") or ""),
+            "issue_field": str(item.get("issue_field") or ""),
+            "issue_threshold": str(item.get("issue_threshold") or ""),
+            "comment": str(item.get("comment") or ""),
+            "owner_question": str(item.get("owner_question") or ""),
+            "user": str(item.get("user") or ""),
+            "created_at": str(item.get("created_at") or ""),
+            "origin": str(item.get("origin") or "manual"),
+            "step_id": str(item.get("step_id") or ""),
+            "source_analysis_id": str(item.get("source_analysis_id") or ""),
+            "scope": {
+                "kind": str(scope.get("kind") or "fix"),
+                "burst_id": str(scope.get("burst_id") or ""),
+                "source_rows": source_rows,
+            },
+        })
+    return result
 
 
 def _build_rds_review_fixes(
@@ -1632,9 +1684,27 @@ def resolve_rds_review_scope(index_path: Path, raw_scope: dict) -> tuple[dict, i
         }
         values: list[object] = []
         if filter_kind == "gps_spike":
-            where = "f.step_length_m > ? AND abs(f.turn_angle_deg) >= ?"
+            where = """
+                f.step_length_m > ?
+                AND (
+                    SELECT previous.step_length_m
+                    FROM fixes previous
+                    WHERE previous.individual_key = f.individual_key
+                      AND (
+                          previous.time_ms < f.time_ms
+                          OR (
+                              previous.time_ms = f.time_ms
+                              AND previous.source_row < f.source_row
+                          )
+                      )
+                    ORDER BY previous.time_ms DESC, previous.source_row DESC
+                    LIMIT 1
+                ) > ?
+                AND abs(f.turn_angle_deg) >= ?
+            """
             values.extend(
                 (
+                    float(spec["step_length_threshold_m"]),
                     float(spec["step_length_threshold_m"]),
                     float(spec["minimum_abs_turn_angle_deg"]),
                 )
