@@ -1258,6 +1258,89 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
         browser.close()
 
 
+def test_rds_whole_study_filter_updates_hidden_retained_individuals(tmp_path):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    samples = [
+        RDS_SAMPLE_ROOT / "268904527_269302895.rds",  # MF006: 3 source outliers
+        RDS_SAMPLE_ROOT / "268904527_269302904.rds",  # MF011: 23 source outliers
+    ]
+    if not all(sample.exists() for sample in samples):
+        pytest.skip("RDS whole-study browser fixtures are unavailable")
+    study_dir = tmp_path / "data" / "movement_rds" / "268904527"
+    study_dir.mkdir(parents=True)
+    for sample in samples:
+        shutil.copy2(sample, study_dir / sample.name)
+    app = create_rds_movement_app(
+        data_root=tmp_path / "data",
+        static_root=STATIC_ROOT,
+        index_path=INDEX_PATH,
+        auth_manager=_auth_manager(),
+    )
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        projection_requests = []
+        page.on(
+            "request",
+            lambda request: projection_requests.append(request.url)
+            if "/review-projection?" in request.url else None,
+        )
+        _login_and_wait(page, base_url, "268904527")
+        page.wait_for_timeout(500)
+
+        checkbox_order = page.locator("[data-individual-checkbox]").evaluate_all(
+            "inputs => inputs.map(input => input.dataset.individualCheckbox)"
+        )
+        mf006_index = checkbox_order.index("MF006")
+        mf011_index = checkbox_order.index("MF011")
+        mf006 = page.locator('[data-individual-checkbox="MF006"]')
+        mf011 = page.locator('[data-individual-checkbox="MF011"]')
+
+        # Retain MF011's exact block in browser memory, then hide it before the
+        # whole-study mutation. This is the stale-cache case reported by users.
+        mf011.check()
+        _wait_for_layer(page, f"movement-binary-paths-individual-{mf011_index}")
+        mf011.uncheck()
+        mf006.check()
+        _wait_for_layer(page, f"movement-binary-paths-individual-{mf006_index}")
+        page.locator('[data-role="color-by"]').select_option("is_outlier")
+        true_level = page.locator(
+            'input[data-action="toggle-threshold-level"][data-level="True"]'
+        )
+        true_level.wait_for(state="visible", timeout=20_000)
+        true_level.check()
+        page.locator('button[data-action="check-above-threshold"]').click()
+        page.locator('[data-role="mark-suspected"]').click()
+        page.locator('[data-role="issue-modal"]').wait_for(state="visible")
+        assert "all matching fixes in the whole study" in page.locator(
+            '[data-role="issue-meta"]'
+        ).text_content()
+        page.locator('[data-role="issue-submit"]').click()
+        page.locator('[data-role="issue-modal"]').wait_for(
+            state="hidden", timeout=20_000
+        )
+        page.wait_for_function(
+            "() => document.querySelector('[data-role=status]').textContent.includes('Flagged 26 fixes')",
+            timeout=20_000,
+        )
+
+        assert not mf011.is_checked()
+        assert "MF011" in projection_requests[-1], projection_requests
+        mf006.uncheck()
+        mf011.check()
+        page.wait_for_function(
+            "layerId => window.__movementDiagnostics.renderedLayerIds.includes(layerId)",
+            arg=f"movement-binary-suspected-individual-{mf011_index}",
+            timeout=20_000,
+        )
+        page.wait_for_function(
+            "() => document.querySelector('[data-role=select-suspicious]').textContent.includes('(26)')",
+            timeout=20_000,
+        )
+        browser.close()
+
+
 def test_rds_queue_navigation_does_not_fan_out_attribute_renders(tmp_path):
     playwright_api = pytest.importorskip("playwright.sync_api")
     samples = sorted(

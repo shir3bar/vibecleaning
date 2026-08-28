@@ -1192,7 +1192,8 @@ def test_movement_frontend_uses_one_scope_aware_flag_action():
     assert 'this.flagTargetKind = "fixes";' not in check_source
     assert '["individual", "bursts", "filter"].includes(flagTarget.kind)' in source
     assert "Checking matches only changes the local checked-fix preview." in source
-    assert source.count(">Select fixes</button>") == 2
+    assert source.count(">${thresholdPreviewActionLabel}</button>") == 2
+    assert '? "Outline visible matches"' in source
     assert "Check visible sample" not in source
     assert "Add preview matches" not in source
     assert 'selectionMethod: "map_double_click"' in source
@@ -1972,6 +1973,10 @@ def test_threshold_issue_ui_defaults_to_whole_study_with_selected_individuals_op
     assert "Question for data owner (optional)" in source
     assert "User, issue type, and description are required." in source
     assert "owner question are required" not in source
+    assert "reviewProjectionIndividuals({ includeRetained = false } = {})" in source
+    assert "includeRetained ? this.data.binaryBlocks?.keys?.() || [] : []" in source
+    assert "reason === \"dataset_switch\" || wholeStudyFilterMutation" in source
+    assert "including hidden and not-yet-loaded individuals" in source
 
 
 def test_movement_history_locks_undo_and_resume_across_persistent_routes(tmp_path):

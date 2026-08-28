@@ -13957,6 +13957,12 @@ class MovementExampleApp {
         </select>
       </label>
     `;
+    const thresholdScopeNote = thresholdFlagScope.kind === "whole_study"
+      ? `<div class="movement-threshold-note">The map can outline matches only on currently visible tracks. Flag thresholded fixes resolves the filter across every individual in the study, including hidden and not-yet-loaded individuals.</div>`
+      : "";
+    const thresholdPreviewActionLabel = thresholdFlagScope.kind === "whole_study"
+      ? "Outline visible matches"
+      : "Select fixes";
     const gpsSpikeControl = gpsSpikeMode
       ? `
         <label class="movement-threshold-range-label">
@@ -14032,12 +14038,13 @@ class MovementExampleApp {
         </div>
         <div class="movement-threshold-note">${escapeHtml(selectionNote)} Checking matches only changes the local checked-fix preview. Flagging resolves the selected-level filter across the scope below.</div>
         ${thresholdScopeControl}
+        ${thresholdScopeNote}
         <div class="movement-threshold-actions">
           <button
             type="button"
             data-action="check-above-threshold"
             ${matchCount === 0 || checkedThresholdSelection ? "disabled" : ""}
-          >Select fixes</button>
+          >${thresholdPreviewActionLabel}</button>
           <button
             type="button"
             data-action="clear-threshold"
@@ -14170,12 +14177,13 @@ class MovementExampleApp {
         </label>`}
         <div class="movement-threshold-note">${escapeHtml(selectionNote)} Checking matches only changes the local checked-fix preview. Flagging resolves the full threshold filter across the scope below.</div>
         ${thresholdScopeControl}
+        ${thresholdScopeNote}
         <div class="movement-threshold-actions">
           <button
             type="button"
             data-action="check-above-threshold"
             ${matchCount === 0 || checkedThresholdSelection ? "disabled" : ""}
-          >Select fixes</button>
+          >${thresholdPreviewActionLabel}</button>
           <button
             type="button"
             data-action="clear-threshold"
@@ -17509,7 +17517,7 @@ class MovementExampleApp {
     });
   }
 
-  reviewProjectionIndividuals() {
+  reviewProjectionIndividuals({ includeRetained = false } = {}) {
     if (!this.data) return [];
     if (this.data.overviewHasAllFixes || this.data.reportAllState === "loaded") {
       return [...this.data.individuals];
@@ -17517,12 +17525,13 @@ class MovementExampleApp {
     return uniqueNonEmpty([
       ...this.getSelectedIndividuals(),
       ...(this.data.detailIndividuals || []),
+      ...(includeRetained ? this.data.binaryBlocks?.keys?.() || [] : []),
     ]);
   }
 
-  async fetchReviewProjection(datasetId) {
+  async fetchReviewProjection(datasetId, { includeRetained = false } = {}) {
     const params = new URLSearchParams({ logical_name: this.currentArtifact });
-    for (const individual of this.reviewProjectionIndividuals()) {
+    for (const individual of this.reviewProjectionIndividuals({ includeRetained })) {
       params.append("individuals", individual);
     }
     const controller = this.beginRequest("reviewProjection");
@@ -17933,7 +17942,14 @@ class MovementExampleApp {
       this.addMutationResultToGraph(result);
     }
     try {
-      const projection = await this.fetchReviewProjection(datasetId);
+      const resultFilter = result?.step?.parameters?.scope?.filter || null;
+      const wholeStudyFilterMutation = Boolean(
+        resultFilter
+        && (!Array.isArray(resultFilter.individuals) || resultFilter.individuals.length === 0)
+      );
+      const projection = await this.fetchReviewProjection(datasetId, {
+        includeRetained: reason === "dataset_switch" || wholeStudyFilterMutation,
+      });
       if (transitionId !== this.viewTransitionId) {
         finishTransitionDiagnostics();
         return;
