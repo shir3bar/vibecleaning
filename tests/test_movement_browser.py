@@ -521,6 +521,25 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         )
         assert scope_view_after["center"] == pytest.approx(scope_view_before["center"])
         assert scope_view_after["zoom"] == pytest.approx(scope_view_before["zoom"])
+        page.locator('[data-queue-individual="beta"]').click()
+        page.wait_for_function(
+            """() => document.querySelector(
+              '.movement-card.queue-active .movement-title'
+            )?.textContent === 'beta'""",
+            timeout=20_000,
+        )
+        solo_navigation_view = page.evaluate(
+            "() => structuredClone(window.__movementDiagnostics.mapView)"
+        )
+        assert solo_navigation_view["center"] == pytest.approx(scope_view_before["center"])
+        assert solo_navigation_view["zoom"] == pytest.approx(scope_view_before["zoom"])
+        page.locator('[data-queue-individual="alpha"]').click()
+        page.wait_for_function(
+            """() => document.querySelector(
+              '.movement-card.queue-active .movement-title'
+            )?.textContent === 'alpha'""",
+            timeout=20_000,
+        )
         page.locator('button[data-queue-scope="group"]').click()
 
         active_card = page.locator('[data-queue-individual="alpha"]')

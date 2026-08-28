@@ -9139,7 +9139,7 @@ class MovementExampleApp {
     return position.group;
   }
 
-  async applyIndividualQueueMapScope({ zoom = true } = {}) {
+  async applyIndividualQueueMapScope({ zoom = false } = {}) {
     if (!this.data || this.individualReviewQueue.mode !== "queue") {
       return;
     }
@@ -9190,13 +9190,11 @@ class MovementExampleApp {
     this.zoomToPath(fallback);
   }
 
-  async focusIndividualQueueItem(individual, { zoom = null, saveBeforeChange = true } = {}) {
+  async focusIndividualQueueItem(individual, { zoom = false, saveBeforeChange = true } = {}) {
     if (!this.data || !individual) {
       return false;
     }
-    const shouldZoom = typeof zoom === "boolean"
-      ? zoom
-      : this.individualReviewQueue.mapScope === "solo";
+    const shouldZoom = zoom === true;
     const previousIndividual = this.individualReviewQueue.activeIndividual;
     if (
       saveBeforeChange
@@ -17704,6 +17702,10 @@ class MovementExampleApp {
     this.refs.resumeClose.disabled = true;
     this.refs.resumeStatus.textContent = "Archiving metadata and removing forward history...";
     this.refs.resumeStatus.classList.remove("error");
+    const viewContext = this.captureDatasetViewContext();
+    if (viewContext) {
+      viewContext.annotationReloadContext = this.captureAnnotationReloadContext();
+    }
     try {
       const result = await this.requestJSON(
         `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/resume`,
@@ -17721,7 +17723,10 @@ class MovementExampleApp {
       this.setUser(user);
       this.refs.resumeModal.classList.add("hidden");
       this.currentDatasetId = result.dataset.dataset_id;
-      await this.loadStudy({ preferredDatasetId: result.dataset.dataset_id });
+      await this.loadStudy({
+        preferredDatasetId: result.dataset.dataset_id,
+        viewContext,
+      });
       const archive = result.archive || {};
       this.setStatus(
         `Resumed at ${result.dataset.dataset_id}; archived metadata for `

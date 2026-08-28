@@ -938,6 +938,13 @@ def test_movement_frontend_exposes_history_lock_and_resume_controls():
     assert "this.canPersistEdits()" in source
     assert "Generated outputs will be deleted." in source
     assert "Analyses, reports, exports, filtering, and visualization remain available." in source
+    resume = source[
+        source.index("  async submitResumeHistory()"):
+        source.index("  async undoCurrentHead()")
+    ]
+    assert "const viewContext = this.captureDatasetViewContext();" in resume
+    assert "viewContext.annotationReloadContext = this.captureAnnotationReloadContext();" in resume
+    assert "viewContext," in resume
 
 
 def test_movement_frontend_includes_auto_burst_controls():
@@ -2723,6 +2730,8 @@ def test_movement_frontend_preserves_queue_context_across_annotation_steps():
     assert "appliedRankingAnalysisId: queue.appliedRankingAnalysisId" in source
     assert "this.restoreAnnotationReloadContext(viewContext)" in source
     assert "preserveAnnotationContext: true" in source
+    assert 'async focusIndividualQueueItem(individual, { zoom = false' in source
+    assert "const shouldZoom = zoom === true;" in source
 
 
 def test_movement_frontend_updates_review_only_steps_without_reloading_tracks():
