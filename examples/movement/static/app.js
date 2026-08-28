@@ -600,6 +600,7 @@ class MovementExampleApp {
       histogramMax: null,
     };
     this.binaryThresholdContextCache = new Map();
+    this.checkedThresholdSignature = "";
     this.thresholdFlagScope = "whole_study";
     this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
@@ -10217,7 +10218,13 @@ class MovementExampleApp {
       return;
     }
     const selectedFixes = this.getSelectedFixes();
-    this.refs.fixHead.textContent = `Checked fixes (${formatCount(selectedFixes.length)})`;
+    const checkedThresholdSelection = this.isCheckedThresholdSelectionActive();
+    const thresholdMatchCount = checkedThresholdSelection
+      ? Number(this.getThresholdContext()?.matchCount) || selectedFixes.length
+      : selectedFixes.length;
+    this.refs.fixHead.textContent = checkedThresholdSelection
+      ? `Checked threshold matches (${formatCount(thresholdMatchCount)})`
+      : `Checked fixes (${formatCount(selectedFixes.length)})`;
     if (!selectedFixes.length) {
       const empty = document.createElement("div");
       empty.className = "movement-empty";
@@ -10314,10 +10321,12 @@ class MovementExampleApp {
 
       this.refs.selectedFixes.appendChild(card);
     }
-    if (selectedFixes.length > fixesToShow.length) {
+    if (thresholdMatchCount > fixesToShow.length) {
       const remainder = document.createElement("div");
       remainder.className = "movement-empty";
-      remainder.textContent = `Showing the first ${formatCount(fixesToShow.length)} checked fixes.`;
+      remainder.textContent = checkedThresholdSelection
+        ? `All ${formatCount(thresholdMatchCount)} matches are outlined on the map. Showing details for the first ${formatCount(fixesToShow.length)} to keep interaction responsive.`
+        : `Showing the first ${formatCount(fixesToShow.length)} checked fixes.`;
       this.refs.selectedFixes.appendChild(remainder);
     }
   }
@@ -12055,6 +12064,7 @@ class MovementExampleApp {
     const hideSuspected = this.refs.hideSuspected.checked;
     const temporalContext = this.temporalSliderEngaged;
     const mutedSuspicious = this.getCurrentColorField()?.key !== INDIVIDUAL_COLOR_FIELD_KEY;
+    const checkedThresholdSelection = this.isCheckedThresholdSelectionActive();
     const useFullLayer = allSelected && !queueIndividual && !manualFlagIndividual;
     const appendLayers = ({ binary, individual = "", fullLayer = false, visible = false }) => {
       const { cacheKey } = this.binaryRenderSpecification();
@@ -12197,6 +12207,22 @@ class MovementExampleApp {
           radiusMaxPixels: 6,
         }));
       }
+      if (checkedThresholdSelection && attributes.thresholdCount) {
+        layers.push(new deck.ScatterplotLayer({
+          id: `movement-binary-checked-threshold-${suffix}`,
+          data: deckData.thresholdData,
+          ...commonPointProps,
+          getFillColor: [0, 0, 0, 0],
+          getLineColor: [255, 204, 40, 255],
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 2,
+          getRadius: 130,
+          radiusMinPixels: 7,
+          radiusMaxPixels: 14,
+          pickable: false,
+        }));
+      }
     };
 
     if (full) {
@@ -12248,6 +12274,7 @@ class MovementExampleApp {
     const visibleSetNames = this.getVisibleSetNames();
     const showPoints = this.refs.showPoints.checked;
     const hideSuspected = this.refs.hideSuspected.checked;
+    const checkedThresholdSelection = this.isCheckedThresholdSelectionActive();
     const mutedSuspicious = this.getCurrentColorField()?.key !== INDIVIDUAL_COLOR_FIELD_KEY;
     const overviewPreviewTracks = this.getOverviewPreviewTracks(
       visibleIndividuals,
@@ -12408,17 +12435,19 @@ class MovementExampleApp {
           ? fix
           : null;
       };
-      for (const fixKey of this.data.selectedFixKeys) {
-        const fix = visibleFix(fixKey);
-        if (!fix) continue;
-        const point = {
-          fixKey: fix.fixKey,
-          individual: fix.individual,
-          setName: fix.setName,
-          position: fix.position,
-          color: this.colorForFix(fix),
-        };
-        selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
+      if (!checkedThresholdSelection || !hasExactMapBlocks) {
+        for (const fixKey of this.data.selectedFixKeys) {
+          const fix = visibleFix(fixKey);
+          if (!fix) continue;
+          const point = {
+            fixKey: fix.fixKey,
+            individual: fix.individual,
+            setName: fix.setName,
+            position: fix.position,
+            color: this.colorForFix(fix),
+          };
+          selectedPointData.push({ ...point, status: fix.review.status || "unreviewed" });
+        }
       }
       for (const fixKey of candidateMatchKeys) {
         const fix = visibleFix(fixKey);
@@ -12801,12 +12830,16 @@ class MovementExampleApp {
       return layerId === "movement-suspected-outline"
         || layerId.startsWith("movement-binary-suspected-");
     };
+    const isCheckedThresholdLayer = layer => String(layer?.id || "")
+      .startsWith("movement-binary-checked-threshold-");
     const orderedLayers = [
       ...layers.filter(layer => (
         !isSuspiciousPointLayer(layer)
+        && !isCheckedThresholdLayer(layer)
         && String(layer?.id || "") !== "movement-checked-suspicious-indicator"
       )),
       ...layers.filter(isSuspiciousPointLayer),
+      ...layers.filter(isCheckedThresholdLayer),
       ...layers.filter(
         layer => String(layer?.id || "") === "movement-checked-suspicious-indicator",
       ),
@@ -13408,12 +13441,14 @@ class MovementExampleApp {
       histogramMin: null,
       histogramMax: null,
     };
+    this.checkedThresholdSignature = "";
     if (this.flagTargetKind === "filter") {
       this.flagTargetKind = this.data?.selectedFixKeys?.size ? "fixes" : "none";
     }
   }
 
   syncFlagTargetToThreshold() {
+    this.checkedThresholdSignature = "";
     if (this.getActiveThresholdMatchKeys().size) {
       this.resetManualFlagTarget({ resetKind: false });
       this.flagTargetKind = "filter";
@@ -13646,6 +13681,29 @@ class MovementExampleApp {
       uncheckedMatchKeys,
       selectionMatchesPreview,
     };
+  }
+
+  thresholdSelectionSignature() {
+    const field = this.getCurrentColorField();
+    if (!this.hasActiveThreshold(field)) return "";
+    return JSON.stringify({
+      datasetId: this.currentDatasetId || "",
+      fieldKey: field?.key || "",
+      value: finiteOrNull(this.thresholdState.value),
+      reverse: this.thresholdState.reverse === true,
+      selectedLevels: [...(this.thresholdState.selectedLevels || [])].sort(),
+      gpsSpikeTurnAngleDeg: this.gpsSpikeTurnAngleDeg,
+      individuals: this.getSelectedIndividuals(),
+      setNames: [...this.getVisibleSetNames()].sort(),
+    });
+  }
+
+  isCheckedThresholdSelectionActive() {
+    return Boolean(
+      this.checkedThresholdSignature
+      && this.flagTargetKind === "filter"
+      && this.checkedThresholdSignature === this.thresholdSelectionSignature()
+    );
   }
 
   getThresholdContext() {
@@ -13881,7 +13939,7 @@ class MovementExampleApp {
     const levelOptions = context?.levelOptions || [];
     const disabledReason = context?.disabledReason || "";
     const matchCount = Number(context?.matchCount) || context?.matchKeys?.size || 0;
-    const selectionMatchesPreview = context?.selectionMatchesPreview === true;
+    const checkedThresholdSelection = this.isCheckedThresholdSelectionActive();
     const previewTruncated = context?.previewTruncated === true;
     const histogram = context?.histogram;
     const histogramMode = context?.histogramMode === "clipped" ? "clipped" : "full";
@@ -13941,8 +13999,10 @@ class MovementExampleApp {
       const meta = selectedLevels.length
         ? `${formatCount(matchCount)} fixes match ${formatCount(selectedLevels.length)} selected levels.`
         : "Choose one or more levels to highlight matching fixes.";
-      const selectionNote = selectionMatchesPreview
-        ? "The checked-fix preview exactly matches the highlighted fixes."
+      const selectionNote = checkedThresholdSelection
+        ? previewTruncated
+          ? `All ${formatCount(matchCount)} matching fixes have an amber outline; details for the first ${formatCount(context.matchKeys.size)} are listed below.`
+          : `All ${formatCount(matchCount)} matching fixes have an amber outline and are in the checked-fix list.`
         : matchCount > 0
           ? previewTruncated
             ? `${formatCount(matchCount)} fixes match; Select fixes will replace the checked-fix preview with its first ${formatCount(context.matchKeys.size)} matches.`
@@ -13976,7 +14036,7 @@ class MovementExampleApp {
           <button
             type="button"
             data-action="check-above-threshold"
-            ${matchCount === 0 || selectionMatchesPreview ? "disabled" : ""}
+            ${matchCount === 0 || checkedThresholdSelection ? "disabled" : ""}
           >Select fixes</button>
           <button
             type="button"
@@ -14025,8 +14085,10 @@ class MovementExampleApp {
         ? "No threshold set"
         : matchCount === 0
           ? "No matches"
-          : selectionMatchesPreview
-            ? `${formatCount(matchCount)} matches • checked-fix preview matches exactly`
+          : checkedThresholdSelection
+            ? previewTruncated
+              ? `${formatCount(matchCount)} matches • all outlined in amber • first ${formatCount(context.matchKeys.size)} listed below`
+              : `${formatCount(matchCount)} matches • all outlined in amber`
             : previewTruncated
               ? `${formatCount(matchCount)} matches • Select fixes replaces the checked-fix preview with its first ${formatCount(context.matchKeys.size)}`
               : `${formatCount(matchCount)} matches • Select fixes replaces the checked-fix preview`;
@@ -14112,7 +14174,7 @@ class MovementExampleApp {
           <button
             type="button"
             data-action="check-above-threshold"
-            ${matchCount === 0 || selectionMatchesPreview ? "disabled" : ""}
+            ${matchCount === 0 || checkedThresholdSelection ? "disabled" : ""}
           >Select fixes</button>
           <button
             type="button"
@@ -14379,7 +14441,7 @@ class MovementExampleApp {
       return;
     }
     const context = this.getThresholdContext();
-    if (!context?.matchKeys?.size || context.selectionMatchesPreview) {
+    if (!context?.matchKeys?.size || this.isCheckedThresholdSelectionActive()) {
       return;
     }
     // The checked preview must correspond exactly to the fixes currently
@@ -14390,6 +14452,7 @@ class MovementExampleApp {
     // Keep the persistent action attached to the filter so compact binary data
     // can resolve every match in the chosen scope on the server.
     this.flagTargetKind = "filter";
+    this.checkedThresholdSignature = this.thresholdSelectionSignature();
     this.renderSelectedFixes();
     this.renderThresholdPane();
     this.renderLayers();

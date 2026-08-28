@@ -364,7 +364,8 @@ def test_rds_binary_renderer_reuses_attributes_and_omits_empty_overlays():
     assert source.count("recomputeColorStyles: false") >= 2
     assert "attributeCacheKey = binary.lastRenderCacheKey" in binary_layers
     assert "this.binaryFilterExtension = new deck.DataFilterExtension" in binary_layers
-    assert "attributes.thresholdCount" not in binary_layers
+    assert "if (checkedThresholdSelection && attributes.thresholdCount)" in binary_layers
+    assert "movement-binary-checked-threshold-${suffix}" in binary_layers
     assert "CONTEXT_GRAY_POINT" in binary_layers
     assert "attributes.suspectedCount" in binary_layers
     assert "attributes.confirmedCount" in binary_layers

@@ -1110,10 +1110,11 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
             "window.__movementDiagnostics.binaryThresholdMatchCount"
         )
         page.locator('button[data-action="check-above-threshold"]').click()
+        _wait_for_layer(page, "movement-binary-checked-threshold")
         selected_count = page.evaluate(
             "window.__movementDiagnosticsSnapshot().selectedFixCount"
         )
-        assert selected_count == min(highlighted_count, 5_000)
+        assert selected_count == min(highlighted_count, 150)
 
         if outlier_sample.exists():
             outlier_individual = page.locator('[data-individual-checkbox="MF006"]')

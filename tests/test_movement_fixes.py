@@ -1944,6 +1944,10 @@ def test_gps_spike_checked_preview_matches_binary_highlight_and_reuses_context()
     )
     assert "this.binaryThresholdContextCache.get(contextCacheKey)" in source
     assert "this.data.selectedFixKeys = new Set(context.matchKeys);" in source
+    assert "this.checkedThresholdSignature = this.thresholdSelectionSignature();" in source
+    assert "movement-binary-checked-threshold-${suffix}" in source
+    assert "data: deckData.thresholdData" in source
+    assert "All ${formatCount(thresholdMatchCount)} matches are outlined on the map." in source
     assert "const nextSelected = new Set(this.data.selectedFixKeys);" not in source[
         source.index("  checkAboveThresholdSelection() {") :
         source.index(
