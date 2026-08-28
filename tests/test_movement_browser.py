@@ -304,6 +304,13 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path):
         _wait_for_layer(page, "movement-binary-paths-full")
         assert len(binary_requests) == 3
         assert page.evaluate("window.__movementDiagnostics.binaryAttributeBuilds") == builds_after_full
+        snapshot = page.evaluate("window.__movementDiagnosticsSnapshot()")
+        assert snapshot["binaryBlockCount"] >= 1
+        assert snapshot["binaryRowCount"] >= 6
+        assert snapshot["workerBlockCount"] >= 1
+        assert snapshot["renderCalls"] > 0
+        assert snapshot["renderedLayerCount"] == len(snapshot["renderedLayerIds"])
+        assert snapshot["documentNodeCount"] > snapshot["queueCardCount"]
 
         page.locator('[data-role="individual-view-queue"]').click()
         entire_individual = page.locator('button[data-queue-flag-individual]').first

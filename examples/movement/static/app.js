@@ -507,8 +507,30 @@ class MovementExampleApp {
     this.previewHandoffFrame = null;
     this.movementDiagnostics = {
       binaryRequests: 0,
+      jsonDetailRequests: 0,
+      reviewProjectionRequests: 0,
       binaryCacheHits: 0,
       binaryAttributeBuilds: 0,
+      renderCalls: 0,
+      renderLastMs: 0,
+      renderTotalMs: 0,
+      renderMaxMs: 0,
+      queueRenderCalls: 0,
+      queueCardsCreated: 0,
+      queueCardsReused: 0,
+      queueCardsRemoved: 0,
+      reviewProjectionCalls: 0,
+      reviewProjectionLastMs: 0,
+      reviewProjectionTotalMs: 0,
+      reviewProjectionMaxMs: 0,
+      binaryReviewBlocksScanned: 0,
+      binaryReviewRowsScanned: 0,
+      binaryReviewBlocksChanged: 0,
+      binaryReviewLastMs: 0,
+      datasetTransitionCalls: 0,
+      datasetTransitionLastMs: 0,
+      datasetTransitionTotalMs: 0,
+      datasetTransitionMaxMs: 0,
       queueContextGrayCount: 0,
       queueContextColoredCount: 0,
       previewActivations: 0,
@@ -519,6 +541,7 @@ class MovementExampleApp {
       mapView: null,
     };
     window.__movementDiagnostics = this.movementDiagnostics;
+    window.__movementDiagnosticsSnapshot = () => this.captureMovementDiagnosticsSnapshot();
     this.lastCandidateMatchKeys = new Set();
     this.loadRequestId = 0;
     this.studyLoadId = 0;
@@ -4595,6 +4618,69 @@ class MovementExampleApp {
       throw error;
     }
     return payload;
+  }
+
+  recordMovementDiagnosticDuration(prefix, startedAt) {
+    const elapsed = Math.max(0, performance.now() - startedAt);
+    this.movementDiagnostics[`${prefix}LastMs`] = elapsed;
+    this.movementDiagnostics[`${prefix}TotalMs`] = (
+      Number(this.movementDiagnostics[`${prefix}TotalMs`]) || 0
+    ) + elapsed;
+    this.movementDiagnostics[`${prefix}MaxMs`] = Math.max(
+      Number(this.movementDiagnostics[`${prefix}MaxMs`]) || 0,
+      elapsed,
+    );
+    return elapsed;
+  }
+
+  captureMovementDiagnosticsSnapshot() {
+    const data = this.data;
+    const binaries = new Set([
+      data?.fullBinaryMovement,
+      ...(data?.binaryBlocks?.values?.() || []),
+    ].filter(Boolean));
+    let binaryRows = 0;
+    let renderCacheEntries = 0;
+    let deckDataCacheEntries = 0;
+    let workerBlocks = 0;
+    for (const binary of binaries) {
+      binaryRows += Number(binary?.header?.row_count) || 0;
+      renderCacheEntries += Number(binary?.renderCaches?.size) || 0;
+      deckDataCacheEntries += Number(binary?.deckDataCaches?.size) || 0;
+      if (binary?.workerBlockId) workerBlocks += 1;
+    }
+    const focusedEntries = data?.focusedObjectCache instanceof Map
+      ? [...data.focusedObjectCache.values()]
+      : [];
+    const focusedFixes = focusedEntries.reduce(
+      (total, entry) => total + Number(entry?.fixes?.length || 0),
+      0,
+    );
+    const memory = performance.memory || {};
+    return {
+      ...this.movementDiagnostics,
+      capturedAt: performance.now(),
+      datasetId: this.currentDatasetId,
+      activeIndividual: this.individualReviewQueue?.activeIndividual || "",
+      selectedIndividualCount: data?.selectedIndividuals?.size || 0,
+      binaryBlockCount: binaries.size,
+      binaryRowCount: binaryRows,
+      renderCacheEntries,
+      deckDataCacheEntries,
+      workerBlockCount: workerBlocks,
+      focusedObjectEntries: focusedEntries.length,
+      focusedObjectFixCount: focusedFixes,
+      materializedFixCount: data?.fixes?.length || 0,
+      detailFixCount: data?.detailFixes?.length || 0,
+      reviewIssueAnnotationCount: data?.reviewIssueAnnotations?.length || 0,
+      graphDatasetCount: this.allDatasets?.length || 0,
+      graphStepCount: this.stepByOutputDatasetId?.size || 0,
+      queueCardCount: this.refs?.individuals?.querySelectorAll?.("[data-queue-individual]")?.length || 0,
+      documentNodeCount: document.getElementsByTagName("*").length,
+      renderedLayerCount: this.movementDiagnostics.renderedLayerIds.length,
+      jsHeapUsedBytes: Number(memory.usedJSHeapSize) || null,
+      jsHeapTotalBytes: Number(memory.totalJSHeapSize) || null,
+    };
   }
 
   async loadBinaryMovement({
@@ -9881,6 +9967,7 @@ class MovementExampleApp {
   }
 
   renderIndividualReviewQueue() {
+    this.movementDiagnostics.queueRenderCalls += 1;
     this.syncPriorOkLastControl();
     const position = this.getIndividualQueuePosition();
     const queue = this.individualReviewQueue;
@@ -9950,6 +10037,9 @@ class MovementExampleApp {
       if (!card) {
         card = document.createElement("div");
         card.dataset.queueIndividual = individual;
+        this.movementDiagnostics.queueCardsCreated += 1;
+      } else {
+        this.movementDiagnostics.queueCardsReused += 1;
       }
       const unresolvedCount = Number(stats.unresolvedSuspectedCount) || 0;
       const origins = Array.isArray(stats.unresolvedIssueOrigins) ? stats.unresolvedIssueOrigins : [];
@@ -10060,7 +10150,10 @@ class MovementExampleApp {
     }
     const desiredSet = new Set(desiredCards);
     for (const child of [...this.refs.individuals.children]) {
-      if (!desiredSet.has(child)) child.remove();
+      if (!desiredSet.has(child)) {
+        child.remove();
+        this.movementDiagnostics.queueCardsRemoved += 1;
+      }
     }
     for (let index = 0; index < desiredCards.length; index += 1) {
       const card = desiredCards[index];
@@ -12081,6 +12174,8 @@ class MovementExampleApp {
   }
 
   renderLayers({ temporalOnly = false } = {}) {
+    const diagnosticStartedAt = performance.now();
+    this.movementDiagnostics.renderCalls += 1;
     this.renderBurstCountIndicator();
     this.syncFixPopupVisibility();
     if (!this.data || !this.overlay || !this.mapLoaded) {
@@ -12090,6 +12185,7 @@ class MovementExampleApp {
         } catch {}
       }
       this.renderFixPopup();
+      this.recordMovementDiagnosticDuration("render", diagnosticStartedAt);
       return;
     }
 
@@ -12676,6 +12772,7 @@ class MovementExampleApp {
       this.setStatus(`Map warning: ${error.message}`, true);
     }
     this.renderFixPopup();
+    this.recordMovementDiagnosticDuration("render", diagnosticStartedAt);
   }
 
   isSourceOnlyFlaggedBurst(burst) {
@@ -14572,6 +14669,7 @@ class MovementExampleApp {
     const requestId = ++this.loadRequestId;
     try {
       const controller = this.beginRequest("detail");
+      this.movementDiagnostics.jsonDetailRequests += 1;
       const payload = await this.fetchJSON(
         this.buildFixesRequestUrl({ familyName, studyName, datasetId, artifactName, individuals: selectedIndividuals }),
         { signal: controller.signal },
@@ -14682,6 +14780,7 @@ class MovementExampleApp {
     const requestId = ++this.loadRequestId;
     try {
       const controller = this.beginRequest("detail");
+      this.movementDiagnostics.jsonDetailRequests += 1;
       const payload = await this.fetchJSON(
         this.buildFixesRequestUrl({
           familyName,
@@ -17242,6 +17341,7 @@ class MovementExampleApp {
       params.append("individuals", individual);
     }
     const controller = this.beginRequest("reviewProjection");
+    this.movementDiagnostics.reviewProjectionRequests += 1;
     const payload = await this.fetchJSON(
       `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/dataset/${encodeURIComponent(datasetId)}/review-projection?${params.toString()}`,
       { signal: controller.signal, cache: "no-store" },
@@ -17342,6 +17442,7 @@ class MovementExampleApp {
 
   async applyBinaryReviewProjection(projection) {
     if (!this.data?.binaryBlocks?.size) return;
+    const diagnosticStartedAt = performance.now();
     const projectedIndividuals = new Set(
       Array.isArray(projection.projected_individuals)
         ? projection.projected_individuals.map(String)
@@ -17382,6 +17483,8 @@ class MovementExampleApp {
     if (this.data.fullBinaryMovement) binaries.add(this.data.fullBinaryMovement);
     const workerUpdates = [];
     for (const binary of binaries) {
+      this.movementDiagnostics.binaryReviewBlocksScanned += 1;
+      this.movementDiagnostics.binaryReviewRowsScanned += Number(binary.header.row_count) || 0;
       const arrays = binary.arrays;
       let changed = false;
       for (let index = 0; index < Number(binary.header.row_count); index += 1) {
@@ -17402,6 +17505,7 @@ class MovementExampleApp {
         }
       }
       if (!changed) continue;
+      this.movementDiagnostics.binaryReviewBlocksChanged += 1;
       binary.renderCaches?.clear?.();
       binary.deckDataCaches?.clear?.();
       binary.attributePromises?.clear?.();
@@ -17410,10 +17514,16 @@ class MovementExampleApp {
       workerUpdates.push(updateMovementBinaryWorkerReviewStatus(binary));
     }
     await Promise.all(workerUpdates);
+    this.movementDiagnostics.binaryReviewLastMs = Math.max(
+      0,
+      performance.now() - diagnosticStartedAt,
+    );
   }
 
   async applyReviewProjection(projection) {
     if (!this.data) return;
+    const diagnosticStartedAt = performance.now();
+    this.movementDiagnostics.reviewProjectionCalls += 1;
     // Keep the newest annotation projection with the immutable movement blocks.
     // A compatible review step can complete while an exact block from its parent
     // dataset is still in flight; loadBinaryMovement reapplies this projection
@@ -17525,6 +17635,7 @@ class MovementExampleApp {
       stats.reviewDecisionOrigin = String(decision.decision_origin || "");
       stats.reviewRound = Number(decision.review_round || 0);
     }
+    this.recordMovementDiagnosticDuration("reviewProjection", diagnosticStartedAt);
   }
 
   clearCompletedFlagTarget(clearTarget) {
@@ -17593,6 +17704,14 @@ class MovementExampleApp {
       reason = "dataset_switch",
     } = {},
   ) {
+    const diagnosticStartedAt = performance.now();
+    this.movementDiagnostics.datasetTransitionCalls += 1;
+    let diagnosticFinished = false;
+    const finishTransitionDiagnostics = () => {
+      if (diagnosticFinished) return;
+      diagnosticFinished = true;
+      this.recordMovementDiagnosticDuration("datasetTransition", diagnosticStartedAt);
+    };
     const transitionId = ++this.viewTransitionId;
     const binaryLoadWasInterrupted = Boolean(
       this.data?.binaryPendingIndividuals?.size
@@ -17626,7 +17745,10 @@ class MovementExampleApp {
     }
     try {
       const projection = await this.fetchReviewProjection(datasetId);
-      if (transitionId !== this.viewTransitionId) return;
+      if (transitionId !== this.viewTransitionId) {
+        finishTransitionDiagnostics();
+        return;
+      }
       this.rememberDatasetMetadata(projection.dataset);
       const compatible = Boolean(
         this.data
@@ -17643,7 +17765,10 @@ class MovementExampleApp {
           await this.refreshGraphMetadata(datasetId);
         }
         await this.loadDataset(viewContext);
-        if (transitionId !== this.viewTransitionId) return;
+        if (transitionId !== this.viewTransitionId) {
+          finishTransitionDiagnostics();
+          return;
+        }
         const loadedRequestedView = Boolean(
           this.data
           && this.data.sourceSignature === String(projection.source_signature || "")
@@ -17663,6 +17788,7 @@ class MovementExampleApp {
         this.renderThresholdPane();
         this.renderLayers();
         this.updateActionButtons();
+        finishTransitionDiagnostics();
         return;
       }
 
@@ -17699,7 +17825,9 @@ class MovementExampleApp {
           requireObjects: this.individualReviewQueue.mode === "queue",
         });
       }
+      finishTransitionDiagnostics();
     } catch (error) {
+      finishTransitionDiagnostics();
       if (this.isAbortError(error)) return;
       this.currentDatasetId = previousDatasetId;
       this.refs.dataset.value = previousDatasetId;
