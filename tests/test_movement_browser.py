@@ -924,6 +924,7 @@ def test_admin_dashboard_refreshes_active_review_without_rebuilding_rows(tmp_pat
         )
         assert page.locator('[data-admin-field="review"]').text_content() == "active"
         assert page.locator('[data-admin-field="ok"]').text_content() == "1"
+        assert page.locator('[data-admin-field="undecided"]').count() == 0
         assert page.evaluate("""() => (
           window.__adminDashboardRow === document.querySelector('tr[data-admin-study-row]')
         )""")
@@ -1178,7 +1179,9 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
                 "() => !document.querySelector('[data-role=dismiss-suspected]').disabled",
                 timeout=20_000,
             )
-            assert unflag_button.text_content() == "Unflag suspicious"
+            assert unflag_button.text_content() == "Unflag suspicious (3)"
+            layer_ids = _layer_ids(page)
+            assert layer_ids[-1] == "movement-checked-suspicious-indicator"
             unflag_button.click()
             page.locator('[data-role="dismiss-modal"]').wait_for(state="visible")
             page.locator('[data-role="dismiss-submit"]').click()

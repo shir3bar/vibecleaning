@@ -1052,6 +1052,49 @@ def test_movement_frontend_clears_checked_fix_halos_and_enlarges_suspicious_fixe
     assert "getFillColor: pointColor" in source
     assert "filled: true" in binary_suspected_layer
     assert "radiusMinPixels: mutedSuspicious ? 9 : 10" in binary_suspected_layer
+    assert 'id: "movement-checked-suspicious-indicator"' in source
+    assert "pickable: false" in source[
+        source.index('id: "movement-checked-suspicious-indicator"'):
+        source.index("if (visibleAutoBurstPaths.length", source.index('id: "movement-checked-suspicious-indicator"'))
+    ]
+    assert "radiusMinPixels: 13" in source
+    assert 'String(layer?.id || "") === "movement-checked-suspicious-indicator"' in source
+    assert "radiusMinPixels: 5" in source
+
+
+def test_movement_popup_and_rds_labels_hide_internal_identifiers():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    popup_fields = source[
+        source.index("const FIX_POPUP_DEFAULT_FIELDS"):
+        source.index("const FIX_POPUP_OFFSET_PX")
+    ]
+    assert '"fix_key"' not in popup_fields
+    assert 'MOVEMENT_APP_CONFIG.rdsSource && fieldKey === "set"' in source
+    assert "movement-fix-popup-row.is-suspected" in source
+    assert "movement-fix-popup-row.is-issue-type" in source
+    assert "function movementSetLabel(value, prefix = \"\")" in source
+    assert "if (!label || MOVEMENT_APP_CONFIG.rdsSource)" in source
+
+
+def test_movement_unflag_action_counts_dismissible_checked_fixes():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    assert "const unflagFixCount = new Set(" in source
+    assert "`Unflag suspicious (${formatCount(unflagFixCount)})`" in source
+    assert "|| unflagFixCount === 0" in source
+
+
+def test_admin_dashboard_omits_undecided_presentation_only():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    dashboard = source[
+        source.index("  updateAdminDashboardRow("):
+        source.index("  async handleAdminDashboardClick(")
+    ]
+
+    assert "<th>Undecided</th>" not in dashboard
+    assert 'data-admin-field="undecided"' not in dashboard
+    assert 'colspan="9"' in dashboard
 
 
 def test_movement_frontend_uses_gray_context_without_threshold_halos():

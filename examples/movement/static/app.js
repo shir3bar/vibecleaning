@@ -215,7 +215,6 @@ const TABLE_INITIAL_ROW_LIMIT = 250;
 const TABLE_ROW_INCREMENT = 250;
 const FIX_POPUP_DEFAULT_FIELDS = [
   "set",
-  "fix_key",
   "review.status",
   "review.issue_type",
   "step_length_m",
@@ -1832,6 +1831,20 @@ class MovementExampleApp {
         .movement-fix-popup-value {
           color: #eef4fb;
           overflow-wrap: anywhere;
+        }
+        .movement-fix-popup-row.is-suspected .movement-fix-popup-value {
+          justify-self: start;
+          padding: 2px 7px;
+          border: 1px solid rgba(255, 204, 40, 0.5);
+          border-radius: 999px;
+          background: rgba(255, 204, 40, 0.13);
+          color: #ffd86a;
+          font-weight: 700;
+        }
+        .movement-fix-popup-row.is-issue-type .movement-fix-popup-label,
+        .movement-fix-popup-row.is-issue-type .movement-fix-popup-value {
+          color: #7fe7ff;
+          font-weight: 650;
         }
         .movement-threshold-head {
           display: grid;
@@ -6192,7 +6205,7 @@ class MovementExampleApp {
     const main = [
       String(point.burst_id || ""),
       point.individual ? `individual ${point.individual}` : "",
-      point.set_name ? `track ${point.set_name}` : "",
+      movementSetLabel(point.set_name, "track "),
       Number.isFinite(Number(point.n_fixes)) ? `${formatCount(point.n_fixes)} fixes` : "",
     ].filter(Boolean);
     return `
@@ -6572,7 +6585,7 @@ class MovementExampleApp {
           const isTopRankingBurst = refIndex === 0;
           const fixCount = finiteOrNull(ref.n_fixes ?? ref.fix_count) ?? ref.fix_keys.length;
           const meta = [
-            ref.set_name ? `track ${ref.set_name}` : "",
+            movementSetLabel(ref.set_name, "track "),
             Number.isFinite(Number(fixCount)) ? `${formatCount(fixCount)} fixes` : "",
             finiteOrNull(ref.outlier_margin) !== null
               ? `decision margin ${formatMaybeNumber(finiteOrNull(ref.outlier_margin), "")}`
@@ -7407,7 +7420,6 @@ class MovementExampleApp {
       fix_keep: formatCount(counts.fix_keep || 0),
       remove: formatCount(counts.remove || 0),
       needs_check: formatCount(counts.needs_check || 0),
-      undecided: formatCount(counts.undecided || 0),
     };
     for (const [field, value] of Object.entries(values)) {
       const cell = row.querySelector(`[data-admin-field="${field}"]`);
@@ -7446,7 +7458,7 @@ class MovementExampleApp {
       <table class="movement-admin-dashboard-table">
         <thead><tr>
           <th>Study</th><th>Review</th><th>Reviewer</th><th>Progress</th>
-          <th>OK</th><th>Fix &amp; Keep</th><th>Remove</th><th>Needs check</th><th>Undecided</th><th>Actions</th>
+          <th>OK</th><th>Fix &amp; Keep</th><th>Remove</th><th>Needs check</th><th>Actions</th>
         </tr></thead>
         <tbody>
           ${studies.map(item => {
@@ -7463,14 +7475,13 @@ class MovementExampleApp {
                 <td data-admin-field="fix_keep">${escapeHtml(formatCount(counts.fix_keep || 0))}</td>
                 <td data-admin-field="remove">${escapeHtml(formatCount(counts.remove || 0))}</td>
                 <td data-admin-field="needs_check">${escapeHtml(formatCount(counts.needs_check || 0))}</td>
-                <td data-admin-field="undecided">${escapeHtml(formatCount(counts.undecided || 0))}</td>
                 <td><div class="movement-admin-dashboard-actions">
                   <button type="button" data-admin-action="expand">Individuals</button>
                   <button type="button" data-admin-action="open">Open study</button>
                 </div></td>
               </tr>
               <tr data-admin-detail-row data-family="${escapeHtml(item.family || "")}" data-study="${escapeHtml(item.study || "")}" hidden>
-                <td colspan="10"><div class="movement-admin-individuals">Loading...</div></td>
+                <td colspan="9"><div class="movement-admin-individuals">Loading...</div></td>
               </tr>
             `;
           }).join("")}
@@ -9033,7 +9044,7 @@ class MovementExampleApp {
                     >
                     <span>
                       <strong>Visible ${escapeHtml(`burst ${formatCount(burst.burstIdx + 1)}`)}</strong>
-                      • ${escapeHtml(burst.setName)}
+                      ${MOVEMENT_APP_CONFIG.rdsSource ? "" : `• ${escapeHtml(burst.setName)}`}
                       • ${escapeHtml(formatTimestamp(burst.startTimeMs))}
                       • ${escapeHtml(`${formatCount(burst.fixCount)} fixes`)}
                     </span>
@@ -10827,7 +10838,7 @@ class MovementExampleApp {
           <thead>
             <tr>
               <th>Individual</th>
-              <th>Track</th>
+              ${MOVEMENT_APP_CONFIG.rdsSource ? "" : "<th>Track</th>"}
               <th>Status</th>
               <th>Issue type</th>
               <th>Fixes</th>
@@ -10840,7 +10851,7 @@ class MovementExampleApp {
             ${segments.map(segment => `
               <tr class="is-segment-row" data-segment-id="${escapeHtml(segment.segmentId)}">
                 <td>${escapeHtml(segment.individual)}</td>
-                <td>${escapeHtml(segment.setName)}</td>
+                ${MOVEMENT_APP_CONFIG.rdsSource ? "" : `<td>${escapeHtml(segment.setName)}</td>`}
                 <td>${escapeHtml(segment.status || "unreviewed")}</td>
                 <td>${escapeHtml(segment.issueType || "Unspecified issue")}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(String(segment.fixCount))}</td>
@@ -10873,7 +10884,7 @@ class MovementExampleApp {
               <th>Flag</th>
               <th>Color</th>
               <th>Individual</th>
-              <th>Track</th>
+              ${MOVEMENT_APP_CONFIG.rdsSource ? "" : "<th>Track</th>"}
               <th>Burst</th>
               <th>Fixes</th>
               <th>Start</th>
@@ -10888,7 +10899,7 @@ class MovementExampleApp {
                 <td><input type="checkbox" data-table-check-burst="${escapeHtml(burst.burstId)}"${this.flagTargetKind === "bursts" && this.manualFlagTarget.burstIds.has(burst.burstId) ? " checked" : ""}${flagCheckboxDisabled}></td>
                 <td><span class="movement-burst-swatch" style="background: ${escapeHtml(rgbaCss(burstPathColor(this.data?.individualPalette, burst, 215)))}"></span></td>
                 <td>${escapeHtml(burst.individual)}</td>
-                <td>${escapeHtml(burst.setName)}</td>
+                ${MOVEMENT_APP_CONFIG.rdsSource ? "" : `<td>${escapeHtml(burst.setName)}</td>`}
                 <td class="movement-table-cell-mono">${escapeHtml(String(burst.burstIdx))}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(String(burst.fixCount))}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(burst.startTimeMs))}</td>
@@ -10937,7 +10948,11 @@ class MovementExampleApp {
       selectionSummary = `${formatCount(selectedCount)} table rows selected. Shift-click within one track to turn the selection into a contiguous segment range.`;
     }
     if (selection && selection.fixes.length >= 2) {
-      selectionSummary = `${selection.individual} • ${selection.setName} • ${formatCount(selection.fixes.length)} fixes from ${formatTimestamp(selection.fixes[0].timeMs)} to ${formatTimestamp(selection.fixes[selection.fixes.length - 1].timeMs)}`;
+      selectionSummary = [
+        selection.individual,
+        movementSetLabel(selection.setName),
+        `${formatCount(selection.fixes.length)} fixes from ${formatTimestamp(selection.fixes[0].timeMs)} to ${formatTimestamp(selection.fixes[selection.fixes.length - 1].timeMs)}`,
+      ].filter(Boolean).join(" • ");
     }
     const renderNote = renderedTable.hasMore
       ? ` Rendering ${formatCount(renderedTable.renderedCount)} of ${formatCount(renderedTable.totalRows)} rows; scroll to load more.`
@@ -10953,7 +10968,7 @@ class MovementExampleApp {
           <tr>
             <th>Flag</th>
             <th>Individual</th>
-            <th>Track</th>
+            ${MOVEMENT_APP_CONFIG.rdsSource ? "" : "<th>Track</th>"}
             <th>Timestamp</th>
             <th>Status</th>
             <th>Segment</th>
@@ -10979,7 +10994,7 @@ class MovementExampleApp {
               <tr class="${rowClasses}" data-fix-key="${escapeHtml(fix.fixKey)}">
                 <td><input type="checkbox" data-table-check-fix="${escapeHtml(fix.fixKey)}"${this.data.selectedFixKeys.has(fix.fixKey) ? " checked" : ""}${flagCheckboxDisabled}></td>
                 <td>${escapeHtml(fix.individual)}</td>
-                <td>${escapeHtml(fix.setName)}</td>
+                ${MOVEMENT_APP_CONFIG.rdsSource ? "" : `<td>${escapeHtml(fix.setName)}</td>`}
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(fix.timeMs))}</td>
                 <td>${escapeHtml(fix.review?.status || "unreviewed")}</td>
                 <td>${escapeHtml(segmentLabel || "—")}</td>
@@ -10993,7 +11008,7 @@ class MovementExampleApp {
           }).join("")}
           ${renderedTable.hasMore ? `
             <tr class="movement-table-more-row">
-              <td colspan="11" class="movement-table-more-cell">Scroll to load more rows.</td>
+              <td colspan="${MOVEMENT_APP_CONFIG.rdsSource ? "10" : "11"}" class="movement-table-more-cell">Scroll to load more rows.</td>
             </tr>
           ` : ""}
         </tbody>
@@ -11990,7 +12005,7 @@ class MovementExampleApp {
       const commonPointProps = {
         ...(temporalContext ? { getFillColor: CONTEXT_GRAY_POINT } : {}),
         getRadius: 68,
-        radiusMinPixels: 3,
+        radiusMinPixels: 5,
         radiusMaxPixels: 8,
         filterRange: [1, 1],
         extensions: [filterExtension],
@@ -12314,6 +12329,28 @@ class MovementExampleApp {
         }),
       );
     }
+
+    const checkedSuspiciousPointData = selectedPointData.filter(
+      item => item.status === "suspected",
+    );
+    if (checkedSuspiciousPointData.length) {
+      layers.push(
+        new deck.ScatterplotLayer({
+          id: "movement-checked-suspicious-indicator",
+          data: checkedSuspiciousPointData,
+          getPosition: item => item.position,
+          getFillColor: [0, 0, 0, 0],
+          getLineColor: [72, 222, 255, 255],
+          filled: false,
+          stroked: true,
+          lineWidthMinPixels: 3.5,
+          getRadius: 215,
+          radiusMinPixels: 13,
+          radiusMaxPixels: 25,
+          pickable: false,
+        }),
+      );
+    }
     if (visibleAutoBurstPaths.length && !hasExactMapBlocks) {
       layers.push(
         new deck.PathLayer({
@@ -12614,8 +12651,14 @@ class MovementExampleApp {
         || layerId.startsWith("movement-binary-suspected-");
     };
     const orderedLayers = [
-      ...layers.filter(layer => !isSuspiciousPointLayer(layer)),
+      ...layers.filter(layer => (
+        !isSuspiciousPointLayer(layer)
+        && String(layer?.id || "") !== "movement-checked-suspicious-indicator"
+      )),
       ...layers.filter(isSuspiciousPointLayer),
+      ...layers.filter(
+        layer => String(layer?.id || "") === "movement-checked-suspicious-indicator",
+      ),
     ];
 
     try {
@@ -12975,7 +13018,7 @@ class MovementExampleApp {
       </div>
       <div class="movement-fix-popup-fields">
         ${popupFields.map(field => `
-          <div class="movement-fix-popup-row">
+          <div class="movement-fix-popup-row${field.id === "review.status" && field.value.toLowerCase() === "suspected" ? " is-suspected" : ""}${field.id === "review.issue_type" ? " is-issue-type" : ""}">
             <div class="movement-fix-popup-label">${escapeHtml(field.label)}</div>
             <div class="movement-fix-popup-value">${escapeHtml(field.value)}</div>
           </div>
@@ -13016,7 +13059,7 @@ class MovementExampleApp {
       if (seenKeys.has(id)) {
         return;
       }
-      rows.push({ label, value: value === null || value === undefined || value === "" ? "missing" : String(value) });
+      rows.push({ id, label, value: value === null || value === undefined || value === "" ? "missing" : String(value) });
       seenKeys.add(id);
     };
     addRow("individual", "Individual", fix.individual, { allowMissing: true });
@@ -13028,6 +13071,9 @@ class MovementExampleApp {
     );
 
     for (const fieldKey of FIX_POPUP_DEFAULT_FIELDS) {
+      if (MOVEMENT_APP_CONFIG.rdsSource && fieldKey === "set") {
+        continue;
+      }
       const resolved = this.resolvePopupFieldValue(fix, fieldKey);
       if (!resolved) {
         continue;
@@ -15514,6 +15560,12 @@ class MovementExampleApp {
       || ["individual", "bursts", "filter"].includes(flagTarget.kind)
     );
     const canConfirmSelectedFixes = this.canConfirmFixes(selectedFixes);
+    const unresolvedSuspectedGroups = this.getUnresolvedSuspectedIssueGroups(selectedFixes);
+    const unflagFixCount = new Set(
+      unresolvedSuspectedGroups.flatMap(
+        group => group.fixes.map(fix => fix.fixKey),
+      ),
+    ).size;
     const suspiciousLoading = this.data?.suspiciousState === "loading";
     const candidatePreviewLoading = this.candidateQueryPreview?.status === "loading";
     const anomalyRankingLoading = ["checking", "restoring", "loading"].includes(
@@ -15579,10 +15631,13 @@ class MovementExampleApp {
       || !hasData
       || !canConfirmSelectedFixes
     );
+    this.refs.dismissSuspected.textContent = unflagFixCount
+      ? `Unflag suspicious (${formatCount(unflagFixCount)})`
+      : "Unflag suspicious";
     this.refs.dismissSuspected.disabled = (
       !canPersistEdits
       || !hasData
-      || this.getUnresolvedSuspectedIssueGroups(selectedFixes).length === 0
+      || unflagFixCount === 0
     );
     this.refs.generateReport.disabled = !hasData || !(this.data?.individuals || []).length;
     this.refs.exportReviewedCsv.disabled = !hasData;
@@ -16309,7 +16364,7 @@ class MovementExampleApp {
           >
           <span class="movement-burst-choice-main">
             <strong>${escapeHtml(`Burst ${formatCount(burst.burstIdx + 1)}`)}</strong>
-            • ${escapeHtml(burst.setName)}
+            ${MOVEMENT_APP_CONFIG.rdsSource ? "" : `• ${escapeHtml(burst.setName)}`}
             • ${escapeHtml(formatTimestamp(burst.startTimeMs))}
             • ${escapeHtml(`${formatCount(burst.fixCount)} fixes`)}
           </span>
@@ -16648,7 +16703,10 @@ class MovementExampleApp {
       <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
-      <div><strong>Track:</strong> ${escapeHtml(`${selection.individual} • ${selection.setName}`)}</div>
+      <div><strong>Track:</strong> ${escapeHtml([
+        selection.individual,
+        movementSetLabel(selection.setName),
+      ].filter(Boolean).join(" • "))}</div>
       <div><strong>Selection method:</strong> ${escapeHtml(formatSelectionMethod(selection.selectionMethod))}</div>
       <div><strong>Segment fixes:</strong> ${escapeHtml(formatCount(selection.fixes.length))}</div>
       <div><strong>Start:</strong> ${escapeHtml(`${formatTimestamp(selection.fixes[0].timeMs)} • ${selection.startFixKey}`)}</div>
@@ -19979,6 +20037,14 @@ function visibleSets(showTrain, showTest) {
   if (showTrain) sets.push("train");
   if (showTest) sets.push("test");
   return sets.length ? sets : ["train"];
+}
+
+function movementSetLabel(value, prefix = "") {
+  const label = String(value || "").trim();
+  if (!label || MOVEMENT_APP_CONFIG.rdsSource) {
+    return "";
+  }
+  return `${prefix}${label}`;
 }
 
 function nearestTrackFixIndex(fixes, currentTimeMs) {
