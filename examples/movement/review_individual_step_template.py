@@ -43,6 +43,11 @@ def main():
         "user": str(params.get("user") or "").strip(),
         "actor": dict(params.get("actor") or {}),
         "review_id": str(params.get("review_id") or "").strip(),
+        "review_round": int(params.get("review_round") or 1),
+        "prior_review_id": str(params.get("prior_review_id") or "").strip(),
+        "decision_origin": "manual",
+        "carried_from_review_id": "",
+        "carried_from_annotation_id": "",
         "created_at": created_at,
         "scope": {
             "kind": "individual",

@@ -150,11 +150,6 @@ def build_edit_lock_profile(
         raise ProjectStateError("Unknown dataset")
     state = load_project_state(project_dir)
     current_dataset_id = str(state["current_dataset_id"])
-    direct_children = sorted(
-        str(dataset.get("dataset_id") or "")
-        for dataset in datasets
-        if str(dataset.get("parent_dataset_id") or "") == selected_dataset_id
-    )
     blockers: list[dict] = []
     if selected_dataset_id != current_dataset_id:
         blockers.append(
@@ -162,14 +157,6 @@ def build_edit_lock_profile(
                 "historical_version",
                 "Historical versions are read-only until Resume discards forward history.",
                 scope="dataset",
-            )
-        )
-    elif direct_children:
-        blockers.append(
-            _blocker(
-                "forward_history_pending",
-                "Undo moved the current pointer backward; Resume is required before editing.",
-                scope="study",
             )
         )
     blockers.extend(dict(item) for item in (additional_blockers or []))
@@ -180,7 +167,7 @@ def build_edit_lock_profile(
         dataset_by_id=dataset_by_id,
     )
     resume_allowed = bool(resume["discard_dataset_ids"]) and any(
-        blocker.get("code") in {"historical_version", "forward_history_pending"}
+        blocker.get("code") == "historical_version"
         for blocker in blockers
     )
     return {
@@ -342,6 +329,7 @@ def resume_from_dataset(
     resume_token: str,
     user: str,
     preflight: Callable[[], None] | None = None,
+    post_resume: Callable[[dict], dict | None] | None = None,
 ) -> dict:
     project_dir = project_dir.resolve()
     normalized_user = normalize_user(user)
@@ -429,11 +417,19 @@ def resume_from_dataset(
                 ignore_errors=True,
             )
 
+        related_state = post_resume({
+            "target_dataset_id": selected_dataset_id,
+            "kept_dataset_ids": list(plan["keep_dataset_ids"]),
+            "discarded_dataset_ids": list(plan["discard_dataset_ids"]),
+            "archive_id": archive_id,
+        }) if post_resume is not None else None
+
         dataset = load_dataset(project_dir, selected_dataset_id)
         return {
             "dataset": dataset,
             "history": list_history(project_dir),
             "profile": build_edit_lock_profile(project_dir, selected_dataset_id),
+            **({"related_state": related_state} if related_state is not None else {}),
             "archive": {
                 "archive_id": archive_id,
                 "discarded_dataset_count": plan["discard_dataset_count"],

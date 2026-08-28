@@ -37,6 +37,11 @@ def main():
             "user": str(params.get("user") or ""),
             "actor": dict(params.get("actor") or {}),
             "review_id": str(params.get("review_id") or ""),
+            "review_round": int(params.get("review_round") or 1),
+            "prior_review_id": str(params.get("prior_review_id") or ""),
+            "decision_origin": str(record.get("decision_origin") or "manual"),
+            "carried_from_review_id": str(record.get("carried_from_review_id") or ""),
+            "carried_from_annotation_id": str(record.get("carried_from_annotation_id") or ""),
             "created_at": created_at,
         })
         annotations.append(record)

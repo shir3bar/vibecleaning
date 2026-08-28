@@ -410,13 +410,23 @@ def _resolve_gps_spike_row_ranges(
     )
     matched_rows = []
     for records in records_by_track.values():
-        for record in records:
+        sorted_records = sorted(
+            records,
+            key=lambda item: (item["time_ms"], item["row_index"], item["fix_key"]),
+        )
+        for index in range(1, len(sorted_records) - 1):
+            record = sorted_records[index]
+            previous = sorted_records[index - 1]
             movement = movement_by_fix_key.get(record["fix_key"], {})
+            previous_movement = movement_by_fix_key.get(previous["fix_key"], {})
+            inbound_step_length = previous_movement.get("step_length_m")
             step_length = movement.get("step_length_m")
             turn_angle = movement.get("turn_angle_deg")
             if (
-                isinstance(step_length, (int, float))
+                isinstance(inbound_step_length, (int, float))
+                and isinstance(step_length, (int, float))
                 and isinstance(turn_angle, (int, float))
+                and inbound_step_length > step_threshold
                 and step_length > step_threshold
                 and abs(turn_angle) >= turn_threshold
             ):
@@ -509,6 +519,10 @@ def normalize_annotation(raw: dict) -> dict:
     if raw_decision not in {"ok", "fix_keep", "remove"}:
         raw_decision = ""
     reviewed = (raw.get("reviewed") is True or _flag_is_true(raw.get("reviewed"))) and bool(raw_decision)
+    try:
+        review_round = max(0, int(raw.get("review_round") or 0))
+    except (TypeError, ValueError):
+        review_round = 0
     return {
         "annotation_id": str(raw.get("annotation_id") or "").strip(),
         "step_id": str(raw.get("step_id") or "").strip(),
@@ -518,6 +532,11 @@ def normalize_annotation(raw: dict) -> dict:
         "review_decision": raw_decision if reviewed else "",
         "needs_check": raw.get("needs_check") is True if reviewed else False,
         "review_id": str(raw.get("review_id") or "").strip(),
+        "review_round": review_round,
+        "prior_review_id": str(raw.get("prior_review_id") or "").strip(),
+        "decision_origin": str(raw.get("decision_origin") or "manual").strip(),
+        "carried_from_review_id": str(raw.get("carried_from_review_id") or "").strip(),
+        "carried_from_annotation_id": str(raw.get("carried_from_annotation_id") or "").strip(),
         "actor": dict(raw.get("actor") or {}) if isinstance(raw.get("actor"), dict) else {},
         "source_artifact": str(raw.get("source_artifact") or "").strip(),
         "source_id": str(raw.get("source_id") or "").strip(),
@@ -999,6 +1018,10 @@ def build_review_projection(
                 "reviewed_at": str(item.get("created_at") or ""),
                 "review_comment": str(item.get("comment") or ""),
                 "step_id": str(item.get("step_id") or ""),
+                "decision_origin": str(item.get("decision_origin") or "manual"),
+                "review_round": int(item.get("review_round") or 0),
+                "carried_from_review_id": str(item.get("carried_from_review_id") or ""),
+                "carried_from_annotation_id": str(item.get("carried_from_annotation_id") or ""),
             }
             for individual, item in decisions.items()
         },
@@ -1243,6 +1266,10 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
             "reviewed_at": item.get("created_at") or "",
             "review_comment": item.get("comment") or "",
             "step_id": item.get("step_id") or "",
+            "decision_origin": str(item.get("decision_origin") or "manual"),
+            "review_round": int(item.get("review_round") or 0),
+            "carried_from_review_id": str(item.get("carried_from_review_id") or ""),
+            "carried_from_annotation_id": str(item.get("carried_from_annotation_id") or ""),
         }
         for individual, item in review_decisions.items()
     }
@@ -1260,6 +1287,10 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
                 "review_user": str(decision.get("user") or "") if decision else "",
                 "reviewed_at": str(decision.get("created_at") or "") if decision else "",
                 "review_comment": str(decision.get("comment") or "") if decision else "",
+                "decision_origin": str(decision.get("decision_origin") or "manual") if decision else "",
+                "review_round": int(decision.get("review_round") or 0) if decision else 0,
+                "carried_from_review_id": str(decision.get("carried_from_review_id") or "") if decision else "",
+                "carried_from_annotation_id": str(decision.get("carried_from_annotation_id") or "") if decision else "",
             }
         )
     result["stats"] = stats_by_individual

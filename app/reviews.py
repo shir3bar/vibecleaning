@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import secrets
 from threading import RLock
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .auth import Actor
 from .edit_locks import project_mutation_lock
@@ -15,6 +15,7 @@ from .state import (
     load_project_state,
     now_iso,
     project_paths,
+    update_project_state,
 )
 
 
@@ -133,6 +134,47 @@ def active_review(state: dict) -> dict | None:
     return None
 
 
+def preceding_completed_review(state: dict, *, review_id: str = "") -> dict | None:
+    """Return the newest completed review before the requested/current review."""
+    for candidate in reversed(state.get("reviews") or []):
+        if str(candidate.get("review_id") or "") == str(review_id or ""):
+            continue
+        if candidate.get("status") == "completed" and candidate.get("final_dataset_id"):
+            return candidate
+    return None
+
+
+def review_round_number(state: dict, review: dict | None = None) -> int:
+    """Return a stable one-based completed-review round for new and legacy records."""
+    explicit = (review or {}).get("review_round")
+    try:
+        if int(explicit) > 0:
+            return int(explicit)
+    except (TypeError, ValueError):
+        pass
+    target_id = str((review or {}).get("review_id") or "")
+    completed = 0
+    for candidate in state.get("reviews") or []:
+        if candidate.get("status") == "completed":
+            completed += 1
+        if target_id and str(candidate.get("review_id") or "") == target_id:
+            return max(1, completed if candidate.get("status") == "completed" else completed + 1)
+    return completed + 1
+
+
+def review_with_provenance(state: dict, review: dict | None) -> dict | None:
+    if review is None:
+        return None
+    result = dict(review)
+    result["review_round"] = review_round_number(state, result)
+    result["prior_review_id"] = str(
+        result.get("prior_review_id")
+        or (preceding_completed_review(state, review_id=result.get("review_id")) or {}).get("review_id")
+        or ""
+    )
+    return result
+
+
 def actor_has_review_history(state: dict, actor: Actor) -> bool:
     if actor.role == "editor":
         return True
@@ -191,6 +233,7 @@ def assign_review(
     expected_current_dataset_id: str,
     expected_review_revision: int,
     individuals: Iterable[str],
+    initializer: Callable[[dict, str], dict | None] | None = None,
 ) -> dict:
     if editor.role != "editor":
         raise ReviewForbiddenError("Only editors can assign reviews")
@@ -205,8 +248,11 @@ def assign_review(
         current = _check_expected_head(project_dir, expected_current_dataset_id)
         if active_review(state) is not None:
             raise ReviewLockedError("The study already has an active review", code="active_review")
+        prior_review = preceding_completed_review(state)
         review = {
             "review_id": f"review_{secrets.token_hex(6)}",
+            "review_round": review_round_number(state),
+            "prior_review_id": str((prior_review or {}).get("review_id") or ""),
             "status": "active",
             "reviewer_user_id": reviewer.user_id,
             "reviewer": reviewer.as_dict(),
@@ -216,6 +262,10 @@ def assign_review(
             "final_dataset_id": None,
             "initial_individuals": required,
         }
+        initialization = initializer(dict(review), current) if initializer is not None else None
+        initialized_dataset_id = str(
+            ((initialization or {}).get("dataset") or {}).get("dataset_id") or current
+        )
         state["reviews"].append(review)
         state["editor_control"] = None
         _event(
@@ -224,10 +274,22 @@ def assign_review(
             editor,
             review_id=review["review_id"],
             reviewer=reviewer.as_dict(),
-            dataset_id=current,
+            dataset_id=initialized_dataset_id,
+            review_round=review["review_round"],
+            prior_review_id=review["prior_review_id"],
         )
-        save_review_state(project_dir, state)
-        return {"review": review, "state": state}
+        try:
+            save_review_state(project_dir, state)
+        except Exception:
+            if initialized_dataset_id != current:
+                update_project_state(project_dir, {"current_dataset_id": current})
+            raise
+        return {
+            "review": review,
+            "state": state,
+            "initialization": initialization,
+            "current_dataset_id": initialized_dataset_id,
+        }
 
 
 def cancel_review(
@@ -266,6 +328,78 @@ def cancel_review(
         )
         save_review_state(project_dir, state)
         return {"review": review, "state": state}
+
+
+def reconcile_review_state_after_resume(
+    project_dir: Path,
+    *,
+    actor: Actor,
+    target_dataset_id: str,
+    kept_dataset_ids: Iterable[str],
+    archive_id: str,
+) -> dict:
+    """Reconcile review records after lineage pruning while its mutation lock is held."""
+    state = load_review_state(project_dir)
+    kept = {str(dataset_id) for dataset_id in kept_dataset_ids if str(dataset_id)}
+    target = str(target_dataset_id or "")
+    discarded_review_ids: list[str] = []
+    cancelled_review_ids: list[str] = []
+    changed = False
+
+    for review in state.get("reviews") or []:
+        status = str(review.get("status") or "")
+        baseline = str(review.get("baseline_dataset_id") or "")
+        final_dataset = str(review.get("final_dataset_id") or "")
+        baseline_discarded = bool(baseline) and baseline not in kept
+        final_discarded = status == "completed" and bool(final_dataset) and final_dataset not in kept
+        if status == "active" and baseline_discarded:
+            review["status"] = "cancelled"
+            review["final_dataset_id"] = target
+            review["cancelled_at"] = now_iso()
+            review["cancelled_by"] = actor.as_dict()
+            review["cancellation_reason"] = (
+                "The review assignment baseline was discarded by Resume."
+            )
+            review["history_resume_archive_id"] = str(archive_id or "")
+            cancelled_review_ids.append(str(review.get("review_id") or ""))
+            _event(
+                state,
+                "review_cancelled_by_history_resume",
+                actor,
+                review_id=str(review.get("review_id") or ""),
+                dataset_id=target,
+                discarded_baseline_dataset_id=baseline,
+                archive_id=str(archive_id or ""),
+            )
+            changed = True
+        elif status == "completed" and (baseline_discarded or final_discarded):
+            review["status"] = "discarded"
+            review["discarded_at"] = now_iso()
+            review["discarded_by"] = actor.as_dict()
+            review["discarded_by_history_resume"] = True
+            review["history_resume_target_dataset_id"] = target
+            review["history_resume_archive_id"] = str(archive_id or "")
+            discarded_review_ids.append(str(review.get("review_id") or ""))
+            _event(
+                state,
+                "completed_review_discarded_by_history_resume",
+                actor,
+                review_id=str(review.get("review_id") or ""),
+                dataset_id=target,
+                prior_final_dataset_id=final_dataset,
+                archive_id=str(archive_id or ""),
+            )
+            changed = True
+
+    if changed:
+        if active_review(state) is None:
+            state["editor_control"] = None
+        state = save_review_state(project_dir, state)
+    return {
+        "state": state,
+        "cancelled_review_ids": cancelled_review_ids,
+        "discarded_review_ids": discarded_review_ids,
+    }
 
 
 def start_editor_control(
@@ -392,9 +526,20 @@ def review_scope(project_dir: Path, review: dict, *, current_dataset_id: str | N
     lineage = _lineage(project_dir, current, baseline)
     position = {dataset_id: index for index, dataset_id in enumerate(lineage)}
     required_since = {str(item): 0 for item in review.get("initial_individuals") or [] if str(item)}
+    history_steps = list_history(project_dir)["steps"]
     steps_by_output = {
         str(step.get("output_dataset_id") or ""): step
-        for step in list_history(project_dir)["steps"]
+        for step in history_steps
+    }
+    known_step_ids = {
+        str(step.get("step_id") or "")
+        for step in history_steps
+        if str(step.get("step_id") or "")
+    }
+    step_output_position = {
+        str(step.get("step_id") or ""): position[output_dataset_id]
+        for output_dataset_id, step in steps_by_output.items()
+        if output_dataset_id in position and str(step.get("step_id") or "")
     }
     for index, dataset_id in enumerate(lineage[1:], start=1):
         step = steps_by_output.get(dataset_id)
@@ -418,6 +563,8 @@ def review_scope(project_dir: Path, review: dict, *, current_dataset_id: str | N
         "position": position,
         "required_since": required_since,
         "required_individuals": sorted(required_since),
+        "known_step_ids": known_step_ids,
+        "step_output_position": step_output_position,
     }
 
 
@@ -453,22 +600,33 @@ def _valid_review_decisions(
     annotations: Iterable[dict],
     scope: dict,
 ) -> dict[str, dict]:
-    latest: dict[str, tuple[int, dict]] = {}
+    latest: dict[str, tuple[tuple[int, int], dict]] = {}
     review_id = str(review.get("review_id") or "")
-    for annotation in annotations:
+    for annotation_index, annotation in enumerate(annotations):
         if annotation.get("annotation_kind") != "individual_review" or not annotation.get("reviewed"):
             continue
         if str(annotation.get("review_id") or "") != review_id:
             continue
         individual = str((annotation.get("scope") or {}).get("individual") or "").strip()
-        dataset_id = str(annotation.get("source_dataset_id") or "")
-        dataset_position = scope["position"].get(dataset_id)
+        step_id = str(annotation.get("step_id") or "")
+        if step_id and step_id in scope["known_step_ids"]:
+            dataset_position = scope["step_output_position"].get(step_id)
+            if dataset_position is None:
+                # The decision belongs to an abandoned descendant or sibling branch.
+                continue
+        else:
+            # Legacy annotations predate reliable step provenance and identify the
+            # dataset on which their decision step was based.
+            dataset_id = str(annotation.get("source_dataset_id") or "")
+            dataset_position = scope["position"].get(dataset_id)
         if individual not in scope["required_since"] or dataset_position is None:
             continue
         if dataset_position < scope["required_since"][individual]:
             continue
         decision = normalize_review_decision(annotation.get("review_decision"))
-        latest[individual] = (dataset_position, {**annotation, "review_decision": decision})
+        order = (dataset_position, annotation_index)
+        if individual not in latest or order >= latest[individual][0]:
+            latest[individual] = (order, {**annotation, "review_decision": decision})
     return {individual: item[1] for individual, item in latest.items()}
 
 
@@ -515,15 +673,10 @@ def prior_review_decisions(
 ) -> dict[str, dict]:
     """Return valid decisions from the immediately preceding completed review."""
     state = load_review_state(project_dir)
-    review_id = str(review.get("review_id") or "")
-    prior_review = None
-    for candidate in reversed(state.get("reviews") or []):
-        candidate_id = str(candidate.get("review_id") or "")
-        if candidate_id == review_id:
-            continue
-        if candidate.get("status") == "completed" and candidate.get("final_dataset_id"):
-            prior_review = candidate
-            break
+    prior_review = preceding_completed_review(
+        state,
+        review_id=str(review.get("review_id") or ""),
+    )
     if prior_review is None:
         return {}
     current_scope = review_scope(project_dir, review, current_dataset_id=current_dataset_id)
@@ -543,9 +696,11 @@ def prior_review_decisions(
         if annotation is None:
             continue
         result[individual] = {
+            **annotation,
             "review_decision": str(annotation.get("review_decision") or ""),
             "needs_check": annotation.get("needs_check") is True,
             "review_id": str(prior_review.get("review_id") or ""),
+            "review_round": review_round_number(state, prior_review),
             "reviewer": reviewer,
             "reviewed_at": str(
                 annotation.get("created_at")
@@ -607,7 +762,7 @@ def complete_review(
 
 def authorize_analysis(project_dir: Path, actor: Actor) -> dict | None:
     state = load_review_state(project_dir)
-    review = active_review(state)
+    review = review_with_provenance(state, active_review(state))
     if actor.role == "editor":
         return review
     if review is None or str(review.get("reviewer_user_id") or "") != actor.user_id:
@@ -626,7 +781,7 @@ def authorize_persistent_change(
 ) -> dict | None:
     state = load_review_state(project_dir)
     _check_expected_revision(state, expected_review_revision)
-    review = active_review(state)
+    review = review_with_provenance(state, active_review(state))
     control = state.get("editor_control")
     assigned = bool(review and str(review.get("reviewer_user_id") or "") == actor.user_id)
     if actor.role == "editor":
@@ -653,7 +808,7 @@ def authorize_persistent_change(
 def review_profile(project_dir: Path, actor: Actor, annotations: Iterable[dict] = ()) -> dict:
     annotation_list = list(annotations)
     state = load_review_state(project_dir)
-    review = active_review(state)
+    review = review_with_provenance(state, active_review(state))
     assigned = bool(review and review.get("reviewer_user_id") == actor.user_id)
     control = state.get("editor_control")
     editor_owns_control = bool(control and control.get("owner_user_id") == actor.user_id)

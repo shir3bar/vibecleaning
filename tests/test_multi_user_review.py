@@ -26,12 +26,17 @@ from app.execution import create_step, undo_to_parent
 from app.reviews import (
     ReviewConflictError,
     ReviewLockedError,
+    active_review,
     assign_review,
     authorize_persistent_change,
+    cancel_review,
+    complete_review,
     finish_editor_control,
+    load_review_state,
     review_coverage,
     review_profile,
     start_editor_control,
+    valid_review_decisions,
 )
 from app.state import ensure_project_state
 from app.state import get_dataset_artifact, load_dataset, project_paths
@@ -247,6 +252,122 @@ def test_review_coverage_follows_dataset_update_and_undo(tmp_path):
         )
 
 
+def test_effective_individual_decision_follows_reachable_dag_order(tmp_path):
+    project, baseline = _project(tmp_path)
+    editor, reviewer = _actors()
+    review = assign_review(
+        project,
+        editor=editor,
+        reviewer=reviewer,
+        expected_current_dataset_id=baseline,
+        expected_review_revision=0,
+        individuals=["alpha"],
+    )["review"]
+
+    def decision_step(parent_dataset_id: str, title: str, *, set_as_head: bool = True):
+        return create_step(
+            project,
+            {
+                "user": reviewer.display_name,
+                "actor": reviewer.as_dict(),
+                "title": title,
+                "kind": "python",
+                "script": STEP_SCRIPT,
+                "parent_dataset_id": parent_dataset_id,
+                "input_artifacts": ["movement.csv"],
+                "output_artifacts": ["movement.csv"],
+                "parameters": {
+                    "workflow": {
+                        "review_id": review["review_id"],
+                        "review_effect": "annotation_only",
+                        "review_impact": {"scope": "none"},
+                    }
+                },
+                "set_as_head": set_as_head,
+            },
+        )
+
+    first = decision_step(baseline, "Alpha OK")
+    first_id = first["dataset"]["dataset_id"]
+    second = decision_step(first_id, "Alpha fix and keep")
+    second_id = second["dataset"]["dataset_id"]
+    third = decision_step(second_id, "Alpha remove")
+    third_id = third["dataset"]["dataset_id"]
+    sibling = decision_step(first_id, "Sibling alpha OK", set_as_head=False)
+    annotations = [
+        {
+            **_decision(review["review_id"], baseline, "alpha", "ok"),
+            "step_id": first["step"]["step_id"],
+        },
+        {
+            **_decision(review["review_id"], first_id, "alpha", "fix_keep"),
+            "step_id": second["step"]["step_id"],
+        },
+        {
+            **_decision(review["review_id"], second_id, "alpha", "remove"),
+            "step_id": third["step"]["step_id"],
+        },
+        {
+            **_decision(review["review_id"], first_id, "alpha", "ok"),
+            "step_id": sibling["step"]["step_id"],
+        },
+    ]
+
+    assert valid_review_decisions(
+        project, review, annotations, current_dataset_id=third_id
+    )["alpha"]["review_decision"] == "remove"
+    assert undo_to_parent(project)["dataset"]["dataset_id"] == second_id
+    assert valid_review_decisions(project, review, annotations)["alpha"]["review_decision"] == "fix_keep"
+    assert undo_to_parent(project)["dataset"]["dataset_id"] == first_id
+    assert valid_review_decisions(project, review, annotations)["alpha"]["review_decision"] == "ok"
+
+
+def test_cancelled_assignment_does_not_advance_completed_review_round(tmp_path):
+    project, baseline = _project(tmp_path)
+    editor, reviewer = _actors()
+    first = assign_review(
+        project,
+        editor=editor,
+        reviewer=reviewer,
+        expected_current_dataset_id=baseline,
+        expected_review_revision=0,
+        individuals=["alpha"],
+    )
+    completed = complete_review(
+        project,
+        actor=reviewer,
+        expected_current_dataset_id=baseline,
+        expected_review_revision=first["state"]["revision"],
+        annotations=[_decision(first["review"]["review_id"], baseline, "alpha", "ok")],
+    )
+    second = assign_review(
+        project,
+        editor=editor,
+        reviewer=reviewer,
+        expected_current_dataset_id=baseline,
+        expected_review_revision=completed["state"]["revision"],
+        individuals=["alpha"],
+    )
+    assert second["review"]["review_round"] == 2
+    cancelled = cancel_review(
+        project,
+        editor=editor,
+        expected_current_dataset_id=baseline,
+        expected_review_revision=second["state"]["revision"],
+        reason="Replace the assignment",
+    )
+    replacement = assign_review(
+        project,
+        editor=editor,
+        reviewer=reviewer,
+        expected_current_dataset_id=baseline,
+        expected_review_revision=cancelled["state"]["revision"],
+        individuals=["alpha"],
+    )
+    assert replacement["review"]["review_round"] == 2
+    assert replacement["review"]["prior_review_id"] == first["review"]["review_id"]
+
+
 def test_editor_can_be_assigned_as_review_owner_without_intervention_control(tmp_path):
     project, baseline = _project(tmp_path)
     editor, _ = _actors()
@@ -360,6 +481,86 @@ def test_assigned_editor_can_submit_review_decisions_without_taking_control(tmp_
         },
     )
     assert decision.status_code == 200, decision.text
+
+
+def test_first_editor_review_action_automatically_assigns_that_editor(tmp_path):
+    data_root = tmp_path / "data"
+    study = data_root / "movement_raw" / "automatic_editor_assignment"
+    study.mkdir(parents=True)
+    (study / "movement.csv").write_text(
+        "eventid,individual,timestamp,longitude,latitude\n"
+        "a1,alpha,2024-01-01T00:00:00Z,-70,40\n"
+        "b1,beta,2024-01-01T00:00:00Z,-71,41\n"
+    )
+    manager = AuthManager(
+        [
+            build_user_record(
+                username="editor",
+                display_name="Eli Editor",
+                role="editor",
+                password="editor-password-long",
+                user_id="user_editor",
+            )
+        ]
+    )
+    static_root = Path(__file__).resolve().parents[1] / "examples" / "movement" / "static"
+    app = create_app(data_root=data_root, static_root=static_root, auth_manager=manager)
+    register_movement_routes(app, data_root=data_root, allowed_families={"movement_raw"})
+    client = TestClient(app)
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "editor", "password": "editor-password-long"},
+    ).status_code == 200
+
+    loaded = client.get(
+        "/api/apps/movement/family/movement_raw/study/automatic_editor_assignment/load"
+    ).json()
+    assert active_review(load_review_state(study)) is None
+    first = client.post(
+        "/api/apps/movement/family/movement_raw/study/automatic_editor_assignment/actions/review-individual",
+        json={
+            "dataset_id": loaded["dataset_id"],
+            "logical_name": "movement.csv",
+            "expected_current_dataset_id": loaded["dataset_id"],
+            "expected_review_revision": loaded["edit_profile"]["review_revision"],
+            "decision": {
+                "individual": "alpha",
+                "review_decision": "ok",
+                "needs_check": False,
+                "comment": "",
+            },
+        },
+    )
+    assert first.status_code == 200, first.text
+    first_payload = first.json()
+    first_review_state = load_review_state(study)
+    review = active_review(first_review_state)
+    assert review is not None
+    assert review["reviewer_user_id"] == "user_editor"
+    assert review["assigned_by"]["user_id"] == "user_editor"
+    assert review["baseline_dataset_id"] == loaded["dataset_id"]
+    assert first_payload["step"]["parameters"]["workflow"]["review_id"] == review["review_id"]
+
+    second_dataset_id = first_payload["dataset"]["dataset_id"]
+    second = client.post(
+        "/api/apps/movement/family/movement_raw/study/automatic_editor_assignment/actions/review-individual",
+        json={
+            "dataset_id": second_dataset_id,
+            "logical_name": "movement.csv",
+            "expected_current_dataset_id": second_dataset_id,
+            "expected_review_revision": first_review_state["revision"],
+            "decision": {
+                "individual": "beta",
+                "review_decision": "fix_keep",
+                "needs_check": False,
+                "comment": "",
+            },
+        },
+    )
+    assert second.status_code == 200, second.text
+    final_state = load_review_state(study)
+    assert len(final_state["reviews"]) == 1
+    assert active_review(final_state)["review_id"] == review["review_id"]
 
 
 def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_path):
@@ -608,6 +809,12 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
         },
     )
     assert reassigned.status_code == 200
+    reassigned_payload = reassigned.json()
+    second_round_id = reassigned_payload["current_dataset_id"]
+    assert second_round_id != output_id
+    assert reassigned_payload["review"]["review_round"] == 2
+    assert reassigned_payload["review"]["prior_review_id"] == completed.json()["review"]["review_id"]
+    assert reassigned_payload["initialization"]["step"]["parameters"]["action"] == "carry_forward_individual_reviews"
     overview = reviewer_client.get(
         "/api/apps/movement/family/movement_raw/study/study_one/"
         f"dataset/{output_id}/overview",
@@ -617,9 +824,10 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
     assert all(not item.get("reviewed", False) for item in overview.json()["stats"].values())
     fresh_profile = reviewer_client.get(
         "/api/apps/movement/family/movement_raw/study/study_one/edit-profile",
-        params={"dataset_id": output_id},
+        params={"dataset_id": second_round_id},
     ).json()
-    assert fresh_profile["coverage"]["reviewed_count"] == 0
+    assert fresh_profile["review"]["review_round"] == 2
+    assert fresh_profile["coverage"]["reviewed_count"] == 1
     assert fresh_profile["coverage"]["prior_needs_check_individuals"] == ["beta"]
     assert fresh_profile["coverage"]["prior_decisions_by_individual"]["alpha"]["review_decision"] == "ok"
     assert fresh_profile["coverage"]["prior_decisions_by_individual"]["beta"]["review_decision"] == "fix_keep"
@@ -636,9 +844,9 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
     assert dashboard_row["review"]["status"] == "active"
     assert dashboard_row["counts"] == {
         "required": 2,
-        "reviewed": 0,
-        "undecided": 2,
-        "ok": 0,
+        "reviewed": 1,
+        "undecided": 1,
+        "ok": 1,
         "fix_keep": 0,
         "remove": 0,
         "needs_check": 0,
@@ -654,6 +862,70 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
     )
     assert dashboard_detail.status_code == 200
     assert dashboard_detail.json()["studies"][0]["individuals"] == [
-        {"individual": "alpha", "review_decision": "", "needs_check": False, "reviewed_at": ""},
+        {"individual": "alpha", "review_decision": "ok", "needs_check": False, "reviewed_at": ANY},
         {"individual": "beta", "review_decision": "", "needs_check": False, "reviewed_at": ""},
     ]
+    _, second_round_annotations_path = get_dataset_artifact(
+        study, second_round_id, "movement_review_annotations.json"
+    )
+    second_round_annotations = json.loads(second_round_annotations_path.read_text())["annotations"]
+    carried = [
+        item for item in second_round_annotations
+        if item.get("review_id") == reassigned_payload["review"]["review_id"]
+    ]
+    assert len(carried) == 1
+    assert carried[0]["scope"]["individual"] == "alpha"
+    assert carried[0]["decision_origin"] == "carried_forward"
+    assert carried[0]["review_round"] == 2
+    assert carried[0]["carried_from_review_id"] == completed.json()["review"]["review_id"]
+
+    override = reviewer_client.post(
+        "/api/apps/movement/family/movement_raw/study/study_one/actions/review-individual",
+        json={
+            "dataset_id": second_round_id,
+            "logical_name": "movement.csv",
+            "expected_current_dataset_id": second_round_id,
+            "expected_review_revision": fresh_profile["review_revision"],
+            "decision": {
+                "individual": "alpha",
+                "review_decision": "remove",
+                "needs_check": False,
+                "comment": "second-round override",
+            },
+        },
+    )
+    assert override.status_code == 200, override.text
+    override_id = override.json()["dataset"]["dataset_id"]
+    override_profile = reviewer_client.get(
+        "/api/apps/movement/family/movement_raw/study/study_one/edit-profile",
+        params={"dataset_id": override_id},
+    ).json()
+    assert override_profile["coverage"]["reviewed_count"] == 1
+    override_dashboard = editor_client.get(
+        "/api/apps/movement/admin/review-summary",
+        params={
+            "family": "movement_raw",
+            "study": "study_one",
+            "include_individuals": "true",
+        },
+    ).json()
+    assert override_dashboard["studies"][0]["individuals"][0]["review_decision"] == "remove"
+
+    undone = reviewer_client.post(
+        "/api/apps/movement/family/movement_raw/study/study_one/undo",
+        json={
+            "expected_current_dataset_id": override_id,
+            "expected_review_revision": override_profile["review_revision"],
+        },
+    )
+    assert undone.status_code == 200, undone.text
+    assert undone.json()["dataset"]["dataset_id"] == second_round_id
+    restored_dashboard = editor_client.get(
+        "/api/apps/movement/admin/review-summary",
+        params={
+            "family": "movement_raw",
+            "study": "study_one",
+            "include_individuals": "true",
+        },
+    ).json()
+    assert restored_dashboard["studies"][0]["individuals"][0]["review_decision"] == "ok"

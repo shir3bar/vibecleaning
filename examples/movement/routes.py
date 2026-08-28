@@ -23,7 +23,7 @@ from app.edit_locks import (
     resume_from_dataset,
     undo_guarded,
 )
-from app.execution import create_analysis
+from app.execution import create_analysis, create_step
 from app.events import StudyEventBroker
 from app.reviews import (
     ReviewConflictError,
@@ -40,6 +40,8 @@ from app.reviews import (
     complete_review,
     finish_editor_control,
     load_review_state,
+    prior_review_decisions,
+    reconcile_review_state_after_resume,
     review_coverage,
     review_profile,
     start_editor_control,
@@ -1169,6 +1171,8 @@ def register_movement_routes(
             "current_dataset_id": current_dataset_id,
             "review": {
                 "review_id": str(review.get("review_id") or ""),
+                "review_round": int(review.get("review_round") or 1),
+                "prior_review_id": str(review.get("prior_review_id") or ""),
                 "status": str(review.get("status") or ""),
                 "reviewer": dict(review.get("reviewer") or {}),
                 "assigned_at": str(review.get("assigned_at") or ""),
@@ -1295,8 +1299,13 @@ def register_movement_routes(
             {
                 "review_effect": review_effect,
                 "review_impact": impact,
+                "review_round": int((review or {}).get("review_round") or 1),
+                "prior_review_id": str((review or {}).get("prior_review_id") or ""),
             }
         )
+        if review is not None:
+            parameters["review_round"] = int(review.get("review_round") or 1)
+            parameters["prior_review_id"] = str(review.get("prior_review_id") or "")
         parameters["workflow"] = workflow
         updated["parameters"] = parameters
 
@@ -2467,6 +2476,169 @@ def register_movement_routes(
             headers={"Cache-Control": "no-store"},
         )
 
+    async def assign_movement_review(
+        study_dir: Path,
+        *,
+        editor: Actor,
+        reviewer: Actor,
+        logical_name: str,
+        expected_current_dataset_id: str,
+        expected_review_revision: object,
+    ) -> dict:
+        current_id = str(load_project_state(study_dir)["current_dataset_id"])
+        dataset = load_dataset(study_dir, current_id)
+        if logical_name:
+            logical_name = validate_path_part(logical_name, label="artifact")
+            artifact, _ = get_dataset_artifact(study_dir, current_id, logical_name)
+            if not configured_artifact_filter(artifact):
+                raise ReviewStateError("Artifact is not reviewable")
+        else:
+            candidates = [
+                item for item in dataset.get("artifacts") or [] if configured_artifact_filter(item)
+            ]
+            if not candidates:
+                raise ReviewStateError("Selected dataset has no reviewable movement artifact")
+            logical_name = str(candidates[0]["logical_name"])
+            get_dataset_artifact(study_dir, current_id, logical_name)
+        individuals = await run_in_threadpool(
+            source_individuals,
+            configured_source,
+            study_dir,
+            current_id,
+            logical_name,
+        )
+        source_bundle_signature = ""
+        source_input_artifacts = [logical_name]
+        if configured_source.bundle_scoped:
+            bundle, _ = await run_in_threadpool(ensure_rds_index, study_dir, current_id)
+            source_bundle_signature = bundle.signature
+            source_input_artifacts = [
+                str(item.get("logical_name") or "")
+                for item in dataset.get("artifacts") or []
+                if configured_source.accepts(item)
+            ]
+        annotations = _load_dataset_review_annotations(study_dir, dataset_id=current_id)
+
+        def initialize_carried_reviews(review: dict, baseline_dataset_id: str) -> dict | None:
+            if int(review.get("review_round") or 1) <= 1:
+                return None
+            previous = prior_review_decisions(
+                study_dir,
+                review,
+                annotations,
+                current_dataset_id=baseline_dataset_id,
+            )
+            records = []
+            for individual in sorted(individuals):
+                prior = previous.get(individual) or {}
+                if (
+                    str(prior.get("review_decision") or "") != "ok"
+                    or prior.get("needs_check") is True
+                ):
+                    continue
+                records.append(
+                    {
+                        "annotation_kind": "individual_review",
+                        "reviewed": True,
+                        "review_decision": "ok",
+                        "needs_check": False,
+                        "comment": "",
+                        "decision_origin": "carried_forward",
+                        "carried_from_review_id": str(prior.get("review_id") or ""),
+                        "carried_from_annotation_id": str(prior.get("annotation_id") or ""),
+                        "source_artifact": str(prior.get("source_artifact") or ""),
+                        "scope": dict(prior.get("scope") or {
+                            "kind": "individual",
+                            "individual": individual,
+                        }),
+                        "resolved_fix_count": int(prior.get("resolved_fix_count") or 0),
+                    }
+                )
+            if not records:
+                return None
+            input_artifacts = list(source_input_artifacts)
+            if any(
+                item.get("logical_name") == "movement_review_annotations.json"
+                for item in dataset.get("artifacts") or []
+            ):
+                input_artifacts.append("movement_review_annotations.json")
+            return create_step(
+                study_dir,
+                {
+                    "user": editor.display_name,
+                    "actor": editor.as_dict(),
+                    "title": f"Carry forward prior OK decisions into review round {review['review_round']}",
+                    "kind": "python",
+                    "script": RDS_REVIEW_STEP_SCRIPT,
+                    "parameters": {
+                        "app": "movement",
+                        "action": "carry_forward_individual_reviews",
+                        "target_artifact": logical_name,
+                        "dataset_id": baseline_dataset_id,
+                        "records": records,
+                        "source_bundle_signature": source_bundle_signature,
+                        "user": editor.display_name,
+                        "actor": editor.as_dict(),
+                        "review_id": str(review.get("review_id") or ""),
+                        "review_round": int(review.get("review_round") or 1),
+                        "prior_review_id": str(review.get("prior_review_id") or ""),
+                        "workflow": {
+                            "review_id": str(review.get("review_id") or ""),
+                            "review_round": int(review.get("review_round") or 1),
+                            "prior_review_id": str(review.get("prior_review_id") or ""),
+                            "review_effect": "annotation_only",
+                            "review_impact": {
+                                "scope": "none",
+                                "actor": editor.as_dict(),
+                            },
+                        },
+                    },
+                    "parent_dataset_id": baseline_dataset_id,
+                    "input_artifacts": input_artifacts,
+                    "output_artifacts": ["movement_review_annotations.json"],
+                    "set_as_head": True,
+                },
+            )
+
+        return assign_review(
+            study_dir,
+            editor=editor,
+            reviewer=reviewer,
+            expected_current_dataset_id=expected_current_dataset_id,
+            expected_review_revision=expected_review_revision,
+            individuals=individuals,
+            initializer=initialize_carried_reviews,
+        )
+
+    async def ensure_editor_self_review(
+        request: Request,
+        study_dir: Path,
+        body: dict,
+        logical_name: str,
+    ) -> dict:
+        actor = current_actor(request)
+        if (
+            actor is None
+            or actor.role != "editor"
+            or active_review(load_review_state(study_dir)) is not None
+        ):
+            return body
+        result = await assign_movement_review(
+            study_dir,
+            editor=actor,
+            reviewer=actor,
+            logical_name=logical_name,
+            expected_current_dataset_id=str(body.get("expected_current_dataset_id") or ""),
+            expected_review_revision=body.get("expected_review_revision"),
+        )
+        updated = dict(body)
+        updated["dataset_id"] = str(result.get("current_dataset_id") or "")
+        updated["expected_current_dataset_id"] = updated["dataset_id"]
+        updated["expected_review_revision"] = int(
+            (result.get("state") or {}).get("revision") or 0
+        )
+        return updated
+
     @app.post(
         "/api/apps/movement/family/{family_name}/study/{study_name}/review/assign"
     )
@@ -2486,36 +2658,14 @@ def register_movement_routes(
             reviewer = app.state.auth_manager.actor_by_id(str(body.get("reviewer_user_id") or ""))
             if reviewer is None:
                 raise ReviewStateError("Unknown reviewer")
-            current_id = str(load_project_state(study_dir)["current_dataset_id"])
-            dataset = load_dataset(study_dir, current_id)
             logical_name = str(body.get("logical_name") or "").strip()
-            if logical_name:
-                logical_name = validate_path_part(logical_name, label="artifact")
-                artifact, _ = get_dataset_artifact(study_dir, current_id, logical_name)
-                if not configured_artifact_filter(artifact):
-                    raise ReviewStateError("Artifact is not reviewable")
-            else:
-                candidates = [
-                    item for item in dataset.get("artifacts") or [] if configured_artifact_filter(item)
-                ]
-                if not candidates:
-                    raise ReviewStateError("Selected dataset has no reviewable movement artifact")
-                logical_name = str(candidates[0]["logical_name"])
-                get_dataset_artifact(study_dir, current_id, logical_name)
-            individuals = await run_in_threadpool(
-                source_individuals,
-                configured_source,
-                study_dir,
-                current_id,
-                logical_name,
-            )
-            result = assign_review(
+            result = await assign_movement_review(
                 study_dir,
                 editor=actor,
                 reviewer=reviewer,
+                logical_name=logical_name,
                 expected_current_dataset_id=str(body.get("expected_current_dataset_id") or ""),
                 expected_review_revision=body.get("expected_review_revision"),
-                individuals=individuals,
             )
             publish_state_event(
                 family_name,
@@ -2524,7 +2674,11 @@ def register_movement_routes(
                 reason="review_assigned",
                 actor=actor,
             )
-            result["edit_profile"] = combined_edit_profile(study_dir, current_id, actor)
+            result["edit_profile"] = combined_edit_profile(
+                study_dir,
+                str(result.get("current_dataset_id") or load_project_state(study_dir)["current_dataset_id"]),
+                actor,
+            )
             return JSONResponse(result)
         except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
             return _review_error_response(exc)
@@ -2897,6 +3051,17 @@ def register_movement_routes(
                 resume_token=resume_token,
                 user=actor.display_name if actor is not None else body.get("user"),
                 preflight=preflight,
+                post_resume=(
+                    lambda context: reconcile_review_state_after_resume(
+                        study_dir,
+                        actor=actor,
+                        target_dataset_id=str(context["target_dataset_id"]),
+                        kept_dataset_ids=context["kept_dataset_ids"],
+                        archive_id=str(context["archive_id"]),
+                    )
+                )
+                if actor is not None
+                else None,
             )
             publish_state_event(
                 family_name,
@@ -2920,8 +3085,14 @@ def register_movement_routes(
             return json_error("Invalid JSON body", 400)
         try:
             study_dir = configured_study_dir(family_name, study_name)
-            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            body = await ensure_editor_self_review(
+                request,
+                study_dir,
+                body,
+                logical_name,
+            )
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             dataset = load_dataset(study_dir, dataset_id)
             get_dataset_artifact(study_dir, dataset_id, logical_name)
             raw_scope = body.get("scope")
@@ -3174,8 +3345,14 @@ def register_movement_routes(
             return json_error("Invalid JSON body", 400)
         try:
             study_dir = configured_study_dir(family_name, study_name)
-            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            body = await ensure_editor_self_review(
+                request,
+                study_dir,
+                body,
+                logical_name,
+            )
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             dataset = load_dataset(study_dir, dataset_id)
             get_dataset_artifact(study_dir, dataset_id, logical_name)
             confirmations = _validate_confirmations(body.get("confirmations"))
@@ -3272,8 +3449,14 @@ def register_movement_routes(
             return json_error("Invalid JSON body", 400)
         try:
             study_dir = configured_study_dir(family_name, study_name)
-            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            body = await ensure_editor_self_review(
+                request,
+                study_dir,
+                body,
+                logical_name,
+            )
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             dataset = load_dataset(study_dir, dataset_id)
             get_dataset_artifact(study_dir, dataset_id, logical_name)
             dismissals = _validate_dismissals(body.get("dismissals"))
@@ -3377,8 +3560,14 @@ def register_movement_routes(
             return json_error("Invalid JSON body", 400)
         try:
             study_dir = configured_study_dir(family_name, study_name)
-            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            body = await ensure_editor_self_review(
+                request,
+                study_dir,
+                body,
+                logical_name,
+            )
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             dataset = load_dataset(study_dir, dataset_id)
             get_dataset_artifact(study_dir, dataset_id, logical_name)
             decision = _validate_individual_review_decision(body.get("decision"))
