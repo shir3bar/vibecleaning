@@ -1223,3 +1223,67 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
 
         page.evaluate("window.__movementMonitorActive = false")
         browser.close()
+
+
+def test_rds_queue_navigation_does_not_fan_out_attribute_renders(tmp_path):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    samples = sorted(
+        RDS_SAMPLE_ROOT.glob("268904527_*.rds"),
+        key=lambda path: path.stat().st_size,
+    )[:15]
+    if len(samples) < 15:
+        pytest.skip("Fifteen RDS movement browser fixtures are unavailable")
+    study_dir = tmp_path / "data" / "movement_rds" / "268904527"
+    study_dir.mkdir(parents=True)
+    for sample in samples:
+        shutil.copy2(sample, study_dir / sample.name)
+    app = create_rds_movement_app(
+        data_root=tmp_path / "data",
+        static_root=STATIC_ROOT,
+        index_path=INDEX_PATH,
+        auth_manager=_auth_manager(),
+    )
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _login_and_wait(page, base_url, "268904527")
+        page.locator("[data-individual-checkbox]").first.wait_for(
+            state="attached", timeout=30_000
+        )
+        page.locator('[data-role="individual-view-queue"]').click()
+        page.locator("[data-queue-individual].queue-active").wait_for(
+            state="attached", timeout=20_000
+        )
+        page.wait_for_function(
+            "() => window.__movementDiagnosticsSnapshot().focusedObjectEntries >= 1",
+            timeout=30_000,
+        )
+
+        for count in range(2, 16):
+            previous = page.locator(
+                "[data-queue-individual].queue-active"
+            ).get_attribute("data-queue-individual")
+            page.keyboard.press("ArrowRight")
+            page.wait_for_function(
+                "previous => document.querySelector('[data-queue-individual].queue-active')?.dataset.queueIndividual !== previous",
+                arg=previous,
+                timeout=30_000,
+            )
+            page.wait_for_function(
+                "count => window.__movementDiagnosticsSnapshot().focusedObjectEntries >= count",
+                arg=count,
+                timeout=30_000,
+            )
+
+        page.wait_for_timeout(100)
+        snapshot = page.evaluate("window.__movementDiagnosticsSnapshot()")
+        assert snapshot["focusedObjectEntries"] == 15
+        assert snapshot["binaryBlockCount"] == 15
+        assert snapshot["binaryRequests"] == 15
+        assert snapshot["jsonDetailRequests"] == 15
+        assert snapshot["binaryAttributeBuilds"] <= 30
+        assert snapshot["binaryAttributeRenderSubscriptions"] <= 15
+        assert snapshot["renderCacheEntries"] <= 30
+        assert snapshot["renderCalls"] < 200
+        browser.close()

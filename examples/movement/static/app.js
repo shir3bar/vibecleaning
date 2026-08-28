@@ -459,6 +459,7 @@ function updateMovementBinaryWorkerReviewStatus(binary) {
 
 function releaseMovementBinaryBlock(binary) {
   const blockId = binary?.workerBlockId;
+  binary?.attributeRenderKeys?.clear?.();
   if (!blockId) return;
   binary.workerBlockId = "";
   movementBinaryWorkerClient?.release(blockId);
@@ -505,12 +506,15 @@ class MovementExampleApp {
     this.pendingMapSingleClickTimer = null;
     this.previewHandoffIndividuals = new Set();
     this.previewHandoffFrame = null;
+    this.binaryAttributeRenderFrame = null;
     this.movementDiagnostics = {
       binaryRequests: 0,
       jsonDetailRequests: 0,
       reviewProjectionRequests: 0,
       binaryCacheHits: 0,
       binaryAttributeBuilds: 0,
+      binaryAttributeRenderSubscriptions: 0,
+      binaryAttributeRenderFrames: 0,
       renderCalls: 0,
       renderLastMs: 0,
       renderTotalMs: 0,
@@ -4763,6 +4767,7 @@ class MovementExampleApp {
     }
     binary.renderCaches = new Map();
     binary.attributePromises = new Map();
+    binary.attributeRenderKeys = new Set();
     for (const field of data.colorFields) {
       const statsKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY
         ? "step_length_m"
@@ -8112,6 +8117,10 @@ class MovementExampleApp {
       window.cancelAnimationFrame(this.previewHandoffFrame);
       this.previewHandoffFrame = null;
     }
+    if (this.binaryAttributeRenderFrame !== null) {
+      window.cancelAnimationFrame(this.binaryAttributeRenderFrame);
+      this.binaryAttributeRenderFrame = null;
+    }
     this.previewHandoffIndividuals.clear();
     this.tableRenderState = {
       signature: "",
@@ -11293,6 +11302,10 @@ class MovementExampleApp {
       window.cancelAnimationFrame(this.previewHandoffFrame);
       this.previewHandoffFrame = null;
     }
+    if (this.binaryAttributeRenderFrame !== null) {
+      window.cancelAnimationFrame(this.binaryAttributeRenderFrame);
+      this.binaryAttributeRenderFrame = null;
+    }
     if (this.overlay) {
       try {
         this.overlay.finalize();
@@ -11554,7 +11567,12 @@ class MovementExampleApp {
   binaryRenderSpecification() {
     const field = this.getCurrentColorField();
     const fieldStyle = field ? this.data.colorStyles.get(field.key) : null;
-    const serializedFieldStyle = fieldStyle?.categories instanceof Map
+    // Individual colors come from the immutable study palette. Focused object
+    // payloads must not create a new binary cache key merely because the
+    // currently materialized individual changed.
+    const serializedFieldStyle = field?.key === INDIVIDUAL_COLOR_FIELD_KEY
+      ? null
+      : fieldStyle?.categories instanceof Map
       ? { ...fieldStyle, categories: [...fieldStyle.categories.entries()] }
       : fieldStyle || null;
     const cacheKey = JSON.stringify({
@@ -11625,6 +11643,35 @@ class MovementExampleApp {
       return promise;
     }
     return this.buildRetainedBinaryAttributes(binary);
+  }
+
+  scheduleBinaryAttributeRender() {
+    if (this.binaryAttributeRenderFrame !== null) return;
+    this.binaryAttributeRenderFrame = window.requestAnimationFrame(() => {
+      this.binaryAttributeRenderFrame = null;
+      this.movementDiagnostics.binaryAttributeRenderFrames += 1;
+      this.renderLayers();
+    });
+  }
+
+  prepareRetainedBinaryAttributesAndRender(binary, cacheKey) {
+    if (!(binary.attributeRenderKeys instanceof Set)) {
+      binary.attributeRenderKeys = new Set();
+    }
+    if (binary.attributeRenderKeys.has(cacheKey)) return;
+    binary.attributeRenderKeys.add(cacheKey);
+    this.movementDiagnostics.binaryAttributeRenderSubscriptions += 1;
+    void this.prepareRetainedBinaryAttributes(binary).then(() => {
+      const retained = (
+        this.data?.fullBinaryMovement === binary
+        || [...(this.data?.binaryBlocks?.values?.() || [])].includes(binary)
+      );
+      if (retained) this.scheduleBinaryAttributeRender();
+    }).catch(error => {
+      this.setStatus(`Map color warning: ${error.message}`, true);
+    }).finally(() => {
+      binary.attributeRenderKeys.delete(cacheKey);
+    });
   }
 
   buildRetainedBinaryAttributes(binary) {
@@ -12007,11 +12054,12 @@ class MovementExampleApp {
       let attributes = binary.renderCaches?.get(cacheKey) || null;
       let attributeCacheKey = cacheKey;
       if (!attributes) {
-        void this.prepareRetainedBinaryAttributes(binary).then(() => {
-          if (this.data?.binaryBlocks && [...this.data.binaryBlocks.values()].includes(binary)) {
-            this.renderLayers();
-          }
-        }).catch(error => this.setStatus(`Map color warning: ${error.message}`, true));
+        // Hidden retained layers keep their last uploaded attributes. Preparing
+        // the current color specification is necessary only when the block is
+        // about to become visible.
+        if (visible) {
+          this.prepareRetainedBinaryAttributesAndRender(binary, cacheKey);
+        }
         attributes = binary.lastRenderAttributes || null;
         attributeCacheKey = binary.lastRenderCacheKey || "pending";
       }
@@ -14362,6 +14410,7 @@ class MovementExampleApp {
       this.data.confirmedTruncated = Boolean(payload.truncated);
       refreshMovementFixCollections(this.data, {
         colorFieldKeys: MOVEMENT_APP_CONFIG.rdsSource ? [this.refs.colorBy.value] : null,
+        recomputeColorStyles: !MOVEMENT_APP_CONFIG.rdsSource,
       });
       this.renderLegend();
       this.renderLayers();
@@ -14434,6 +14483,7 @@ class MovementExampleApp {
       this.data.suspiciousTruncated = Boolean(payload.truncated);
       refreshMovementFixCollections(this.data, {
         colorFieldKeys: MOVEMENT_APP_CONFIG.rdsSource ? [this.refs.colorBy.value] : null,
+        recomputeColorStyles: !MOVEMENT_APP_CONFIG.rdsSource,
       });
       if (focus) {
         this.clearThresholdState();
@@ -14747,7 +14797,10 @@ class MovementExampleApp {
     this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(preserved, selectedIndividuals);
     if (renderedChanged) {
       composeFocusedMovementSelection(this.data, cachedIndividuals);
-      refreshMovementFixCollections(this.data, { colorFieldKeys: [this.refs.colorBy.value] });
+      refreshMovementFixCollections(this.data, {
+        colorFieldKeys: [this.refs.colorBy.value],
+        recomputeColorStyles: false,
+      });
       this.renderSelectedFixes();
       this.renderThresholdPane();
       this.renderLayers();
@@ -14810,7 +14863,10 @@ class MovementExampleApp {
       this.data.detailIndividuals = [...currentSelection];
       this.data.detailLoadingIndividuals = stillMissing;
       this.data.detailState = stillMissing.length ? "loading" : "loaded";
-      refreshMovementFixCollections(this.data, { colorFieldKeys: [this.refs.colorBy.value] });
+      refreshMovementFixCollections(this.data, {
+        colorFieldKeys: [this.refs.colorBy.value],
+        recomputeColorStyles: false,
+      });
       this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(
         preserved,
         currentSelection,
@@ -17509,6 +17565,7 @@ class MovementExampleApp {
       binary.renderCaches?.clear?.();
       binary.deckDataCaches?.clear?.();
       binary.attributePromises?.clear?.();
+      binary.attributeRenderKeys?.clear?.();
       binary.lastRenderAttributes = null;
       binary.lastRenderCacheKey = "";
       workerUpdates.push(updateMovementBinaryWorkerReviewStatus(binary));

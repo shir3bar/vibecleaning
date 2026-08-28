@@ -356,6 +356,12 @@ def test_rds_binary_renderer_reuses_attributes_and_omits_empty_overlays():
     ]
     assert "binary.renderCaches?.has(cacheKey)" in source
     assert "binary.lastRenderCacheKey = cacheKey" in source
+    assert "binary.attributeRenderKeys.has(cacheKey)" in source
+    assert "this.scheduleBinaryAttributeRender();" in source
+    assert "if (this.binaryAttributeRenderFrame !== null) return;" in source
+    assert "if (visible) {\n          this.prepareRetainedBinaryAttributesAndRender" in binary_layers
+    assert "field?.key === INDIVIDUAL_COLOR_FIELD_KEY\n      ? null" in source
+    assert source.count("recomputeColorStyles: false") >= 2
     assert "attributeCacheKey = binary.lastRenderCacheKey" in binary_layers
     assert "this.binaryFilterExtension = new deck.DataFilterExtension" in binary_layers
     assert "attributes.thresholdCount" not in binary_layers
