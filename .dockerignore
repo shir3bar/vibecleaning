@@ -1,0 +1,14 @@
+.git
+.DS_Store
+__pycache__
+.pytest_cache
+.cache
+
+movebench/.git
+movebench/.cache
+movebench/__pycache__
+movebench/movement_raw
+
+vibecleaning/.git
+vibecleaning/.pytest_cache
+vibecleaning/data

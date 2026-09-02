@@ -1,0 +1,40 @@
+{
+  "name": "movebenchvibe",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "initializeCommand": "bash -lc 'mkdir -p \"$HOME/.codex/sessions\" && touch \"$HOME/.codex/auth.json\"'",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "postCreateCommand": "mkdir -p /root/.codex && printf 'approval_policy = \"never\"\\nsandbox_mode = \"danger-full-access\"\\n[features]\\nweb_search_request = true\\n[sandbox_workspace_write]\\nnetwork_access = true\\n' > /root/.codex/config.toml && conda run -n movebench python -m pip install --upgrade pip && conda run -n movebench python -m pip install -e ./movebench && conda run -n movebench python -m pip install -r ./vibecleaning/requirements.txt && conda run -n movebench python -m ipykernel install --user --name movebench --display-name 'Python (movebench)'",
+  "remoteUser": "root",
+  "containerUser": "root",
+  "updateRemoteUserUID": false,
+  "userEnvProbe": "none",
+  "runArgs": [
+    "--tz", "local"
+  ],
+  "containerEnv": {
+    "IS_SANDBOX": "1",
+    "TAR_OPTIONS": "--no-same-owner --no-same-permissions --no-overwrite-dir"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "openai.chatgpt",
+        "ms-toolsai.jupyter",
+        "ms-python.python"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/opt/conda/envs/movebench/bin/python",
+        "claudeCode.allowDangerouslySkipPermissions": true,
+        "claudeCode.initialPermissionMode": "bypassPermissions"
+      }
+    }
+  },
+  "mounts": [
+    "source=${localEnv:HOME}/.codex/auth.json,target=/root/.codex/auth.json,type=bind",
+    "source=${localEnv:HOME}/.codex/sessions,target=/root/.codex/sessions,type=bind"
+  ]
+}
