@@ -5,6 +5,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from app.filesystem import atomic_replace
+
 from .osm_enrichment import OSMEnrichmentError, enrich_movement_csv_with_osm_context
 from .osm_extracts import GEOFABRIK_INDEX_URL
 
@@ -61,7 +63,7 @@ def write_json_atomic(path: Path, payload: dict):
             output_handle.write("\n")
             output_handle.flush()
             os.fsync(output_handle.fileno())
-        os.replace(temporary_path, path)
+        atomic_replace(temporary_path, path)
     except Exception:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)

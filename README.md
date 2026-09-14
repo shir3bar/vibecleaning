@@ -21,6 +21,11 @@ Conda, minimal `move_viz`, verification, and configuration instructions.
 
 For a shared institutional deployment, see the
 [University IT deployment requirements](docs/IT_DEPLOYMENT_REQUIREMENTS.md).
+Windows users can start either movement profile with the supported launcher:
+
+```powershell
+.\scripts\start-vibecleaning.ps1 -Profile Rds -DataRoot "\\server\share\movement"
+```
 
 Key rules:
 
@@ -57,6 +62,10 @@ uv run python -m app.auth_cli bootstrap admin --display-name "Review Administrat
 uv run python -m app.auth_cli add reviewer1 --display-name "Taylor Reviewer" --role reviewer
 uv run python examples/slim_movement/server.py
 ```
+
+Shared installations can configure authoritative data, local disposable caches,
+and cross-machine locking with `VIBECLEANING_DATA_ROOT`,
+`VIBECLEANING_CACHE_ROOT`, and `VIBECLEANING_SHARED_LOCKING`.
 
 See [examples/slim_movement/README.md](examples/slim_movement/README.md) for
 account management, reviewer/editor workflow, and secure HTTPS deployment guidance.

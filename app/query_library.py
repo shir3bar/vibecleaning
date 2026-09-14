@@ -5,6 +5,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .filesystem import atomic_write_json, exclusive_file_lock
 from .state import META_DIR_NAME, ProjectStateError
 
 
@@ -150,17 +151,7 @@ def _merge_builtin_queries(persisted_records: list[dict]) -> list[dict]:
 
 
 def save_query_library(data_root: Path, payload: dict):
-    path = query_library_path(data_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.parent / f"{path.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-        temp_path.replace(path)
-    finally:
-        try:
-            temp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+    atomic_write_json(query_library_path(data_root), payload)
 
 
 def list_queries(data_root: Path, app: str | None = None) -> list[dict]:
@@ -200,40 +191,42 @@ def get_query(data_root: Path, query_id: str, version: int | None = None) -> dic
 def save_query(data_root: Path, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ProjectStateError("Invalid query payload")
-    persisted_library = _load_persisted_query_library(data_root)
-    persisted_queries = persisted_library["queries"]
-    existing_queries = _merge_builtin_queries(persisted_queries)
+    library_path = query_library_path(data_root)
+    with exclusive_file_lock(library_path.with_name("query_library.lock")):
+        persisted_library = _load_persisted_query_library(data_root)
+        persisted_queries = persisted_library["queries"]
+        existing_queries = _merge_builtin_queries(persisted_queries)
 
-    query_id = payload.get("query_id")
-    if query_id in (None, ""):
-        query_id = f"query_{uuid.uuid4().hex[:12]}"
-    else:
-        query_id = _query_id(query_id)
+        query_id = payload.get("query_id")
+        if query_id in (None, ""):
+            query_id = f"query_{uuid.uuid4().hex[:12]}"
+        else:
+            query_id = _query_id(query_id)
 
-    existing_versions = [
-        query["version"]
-        for query in existing_queries
-        if query.get("query_id") == query_id
-    ]
-    version = max(existing_versions, default=0) + 1
+        existing_versions = [
+            query["version"]
+            for query in existing_queries
+            if query.get("query_id") == query_id
+        ]
+        version = max(existing_versions, default=0) + 1
 
-    record = {
-        "query_id": query_id,
-        "version": version,
-        "app": _required_text(payload.get("app"), "app", max_length=80),
-        "name": _required_text(payload.get("name"), "name", max_length=160),
-        "description": _optional_text(payload.get("description"), "description", max_length=1200),
-        "candidate_kind": _required_text(payload.get("candidate_kind"), "candidate_kind", max_length=80),
-        "evaluator": _required_mapping(payload.get("evaluator"), "evaluator"),
-        "definition": _required_mapping(payload.get("definition"), "definition"),
-        "parameters": _optional_mapping(payload.get("parameters"), "parameters"),
-        "required_fields": _optional_list(payload.get("required_fields"), "required_fields"),
-        "created_by": _required_text(payload.get("created_by"), "created_by", max_length=80),
-        "created_at": now_iso(),
-    }
-    persisted_queries.append(record)
-    save_query_library(data_root, {"queries": persisted_queries})
-    return dict(record)
+        record = {
+            "query_id": query_id,
+            "version": version,
+            "app": _required_text(payload.get("app"), "app", max_length=80),
+            "name": _required_text(payload.get("name"), "name", max_length=160),
+            "description": _optional_text(payload.get("description"), "description", max_length=1200),
+            "candidate_kind": _required_text(payload.get("candidate_kind"), "candidate_kind", max_length=80),
+            "evaluator": _required_mapping(payload.get("evaluator"), "evaluator"),
+            "definition": _required_mapping(payload.get("definition"), "definition"),
+            "parameters": _optional_mapping(payload.get("parameters"), "parameters"),
+            "required_fields": _optional_list(payload.get("required_fields"), "required_fields"),
+            "created_by": _required_text(payload.get("created_by"), "created_by", max_length=80),
+            "created_at": now_iso(),
+        }
+        persisted_queries.append(record)
+        save_query_library(data_root, {"queries": persisted_queries})
+        return dict(record)
 
 
 def _query_id(raw_value: object) -> str:

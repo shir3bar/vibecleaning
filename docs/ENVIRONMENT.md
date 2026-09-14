@@ -145,14 +145,54 @@ was skipped or failed.
 
 ## Configuration
 
-The example servers accept `HOST` and `PORT`. Full and slim movement load the
-multi-user registry once from `data/.vibecleaning/users.json`. Bootstrap it before
-first startup:
+The example servers accept `HOST` and `PORT`. Movement deployments also use:
+
+```text
+VIBECLEANING_DATA_ROOT       authoritative projects and review history
+VIBECLEANING_CACHE_ROOT      machine-local disposable caches
+VIBECLEANING_SHARED_LOCKING  required (default) or disabled
+```
+
+An explicit Python constructor or CLI path takes precedence over its environment
+variable; the environment takes precedence over platform defaults. The Windows
+cache default is `%LOCALAPPDATA%\Vibecleaning\cache`. The macOS default is
+`~/Library/Caches/Vibecleaning`, and Linux follows `XDG_CACHE_HOME` or
+`~/.cache/vibecleaning`.
+
+Full and slim movement load the multi-user registry once from
+`<data-root>/.vibecleaning/users.json`. Bootstrap it before first startup:
 
 ```bash
 uv run python -m app.auth_cli bootstrap admin --display-name "Review Administrator"
 uv run python -m app.auth_cli add reviewer1 --display-name "Taylor Reviewer" --role reviewer
 ```
+
+Pass `--data-root` to override `VIBECLEANING_DATA_ROOT`. Account changes use a
+cross-process lock, but administrators should still make registry changes during
+a maintenance window and restart running instances afterward. Share ACLs are the
+security boundary for `users.json`; POSIX mode bits are not an access-control
+mechanism on Windows shares.
+
+Clear local RDS indexes explicitly with one of:
+
+```bash
+uv run python -m app.cache_cli clear-rds --all
+uv run python -m app.cache_cli clear-rds --older-than-days 30
+```
+
+On Windows 11, use the launcher from the repository root:
+
+```powershell
+.\scripts\start-vibecleaning.ps1 `
+  -Profile Rds `
+  -DataRoot "\\university-server\research\movement-data" `
+  -SharedLocking required
+```
+
+Use `-Profile Csv` for the slim CSV application and optionally pass
+`-CacheRoot`, `-Port`, or `-SharedLocking disabled`. The launcher keeps the uv
+environment and caches beneath `%LOCALAPPDATA%\Vibecleaning`, binds only to
+`127.0.0.1`, and refuses an occupied port.
 
 Use the same CLI's `list`, `enable`, `disable`, and `reset-password` commands for
 operator account management and restart the server after changes. The app must

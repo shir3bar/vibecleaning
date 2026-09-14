@@ -13,6 +13,7 @@ from shapely.geometry import box, mapping, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
+from app.filesystem import atomic_replace
 from app.osm import EARTH_RADIUS_M
 
 from .osm_context import OSM_CONTEXT_LAYER_SPECS, normalize_local_search_radius_m
@@ -1042,7 +1043,7 @@ def _write_bytes_atomic(path: Path, content: bytes):
             temporary.flush()
             os.fsync(temporary.fileno())
             temporary_path = Path(temporary.name)
-        os.replace(temporary_path, path)
+        atomic_replace(temporary_path, path)
     except Exception:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
@@ -1320,7 +1321,7 @@ def cache_geofabrik_source_pbf(
                     raise OSMExtractSourceError(
                         f"Downloaded Geofabrik source size mismatch for {source['region_id']}."
                     )
-                os.replace(temporary_path, paths["pbf"])
+                atomic_replace(temporary_path, paths["pbf"])
                 temporary_path = None
                 break
             except httpx.HTTPError as exc:
@@ -1410,7 +1411,7 @@ def _write_gzip_features_atomic(path: Path, features: list[dict]) -> str:
             temporary.flush()
             os.fsync(temporary.fileno())
         digest = _sha256_path(temporary_path)
-        os.replace(temporary_path, path)
+        atomic_replace(temporary_path, path)
         return digest
     except Exception:
         if temporary_path is not None:

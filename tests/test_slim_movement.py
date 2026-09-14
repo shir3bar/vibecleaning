@@ -27,6 +27,7 @@ def create_slim_test_client(
     *,
     credentials: tuple[str, str] | None = None,
     authenticated: bool = True,
+    shared_locking: str | None = None,
 ) -> TestClient:
     data_root = tmp_path / "data"
     raw_study = data_root / "movement_raw" / "raw_study"
@@ -48,6 +49,7 @@ def create_slim_test_client(
             password=password,
             role="editor",
         ),
+        shared_locking=shared_locking,
     )
     client = TestClient(app)
     if authenticated:
@@ -57,6 +59,20 @@ def create_slim_test_client(
         )
         assert response.status_code == 200
     return client
+
+
+def test_slim_runtime_exposes_cooperative_mode_warning(tmp_path):
+    client = create_slim_test_client(
+        tmp_path,
+        authenticated=False,
+        shared_locking="disabled",
+    )
+
+    response = client.get("/api/runtime")
+
+    assert response.status_code == 200
+    assert response.json()["cooperative_mode"] is True
+    assert "one active writer" in response.json()["warning"]
 
 
 def test_slim_movement_serves_shared_viewer_with_slim_profile(tmp_path):
@@ -94,11 +110,14 @@ def test_slim_auth_keeps_login_assets_public_and_protects_data_routes(tmp_path):
         authenticated=False,
     )
 
-    for path in ("/", "/static/app.js", "/static/login.js"):
+    for path in ("/", "/static/app.js", "/static/login.js", "/api/runtime"):
         response = client.get(path)
         assert response.status_code == 200
         assert "www-authenticate" not in response.headers
         assert "set-cookie" not in response.headers
+
+    runtime = client.get("/api/runtime")
+    assert runtime.json()["shared_locking"] == "required"
 
     for path in (
         "/api/auth/me",
@@ -153,6 +172,8 @@ def test_slim_login_uses_shared_http_only_cookie_session():
     assert 'fetch("/api/auth/login"' in source
     assert 'window.location.reload()' in source
     assert 'logoutButton.addEventListener("click"' in source
+    assert 'fetch("/api/runtime"' in source
+    assert "COOPERATIVE MODE:" in source
 
 
 def test_slim_movement_catalog_exposes_only_movement_raw(tmp_path):

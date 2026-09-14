@@ -2898,7 +2898,8 @@ def test_movement_frontend_updates_review_only_steps_without_reloading_tracks():
     assert "without reloading movement tracks" in transition
     assert "window.addEventListener(\"focus\"" not in source
     assert 'String(update.reason || "") !== "editor_control_released"' in source
-    assert 'String(actor.role || "") !== "reviewer"' in source
+    assert "async refreshSharedStudyState(update)" in source
+    assert "remoteHead !== knownHead" in source
     assert 'data-role="release-notice" hidden' in source
     assert 'data-role="load-editor-release"' in source
 

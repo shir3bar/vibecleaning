@@ -13,6 +13,7 @@ from .execution import create_analysis, create_step, set_current_head, undo_to_p
 from .osm import OSMFetchError, OSMValidationError, fetch_osm_features, normalize_osm_request
 from .preview import preview_artifact
 from .query_library import get_query, list_queries, save_query
+from .runtime import COOPERATIVE_MODE_WARNING, shared_locking_mode, shared_locking_scope
 from .state import (
     ProjectStateError,
     get_dataset_artifact,
@@ -71,6 +72,7 @@ def create_app(
     static_root: Path,
     index_path: Path | None = None,
     auth_manager: AuthManager | None = None,
+    shared_locking: str | None = None,
 ) -> FastAPI:
     data_root = data_root.resolve()
     static_root = static_root.resolve()
@@ -79,6 +81,7 @@ def create_app(
     app = FastAPI()
     app.state.data_root = data_root
     app.state.static_root = static_root
+    app.state.shared_locking = shared_locking_mode(shared_locking)
 
     def require_editor_when_authenticated(request: Request) -> None:
         if auth_manager is None:
@@ -100,7 +103,8 @@ def create_app(
 
     @app.middleware("http")
     async def add_security_headers(request: Request, call_next):
-        response = await call_next(request)
+        with shared_locking_scope(app.state.shared_locking):
+            response = await call_next(request)
         if request.url.path == "/" or request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
             response.headers["Pragma"] = "no-cache"
@@ -135,6 +139,17 @@ def create_app(
     @app.get("/")
     async def index():
         return FileResponse(resolved_index_path)
+
+    @app.get("/api/runtime")
+    async def get_runtime_configuration():
+        cooperative = app.state.shared_locking == "disabled"
+        return JSONResponse(
+            {
+                "shared_locking": app.state.shared_locking,
+                "cooperative_mode": cooperative,
+                "warning": COOPERATIVE_MODE_WARNING if cooperative else "",
+            }
+        )
 
     @app.get("/api/projects")
     async def get_projects(request: Request):

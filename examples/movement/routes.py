@@ -25,7 +25,7 @@ from app.edit_locks import (
     undo_guarded,
 )
 from app.execution import create_analysis, create_step
-from app.events import StudyEventBroker
+from app.events import StudyEventBroker, shared_study_state
 from app.reviews import (
     ReviewConflictError,
     ReviewForbiddenError,
@@ -48,6 +48,7 @@ from app.reviews import (
     start_editor_control,
     valid_review_decisions,
 )
+from app.runtime import resolve_cache_root
 from app.state import (
     ProjectStateError,
     get_dataset_artifact,
@@ -351,6 +352,8 @@ EXPORT_REVIEWED_RDS_SCRIPT = build_self_contained_script(
     EXPORT_REVIEWED_RDS_TEMPLATE_PATH,
     (
         *MOVEMENT_REVIEW_MODULES,
+        "app.filesystem",
+        "app.runtime",
         "app.state",
         "examples.movement.rds_index",
         "examples.movement.rds_export",
@@ -994,8 +997,10 @@ def register_movement_routes(
     overview_series_points: int | None = None,
     background_anomaly_ranking: bool = False,
     source_format: str = "csv",
+    cache_root: Path | None = None,
 ):
     data_root = data_root.resolve()
+    configured_cache_root = resolve_cache_root(cache_root)
     configured_source = source_adapter(source_format)
     configured_families = (
         set(allowed_families)
@@ -1012,6 +1017,13 @@ def register_movement_routes(
     analysis_jobs_lock = Lock()
     event_broker = StudyEventBroker()
     authentication_enabled = getattr(app.state, "auth_manager", None) is not None
+
+    def ensure_configured_rds_index(study_dir: Path, dataset_id: str):
+        return ensure_rds_index(
+            study_dir,
+            dataset_id,
+            cache_root=configured_cache_root,
+        )
 
     def prune_analysis_jobs() -> None:
         with analysis_jobs_lock:
@@ -1102,12 +1114,10 @@ def register_movement_routes(
         actor: Actor | None,
         target_user_id: str = "",
     ) -> dict:
-        state = load_review_state(study_dir)
         return {
             "event": "study_state_changed",
             "reason": reason,
-            "review_revision": int(state.get("revision") or 0),
-            "current_dataset_id": str(load_project_state(study_dir)["current_dataset_id"]),
+            **shared_study_state(study_dir),
             "actor": actor_payload(actor),
             "target_user_id": str(target_user_id or ""),
         }
@@ -1882,7 +1892,7 @@ def register_movement_routes(
             )
             if configured_source.bundle_scoped:
                 bundle, index_path = await run_in_threadpool(
-                    ensure_rds_index, study_dir, dataset_id
+                    ensure_configured_rds_index, study_dir, dataset_id
                 )
                 projection = await run_in_threadpool(
                     build_rds_review_projection,
@@ -2056,7 +2066,7 @@ def register_movement_routes(
             visible_annotations = display_annotations(study_dir, dataset_id, annotations)
             if configured_source.bundle_scoped:
                 bundle, index_path = await run_in_threadpool(
-                    ensure_rds_index, study_dir, dataset_id
+                    ensure_configured_rds_index, study_dir, dataset_id
                 )
                 payload = await run_in_threadpool(
                     build_rds_binary_columns,
@@ -2204,7 +2214,7 @@ def register_movement_routes(
                 )
             if configured_source.bundle_scoped:
                 bundle, _index_path = await run_in_threadpool(
-                    ensure_rds_index, study_dir, normalized_dataset_id
+                    ensure_configured_rds_index, study_dir, normalized_dataset_id
                 )
                 exclusion_signature = review_exclusion_signature(
                     study_dir, normalized_dataset_id, normalized_logical_name
@@ -2323,7 +2333,7 @@ def register_movement_routes(
             }
             if configured_source.bundle_scoped:
                 bundle, index_path = await run_in_threadpool(
-                    ensure_rds_index, study_dir, dataset_id
+                    ensure_configured_rds_index, study_dir, dataset_id
                 )
                 annotations = _load_dataset_review_annotations(
                     study_dir, dataset_id=dataset_id
@@ -2554,7 +2564,9 @@ def register_movement_routes(
         source_bundle_signature = ""
         source_input_artifacts = [logical_name]
         if configured_source.bundle_scoped:
-            bundle, _ = await run_in_threadpool(ensure_rds_index, study_dir, current_id)
+            bundle, _ = await run_in_threadpool(
+                ensure_configured_rds_index, study_dir, current_id
+            )
             source_bundle_signature = bundle.signature
             source_input_artifacts = [
                 str(item.get("logical_name") or "")
@@ -2925,14 +2937,29 @@ def register_movement_routes(
                     reason="connected",
                     actor=actor,
                 )
+                last_fingerprint = str(snapshot["state_fingerprint"])
                 yield f"event: study_state_changed\ndata: {json.dumps(snapshot)}\n\n"
                 while True:
                     if await request.is_disconnected():
                         break
                     try:
-                        event = await asyncio.wait_for(queue.get(), timeout=60)
+                        event = await asyncio.wait_for(queue.get(), timeout=3)
                     except asyncio.TimeoutError:
-                        yield ": keepalive\n\n"
+                        try:
+                            event = state_event_payload(
+                                study_dir,
+                                reason="shared_state_changed",
+                                actor=None,
+                            )
+                        except (OSError, ProjectStateError, ReviewStateError):
+                            yield ": keepalive\n\n"
+                            continue
+                        fingerprint = str(event.get("state_fingerprint") or "")
+                        if fingerprint == last_fingerprint:
+                            yield ": keepalive\n\n"
+                            continue
+                        last_fingerprint = fingerprint
+                        yield f"event: study_state_changed\ndata: {json.dumps(event)}\n\n"
                         continue
                     target_user_id = str(event.get("target_user_id") or "")
                     if target_user_id and (
@@ -2941,6 +2968,7 @@ def register_movement_routes(
                         or actor.user_id != target_user_id
                     ):
                         continue
+                    last_fingerprint = str(event.get("state_fingerprint") or last_fingerprint)
                     yield f"event: study_state_changed\ndata: {json.dumps(event)}\n\n"
 
         return StreamingResponse(
@@ -3139,7 +3167,7 @@ def register_movement_routes(
             filter_spec = _validate_filter_scope(body.get("filter"))
             if configured_source.bundle_scoped:
                 bundle, index_path = await run_in_threadpool(
-                    ensure_rds_index, study_dir, dataset_id
+                    ensure_configured_rds_index, study_dir, dataset_id
                 )
                 validate_requested_bundle(body, bundle.signature)
                 _resolved_scope, match_count = await run_in_threadpool(
@@ -3197,7 +3225,7 @@ def register_movement_routes(
             annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
             if configured_source.bundle_scoped:
                 bundle, _index_path = await run_in_threadpool(
-                    ensure_rds_index, study_dir, dataset_id
+                    ensure_configured_rds_index, study_dir, dataset_id
                 )
                 validate_requested_bundle(body, bundle.signature)
             movement, source_signature = await run_in_threadpool(
@@ -3424,7 +3452,7 @@ def register_movement_routes(
             source_bundle_signature = ""
             if configured_source.bundle_scoped:
                 bundle, index_path = await run_in_threadpool(
-                    ensure_rds_index, study_dir, dataset_id
+                    ensure_configured_rds_index, study_dir, dataset_id
                 )
                 validate_requested_bundle(body, bundle.signature)
                 resolved_scope, resolved_fix_count = await run_in_threadpool(
@@ -3581,7 +3609,7 @@ def register_movement_routes(
             input_artifacts = [logical_name]
             if configured_source.bundle_scoped:
                 bundle, _index_path = await run_in_threadpool(
-                    ensure_rds_index, study_dir, dataset_id
+                    ensure_configured_rds_index, study_dir, dataset_id
                 )
                 validate_requested_bundle(body, bundle.signature)
                 records = _rds_resolution_records(
@@ -3685,7 +3713,7 @@ def register_movement_routes(
             input_artifacts = [logical_name]
             if configured_source.bundle_scoped:
                 bundle, index_path = await run_in_threadpool(
-                    ensure_rds_index, study_dir, dataset_id
+                    ensure_configured_rds_index, study_dir, dataset_id
                 )
                 validate_requested_bundle(body, bundle.signature)
                 annotations = _load_dataset_review_annotations(
@@ -3805,7 +3833,7 @@ def register_movement_routes(
             input_artifacts = [logical_name]
             if configured_source.bundle_scoped:
                 bundle, index_path = await run_in_threadpool(
-                    ensure_rds_index, study_dir, dataset_id
+                    ensure_configured_rds_index, study_dir, dataset_id
                 )
                 validate_requested_bundle(body, bundle.signature)
                 resolved_scope, resolved_fix_count = await run_in_threadpool(
@@ -3921,7 +3949,7 @@ def register_movement_routes(
             report_sidecar_attachment_name = ""
             report_source_bundle_signature = ""
             if configured_source.bundle_scoped:
-                bundle, index_path = ensure_rds_index(study_dir, dataset_id)
+                bundle, index_path = ensure_configured_rds_index(study_dir, dataset_id)
                 validate_requested_bundle(body, bundle.signature)
                 report_source_bundle_signature = bundle.signature
                 report_input_artifacts = [

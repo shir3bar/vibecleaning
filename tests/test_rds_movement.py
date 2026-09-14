@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 import struct
 import sys
 import zipfile
@@ -55,6 +56,7 @@ def _client(tmp_path: Path) -> tuple[TestClient, Path]:
         shutil.copy2(source, study_dir / source.name)
     app = create_rds_movement_app(
         data_root=tmp_path / "data",
+        cache_root=tmp_path / "cache",
         static_root=MOVEMENT_STATIC_ROOT,
         index_path=MOVEMENT_INDEX,
         auth_manager=AuthManager.for_testing(
@@ -82,6 +84,7 @@ def _detector_client(tmp_path: Path) -> tuple[TestClient, Path]:
         shutil.copy2(source, study_dir / source.name.replace("_KAMI.rds", ".rds"))
     app = create_rds_movement_app(
         data_root=tmp_path / "data",
+        cache_root=tmp_path / "cache",
         static_root=MOVEMENT_STATIC_ROOT,
         index_path=MOVEMENT_INDEX,
         auth_manager=AuthManager.for_testing(
@@ -220,7 +223,9 @@ def test_rds_filter_preview_returns_exact_scope_count_without_creating_step(tmp_
         f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{dataset_id}/overview",
         params={"logical_name": logical_name},
     ).json()
-    bundle, index_path = ensure_rds_index(study_dir, dataset_id)
+    bundle, index_path = ensure_rds_index(
+        study_dir, dataset_id, cache_root=tmp_path / "cache"
+    )
     base_filter = {
         "field_key": "is_outlier",
         "field_kind": "boolean",
@@ -478,7 +483,9 @@ def test_rds_adapter_matches_existing_csv_movement_model(tmp_path):
     study_dir.mkdir()
     shutil.copy2(source, study_dir / source.name)
     state = ensure_project_state(study_dir)
-    _bundle, index_path = ensure_rds_index(study_dir, state["current_dataset_id"])
+    _bundle, index_path = ensure_rds_index(
+        study_dir, state["current_dataset_id"], cache_root=tmp_path / "cache"
+    )
     rds_payload = build_rds_fixes(index_path)
 
     csv_path = tmp_path / "equivalent.csv"
@@ -516,7 +523,9 @@ def test_rds_numeric_filter_scope_keeps_selected_individuals(tmp_path):
     for source in _sample_files():
         shutil.copy2(source, study_dir / source.name)
     state = ensure_project_state(study_dir)
-    _bundle, index_path = ensure_rds_index(study_dir, state["current_dataset_id"])
+    _bundle, index_path = ensure_rds_index(
+        study_dir, state["current_dataset_id"], cache_root=tmp_path / "cache"
+    )
     payload = build_rds_fixes(index_path)
     selected = payload["fixes"][0]["individual"]
     selected_fix_count = sum(
@@ -581,7 +590,7 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
         "line_source_indexes", "line_target_indexes",
     }
 
-    cache_path = next((study_dir / ".vibecleaning" / "cache" / "movement").glob("*.sqlite"))
+    cache_path = next((tmp_path / "cache" / "movement" / "rds").glob("*.sqlite"))
     first_mtime = cache_path.stat().st_mtime_ns
     repeated = client.get(
         f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{dataset_id}/fixes-binary"
@@ -594,6 +603,14 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
     )
     assert rebuilt.status_code == 200
     assert cache_path.exists()
+
+    cache_path.write_bytes(b"interrupted local index build")
+    recovered = client.get(
+        f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{dataset_id}/fixes-binary"
+    )
+    assert recovered.status_code == 200
+    with sqlite3.connect(cache_path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
     feature_rows = rds_burst_feature_rows(cache_path)
     source_ranking = source_outlier_ranking(cache_path)
@@ -871,7 +888,9 @@ def test_rds_roi_scope_resolves_exact_source_rows(tmp_path):
         "/api/apps/movement/family/movement_rds/study/268904527/load"
     ).json()
     dataset_id = loaded["dataset_id"]
-    _bundle, index_path = ensure_rds_index(study_dir, dataset_id)
+    _bundle, index_path = ensure_rds_index(
+        study_dir, dataset_id, cache_root=tmp_path / "cache"
+    )
     movement = build_rds_fixes(index_path, limit=1)
     fix = movement["fixes"][0]
     longitude = float(fix["lon"])

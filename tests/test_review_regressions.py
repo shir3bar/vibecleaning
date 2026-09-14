@@ -53,14 +53,19 @@ def test_geometry_crs_without_amt_attribute():
 
 def test_cache_keeps_other_content_versions_and_reuses_annotations(tmp_path, monkeypatch):
     bundle = rds_index.RdsBundle(study_dir=tmp_path, dataset_id="v1", artifacts=(), paths=(), signature="same-source")
-    path = rds_index.rds_index_path(bundle)
+    cache_root = tmp_path / "local-cache"
+    path = rds_index.rds_index_path(bundle, cache_root=cache_root)
     path.parent.mkdir(parents=True)
     old = path.parent / "other-source.sqlite"
     old.touch()
     monkeypatch.setattr(rds_index, "load_rds_bundle", lambda *a: bundle)
     monkeypatch.setattr(rds_index, "_index_matches", lambda *a: True)
     monkeypatch.setattr(rds_index, "build_rds_index", lambda *a: pytest.fail("Annotation must not rebuild index"))
-    assert rds_index.ensure_rds_index(tmp_path, "v1")[1] == rds_index.ensure_rds_index(tmp_path, "v2")[1]
+    assert rds_index.ensure_rds_index(
+        tmp_path, "v1", cache_root=cache_root
+    )[1] == rds_index.ensure_rds_index(
+        tmp_path, "v2", cache_root=cache_root
+    )[1]
     assert old.exists()
 
 

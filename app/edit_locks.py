@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import hashlib
 import json
 from pathlib import Path
@@ -9,6 +8,7 @@ import shutil
 from typing import Callable, Iterator
 
 from .execution import create_step, set_current_head, undo_to_parent
+from .filesystem import FileLockTimeoutError, atomic_replace, exclusive_file_lock
 from .state import (
     ProjectStateError,
     list_datasets,
@@ -210,12 +210,13 @@ def require_editable_dataset(
 def project_mutation_lock(project_dir: Path) -> Iterator[None]:
     paths = project_paths(project_dir.resolve())
     paths["meta"].mkdir(parents=True, exist_ok=True)
-    with paths["mutation_lock"].open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
+    try:
+        with exclusive_file_lock(paths["mutation_lock"]):
             yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except FileLockTimeoutError as exc:
+        raise EditConflictError(
+            "Another Vibecleaning process is updating this study; try again shortly"
+        ) from exc
 
 
 def create_guarded_step(
@@ -400,7 +401,7 @@ def resume_from_dataset(
             }
             save_json(staging_dir / "manifest.json", manifest)
             paths["archives"].mkdir(parents=True, exist_ok=True)
-            staging_dir.replace(archive_dir)
+            atomic_replace(staging_dir, archive_dir)
         except Exception:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise

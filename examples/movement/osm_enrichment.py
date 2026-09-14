@@ -5,6 +5,8 @@ import tempfile
 from copy import deepcopy
 from pathlib import Path
 
+from app.filesystem import atomic_replace
+
 from .osm_context import build_fix_osm_context, normalize_local_search_radius_m
 from .osm_extracts import (
     GEOFABRIK_INDEX_URL,
@@ -53,7 +55,7 @@ def _write_csv_atomic(path: Path, *, fieldnames: list[str], rows: list[dict]):
             writer.writerows(rows)
             output_handle.flush()
             os.fsync(output_handle.fileno())
-        os.replace(temporary_path, path)
+        atomic_replace(temporary_path, path)
     except Exception:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)

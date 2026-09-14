@@ -610,6 +610,9 @@ def test_roi_drawing_uses_queue_and_browse_scopes(tmp_path):
         browser = _open_browser(playwright)
         page = browser.new_page(viewport={"width": 1440, "height": 900})
         _login_and_wait(page, base_url, "roi_ui")
+        page.locator("[data-individual-checkbox]").first.wait_for(
+            state="attached", timeout=20_000
+        )
         page.locator('[data-role="individual-view-queue"]').click()
         page.locator('[data-role="track-player"]').wait_for(
             state="visible", timeout=20_000
@@ -1302,6 +1305,7 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
         shutil.copy2(sample, study_dir / sample.name)
     app = create_rds_movement_app(
         data_root=tmp_path / "data",
+        cache_root=tmp_path / "cache",
         static_root=STATIC_ROOT,
         index_path=INDEX_PATH,
         auth_manager=_auth_manager(),
@@ -1543,6 +1547,7 @@ def test_rds_whole_study_filter_updates_hidden_retained_individuals(tmp_path):
         shutil.copy2(sample, study_dir / sample.name)
     app = create_rds_movement_app(
         data_root=tmp_path / "data",
+        cache_root=tmp_path / "cache",
         static_root=STATIC_ROOT,
         index_path=INDEX_PATH,
         auth_manager=_auth_manager(),
@@ -1626,6 +1631,7 @@ def test_rds_queue_navigation_does_not_fan_out_attribute_renders(tmp_path):
         shutil.copy2(sample, study_dir / sample.name)
     app = create_rds_movement_app(
         data_root=tmp_path / "data",
+        cache_root=tmp_path / "cache",
         static_root=STATIC_ROOT,
         index_path=INDEX_PATH,
         auth_manager=_auth_manager(),

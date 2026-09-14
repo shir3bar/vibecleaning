@@ -16,6 +16,8 @@ from fastapi.responses import JSONResponse
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .filesystem import atomic_write_json
+
 
 AUTH_DIR_NAME = ".vibecleaning"
 USERS_FILE_NAME = "users.json"
@@ -25,7 +27,7 @@ SCRYPT_N = 2**14
 SCRYPT_R = 8
 SCRYPT_P = 1
 VALID_ROLES = frozenset({"reviewer", "editor"})
-PUBLIC_PATHS = frozenset({"/", "/api/auth/login"})
+PUBLIC_PATHS = frozenset({"/", "/api/auth/login", "/api/runtime"})
 PUBLIC_PREFIXES = ("/static/", "/slim-static/")
 
 
@@ -143,12 +145,8 @@ def read_users_file(path: Path) -> list[dict]:
 
 
 def write_users_file(path: Path, users: Iterable[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"schema_version": 1, "users": list(users)}
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.chmod(0o600)
-    temporary.replace(path)
+    atomic_write_json(path, payload, mode=0o600)
 
 
 def build_user_record(

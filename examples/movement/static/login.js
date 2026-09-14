@@ -6,8 +6,24 @@ const submitButton = document.querySelector("#login-submit");
 const statusText = document.querySelector("#login-status");
 const appShell = document.querySelector("#app-shell");
 const logoutButton = document.querySelector("#logout-button");
+const cooperativeWarning = document.querySelector("#cooperative-mode-warning");
 
 let applicationLoaded = false;
+
+async function loadRuntimeConfiguration() {
+  try {
+    const response = await fetch("/api/runtime", { cache: "no-store" });
+    if (!response.ok) return;
+    const runtime = await response.json();
+    if (runtime.cooperative_mode === true && cooperativeWarning) {
+      cooperativeWarning.textContent = `COOPERATIVE MODE: ${runtime.warning}`;
+      cooperativeWarning.hidden = false;
+      document.body.classList.add("cooperative-mode");
+    }
+  } catch {}
+}
+
+void loadRuntimeConfiguration();
 
 function showLogin(message = "") {
   loginView.hidden = false;

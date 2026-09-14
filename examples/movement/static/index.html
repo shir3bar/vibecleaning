@@ -31,6 +31,23 @@
     display: flex;
     flex-direction: column;
   }
+  .cooperative-mode-warning {
+    position: fixed;
+    inset: 0 0 auto 0;
+    z-index: 10000;
+    padding: 9px 16px;
+    border-bottom: 1px solid #f59e0b;
+    background: #7c2d12;
+    color: #fff7ed;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.35;
+    text-align: center;
+  }
+  body.cooperative-mode #login-view,
+  body.cooperative-mode #app-shell {
+    padding-top: 44px;
+  }
   #login-view { min-height: 100%; display: grid; place-items: center; padding: 24px; }
   .login-card { width: min(100%, 390px); padding: 30px; border: 1px solid var(--border); border-radius: 18px; background: var(--panel); box-shadow: 0 24px 70px rgba(0,0,0,.38); }
   .login-brand { font: 700 22px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -92,6 +109,7 @@
 </style>
 </head>
 <body>
+<div id="cooperative-mode-warning" class="cooperative-mode-warning" role="alert" hidden></div>
 <section id="login-view" aria-labelledby="login-title">
   <form id="login-form" class="login-card">
     <h1 id="login-title" class="login-brand">vibecleaning</h1>

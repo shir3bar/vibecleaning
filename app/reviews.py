@@ -8,6 +8,7 @@ from typing import Callable, Iterable
 
 from .auth import Actor
 from .edit_locks import project_mutation_lock
+from .filesystem import atomic_write_json
 from .state import (
     ProjectStateError,
     list_history,
@@ -117,10 +118,7 @@ def load_review_state(project_dir: Path) -> dict:
 def save_review_state(project_dir: Path, state: dict) -> dict:
     normalized = normalize_review_state(state)
     path = review_state_path(project_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
-    temporary.write_text(json.dumps(normalized, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(path, normalized)
     stat = path.stat()
     with _cache_lock:
         _state_cache[str(path.resolve())] = (stat.st_mtime_ns, stat.st_size, normalized)

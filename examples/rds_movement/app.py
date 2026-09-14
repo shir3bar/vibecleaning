@@ -14,6 +14,8 @@ def create_rds_movement_app(
     static_root: Path,
     index_path: Path,
     auth_manager: AuthManager | None = None,
+    cache_root: Path | None = None,
+    shared_locking: str | None = None,
 ) -> FastAPI:
     if auth_manager is None:
         auth_manager = AuthManager.from_data_root(data_root)
@@ -22,6 +24,7 @@ def create_rds_movement_app(
         static_root=static_root,
         index_path=index_path,
         auth_manager=auth_manager,
+        shared_locking=shared_locking,
     )
     register_movement_routes(
         app,
@@ -33,6 +36,7 @@ def create_rds_movement_app(
         overview_series_points=250,
         background_anomaly_ranking=True,
         source_format="rds",
+        cache_root=cache_root,
     )
 
     install_movement_shell_mode(app, index_path=index_path, mode="rds_movement")

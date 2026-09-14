@@ -15,6 +15,8 @@ from .auth import (
     users_path,
     write_users_file,
 )
+from .filesystem import FileLockTimeoutError, exclusive_file_lock
+from .runtime import resolve_data_root
 
 
 def _read_or_empty(path: Path) -> list[dict]:
@@ -41,7 +43,7 @@ def _find_user(users: list[dict], username: str) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Manage Vibecleaning local users")
-    parser.add_argument("--data-root", type=Path, default=Path("data"))
+    parser.add_argument("--data-root", type=Path)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     bootstrap = subparsers.add_parser("bootstrap", help="Create the first editor registry")
@@ -62,44 +64,47 @@ def main(argv: list[str] | None = None) -> int:
 
     subparsers.add_parser("list", help="List accounts")
     args = parser.parse_args(argv)
-    path = users_path(args.data_root)
+    data_root = resolve_data_root(args.data_root, default=Path("data"))
+    path = users_path(data_root)
 
     try:
-        users = _read_or_empty(path)
-        if args.command in {"bootstrap", "add"}:
-            if args.command == "bootstrap" and users:
-                raise AuthenticationError("The user registry is already initialized")
-            username = normalize_username(args.username)
-            if any(user.get("username") == username for user in users):
-                raise AuthenticationError("Username already exists")
-            users.append(
-                build_user_record(
-                    username=username,
-                    display_name=normalize_display_name(args.display_name),
-                    role="editor" if args.command == "bootstrap" else normalize_role(args.role),
-                    password=_password(),
+        lock_path = path.with_name("users.lock")
+        with exclusive_file_lock(lock_path):
+            users = _read_or_empty(path)
+            if args.command in {"bootstrap", "add"}:
+                if args.command == "bootstrap" and users:
+                    raise AuthenticationError("The user registry is already initialized")
+                username = normalize_username(args.username)
+                if any(user.get("username") == username for user in users):
+                    raise AuthenticationError("Username already exists")
+                users.append(
+                    build_user_record(
+                        username=username,
+                        display_name=normalize_display_name(args.display_name),
+                        role="editor" if args.command == "bootstrap" else normalize_role(args.role),
+                        password=_password(),
+                    )
                 )
-            )
-            write_users_file(path, users)
-        elif args.command == "reset-password":
-            from .auth import hash_password
+                write_users_file(path, users)
+            elif args.command == "reset-password":
+                from .auth import hash_password
 
-            user = _find_user(users, args.username)
-            user["password_hash"] = hash_password(_password())
-            user["auth_version"] = int(user.get("auth_version") or 1) + 1
-            write_users_file(path, users)
-        elif args.command in {"enable", "disable"}:
-            user = _find_user(users, args.username)
-            user["enabled"] = args.command == "enable"
-            user["auth_version"] = int(user.get("auth_version") or 1) + 1
-            write_users_file(path, users)
-        else:
-            for user in sorted(users, key=lambda item: str(item.get("username") or "")):
-                print(
-                    f"{user.get('username')}\t{user.get('display_name')}\t"
-                    f"{user.get('role')}\t{'enabled' if user.get('enabled') else 'disabled'}"
-                )
-    except AuthenticationError as exc:
+                user = _find_user(users, args.username)
+                user["password_hash"] = hash_password(_password())
+                user["auth_version"] = int(user.get("auth_version") or 1) + 1
+                write_users_file(path, users)
+            elif args.command in {"enable", "disable"}:
+                user = _find_user(users, args.username)
+                user["enabled"] = args.command == "enable"
+                user["auth_version"] = int(user.get("auth_version") or 1) + 1
+                write_users_file(path, users)
+            else:
+                for user in sorted(users, key=lambda item: str(item.get("username") or "")):
+                    print(
+                        f"{user.get('username')}\t{user.get('display_name')}\t"
+                        f"{user.get('role')}\t{'enabled' if user.get('enabled') else 'disabled'}"
+                    )
+    except (AuthenticationError, FileLockTimeoutError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     return 0

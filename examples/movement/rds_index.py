@@ -32,6 +32,8 @@ import pandas as pd
 import rdata
 from rdata.conversion import DEFAULT_CLASS_MAP, dataframe_constructor
 
+from app.filesystem import atomic_replace, exclusive_file_lock
+from app.runtime import resolve_cache_root
 from app.state import ProjectStateError, load_dataset, resolve_artifact_path
 
 from .movement_features import (
@@ -741,19 +743,14 @@ def build_rds_index(bundle: RdsBundle, output_path: Path) -> None:
             check = connection.execute("PRAGMA integrity_check").fetchone()[0]
             if check != "ok":
                 raise ValueError(f"SQLite integrity check failed: {check}")
-        os.replace(temporary_path, output_path)
+        atomic_replace(temporary_path, output_path)
     finally:
         temporary_path.unlink(missing_ok=True)
 
 
-def rds_index_path(bundle: RdsBundle) -> Path:
-    return (
-        bundle.study_dir
-        / ".vibecleaning"
-        / "cache"
-        / "movement"
-        / f"{bundle.signature}.sqlite"
-    )
+def rds_index_path(bundle: RdsBundle, *, cache_root: Path | None = None) -> Path:
+    root = resolve_cache_root(cache_root)
+    return root / "movement" / "rds" / f"{bundle.signature}.sqlite"
 
 
 def _index_matches(path: Path, signature: str) -> bool:
@@ -770,11 +767,18 @@ def _index_matches(path: Path, signature: str) -> bool:
         return False
 
 
-def ensure_rds_index(study_dir: Path, dataset_id: str) -> tuple[RdsBundle, Path]:
+def ensure_rds_index(
+    study_dir: Path,
+    dataset_id: str,
+    *,
+    cache_root: Path | None = None,
+) -> tuple[RdsBundle, Path]:
     bundle = load_rds_bundle(study_dir, dataset_id)
-    path = rds_index_path(bundle)
-    if not _index_matches(path, bundle.signature):
-        build_rds_index(bundle, path)
+    path = rds_index_path(bundle, cache_root=cache_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with exclusive_file_lock(path.with_suffix(".lock"), mode="required"):
+        if not _index_matches(path, bundle.signature):
+            build_rds_index(bundle, path)
     # Annotation-only dataset revisions have the SAME source bundle signature
     # and reuse this index. Never delete another content version here: another
     # local app can still be reading it over the shared deployment filesystem.

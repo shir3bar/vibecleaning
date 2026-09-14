@@ -65,6 +65,8 @@ MOVEMENT_OSM_ENRICHMENT_MODULES = (
     "examples.movement.bursts",
     "examples.movement.movement_features",
     "examples.movement.summary",
+    "app.filesystem",
+    "app.runtime",
     "app.osm",
     "examples.movement.osm_context",
     "examples.movement.osm_extracts",

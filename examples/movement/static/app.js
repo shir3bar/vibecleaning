@@ -642,6 +642,9 @@ class MovementExampleApp {
     };
     this.studyEvents = null;
     this.studyEventsKey = "";
+    this.studyEventsFingerprint = "";
+    this.sharedStateRefreshInFlight = false;
+    this.pendingSharedStateUpdate = null;
     this.editorReleaseDatasetId = "";
     this.adminDashboardRefreshTimer = null;
     this.adminDashboardRefreshInFlight = false;
@@ -8395,11 +8398,6 @@ class MovementExampleApp {
 
   connectStudyEvents() {
     if (!this.currentFamily || !this.currentStudy || typeof EventSource === "undefined") return;
-    const actor = window.vibecleaningActor || this.editLockProfile?.actor || {};
-    if (String(actor.role || "") !== "reviewer") {
-      this.closeStudyEvents();
-      return;
-    }
     const key = `${this.currentFamily}/${this.currentStudy}`;
     if (this.studyEvents && this.studyEventsKey === key) return;
     this.studyEvents?.close();
@@ -8410,17 +8408,61 @@ class MovementExampleApp {
       if (events !== this.studyEvents) return;
       let update;
       try { update = JSON.parse(event.data); } catch { return; }
-      if (String(update.reason || "") !== "editor_control_released") return;
+      const fingerprint = String(update.state_fingerprint || "");
+      if (String(update.reason || "") === "connected") {
+        this.studyEventsFingerprint = fingerprint;
+        return;
+      }
+      if (fingerprint && fingerprint === this.studyEventsFingerprint) return;
+      this.studyEventsFingerprint = fingerprint;
       const actor = window.vibecleaningActor || this.editLockProfile?.actor || {};
-      if (String(actor.role || "") !== "reviewer") return;
+      const updateActor = update.actor || {};
+      if (
+        String(update.reason || "") !== "shared_state_changed"
+        && String(updateActor.user_id || "")
+        && String(updateActor.user_id || "") === String(actor.user_id || "")
+      ) return;
+      if (String(update.reason || "") !== "editor_control_released") {
+        void this.refreshSharedStudyState(update);
+        return;
+      }
       const targetUserId = String(update.target_user_id || "");
-      if (!targetUserId || targetUserId !== String(actor.user_id || "")) return;
+      if (!targetUserId || targetUserId !== String(actor.user_id || "")) {
+        void this.refreshSharedStudyState(update);
+        return;
+      }
       const remoteHead = String(update.current_dataset_id || "");
       if (!remoteHead) return;
       this.editorReleaseDatasetId = remoteHead;
       if (this.refs.releaseNotice) this.refs.releaseNotice.hidden = false;
       this.setStatus("The editor has finished making changes. Load the latest version when ready.");
     });
+  }
+
+  async refreshSharedStudyState(update) {
+    this.pendingSharedStateUpdate = update;
+    if (this.sharedStateRefreshInFlight) return;
+    this.sharedStateRefreshInFlight = true;
+    try {
+      while (this.pendingSharedStateUpdate) {
+        const next = this.pendingSharedStateUpdate;
+        this.pendingSharedStateUpdate = null;
+        const remoteHead = String(next.current_dataset_id || "");
+        const knownHead = this.expectedCurrentDatasetId();
+        if (remoteHead && remoteHead !== knownHead) {
+          const viewContext = this.captureDatasetViewContext();
+          await this.loadStudy({ preferredDatasetId: remoteHead, viewContext });
+          this.setStatus("A change from another Vibecleaning instance was loaded.");
+        } else {
+          await this.loadEditLockProfile();
+          this.setStatus("Review assignment or editor control changed on another instance.");
+        }
+      }
+    } catch (error) {
+      this.setStatus(`Could not refresh shared study state: ${error.message}`, true);
+    } finally {
+      this.sharedStateRefreshInFlight = false;
+    }
   }
 
   async loadReleasedEditorChanges() {
@@ -8438,6 +8480,8 @@ class MovementExampleApp {
     this.studyEvents?.close();
     this.studyEvents = null;
     this.studyEventsKey = "";
+    this.studyEventsFingerprint = "";
+    this.pendingSharedStateUpdate = null;
     this.editorReleaseDatasetId = "";
     if (this.refs?.releaseNotice) this.refs.releaseNotice.hidden = true;
   }

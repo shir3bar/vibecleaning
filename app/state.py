@@ -4,6 +4,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .filesystem import atomic_write_json
+
 
 META_DIR_NAME = ".vibecleaning"
 
@@ -30,8 +32,7 @@ def load_json(path: Path) -> dict:
 
 
 def save_json(path: Path, payload: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    atomic_write_json(path, payload)
 
 
 def normalize_user(user: object) -> str:
