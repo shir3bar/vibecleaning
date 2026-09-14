@@ -334,7 +334,9 @@ def distance_to_feature_m(lon: float, lat: float, geometry: object) -> float | N
         rings = [ring for ring in coordinates if isinstance(ring, list)]
         if not rings:
             return None
-        if _point_in_ring(lon, lat, rings[0]):
+        if _point_in_ring(lon, lat, rings[0]) and not any(
+            _point_in_ring(lon, lat, hole) for hole in rings[1:]
+        ):
             return 0.0
         distances = [
             _distance_to_line_m(lon, lat, ring)

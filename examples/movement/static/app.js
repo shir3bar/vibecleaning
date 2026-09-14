@@ -193,6 +193,19 @@ const BURST_FOCUS_RING_COLOR = [216, 180, 254, 235];
 const STORAGE_VERSION = 5;
 const INDIVIDUAL_QUEUE_PAGE_SIZE = 25;
 const INDIVIDUAL_QUEUE_GROUP_SIZE = 5;
+const TRACK_PLAYER_WINDOW_SIZES = Object.freeze([24, 72]);
+const TRACK_PLAYER_SPEEDS = Object.freeze([0.5, 1, 2]);
+const TRACK_PLAYER_VIEW_MODES = Object.freeze(["context", "trail"]);
+const TRACK_PLAYER_PLAYBACK_MODES = Object.freeze(["inspect", "scan"]);
+const DEFAULT_TRACK_PLAYER_WINDOW_SIZE = 24;
+const DEFAULT_TRACK_PLAYER_SPEED = 1;
+const DEFAULT_TRACK_PLAYER_VIEW_MODE = "context";
+const DEFAULT_TRACK_PLAYER_PLAYBACK_MODE = "inspect";
+const TRACK_PLAYER_BASE_DELAY_MS = 400;
+const TRACK_PLAYER_MIN_DELAY_MS = 150;
+const TRACK_PLAYER_MAX_DELAY_MS = 1600;
+const TRACK_PLAYER_SCAN_DELAY_MS = 50;
+const TRACK_PLAYER_SCAN_TARGET_STEPS = 1500;
 const DEFAULT_BURST_GAP_MODE = "quantile";
 const DEFAULT_BURST_GAP_SECONDS = 3600;
 const DEFAULT_BURST_GAP_QUANTILE = 0.999;
@@ -680,7 +693,40 @@ class MovementExampleApp {
       priorOkLast: true,
       priorOkLastReviewId: "",
     };
+    this.trackPlayer = {
+      individual: "",
+      binary: null,
+      sequence: null,
+      index: 0,
+      medianGapMs: 0,
+      windowSize: TRACK_PLAYER_WINDOW_SIZES.includes(Number(this.uiState.trackPlayerWindowSize))
+        ? Number(this.uiState.trackPlayerWindowSize)
+        : DEFAULT_TRACK_PLAYER_WINDOW_SIZE,
+      speed: TRACK_PLAYER_SPEEDS.includes(Number(this.uiState.trackPlayerSpeed))
+        ? Number(this.uiState.trackPlayerSpeed)
+        : DEFAULT_TRACK_PLAYER_SPEED,
+      viewMode: TRACK_PLAYER_VIEW_MODES.includes(this.uiState.trackPlayerViewMode)
+        ? this.uiState.trackPlayerViewMode
+        : DEFAULT_TRACK_PLAYER_VIEW_MODE,
+      playbackMode: TRACK_PLAYER_PLAYBACK_MODES.includes(this.uiState.trackPlayerPlaybackMode)
+        ? this.uiState.trackPlayerPlaybackMode
+        : DEFAULT_TRACK_PLAYER_PLAYBACK_MODE,
+      hidden: this.uiState.trackPlayerHidden === true,
+      playing: false,
+      timer: null,
+    };
+    this.roiSelection = {
+      drawing: false,
+      vertices: [],
+      preview: null,
+      loading: false,
+      error: "",
+      scopeMode: "whole_study",
+    };
     this.handleWindowResize = () => this.handleLayoutResize();
+    this.handleDocumentVisibilityChange = () => {
+      if (document.hidden) this.pauseTrackPlayer();
+    };
     this.handleSidePanePointerMove = event => this.onSidePanePointerMove(event);
     this.handleSidePanePointerUp = event => this.onSidePanePointerUp(event);
     this.handleIndividualPanePointerMove = event => this.onIndividualPanePointerMove(event);
@@ -751,6 +797,11 @@ class MovementExampleApp {
         individualQueueOrder: "dataset",
         individualQueueRankingMethod: "isolation_forest",
         individualQueuePage: 0,
+        trackPlayerWindowSize: DEFAULT_TRACK_PLAYER_WINDOW_SIZE,
+        trackPlayerSpeed: DEFAULT_TRACK_PLAYER_SPEED,
+        trackPlayerViewMode: DEFAULT_TRACK_PLAYER_VIEW_MODE,
+        trackPlayerPlaybackMode: DEFAULT_TRACK_PLAYER_PLAYBACK_MODE,
+        trackPlayerHidden: false,
       };
     }
   }
@@ -786,6 +837,11 @@ class MovementExampleApp {
       individualQueueRankingMethod: this.individualReviewQueue?.rankingMethod
         || this.getRankingMethod(),
       individualQueuePage: this.individualReviewQueue?.pageIndex || 0,
+      trackPlayerWindowSize: this.trackPlayer?.windowSize || DEFAULT_TRACK_PLAYER_WINDOW_SIZE,
+      trackPlayerSpeed: this.trackPlayer?.speed || DEFAULT_TRACK_PLAYER_SPEED,
+      trackPlayerViewMode: this.trackPlayer?.viewMode || DEFAULT_TRACK_PLAYER_VIEW_MODE,
+      trackPlayerPlaybackMode: this.trackPlayer?.playbackMode || DEFAULT_TRACK_PLAYER_PLAYBACK_MODE,
+      trackPlayerHidden: this.trackPlayer?.hidden === true,
     };
     localStorage.setItem(MOVEMENT_APP_CONFIG.storageKey, JSON.stringify(this.uiState));
   }
@@ -1102,6 +1158,7 @@ class MovementExampleApp {
     if (listHeight !== null) {
       this.applyIndividualListHeight(listHeight, { save: false });
     }
+    this.renderTrackPlayer();
   }
 
   currentIndividualListHeight() {
@@ -1758,6 +1815,263 @@ class MovementExampleApp {
         .movement-map-attribution a {
           color: #d6ecff;
           text-decoration: underline;
+        }
+        .movement-track-player {
+          position: absolute;
+          top: 16px;
+          right: 56px;
+          z-index: 6;
+          width: min(340px, calc(100% - 72px));
+          display: grid;
+          gap: 8px;
+          padding: 11px;
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          border-radius: 14px;
+          background: rgba(5, 11, 20, 0.94);
+          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+          color: #e8eef7;
+          pointer-events: auto;
+        }
+        .movement-track-player.hidden {
+          display: none;
+        }
+        .movement-track-player:focus-visible {
+          outline: 2px solid rgba(72, 222, 255, 0.85);
+          outline-offset: 2px;
+        }
+        .movement-track-player-show {
+          position: absolute;
+          top: 16px;
+          right: 56px;
+          z-index: 6;
+          padding: 8px 11px;
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          border-radius: 999px;
+          background: rgba(5, 11, 20, 0.92);
+          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34);
+          color: #e8eef7;
+          cursor: pointer;
+          font: inherit;
+          font-size: 11px;
+        }
+        .movement-track-player-show.hidden {
+          display: none;
+        }
+        .movement-track-player-head,
+        .movement-track-player-controls,
+        .movement-track-player-meta {
+          display: flex;
+          align-items: center;
+          gap: 7px;
+        }
+        .movement-track-player-head {
+          justify-content: space-between;
+          min-width: 0;
+        }
+        .movement-track-player-head-actions {
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          flex: none;
+        }
+        .movement-track-player-hide {
+          padding: 3px 7px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 7px;
+          background: rgba(255, 255, 255, 0.06);
+          color: #b8c8d8;
+          cursor: pointer;
+          font: inherit;
+          font-size: 10px;
+        }
+        .movement-track-player-title {
+          overflow: hidden;
+          color: #f4f8fc;
+          font-size: 12px;
+          font-weight: 700;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .movement-track-player-meta {
+          justify-content: space-between;
+          color: #b8c8d8;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: 10px;
+          font-variant-numeric: tabular-nums;
+        }
+        .movement-track-player-frame {
+          position: relative;
+          height: 210px;
+          overflow: hidden;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 10px;
+          background: #07111d;
+        }
+        .movement-track-player-canvas {
+          display: block;
+          width: 100%;
+          height: 100%;
+        }
+        .movement-track-player-empty {
+          position: absolute;
+          inset: 0;
+          display: grid;
+          place-items: center;
+          padding: 18px;
+          color: #9bb0c6;
+          font-size: 12px;
+          line-height: 1.4;
+          text-align: center;
+          pointer-events: none;
+        }
+        .movement-track-player-empty.hidden {
+          display: none;
+        }
+        .movement-track-player-north {
+          position: absolute;
+          top: 8px;
+          right: 9px;
+          color: rgba(238, 246, 255, 0.88);
+          font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+          pointer-events: none;
+        }
+        .movement-track-player-scale {
+          position: absolute;
+          left: 9px;
+          bottom: 8px;
+          display: grid;
+          gap: 2px;
+          color: rgba(238, 246, 255, 0.88);
+          font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+          pointer-events: none;
+        }
+        .movement-track-player-scale::after {
+          content: "";
+          width: var(--movement-track-player-scale-width, 48px);
+          border-bottom: 2px solid currentColor;
+          box-shadow: -1px 0 currentColor, 1px 0 currentColor;
+        }
+        .movement-track-player-controls {
+          flex-wrap: wrap;
+        }
+        .movement-track-player-scrubber {
+          display: grid;
+          gap: 3px;
+        }
+        .movement-track-player-scrubber input {
+          width: 100%;
+          margin: 0;
+          accent-color: #48deff;
+          cursor: pointer;
+        }
+        .movement-track-player-scrubber input:disabled {
+          cursor: not-allowed;
+          opacity: 0.45;
+        }
+        .movement-track-player-controls button,
+        .movement-track-player-controls select {
+          min-height: 30px;
+          padding: 5px 8px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 8px;
+          background: rgba(255, 255, 255, 0.07);
+          color: #e8eef7;
+          cursor: pointer;
+          font: inherit;
+          font-size: 11px;
+        }
+        .movement-track-player-controls button:disabled,
+        .movement-track-player-controls select:disabled {
+          cursor: not-allowed;
+          opacity: 0.45;
+        }
+        .movement-track-player-controls label {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          color: #9bb0c6;
+          font-size: 10px;
+        }
+        .movement-roi-panel {
+          position: absolute;
+          top: 16px;
+          left: 50%;
+          z-index: 7;
+          width: min(430px, calc(100% - 40px));
+          display: grid;
+          gap: 8px;
+          padding: 11px;
+          border: 1px solid rgba(255, 204, 40, 0.32);
+          border-radius: 14px;
+          background: rgba(5, 11, 20, 0.95);
+          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+          color: #e8eef7;
+          transform: translateX(-50%);
+        }
+        .movement-roi-panel.hidden {
+          display: none;
+        }
+        .movement-roi-head,
+        .movement-roi-actions,
+        .movement-roi-scope {
+          display: flex;
+          align-items: center;
+          gap: 7px;
+        }
+        .movement-roi-head {
+          justify-content: space-between;
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .movement-roi-scope {
+          flex-wrap: wrap;
+          color: #b8c8d8;
+          font-size: 11px;
+        }
+        .movement-roi-scope select,
+        .movement-roi-panel input,
+        .movement-roi-panel textarea,
+        .movement-roi-panel button {
+          border: 1px solid rgba(255, 255, 255, 0.11);
+          border-radius: 8px;
+          background: rgba(255, 255, 255, 0.07);
+          color: #e8eef7;
+          font: inherit;
+          font-size: 11px;
+        }
+        .movement-roi-panel input,
+        .movement-roi-panel textarea {
+          box-sizing: border-box;
+          width: 100%;
+          padding: 7px 8px;
+        }
+        .movement-roi-panel textarea {
+          min-height: 48px;
+          resize: vertical;
+        }
+        .movement-roi-panel button,
+        .movement-roi-scope select {
+          padding: 6px 9px;
+          cursor: pointer;
+        }
+        .movement-roi-panel button:disabled {
+          cursor: not-allowed;
+          opacity: 0.45;
+        }
+        .movement-roi-status {
+          color: #b8c8d8;
+          font-size: 11px;
+          line-height: 1.4;
+        }
+        .movement-roi-status.error {
+          color: #ff9b9b;
+        }
+        .movement-roi-actions {
+          flex-wrap: wrap;
+        }
+        .movement-roi-actions .movement-emphasis {
+          background: rgba(67, 206, 162, 0.22);
+          color: #d8fff3;
         }
         .movement-legend {
           position: absolute;
@@ -3426,6 +3740,14 @@ class MovementExampleApp {
           }
         }
         @media (max-width: 560px) {
+          .movement-track-player {
+            top: 52px;
+            right: 12px;
+            width: calc(100% - 24px);
+          }
+          .movement-track-player-frame {
+            height: 180px;
+          }
           .movement-threshold-range {
             flex-direction: column;
             align-items: stretch;
@@ -3489,6 +3811,7 @@ class MovementExampleApp {
           <button type="button" data-role="check-candidates">Check filter matches</button>
           <button type="button" data-role="clear-candidates">Clear candidates</button>
           <button type="button" data-role="reset-view">Reset view</button>
+          <button type="button" data-role="roi-draw">Draw ROI</button>
           <button type="button" class="movement-emphasis" data-role="mark-suspected">Flag checked fixes</button>
           <button type="button" class="movement-emphasis" data-role="mark-confirmed">Mark confirmed</button>
           <button type="button" data-role="dismiss-suspected">Unflag suspicious</button>
@@ -3512,6 +3835,87 @@ class MovementExampleApp {
         <div class="movement-main">
           <div class="movement-map-wrap">
             <div class="movement-map" data-role="map"></div>
+            <section class="movement-track-player hidden" data-role="track-player" aria-label="Individual track player" tabindex="0">
+              <div class="movement-track-player-head">
+                <div class="movement-track-player-title" data-role="track-player-title">Individual track</div>
+                <div class="movement-track-player-head-actions">
+                  <span data-role="track-player-count">0 fixes</span>
+                  <button class="movement-track-player-hide" type="button" data-role="track-player-hide">Hide</button>
+                </div>
+              </div>
+              <div class="movement-track-player-frame">
+                <canvas class="movement-track-player-canvas" data-role="track-player-canvas"></canvas>
+                <div class="movement-track-player-empty" data-role="track-player-empty">Loading exact fixes…</div>
+                <div class="movement-track-player-north" aria-hidden="true">N ↑</div>
+                <div class="movement-track-player-scale" data-role="track-player-scale" aria-hidden="true"></div>
+              </div>
+              <div class="movement-track-player-meta">
+                <span data-role="track-player-time">No timestamp</span>
+                <span data-role="track-player-position">fix 0 of 0</span>
+              </div>
+              <label class="movement-track-player-scrubber">
+                <input type="range" min="0" max="0" step="1" value="0" data-role="track-player-slider" aria-label="Current track fix">
+              </label>
+              <div class="movement-track-player-controls">
+                <button type="button" data-role="track-player-play" aria-label="Play track">Play</button>
+                <label>Window
+                  <select data-role="track-player-window" aria-label="Track player window size">
+                    <option value="24">24 fixes</option>
+                    <option value="72">72 fixes</option>
+                  </select>
+                </label>
+                <label>View
+                  <select data-role="track-player-view" aria-label="Track player viewport">
+                    <option value="context">Fixed window</option>
+                    <option value="trail">Trail</option>
+                  </select>
+                </label>
+                <label>Playback
+                  <select data-role="track-player-playback" aria-label="Track player playback mode">
+                    <option value="inspect">Inspect</option>
+                    <option value="scan">Fast scan</option>
+                  </select>
+                </label>
+                <label>Speed
+                  <select data-role="track-player-speed" aria-label="Track player speed">
+                    <option value="0.5">0.5×</option>
+                    <option value="1">1×</option>
+                    <option value="2">2×</option>
+                  </select>
+                </label>
+              </div>
+            </section>
+            <button class="movement-track-player-show hidden" type="button" data-role="track-player-show">Show track player</button>
+            <section class="movement-roi-panel hidden" data-role="roi-panel" aria-label="Map region selection">
+              <div class="movement-roi-head">
+                <span>Region of interest</span>
+                <button type="button" data-role="roi-close" aria-label="Close region selection">Close</button>
+              </div>
+              <div class="movement-roi-status" data-role="roi-status">Click Draw, then add at least three vertices on the map.</div>
+              <div class="movement-roi-scope">
+                <button type="button" data-role="roi-start">Draw new ROI</button>
+                <button type="button" data-role="roi-undo" disabled>Undo vertex</button>
+                <button type="button" data-role="roi-finish" disabled>Finish and preview</button>
+                <label>Scope
+                  <select data-role="roi-scope">
+                    <option value="whole_study">Whole study</option>
+                    <option value="selected_individuals">Selected individuals</option>
+                    <option value="active_individual">Active individual</option>
+                  </select>
+                </label>
+              </div>
+              <label class="movement-subtle">Issue type
+                <input type="text" data-role="roi-issue-type" value="location review" maxlength="120">
+              </label>
+              <label class="movement-subtle">Comment
+                <textarea data-role="roi-comment" maxlength="1200">Fix falls inside the drawn region of interest.</textarea>
+              </label>
+              <div class="movement-roi-actions">
+                <button class="movement-emphasis" type="button" data-role="roi-flag" disabled>Flag inside ROI</button>
+                <button type="button" data-role="roi-unflag" disabled>Unflag suspected inside ROI</button>
+                <button type="button" data-role="roi-clear">Clear ROI</button>
+              </div>
+            </section>
             <div class="movement-map-attribution hidden" data-role="map-attribution"></div>
             <div class="movement-legend hidden" data-role="legend"></div>
             <div class="movement-threshold hidden" data-role="threshold-pane"></div>
@@ -3905,6 +4309,19 @@ class MovementExampleApp {
       checkCandidates: this.mountEl.querySelector('[data-role="check-candidates"]'),
       clearCandidates: this.mountEl.querySelector('[data-role="clear-candidates"]'),
       resetView: this.mountEl.querySelector('[data-role="reset-view"]'),
+      roiDraw: this.mountEl.querySelector('[data-role="roi-draw"]'),
+      roiPanel: this.mountEl.querySelector('[data-role="roi-panel"]'),
+      roiClose: this.mountEl.querySelector('[data-role="roi-close"]'),
+      roiStatus: this.mountEl.querySelector('[data-role="roi-status"]'),
+      roiStart: this.mountEl.querySelector('[data-role="roi-start"]'),
+      roiUndo: this.mountEl.querySelector('[data-role="roi-undo"]'),
+      roiFinish: this.mountEl.querySelector('[data-role="roi-finish"]'),
+      roiScope: this.mountEl.querySelector('[data-role="roi-scope"]'),
+      roiIssueType: this.mountEl.querySelector('[data-role="roi-issue-type"]'),
+      roiComment: this.mountEl.querySelector('[data-role="roi-comment"]'),
+      roiFlag: this.mountEl.querySelector('[data-role="roi-flag"]'),
+      roiUnflag: this.mountEl.querySelector('[data-role="roi-unflag"]'),
+      roiClear: this.mountEl.querySelector('[data-role="roi-clear"]'),
       markSuspected: this.mountEl.querySelector('[data-role="mark-suspected"]'),
       markConfirmed: this.mountEl.querySelector('[data-role="mark-confirmed"]'),
       dismissSuspected: this.mountEl.querySelector('[data-role="dismiss-suspected"]'),
@@ -3972,6 +4389,22 @@ class MovementExampleApp {
       slider: this.mountEl.querySelector('[data-role="slider"]'),
       time: this.mountEl.querySelector('[data-role="time"]'),
       map: this.mountEl.querySelector('[data-role="map"]'),
+      trackPlayer: this.mountEl.querySelector('[data-role="track-player"]'),
+      trackPlayerShow: this.mountEl.querySelector('[data-role="track-player-show"]'),
+      trackPlayerHide: this.mountEl.querySelector('[data-role="track-player-hide"]'),
+      trackPlayerTitle: this.mountEl.querySelector('[data-role="track-player-title"]'),
+      trackPlayerCount: this.mountEl.querySelector('[data-role="track-player-count"]'),
+      trackPlayerCanvas: this.mountEl.querySelector('[data-role="track-player-canvas"]'),
+      trackPlayerEmpty: this.mountEl.querySelector('[data-role="track-player-empty"]'),
+      trackPlayerScale: this.mountEl.querySelector('[data-role="track-player-scale"]'),
+      trackPlayerTime: this.mountEl.querySelector('[data-role="track-player-time"]'),
+      trackPlayerPosition: this.mountEl.querySelector('[data-role="track-player-position"]'),
+      trackPlayerSlider: this.mountEl.querySelector('[data-role="track-player-slider"]'),
+      trackPlayerPlay: this.mountEl.querySelector('[data-role="track-player-play"]'),
+      trackPlayerWindow: this.mountEl.querySelector('[data-role="track-player-window"]'),
+      trackPlayerView: this.mountEl.querySelector('[data-role="track-player-view"]'),
+      trackPlayerPlayback: this.mountEl.querySelector('[data-role="track-player-playback"]'),
+      trackPlayerSpeed: this.mountEl.querySelector('[data-role="track-player-speed"]'),
       mapAttribution: this.mountEl.querySelector('[data-role="map-attribution"]'),
       legend: this.mountEl.querySelector('[data-role="legend"]'),
       thresholdPane: this.mountEl.querySelector('[data-role="threshold-pane"]'),
@@ -4105,6 +4538,10 @@ class MovementExampleApp {
     this.refs.tableSortDirection.dataset.direction = this.uiState.tableDescending ? "desc" : "asc";
     this.refs.tableSortDirection.textContent = this.uiState.tableDescending ? "Descending" : "Ascending";
     this.refs.individualSearch.value = this.individualSearchQuery;
+    this.refs.trackPlayerWindow.value = String(this.trackPlayer.windowSize);
+    this.refs.trackPlayerView.value = this.trackPlayer.viewMode;
+    this.refs.trackPlayerPlayback.value = this.trackPlayer.playbackMode;
+    this.refs.trackPlayerSpeed.value = String(this.trackPlayer.speed);
     this.syncIndividualQueueRankingOptions();
     this.refs.individualQueueFilter.value = this.individualReviewQueue.filterMode;
     this.applySidePaneWidth(this.sidePaneWidthPx, { save: false, resizeMap: false });
@@ -4125,6 +4562,7 @@ class MovementExampleApp {
 
   bindEvents() {
     window.addEventListener("resize", this.handleWindowResize);
+    document.addEventListener("visibilitychange", this.handleDocumentVisibilityChange);
     this.refs.assignReview?.addEventListener("click", () => void this.assignCurrentReview());
     this.refs.completeReview?.addEventListener("click", () => void this.completeCurrentReview());
     this.refs.cancelReview?.addEventListener("click", () => void this.cancelCurrentReview());
@@ -4466,6 +4904,26 @@ class MovementExampleApp {
     });
     this.refs.clearCandidates.addEventListener("click", () => this.clearCandidateQueryPreview({ announce: true }));
     this.refs.resetView.addEventListener("click", () => this.resetView());
+    this.refs.roiDraw.addEventListener("click", () => this.openRoiSelection());
+    this.refs.roiClose.addEventListener("click", () => this.clearRoiSelection());
+    this.refs.roiStart.addEventListener("click", () => this.startRoiDrawing());
+    this.refs.roiUndo.addEventListener("click", () => this.undoRoiVertex());
+    this.refs.roiFinish.addEventListener("click", () => void this.finishRoiDrawing());
+    this.refs.roiClear.addEventListener("click", () => this.clearRoiSelection());
+    this.refs.roiScope.addEventListener("change", () => {
+      const requested = this.refs.roiScope.value;
+      this.roiSelection.scopeMode = this.individualReviewQueue.mode === "queue"
+        ? "active_individual"
+        : requested === "selected_individuals" ? requested : "whole_study";
+      this.roiSelection.preview = null;
+      this.roiSelection.error = "";
+      this.renderRoiPanel();
+      if (!this.roiSelection.drawing && this.roiSelection.vertices.length >= 3) {
+        void this.previewRoiSelection();
+      }
+    });
+    this.refs.roiFlag.addEventListener("click", () => void this.applyRoiFlag());
+    this.refs.roiUnflag.addEventListener("click", () => void this.applyRoiUnflag());
     this.refs.markSuspected.addEventListener("click", () => void this.openActiveFlagModal());
     this.refs.markConfirmed.addEventListener("click", () => this.openConfirmModal());
     this.refs.dismissSuspected.addEventListener("click", () => this.openDismissModal());
@@ -4490,10 +4948,18 @@ class MovementExampleApp {
     });
     this.refs.resumeHistory.addEventListener("click", () => this.openResumeModal());
     this.refs.slider.addEventListener("pointerdown", () => {
+      if (this.individualReviewQueue.mode === "queue") {
+        this.pauseTrackPlayer();
+        return;
+      }
       this.temporalSliderEngaged = true;
       this.scheduleTemporalFocusRender();
     });
     this.refs.slider.addEventListener("input", () => {
+      if (this.individualReviewQueue.mode === "queue") {
+        this.setTrackPlayerIndex(Number(this.refs.slider.value), { pause: true });
+        return;
+      }
       this.currentTimeMs = Number(this.refs.slider.value) || 0;
       this.updateTimeLabel();
       if (this.temporalSliderEngaged) {
@@ -4508,6 +4974,91 @@ class MovementExampleApp {
     this.refs.slider.addEventListener("pointerup", finishTemporalSliderInteraction);
     this.refs.slider.addEventListener("pointercancel", finishTemporalSliderInteraction);
     this.refs.slider.addEventListener("blur", finishTemporalSliderInteraction);
+    this.refs.trackPlayer.addEventListener("click", event => {
+      if (!event.target.closest("button, input, select, textarea, [contenteditable]")) {
+        this.refs.trackPlayer.focus({ preventScroll: true });
+      }
+    });
+    this.refs.trackPlayer.addEventListener("keydown", event => {
+      if (
+        !["ArrowLeft", "ArrowRight"].includes(event.key)
+        || event.altKey
+        || event.ctrlKey
+        || event.metaKey
+        || event.shiftKey
+        || event.isComposing
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const direction = event.key === "ArrowRight" ? 1 : -1;
+      this.setTrackPlayerIndex(this.trackPlayer.index + direction, { pause: true });
+    });
+    this.refs.trackPlayerSlider.addEventListener("pointerdown", () => {
+      this.pauseTrackPlayer();
+    });
+    this.refs.trackPlayerSlider.addEventListener("input", () => {
+      this.setTrackPlayerIndex(Number(this.refs.trackPlayerSlider.value), { pause: true });
+    });
+    this.refs.trackPlayerPlay.addEventListener("click", () => {
+      if (this.trackPlayer.playing) this.pauseTrackPlayer();
+      else this.playTrackPlayer();
+    });
+    this.refs.trackPlayerWindow.addEventListener("change", () => {
+      const requested = Number(this.refs.trackPlayerWindow.value);
+      this.trackPlayer.windowSize = TRACK_PLAYER_WINDOW_SIZES.includes(requested)
+        ? requested
+        : DEFAULT_TRACK_PLAYER_WINDOW_SIZE;
+      this.refs.trackPlayerWindow.value = String(this.trackPlayer.windowSize);
+      this.saveUiState();
+      this.renderTrackPlayer();
+      if (this.trackPlayer.playing && this.trackPlayer.playbackMode === "scan") {
+        this.scheduleNextTrackPlayerFix();
+      }
+    });
+    this.refs.trackPlayerView.addEventListener("change", () => {
+      const requested = this.refs.trackPlayerView.value;
+      this.trackPlayer.viewMode = TRACK_PLAYER_VIEW_MODES.includes(requested)
+        ? requested
+        : DEFAULT_TRACK_PLAYER_VIEW_MODE;
+      this.refs.trackPlayerView.value = this.trackPlayer.viewMode;
+      this.saveUiState();
+      this.renderTrackPlayer();
+    });
+    this.refs.trackPlayerPlayback.addEventListener("change", () => {
+      const requested = this.refs.trackPlayerPlayback.value;
+      this.trackPlayer.playbackMode = TRACK_PLAYER_PLAYBACK_MODES.includes(requested)
+        ? requested
+        : DEFAULT_TRACK_PLAYER_PLAYBACK_MODE;
+      this.refs.trackPlayerPlayback.value = this.trackPlayer.playbackMode;
+      this.saveUiState();
+      if (this.trackPlayer.playing) this.scheduleNextTrackPlayerFix();
+    });
+    this.refs.trackPlayerSpeed.addEventListener("change", () => {
+      const requested = Number(this.refs.trackPlayerSpeed.value);
+      this.trackPlayer.speed = TRACK_PLAYER_SPEEDS.includes(requested)
+        ? requested
+        : DEFAULT_TRACK_PLAYER_SPEED;
+      this.refs.trackPlayerSpeed.value = String(this.trackPlayer.speed);
+      this.saveUiState();
+      if (this.trackPlayer.playing) {
+        this.scheduleNextTrackPlayerFix();
+      }
+    });
+    this.refs.trackPlayerHide.addEventListener("click", () => {
+      this.trackPlayer.hidden = true;
+      this.pauseTrackPlayer({ render: false });
+      this.saveUiState();
+      this.renderTrackPlayer();
+      this.renderLayers({ temporalOnly: true });
+    });
+    this.refs.trackPlayerShow.addEventListener("click", () => {
+      this.trackPlayer.hidden = false;
+      this.saveUiState();
+      this.renderTrackPlayer();
+      this.renderLayers({ temporalOnly: true });
+    });
     this.refs.thresholdPane.addEventListener("click", event => this.handleThresholdPaneClick(event));
     this.refs.thresholdPane.addEventListener("change", event => this.handleThresholdPaneChange(event));
     this.refs.thresholdPane.addEventListener("focusin", event => this.handleThresholdPaneFocusIn(event));
@@ -4669,6 +5220,27 @@ class MovementExampleApp {
       capturedAt: performance.now(),
       datasetId: this.currentDatasetId,
       activeIndividual: this.individualReviewQueue?.activeIndividual || "",
+      trackPlayerIndividual: this.trackPlayer?.individual || "",
+      trackPlayerFixCount: this.trackPlayer?.sequence?.length || 0,
+      trackPlayerIndex: this.trackPlayer?.index || 0,
+      trackPlayerTimeMs: this.getTrackPlayerCurrentFix()?.timeMs ?? null,
+      trackPlayerSourceRow: this.getTrackPlayerCurrentFix()?.sourceRow ?? null,
+      trackPlayerPlaying: this.trackPlayer?.playing === true,
+      trackPlayerWindowSize: this.trackPlayer?.windowSize || DEFAULT_TRACK_PLAYER_WINDOW_SIZE,
+      trackPlayerSpeed: this.trackPlayer?.speed || DEFAULT_TRACK_PLAYER_SPEED,
+      trackPlayerViewMode: this.trackPlayer?.viewMode || DEFAULT_TRACK_PLAYER_VIEW_MODE,
+      trackPlayerPlaybackMode: this.trackPlayer?.playbackMode || DEFAULT_TRACK_PLAYER_PLAYBACK_MODE,
+      trackPlayerHidden: this.trackPlayer?.hidden === true,
+      trackPlayerFastScanStep: trackPlayerFastScanStep(
+        this.trackPlayer?.sequence?.length || 0,
+        this.trackPlayer?.windowSize || DEFAULT_TRACK_PLAYER_WINDOW_SIZE,
+      ),
+      trackPlayerMedianGapMs: this.trackPlayer?.medianGapMs || 0,
+      trackPlayerSequenceBytes: this.trackPlayer?.sequence?.byteLength || 0,
+      roiDrawing: this.roiSelection?.drawing === true,
+      roiVertexCount: this.roiSelection?.vertices?.length || 0,
+      roiMatchCount: Number(this.roiSelection?.preview?.match_count) || 0,
+      roiScopeMode: this.roiSelection?.scopeMode || "",
       selectedIndividualCount: data?.selectedIndividuals?.size || 0,
       binaryBlockCount: binaries.size,
       binaryRowCount: binaryRows,
@@ -4789,8 +5361,28 @@ class MovementExampleApp {
         });
       } else if (field.kind === "boolean") {
         data.colorStyles.set(field.key, { kind: "boolean" });
+      } else if (field.kind === "categorical") {
+        const column = binary.header.color_columns?.[field.key];
+        const existing = data.colorStyles.get(field.key);
+        const categories = existing?.categories instanceof Map
+          ? new Map(existing.categories)
+          : new Map();
+        if (!categories.has("Missing")) {
+          categories.set("Missing", [120, 136, 153, 150]);
+        }
+        for (const level of column?.levels || []) {
+          const label = String(level || "");
+          if (!label || categories.has(label)) continue;
+          let hash = 0;
+          for (const character of label) {
+            hash = ((hash * 31) + character.charCodeAt(0)) >>> 0;
+          }
+          categories.set(label, [...hslToRgb(hash % 360, 0.72, 0.56), POINT_ALPHA]);
+        }
+        data.colorStyles.set(field.key, { kind: "categorical", categories });
       }
     }
+    if (data === this.data) this.renderLegend();
     await this.prepareRetainedBinaryAttributes(binary);
     if (
       this.requestControllers[requestName] !== controller
@@ -4825,6 +5417,13 @@ class MovementExampleApp {
         await this.applyBinaryReviewProjection(data.reviewProjection);
       }
       this.beginPreviewHandoff(loadedIndividuals);
+      if (
+        this.individualReviewQueue.mode === "queue"
+        && loadedIndividuals.includes(this.queueActiveIndividual())
+      ) {
+        this.syncTrackPlayer();
+        this.renderLayers({ temporalOnly: true });
+      }
     }
     this.requestControllers[requestName] = null;
     return binary;
@@ -8068,6 +8667,8 @@ class MovementExampleApp {
       : this.data.minTimeMs;
     this.refs.slider.min = String(this.data.minTimeMs);
     this.refs.slider.max = String(this.data.maxTimeMs);
+    this.refs.slider.step = "1";
+    this.refs.slider.disabled = false;
     this.refs.slider.value = String(this.currentTimeMs);
     if (viewContext?.pendingIssueContext) {
       this.pendingIssueContext = viewContext.pendingIssueContext;
@@ -8087,6 +8688,8 @@ class MovementExampleApp {
   }
 
   clearLoadedStudyState() {
+    this.clearTrackPlayer();
+    this.clearRoiSelection();
     this.cancelBinaryRequests();
     try {
       releaseMovementBinaryData(this.data);
@@ -8144,6 +8747,8 @@ class MovementExampleApp {
     this.refs.fixHead.textContent = "Checked fixes";
     this.refs.slider.min = "0";
     this.refs.slider.max = "0";
+    this.refs.slider.step = "1";
+    this.refs.slider.disabled = false;
     this.refs.slider.value = "0";
     this.syncAnomalyFeatureSetOptions({ save: false });
     this.updateTimeLabel();
@@ -9178,13 +9783,19 @@ class MovementExampleApp {
       if (nextMode === "queue") {
         this.setSideSheet("individuals");
         this.renderIndividuals();
+        this.syncTrackPlayer();
+        this.renderLayers({ temporalOnly: true });
       }
       return;
     }
+    this.clearRoiSelection();
     if (nextMode === "queue") {
+      this.clearTrackPlayer();
       queue.browseContext = this.captureDatasetViewContext();
       queue.browseSideSheet = this.refs.sideSheetTabs?.dataset.activeSheet || "individuals";
       queue.mode = "queue";
+      this.renderLegend();
+      this.renderThresholdPane();
       queue.activeIndividual = "";
       this.hiddenBurstIds.clear();
       this.resetManualFlagTarget();
@@ -9200,8 +9811,13 @@ class MovementExampleApp {
         this.map.jumpTo(queue.queueMapView);
       }
     } else {
+      this.clearTrackPlayer();
       queue.queueMapView = this.captureCurrentMapView();
       queue.mode = "browse";
+      this.refs.slider.disabled = false;
+      this.refs.slider.min = String(this.data.minTimeMs);
+      this.refs.slider.max = String(this.data.maxTimeMs);
+      this.refs.slider.step = "1";
       this.hiddenBurstIds.clear();
       this.resetManualFlagTarget();
       this.flagTargetKind = this.data.selectedFixKeys.size ? "fixes" : "none";
@@ -9225,6 +9841,7 @@ class MovementExampleApp {
         this.applyIndividualListHeight(this.individualListHeightPx, { save: false });
       }
       this.renderSelectedFixes();
+      this.renderLegend();
       this.renderThresholdPane();
       this.renderLayers();
       await this.loadDetailForCurrentSelection({ requireObjects: true });
@@ -9259,12 +9876,15 @@ class MovementExampleApp {
       this.data.selectedFixKeys,
       individuals,
     );
+    this.syncTrackPlayer();
     this.renderIndividuals();
     this.renderSelectedFixes();
     this.renderThresholdPane();
     this.renderLayers();
     this.updateActionButtons();
     await this.loadDetailForCurrentSelection({ requireObjects: true });
+    this.syncTrackPlayer();
+    this.renderLayers({ temporalOnly: true });
     if (zoom) {
       this.zoomToIndividualQueueActive();
     }
@@ -9327,7 +9947,11 @@ class MovementExampleApp {
     this.individualReviewQueue.groupIndex = Math.floor(
       pageOffset / INDIVIDUAL_QUEUE_GROUP_SIZE,
     );
+    if (previousIndividual !== individual && this.roiSelection.vertices.length) {
+      this.clearRoiSelection();
+    }
     this.individualReviewQueue.activeIndividual = individual;
+    this.syncTrackPlayer({ reset: previousIndividual !== individual });
     this.clearFlagTargetForQueueIndividualChange(previousIndividual, individual);
     const position = this.getIndividualQueuePosition();
     const nextGroup = position.group.join("\u0000");
@@ -9341,6 +9965,8 @@ class MovementExampleApp {
     this.renderIndividuals();
     this.renderLayers();
     await this.loadDetailForCurrentSelection({ requireObjects: true });
+    this.syncTrackPlayer();
+    this.renderLayers({ temporalOnly: true });
     if (shouldZoom) {
       this.zoomToIndividualQueueActive();
     }
@@ -11135,7 +11761,7 @@ class MovementExampleApp {
     if (!legendEl) {
       return;
     }
-    if (!this.data) {
+    if (!this.data || this.individualReviewQueue.mode === "queue") {
       legendEl.innerHTML = "";
       legendEl.classList.add("hidden");
       return;
@@ -11399,6 +12025,372 @@ class MovementExampleApp {
     });
   }
 
+  buildTrackPlayerSequence(binary, individual) {
+    const code = (binary?.header?.individuals || []).indexOf(individual);
+    const [start, end] = binary?.individualRanges?.get(code) || [0, 0];
+    const count = Math.max(0, Number(end) - Number(start));
+    const sequence = new Uint32Array(count);
+    for (let offset = 0; offset < count; offset += 1) {
+      sequence[offset] = Number(start) + offset;
+    }
+    const arrays = binary?.arrays || {};
+    sequence.sort((left, right) => (
+      Number(arrays.time_ms?.[left]) - Number(arrays.time_ms?.[right])
+      || Number(arrays.artifact_codes?.[left]) - Number(arrays.artifact_codes?.[right])
+      || Number(arrays.source_rows?.[left]) - Number(arrays.source_rows?.[right])
+      || left - right
+    ));
+    return sequence;
+  }
+
+  syncTrackPlayer({ reset = false } = {}) {
+    if (!this.refs?.trackPlayer) return false;
+    if (!this.data || this.individualReviewQueue.mode !== "queue") {
+      this.pauseTrackPlayer({ render: false });
+      this.refs.trackPlayer.classList.add("hidden");
+      return false;
+    }
+    const individual = this.queueActiveIndividual();
+    const binary = individual ? this.data.binaryBlocks?.get(individual) : null;
+    const changed = (
+      reset
+      || individual !== this.trackPlayer.individual
+      || binary !== this.trackPlayer.binary
+    );
+    if (changed) {
+      this.pauseTrackPlayer({ render: false });
+      this.trackPlayer.individual = individual;
+      this.trackPlayer.binary = binary || null;
+      this.trackPlayer.sequence = binary
+        ? this.buildTrackPlayerSequence(binary, individual)
+        : null;
+      this.trackPlayer.index = 0;
+      this.trackPlayer.medianGapMs = this.trackPlayer.sequence?.length
+        ? medianTrackPlayerGapMs(binary, this.trackPlayer.sequence)
+        : 0;
+    }
+    const count = this.trackPlayer.sequence?.length || 0;
+    this.trackPlayer.index = count
+      ? clamp(this.trackPlayer.index, 0, count - 1)
+      : 0;
+    this.refs.slider.min = "0";
+    this.refs.slider.max = String(Math.max(0, count - 1));
+    this.refs.slider.step = "1";
+    this.refs.slider.value = String(this.trackPlayer.index);
+    this.refs.slider.disabled = count === 0;
+    const current = this.getTrackPlayerCurrentFix();
+    if (current) this.currentTimeMs = current.timeMs;
+    this.renderTrackPlayer();
+    this.updateTimeLabel();
+    return count > 0;
+  }
+
+  clearTrackPlayer() {
+    this.pauseTrackPlayer({ render: false });
+    this.trackPlayer.individual = "";
+    this.trackPlayer.binary = null;
+    this.trackPlayer.sequence = null;
+    this.trackPlayer.index = 0;
+    this.trackPlayer.medianGapMs = 0;
+    this.refs?.trackPlayer?.classList.add("hidden");
+    this.refs?.trackPlayerShow?.classList.add("hidden");
+  }
+
+  getTrackPlayerCurrentFix(index = this.trackPlayer.index) {
+    const sequence = this.trackPlayer.sequence;
+    const binary = this.trackPlayer.binary;
+    if (!binary || !sequence?.length) return null;
+    const sequenceIndex = clamp(Number(index) || 0, 0, sequence.length - 1);
+    const binaryIndex = Number(sequence[sequenceIndex]);
+    const positionOffset = binaryIndex * 2;
+    return {
+      binaryIndex,
+      sequenceIndex,
+      individual: this.trackPlayer.individual,
+      timeMs: Number(binary.arrays.time_ms?.[binaryIndex]) || 0,
+      sourceRow: Number(binary.arrays.source_rows?.[binaryIndex]) || 0,
+      position: [
+        Number(binary.arrays.positions?.[positionOffset]),
+        Number(binary.arrays.positions?.[positionOffset + 1]),
+      ],
+      reviewStatus: Number(binary.arrays.review_status?.[binaryIndex]) || 0,
+    };
+  }
+
+  getTrackPlayerWindowFixes() {
+    const sequence = this.trackPlayer.sequence;
+    const binary = this.trackPlayer.binary;
+    if (!binary || !sequence?.length) return [];
+    const current = clamp(this.trackPlayer.index, 0, sequence.length - 1);
+    const windowSize = Math.min(this.trackPlayer.windowSize, sequence.length);
+    let start = Math.max(0, current - windowSize + 1);
+    let end = current;
+    if (this.trackPlayer.viewMode === "context") {
+      start = Math.floor(current / windowSize) * windowSize;
+      end = Math.min(sequence.length - 1, start + windowSize - 1);
+    }
+    const field = this.getCurrentColorField();
+    const fixes = [];
+    for (let sequenceIndex = start; sequenceIndex <= end; sequenceIndex += 1) {
+      const binaryIndex = Number(sequence[sequenceIndex]);
+      const positionOffset = binaryIndex * 2;
+      fixes.push({
+        binaryIndex,
+        sequenceIndex,
+        timeMs: Number(binary.arrays.time_ms?.[binaryIndex]) || 0,
+        position: [
+          Number(binary.arrays.positions?.[positionOffset]),
+          Number(binary.arrays.positions?.[positionOffset + 1]),
+        ],
+        reviewStatus: Number(binary.arrays.review_status?.[binaryIndex]) || 0,
+        color: this.binaryColorForIndex(binary, binaryIndex, field),
+      });
+    }
+    return fixes.filter(fix => (
+      Number.isFinite(fix.position[0]) && Number.isFinite(fix.position[1])
+    ));
+  }
+
+  setTrackPlayerIndex(index, { pause = false } = {}) {
+    const count = this.trackPlayer.sequence?.length || 0;
+    if (!count || this.individualReviewQueue.mode !== "queue") return;
+    if (pause) this.pauseTrackPlayer({ render: false });
+    this.trackPlayer.index = clamp(Math.round(Number(index) || 0), 0, count - 1);
+    const current = this.getTrackPlayerCurrentFix();
+    if (current) this.currentTimeMs = current.timeMs;
+    this.refs.slider.value = String(this.trackPlayer.index);
+    this.refs.trackPlayerSlider.value = String(this.trackPlayer.index);
+    this.renderTrackPlayer();
+    this.updateTimeLabel();
+    this.scheduleTemporalFocusRender();
+  }
+
+  playTrackPlayer() {
+    const count = this.trackPlayer.sequence?.length || 0;
+    if (count < 2 || this.individualReviewQueue.mode !== "queue") return;
+    if (this.trackPlayer.index >= count - 1) {
+      this.setTrackPlayerIndex(0);
+    }
+    this.trackPlayer.playing = true;
+    this.renderTrackPlayer();
+    this.scheduleNextTrackPlayerFix();
+  }
+
+  pauseTrackPlayer({ render = true } = {}) {
+    if (this.trackPlayer?.timer !== null) {
+      window.clearTimeout(this.trackPlayer.timer);
+      this.trackPlayer.timer = null;
+    }
+    if (this.trackPlayer) this.trackPlayer.playing = false;
+    if (render) this.renderTrackPlayer();
+  }
+
+  scheduleNextTrackPlayerFix() {
+    if (this.trackPlayer.timer !== null) {
+      window.clearTimeout(this.trackPlayer.timer);
+      this.trackPlayer.timer = null;
+    }
+    const sequence = this.trackPlayer.sequence;
+    const binary = this.trackPlayer.binary;
+    if (
+      !this.trackPlayer.playing
+      || !binary
+      || !sequence?.length
+      || this.trackPlayer.index >= sequence.length - 1
+    ) {
+      this.pauseTrackPlayer();
+      return;
+    }
+    const scanStep = this.trackPlayer.playbackMode === "scan"
+      ? trackPlayerFastScanStep(sequence.length, this.trackPlayer.windowSize)
+      : 1;
+    let nextIndex = Math.min(sequence.length - 1, this.trackPlayer.index + scanStep);
+    if (this.trackPlayer.playbackMode === "scan" && this.trackPlayer.viewMode === "context") {
+      const pageEnd = Math.min(
+        sequence.length - 1,
+        (Math.floor(this.trackPlayer.index / this.trackPlayer.windowSize) + 1)
+          * this.trackPlayer.windowSize - 1,
+      );
+      nextIndex = this.trackPlayer.index >= pageEnd
+        ? Math.min(sequence.length - 1, this.trackPlayer.index + 1)
+        : Math.min(nextIndex, pageEnd);
+    }
+    const currentBinaryIndex = Number(sequence[this.trackPlayer.index]);
+    const nextBinaryIndex = Number(sequence[nextIndex]);
+    const gapMs = (
+      Number(binary.arrays.time_ms?.[nextBinaryIndex])
+      - Number(binary.arrays.time_ms?.[currentBinaryIndex])
+    );
+    const delay = this.trackPlayer.playbackMode === "scan"
+      ? TRACK_PLAYER_SCAN_DELAY_MS / this.trackPlayer.speed
+      : trackPlayerDelayMs(
+        gapMs,
+        this.trackPlayer.medianGapMs,
+        this.trackPlayer.speed,
+      );
+    this.trackPlayer.timer = window.setTimeout(() => {
+      this.trackPlayer.timer = null;
+      if (!this.trackPlayer.playing) return;
+      this.setTrackPlayerIndex(nextIndex);
+      if (this.trackPlayer.index >= sequence.length - 1) {
+        this.pauseTrackPlayer();
+      } else {
+        this.scheduleNextTrackPlayerFix();
+      }
+    }, delay);
+  }
+
+  renderTrackPlayer() {
+    const refs = this.refs;
+    if (!refs?.trackPlayer || this.individualReviewQueue.mode !== "queue" || !this.data) {
+      refs?.trackPlayer?.classList.add("hidden");
+      refs?.trackPlayerShow?.classList.add("hidden");
+      return;
+    }
+    if (this.trackPlayer.hidden) {
+      refs.trackPlayer.classList.add("hidden");
+      refs.trackPlayerShow.classList.remove("hidden");
+      return;
+    }
+    const player = this.trackPlayer;
+    const count = player.sequence?.length || 0;
+    const current = this.getTrackPlayerCurrentFix();
+    refs.trackPlayer.classList.remove("hidden");
+    refs.trackPlayerShow.classList.add("hidden");
+    refs.trackPlayerTitle.textContent = player.individual || "Individual track";
+    refs.trackPlayerCount.textContent = `${formatCount(count)} ${count === 1 ? "fix" : "fixes"}`;
+    refs.trackPlayerTime.textContent = current ? formatTimestamp(current.timeMs) : "No timestamp";
+    refs.trackPlayerPosition.textContent = current
+      ? `fix ${formatCount(player.index + 1)} of ${formatCount(count)}`
+      : "fix 0 of 0";
+    refs.trackPlayerPlay.textContent = player.playing ? "Pause" : "Play";
+    refs.trackPlayerPlay.setAttribute("aria-label", player.playing ? "Pause track" : "Play track");
+    refs.trackPlayerPlay.disabled = count < 2;
+    refs.trackPlayerWindow.disabled = count === 0;
+    refs.trackPlayerView.disabled = count === 0;
+    refs.trackPlayerPlayback.disabled = count < 2;
+    refs.trackPlayerSpeed.disabled = count < 2;
+    refs.trackPlayerWindow.value = String(player.windowSize);
+    refs.trackPlayerView.value = player.viewMode;
+    refs.trackPlayerPlayback.value = player.playbackMode;
+    refs.trackPlayerSpeed.value = String(player.speed);
+    refs.trackPlayerSlider.min = "0";
+    refs.trackPlayerSlider.max = String(Math.max(0, count - 1));
+    refs.trackPlayerSlider.step = "1";
+    refs.trackPlayerSlider.value = String(player.index);
+    refs.trackPlayerSlider.disabled = count === 0;
+    refs.trackPlayerEmpty.textContent = player.individual && !player.binary
+      ? "Loading exact fixes…"
+      : player.individual
+        ? "No fixes are available for this individual."
+        : "Select an individual to begin playback.";
+    refs.trackPlayerEmpty.classList.toggle("hidden", Boolean(current));
+
+    const canvas = refs.trackPlayerCanvas;
+    canvas.dataset.individual = player.individual;
+    canvas.dataset.index = String(player.index);
+    canvas.dataset.count = String(count);
+    canvas.dataset.timeMs = current ? String(current.timeMs) : "";
+    canvas.dataset.sourceRow = current ? String(current.sourceRow) : "";
+    const fixes = this.getTrackPlayerWindowFixes();
+    canvas.dataset.windowStart = String(fixes[0]?.sequenceIndex ?? 0);
+    canvas.dataset.windowEnd = String(fixes[fixes.length - 1]?.sequenceIndex ?? 0);
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(1, Math.round(rect.width || canvas.parentElement?.clientWidth || 318));
+    const height = Math.max(1, Math.round(rect.height || canvas.parentElement?.clientHeight || 210));
+    const deviceScale = Math.max(1, Math.min(2, Number(window.devicePixelRatio) || 1));
+    const pixelWidth = Math.round(width * deviceScale);
+    const pixelHeight = Math.round(height * deviceScale);
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.setTransform(deviceScale, 0, 0, deviceScale, 0, 0);
+    context.clearRect(0, 0, width, height);
+    context.fillStyle = "#07111d";
+    context.fillRect(0, 0, width, height);
+    context.strokeStyle = "rgba(148, 163, 184, 0.10)";
+    context.lineWidth = 1;
+    for (let x = 24; x < width; x += 24) {
+      context.beginPath();
+      context.moveTo(x, 0);
+      context.lineTo(x, height);
+      context.stroke();
+    }
+    for (let y = 24; y < height; y += 24) {
+      context.beginPath();
+      context.moveTo(0, y);
+      context.lineTo(width, y);
+      context.stroke();
+    }
+    if (!fixes.length) {
+      refs.trackPlayerScale.textContent = "";
+      refs.trackPlayerScale.style.removeProperty("--movement-track-player-scale-width");
+      return;
+    }
+
+    const projected = projectTrackPlayerFixes(fixes, width, height);
+    for (let index = 1; index < projected.points.length; index += 1) {
+      const previous = projected.points[index - 1];
+      const point = projected.points[index];
+      const age = index / Math.max(1, projected.points.length - 1);
+      const isFuture = fixes[index].sequenceIndex > player.index;
+      context.strokeStyle = isFuture
+        ? "rgba(132, 148, 166, 0.42)"
+        : `rgba(72, 222, 255, ${0.36 + (age * 0.56)})`;
+      context.lineWidth = 2.5;
+      context.lineCap = "round";
+      context.setLineDash(isFuture ? [4, 4] : []);
+      context.beginPath();
+      context.moveTo(previous.x, previous.y);
+      context.lineTo(point.x, point.y);
+      context.stroke();
+    }
+    context.setLineDash([]);
+    projected.points.forEach((point, index) => {
+      const isFuture = fixes[index].sequenceIndex > player.index;
+      const color = isFuture
+        ? [132, 148, 166, 130]
+        : fixes[index].color || [124, 210, 255, POINT_ALPHA];
+      context.fillStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${Math.max(0.32, Number(color[3] ?? 255) / 255)})`;
+      context.beginPath();
+      context.arc(point.x, point.y, 3.2, 0, Math.PI * 2);
+      context.fill();
+      const reviewStatus = fixes[index].reviewStatus;
+      if (reviewStatus === 1 || reviewStatus === 2) {
+        context.strokeStyle = reviewStatus === 1
+          ? "rgba(255, 204, 40, 0.95)"
+          : "rgba(180, 190, 202, 0.80)";
+        context.lineWidth = 1.5;
+        context.beginPath();
+        context.arc(point.x, point.y, 5.2, 0, Math.PI * 2);
+        context.stroke();
+      }
+    });
+    const markerIndex = Math.max(
+      0,
+      fixes.findIndex(fix => fix.sequenceIndex === player.index),
+    );
+    const marker = projected.points[markerIndex];
+    context.fillStyle = "#05070a";
+    context.strokeStyle = "rgba(255, 255, 255, 0.98)";
+    context.lineWidth = 3;
+    context.beginPath();
+    context.arc(marker.x, marker.y, 7, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+
+    const scaleDistance = niceTrackPlayerScaleMeters(projected.metersPerPixel * 72);
+    const scaleWidth = scaleDistance / projected.metersPerPixel;
+    refs.trackPlayerScale.textContent = formatTrackPlayerDistance(scaleDistance);
+    refs.trackPlayerScale.style.setProperty(
+      "--movement-track-player-scale-width",
+      `${Math.max(18, Math.min(90, scaleWidth))}px`,
+    );
+  }
+
   getExactMapIndividuals() {
     const exact = new Set();
     for (const individual of this.data?.binaryBlocks?.keys?.() || []) {
@@ -11456,13 +12448,37 @@ class MovementExampleApp {
       this.previewHandoffIndividuals.add(individual);
       changed = true;
     }
-    if (!changed || this.previewHandoffFrame !== null) return;
+    if (!changed) return;
     this.movementDiagnostics.exactActivations += uniqueNonEmpty(individuals).length;
     this.movementDiagnostics.lastExactActivationMs = performance.now();
+    // Render the overlap state immediately. The overview path must remain
+    // visible until renderLayers confirms that the exact binary geometry was
+    // actually handed to DeckGL; binary arrival alone is not that guarantee.
+    this.renderLayers();
+  }
+
+  schedulePreviewHandoffCompletion(renderedLayerIds) {
+    if (!this.previewHandoffIndividuals.size || this.previewHandoffFrame !== null) return;
+    const ids = new Set(renderedLayerIds || []);
+    const fullGeometryRendered = (
+      ids.has("movement-binary-paths-full")
+      || ids.has("movement-binary-points-full")
+    );
+    const completedIndividuals = [...this.previewHandoffIndividuals].filter(individual => {
+      if (fullGeometryRendered) return true;
+      const code = Math.max(0, this.data?.individuals?.indexOf(individual) ?? -1);
+      return (
+        ids.has(`movement-binary-paths-individual-${code}`)
+        || ids.has(`movement-binary-points-individual-${code}`)
+      );
+    });
+    if (!completedIndividuals.length) return;
     this.previewHandoffFrame = window.requestAnimationFrame(() => {
       this.previewHandoffFrame = window.requestAnimationFrame(() => {
         this.previewHandoffFrame = null;
-        this.previewHandoffIndividuals.clear();
+        for (const individual of completedIndividuals) {
+          this.previewHandoffIndividuals.delete(individual);
+        }
         this.renderLayers();
       });
     });
@@ -11763,12 +12779,10 @@ class MovementExampleApp {
       suspectedCount += suspectedFilter[index];
       confirmedCount += confirmedFilter[index];
       thresholdCount += thresholdFilter[index];
-      const queueContextGray = queueFlagContext && status !== 1;
       if (queueFlagContext && status !== 2) {
-        if (status === 1) queueContextColoredCount += 1;
-        else queueContextGrayCount += 1;
+        queueContextColoredCount += 1;
       }
-      const color = (thresholdActive && !thresholdFilter[index]) || queueContextGray
+      const color = thresholdActive && !thresholdFilter[index]
         ? CONTEXT_GRAY_POINT
         : this.binaryColorForIndex(binary, index, field);
       const offset = index * 4;
@@ -12257,6 +13271,7 @@ class MovementExampleApp {
   renderLayers({ temporalOnly = false } = {}) {
     const diagnosticStartedAt = performance.now();
     this.movementDiagnostics.renderCalls += 1;
+    if (this.individualReviewQueue.mode === "queue") this.renderTrackPlayer();
     this.renderBurstCountIndicator();
     this.syncFixPopupVisibility();
     if (!this.data || !this.overlay || !this.mapLoaded) {
@@ -12825,6 +13840,78 @@ class MovementExampleApp {
     }
 
     layers.push(...this.getOsmDeckLayers());
+    const roiVertices = this.roiSelection.vertices;
+    if (roiVertices.length >= 2) {
+      layers.push(new deck.PathLayer({
+        id: "movement-roi-path",
+        data: [{
+          path: this.roiSelection.drawing || roiVertices.length < 3
+            ? roiVertices
+            : [...roiVertices, roiVertices[0]],
+        }],
+        getPath: item => item.path,
+        getColor: [255, 204, 40, 245],
+        getWidth: 4,
+        widthMinPixels: 2,
+        pickable: false,
+      }));
+    }
+    if (roiVertices.length >= 3 && !this.roiSelection.drawing) {
+      layers.push(new deck.PolygonLayer({
+        id: "movement-roi-fill",
+        data: [{ polygon: roiVertices }],
+        getPolygon: item => item.polygon,
+        getFillColor: [255, 204, 40, 34],
+        getLineColor: [255, 204, 40, 245],
+        getLineWidth: 3,
+        lineWidthMinPixels: 2,
+        filled: true,
+        stroked: true,
+        pickable: false,
+      }));
+    }
+    if (roiVertices.length) {
+      layers.push(new deck.ScatterplotLayer({
+        id: "movement-roi-vertices",
+        data: roiVertices,
+        getPosition: item => item,
+        getFillColor: [255, 204, 40, 255],
+        getLineColor: [8, 12, 20, 255],
+        getRadius: 110,
+        radiusMinPixels: 5,
+        radiusMaxPixels: 9,
+        lineWidthMinPixels: 1,
+        filled: true,
+        stroked: true,
+        pickable: false,
+      }));
+    }
+    const trackPlayerCurrent = (
+      this.individualReviewQueue.mode === "queue"
+      && !this.trackPlayer.hidden
+    )
+      ? this.getTrackPlayerCurrentFix()
+      : null;
+    if (
+      trackPlayerCurrent
+      && Number.isFinite(trackPlayerCurrent.position[0])
+      && Number.isFinite(trackPlayerCurrent.position[1])
+    ) {
+      layers.push(new deck.ScatterplotLayer({
+        id: "movement-track-player-position",
+        data: [trackPlayerCurrent],
+        getPosition: item => item.position,
+        getFillColor: [3, 5, 8, 255],
+        getLineColor: [255, 255, 255, 255],
+        filled: true,
+        stroked: true,
+        lineWidthMinPixels: 3,
+        getRadius: 165,
+        radiusMinPixels: 9,
+        radiusMaxPixels: 18,
+        pickable: false,
+      }));
+    }
     const isSuspiciousPointLayer = layer => {
       const layerId = String(layer?.id || "");
       return layerId === "movement-suspected-outline"
@@ -12832,23 +13919,31 @@ class MovementExampleApp {
     };
     const isCheckedThresholdLayer = layer => String(layer?.id || "")
       .startsWith("movement-binary-checked-threshold-");
+    const isTrackPlayerLayer = layer => String(layer?.id || "")
+      === "movement-track-player-position";
+    const isRoiLayer = layer => String(layer?.id || "").startsWith("movement-roi-");
     const orderedLayers = [
       ...layers.filter(layer => (
         !isSuspiciousPointLayer(layer)
         && !isCheckedThresholdLayer(layer)
         && String(layer?.id || "") !== "movement-checked-suspicious-indicator"
+        && !isTrackPlayerLayer(layer)
+        && !isRoiLayer(layer)
       )),
       ...layers.filter(isSuspiciousPointLayer),
       ...layers.filter(isCheckedThresholdLayer),
       ...layers.filter(
         layer => String(layer?.id || "") === "movement-checked-suspicious-indicator",
       ),
+      ...layers.filter(isRoiLayer),
+      ...layers.filter(isTrackPlayerLayer),
     ];
 
     try {
-      this.movementDiagnostics.renderedLayerIds = orderedLayers.map(
+      const renderedLayerIds = orderedLayers.map(
         layer => String(layer?.id || ""),
       );
+      this.movementDiagnostics.renderedLayerIds = renderedLayerIds;
       this.overlay.setProps({
         layers: orderedLayers,
         useDevicePixels: (
@@ -12856,6 +13951,7 @@ class MovementExampleApp {
           || selectedPointData.length
         ) <= LARGE_MAP_POINT_THRESHOLD,
       });
+      this.schedulePreviewHandoffCompletion(renderedLayerIds);
     } catch (error) {
       this.setStatus(`Map warning: ${error.message}`, true);
     }
@@ -13032,7 +14128,288 @@ class MovementExampleApp {
     return true;
   }
 
+  roiScopeIndividuals() {
+    if (this.individualReviewQueue.mode === "queue") {
+      const active = this.queueActiveIndividual();
+      return active ? [active] : [];
+    }
+    return this.roiSelection.scopeMode === "selected_individuals"
+      ? this.getSelectedIndividuals()
+      : [];
+  }
+
+  openRoiSelection() {
+    if (!this.data) return;
+    this.refs.roiPanel.classList.remove("hidden");
+    if (this.individualReviewQueue.mode === "queue") {
+      this.roiSelection.scopeMode = "active_individual";
+    } else if (this.roiSelection.scopeMode === "active_individual") {
+      this.roiSelection.scopeMode = "whole_study";
+    }
+    if (this.roiSelection.vertices.length < 3) this.startRoiDrawing();
+    else this.renderRoiPanel();
+  }
+
+  startRoiDrawing() {
+    if (!this.data) return;
+    this.roiSelection.drawing = true;
+    this.roiSelection.vertices = [];
+    this.roiSelection.preview = null;
+    this.roiSelection.loading = false;
+    this.roiSelection.error = "";
+    this.refs.roiPanel.classList.remove("hidden");
+    const canvas = this.map?.getCanvas?.();
+    if (canvas) canvas.style.cursor = "crosshair";
+    this.closeFixPopup();
+    this.renderRoiPanel();
+    this.renderLayers({ temporalOnly: true });
+  }
+
+  undoRoiVertex() {
+    if (!this.roiSelection.drawing || !this.roiSelection.vertices.length) return;
+    this.roiSelection.vertices.pop();
+    this.roiSelection.preview = null;
+    this.roiSelection.error = "";
+    this.renderRoiPanel();
+    this.renderLayers({ temporalOnly: true });
+  }
+
+  async finishRoiDrawing() {
+    if (this.roiSelection.vertices.length < 3) return;
+    this.roiSelection.drawing = false;
+    const canvas = this.map?.getCanvas?.();
+    if (canvas) canvas.style.cursor = "";
+    this.renderRoiPanel();
+    this.renderLayers({ temporalOnly: true });
+    await this.previewRoiSelection();
+  }
+
+  clearRoiSelection() {
+    this.roiSelection.drawing = false;
+    this.roiSelection.vertices = [];
+    this.roiSelection.preview = null;
+    this.roiSelection.loading = false;
+    this.roiSelection.error = "";
+    const canvas = this.map?.getCanvas?.();
+    if (canvas) canvas.style.cursor = "";
+    this.refs?.roiPanel?.classList.add("hidden");
+    this.renderLayers({ temporalOnly: true });
+  }
+
+  renderRoiPanel() {
+    const refs = this.refs;
+    if (!refs?.roiPanel) return;
+    const roi = this.roiSelection;
+    const queueMode = this.individualReviewQueue.mode === "queue";
+    if (queueMode) roi.scopeMode = "active_individual";
+    refs.roiScope.value = roi.scopeMode;
+    refs.roiScope.disabled = queueMode;
+    const activeOption = refs.roiScope.querySelector('option[value="active_individual"]');
+    if (activeOption) activeOption.hidden = !queueMode;
+    refs.roiUndo.disabled = !roi.drawing || !roi.vertices.length;
+    refs.roiFinish.disabled = !roi.drawing || roi.vertices.length < 3;
+    const preview = roi.preview;
+    refs.roiFlag.disabled = roi.loading || !preview || Number(preview.unreviewed_count) <= 0;
+    refs.roiUnflag.disabled = roi.loading || !preview || Number(preview.dismissible_fix_count) <= 0;
+    refs.roiFlag.textContent = preview
+      ? `Flag unreviewed (${formatCount(preview.unreviewed_count || 0)})`
+      : "Flag inside ROI";
+    refs.roiUnflag.textContent = preview
+      ? `Unflag suspected (${formatCount(preview.dismissible_fix_count || 0)})`
+      : "Unflag suspected inside ROI";
+    refs.roiStatus.classList.toggle("error", Boolean(roi.error));
+    if (roi.error) {
+      refs.roiStatus.textContent = roi.error;
+    } else if (roi.loading) {
+      refs.roiStatus.textContent = "Resolving the ROI against exact dataset fixes…";
+    } else if (preview) {
+      const scopeLabel = queueMode
+        ? `active individual ${this.queueActiveIndividual()}`
+        : roi.scopeMode === "selected_individuals"
+          ? `${formatCount(this.roiScopeIndividuals().length)} selected individual(s)`
+          : "the whole study";
+      refs.roiStatus.textContent = `${formatCount(preview.match_count || 0)} fixes inside ROI for ${scopeLabel}: ${formatCount(preview.unreviewed_count || 0)} unreviewed, ${formatCount(preview.suspected_count || 0)} suspected, ${formatCount(preview.confirmed_count || 0)} confirmed.`;
+    } else if (roi.drawing) {
+      refs.roiStatus.textContent = `${formatCount(roi.vertices.length)} vertices. Click the map to add vertices, then finish the shape.`;
+    } else {
+      refs.roiStatus.textContent = "Finish the polygon to preview exact matching fixes.";
+    }
+  }
+
+  async previewRoiSelection() {
+    if (!this.data || this.roiSelection.vertices.length < 3) return;
+    const scopedIndividuals = this.roiScopeIndividuals();
+    if (
+      (this.individualReviewQueue.mode === "queue" && !scopedIndividuals.length)
+      || (
+        this.individualReviewQueue.mode !== "queue"
+        && this.roiSelection.scopeMode === "selected_individuals"
+        && !scopedIndividuals.length
+      )
+    ) {
+      this.roiSelection.error = "This ROI scope does not contain any individuals.";
+      this.renderRoiPanel();
+      return;
+    }
+    const signature = JSON.stringify({
+      datasetId: this.currentDatasetId,
+      vertices: this.roiSelection.vertices,
+      individuals: scopedIndividuals,
+    });
+    this.roiSelection.loading = true;
+    this.roiSelection.preview = null;
+    this.roiSelection.error = "";
+    this.renderRoiPanel();
+    try {
+      const preview = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/preview-roi`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            source_bundle_signature: this.data?.sourceSignature || "",
+            scope: {
+              kind: "roi",
+              polygon: this.roiSelection.vertices,
+              individuals: scopedIndividuals,
+            },
+            burst_gap_mode: this.getBurstGapMode(),
+            burst_gap_seconds: this.getBurstGapSeconds(),
+            burst_gap_quantile: this.getBurstGapQuantile(),
+          }),
+        },
+      );
+      const currentSignature = JSON.stringify({
+        datasetId: this.currentDatasetId,
+        vertices: this.roiSelection.vertices,
+        individuals: this.roiScopeIndividuals(),
+      });
+      if (signature !== currentSignature) return;
+      this.roiSelection.preview = preview;
+    } catch (error) {
+      this.roiSelection.preview = null;
+      this.roiSelection.error = error.message;
+    } finally {
+      this.roiSelection.loading = false;
+      this.renderRoiPanel();
+    }
+  }
+
+  async applyRoiFlag() {
+    const preview = this.roiSelection.preview;
+    if (!preview || Number(preview.unreviewed_count) <= 0 || this.rejectLockedEdit()) return;
+    const issueType = this.refs.roiIssueType.value.trim();
+    const comment = this.refs.roiComment.value.trim();
+    if (!issueType || !comment) {
+      this.roiSelection.error = "Issue type and comment are required before flagging.";
+      this.renderRoiPanel();
+      return;
+    }
+    if (this.hasUnsavedIndividualReviewDrafts()) {
+      this.roiSelection.error = "Save or discard the individual decision before flagging the ROI.";
+      this.renderRoiPanel();
+      return;
+    }
+    this.roiSelection.loading = true;
+    this.renderRoiPanel();
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/annotate-scope`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            expected_current_dataset_id: this.expectedCurrentDatasetId(),
+            expected_review_revision: this.expectedReviewRevision(),
+            logical_name: this.currentArtifact,
+            source_bundle_signature: this.data?.sourceSignature || "",
+            scope: {
+              kind: "roi",
+              polygon: this.roiSelection.vertices,
+              individuals: this.roiScopeIndividuals(),
+            },
+            status: "suspected",
+            origin: "manual",
+            issue_type: issueType,
+            comment,
+            workflow_context: {
+              entry_point: this.individualReviewQueue.mode === "queue"
+                ? "individual_review_queue"
+                : "movement_map",
+              scope_kind: "roi",
+              active_individual: this.queueActiveIndividual(),
+              selection_methods: ["map_polygon"],
+            },
+            burst_gap_mode: this.getBurstGapMode(),
+            burst_gap_seconds: this.getBurstGapSeconds(),
+            burst_gap_quantile: this.getBurstGapQuantile(),
+            user: this.getUser(),
+          }),
+        },
+      );
+      const affected = Number(result?.step?.summary?.resolved_fix_count) || 0;
+      await this.loadStudyAtDataset(result.dataset.dataset_id, { result });
+      this.setStatus(`Flagged ${formatCount(affected)} ROI fixes as suspicious.`);
+    } catch (error) {
+      this.roiSelection.loading = false;
+      await this.handleEditRequestError(error);
+      this.roiSelection.error = error.message;
+      this.renderRoiPanel();
+    }
+  }
+
+  async applyRoiUnflag() {
+    const preview = this.roiSelection.preview;
+    if (!preview?.dismissals?.length || this.rejectLockedEdit()) return;
+    if (this.hasUnsavedIndividualReviewDrafts()) {
+      this.roiSelection.error = "Save or discard the individual decision before unflagging the ROI.";
+      this.renderRoiPanel();
+      return;
+    }
+    this.roiSelection.loading = true;
+    this.renderRoiPanel();
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/dismiss-issues`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dataset_id: this.currentDatasetId,
+            expected_current_dataset_id: this.expectedCurrentDatasetId(),
+            expected_review_revision: this.expectedReviewRevision(),
+            logical_name: this.currentArtifact,
+            source_bundle_signature: this.data?.sourceSignature || "",
+            dismissals: preview.dismissals,
+            note: this.refs.roiComment.value.trim(),
+            user: this.getUser(),
+          }),
+        },
+      );
+      const affected = Number(preview.dismissible_fix_count) || 0;
+      await this.loadStudyAtDataset(result.dataset.dataset_id, { result });
+      this.setStatus(`Unflagged ${formatCount(affected)} suspected ROI fixes.`);
+    } catch (error) {
+      this.roiSelection.loading = false;
+      await this.handleEditRequestError(error);
+      this.roiSelection.error = error.message;
+      this.renderRoiPanel();
+    }
+  }
+
   handleMapClick(event) {
+    if (this.roiSelection.drawing) {
+      const longitude = Number(event?.lngLat?.lng);
+      const latitude = Number(event?.lngLat?.lat);
+      if (Number.isFinite(longitude) && Number.isFinite(latitude)) {
+        this.roiSelection.vertices.push([longitude, latitude]);
+        this.roiSelection.preview = null;
+        this.roiSelection.error = "";
+        this.renderRoiPanel();
+        this.renderLayers({ temporalOnly: true });
+      }
+      return;
+    }
     if (!this.overlay || !this.data) {
       return;
     }
@@ -13089,6 +14466,7 @@ class MovementExampleApp {
   handleMapDoubleClick(event) {
     event?.preventDefault?.();
     event?.originalEvent?.preventDefault?.();
+    if (this.roiSelection.drawing) return;
     if (this.pendingMapSingleClickTimer !== null) {
       window.clearTimeout(this.pendingMapSingleClickTimer);
       this.pendingMapSingleClickTimer = null;
@@ -13108,6 +14486,7 @@ class MovementExampleApp {
   handleMapContextMenu(event) {
     event?.preventDefault?.();
     event?.originalEvent?.preventDefault?.();
+    if (this.roiSelection.drawing) return;
     if (!this.overlay || !this.data) {
       this.closeFixPopup();
       return;
@@ -13339,6 +14718,14 @@ class MovementExampleApp {
   updateTimeLabel() {
     if (!this.data) {
       this.refs.time.textContent = "No timestamps";
+      return;
+    }
+    if (this.individualReviewQueue.mode === "queue") {
+      const current = this.getTrackPlayerCurrentFix();
+      const count = this.trackPlayer.sequence?.length || 0;
+      this.refs.time.textContent = current
+        ? `${formatTimestamp(current.timeMs)} • fix ${formatCount(this.trackPlayer.index + 1)} of ${formatCount(count)}`
+        : "Loading the active individual’s timeline…";
       return;
     }
     this.refs.time.textContent = formatTimestamp(this.currentTimeMs);
@@ -13951,7 +15338,7 @@ class MovementExampleApp {
     if (!pane) {
       return;
     }
-    if (!this.data) {
+    if (!this.data || this.individualReviewQueue.mode === "queue") {
       pane.innerHTML = "";
       pane.classList.add("hidden");
       return;
@@ -17967,6 +19354,8 @@ class MovementExampleApp {
       reason = "dataset_switch",
     } = {},
   ) {
+    this.pauseTrackPlayer({ render: false });
+    this.clearRoiSelection();
     const diagnosticStartedAt = performance.now();
     this.movementDiagnostics.datasetTransitionCalls += 1;
     let diagnosticFinished = false;
@@ -20443,6 +21832,123 @@ function movementSetLabel(value, prefix = "") {
     return "";
   }
   return `${prefix}${label}`;
+}
+
+function medianTrackPlayerGapMs(binary, sequence) {
+  if (!binary?.arrays?.time_ms || !sequence || sequence.length < 2) return 0;
+  const gaps = new Float64Array(sequence.length - 1);
+  let gapCount = 0;
+  for (let index = 1; index < sequence.length; index += 1) {
+    const gap = (
+      Number(binary.arrays.time_ms[Number(sequence[index])])
+      - Number(binary.arrays.time_ms[Number(sequence[index - 1])])
+    );
+    if (Number.isFinite(gap) && gap > 0) {
+      gaps[gapCount] = gap;
+      gapCount += 1;
+    }
+  }
+  if (!gapCount) return 0;
+  const sorted = gaps.slice(0, gapCount);
+  sorted.sort();
+  const middle = Math.floor(gapCount / 2);
+  return gapCount % 2
+    ? Number(sorted[middle])
+    : (Number(sorted[middle - 1]) + Number(sorted[middle])) / 2;
+}
+
+function trackPlayerFastScanStep(count, windowSize) {
+  const normalizedCount = Math.max(0, Math.floor(Number(count) || 0));
+  const normalizedWindow = Math.max(1, Math.floor(Number(windowSize) || 1));
+  if (normalizedCount < 2) return 1;
+  return clamp(
+    Math.ceil((normalizedCount - 1) / TRACK_PLAYER_SCAN_TARGET_STEPS),
+    1,
+    normalizedWindow,
+  );
+}
+
+function trackPlayerDelayMs(gapMs, medianGapMs, speed = DEFAULT_TRACK_PLAYER_SPEED) {
+  const normalizedMedian = Number(medianGapMs) > 0 ? Number(medianGapMs) : Number(gapMs);
+  const ratio = Number(gapMs) > 0 && normalizedMedian > 0
+    ? Number(gapMs) / normalizedMedian
+    : TRACK_PLAYER_MIN_DELAY_MS / TRACK_PLAYER_BASE_DELAY_MS;
+  const capped = clamp(
+    TRACK_PLAYER_BASE_DELAY_MS * ratio,
+    TRACK_PLAYER_MIN_DELAY_MS,
+    TRACK_PLAYER_MAX_DELAY_MS,
+  );
+  const normalizedSpeed = TRACK_PLAYER_SPEEDS.includes(Number(speed))
+    ? Number(speed)
+    : DEFAULT_TRACK_PLAYER_SPEED;
+  return capped / normalizedSpeed;
+}
+
+function projectTrackPlayerFixes(fixes, width, height) {
+  const padding = 22;
+  const firstPosition = fixes[0]?.position || [0, 0];
+  const meanLatitude = fixes.reduce(
+    (total, fix) => total + Number(fix.position?.[1] || 0),
+    0,
+  ) / Math.max(1, fixes.length);
+  const longitudeMeters = 111320 * Math.max(0.01, Math.cos(meanLatitude * Math.PI / 180));
+  const latitudeMeters = 110540;
+  let previousLongitude = Number(firstPosition[0]) || 0;
+  const local = fixes.map((fix, index) => {
+    let longitude = Number(fix.position[0]) || 0;
+    if (index > 0) {
+      while (longitude - previousLongitude > 180) longitude -= 360;
+      while (longitude - previousLongitude < -180) longitude += 360;
+    }
+    previousLongitude = longitude;
+    return {
+      xMeters: (longitude - Number(firstPosition[0])) * longitudeMeters,
+      yMeters: (Number(fix.position[1]) - Number(firstPosition[1])) * latitudeMeters,
+    };
+  });
+  let minX = Math.min(...local.map(point => point.xMeters));
+  let maxX = Math.max(...local.map(point => point.xMeters));
+  let minY = Math.min(...local.map(point => point.yMeters));
+  let maxY = Math.max(...local.map(point => point.yMeters));
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const spanX = Math.max(10, maxX - minX);
+  const spanY = Math.max(10, maxY - minY);
+  minX = centerX - (spanX / 2);
+  maxX = centerX + (spanX / 2);
+  minY = centerY - (spanY / 2);
+  maxY = centerY + (spanY / 2);
+  const innerWidth = Math.max(1, width - (padding * 2));
+  const innerHeight = Math.max(1, height - (padding * 2));
+  const scale = Math.max(0.000001, Math.min(
+    innerWidth / Math.max(0.000001, maxX - minX),
+    innerHeight / Math.max(0.000001, maxY - minY),
+  ));
+  return {
+    points: local.map(point => ({
+      x: (width / 2) + ((point.xMeters - centerX) * scale),
+      y: (height / 2) - ((point.yMeters - centerY) * scale),
+    })),
+    metersPerPixel: 1 / scale,
+  };
+}
+
+function niceTrackPlayerScaleMeters(targetMeters) {
+  const target = Math.max(0.001, Number(targetMeters) || 1);
+  const magnitude = 10 ** Math.floor(Math.log10(target));
+  for (const multiplier of [5, 2, 1]) {
+    const candidate = magnitude * multiplier;
+    if (candidate <= target) return candidate;
+  }
+  return magnitude / 2;
+}
+
+function formatTrackPlayerDistance(meters) {
+  if (meters >= 1000) {
+    return `${formatMaybeNumber(meters / 1000, "km")}`;
+  }
+  if (meters >= 1) return `${formatMaybeNumber(meters, "m")}`;
+  return `${formatMaybeNumber(meters * 100, "cm")}`;
 }
 
 function nearestTrackFixIndex(fixes, currentTimeMs) {

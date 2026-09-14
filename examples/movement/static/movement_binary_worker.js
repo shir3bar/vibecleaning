@@ -68,6 +68,29 @@ function numericColor(value, range) {
   ];
 }
 
+function hslToRgb(h, s, l) {
+  const c = (1 - Math.abs((2 * l) - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - (c / 2);
+  let rgb = [0, 0, 0];
+  if (h < 60) rgb = [c, x, 0];
+  else if (h < 120) rgb = [x, c, 0];
+  else if (h < 180) rgb = [0, c, x];
+  else if (h < 240) rgb = [0, x, c];
+  else if (h < 300) rgb = [x, 0, c];
+  else rgb = [c, 0, x];
+  return rgb.map(value => Math.round((value + m) * 255));
+}
+
+function categoricalColor(level) {
+  if (!level || level === "Missing") return [120, 136, 153, 150];
+  let hash = 0;
+  for (const character of level) {
+    hash = ((hash * 31) + character.charCodeAt(0)) >>> 0;
+  }
+  return [...hslToRgb(hash % 360, 0.72, 0.56), 215];
+}
+
 function burstIdAt(movement, index, individual) {
   const code = Number(movement.arrays.burst_values?.[index]);
   if (movement.header.source_format === "csv") {
@@ -97,7 +120,7 @@ function colorAt(movement, index, spec) {
   if (field.kind === "numeric") return numericColor(Number(value), spec.range);
   const code = Number(value);
   const level = code > 0 ? String(column?.levels?.[code - 1] || "") : "Missing";
-  return spec.categoryColors?.[level] || [120, 136, 153, 150];
+  return spec.categoryColors?.[level] || categoricalColor(level);
 }
 
 function inboundStepLengthAt(movement, index) {
@@ -171,12 +194,10 @@ function buildAttributes(movement, spec) {
     suspectedCount += suspectedFilter[index];
     confirmedCount += confirmedFilter[index];
     thresholdCount += thresholdFilter[index];
-    const queueContextGray = queueFlagContext && status !== 1;
     if (queueFlagContext && status !== 2) {
-      if (status === 1) queueContextColoredCount += 1;
-      else queueContextGrayCount += 1;
+      queueContextColoredCount += 1;
     }
-    const color = (threshold.active && !thresholdFilter[index]) || queueContextGray
+    const color = threshold.active && !thresholdFilter[index]
       ? CONTEXT_GRAY_POINT
       : colorAt(movement, index, spec);
     pointColors.set(color, index * 4);

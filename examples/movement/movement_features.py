@@ -1,6 +1,7 @@
 import random
 from math import degrees, isfinite, pi, radians
 
+import numpy as np
 from pyproj import Geod
 
 
@@ -12,6 +13,45 @@ STEP_FEATURE_FIELDS = (
     "turn_angle_deg",
 )
 WGS84_GEOD = Geod(ellps="WGS84")
+
+
+def burst_movement_summary(time_ms, lon, lat) -> dict:
+    """Summarize adjacent retained fixes inside ONE ordered burst.
+
+    Shared by CSV, RDS and offline reporting. Never consume cached per-fix
+    steps: move2 attaches those to starting fixes and a burst's last cached
+    step can lead outside the burst. Callers own membership/exclusion rules.
+    Vectorized geodesics keep large bursts inexpensive.
+    """
+    times = np.asarray(time_ms, dtype=np.int64)
+    lon, lat = np.asarray(lon, dtype=float), np.asarray(lat, dtype=float)
+    if not len(times) or not (len(times) == len(lon) == len(lat)):
+        raise ValueError("A burst requires equally sized, nonempty coordinate/time arrays")
+    if np.any(np.diff(times) < 0) or not (np.isfinite(lon).all() and np.isfinite(lat).all()):
+        raise ValueError("Burst coordinates must be finite and timestamps ordered")
+    gaps = np.diff(times).astype(float) / 1000.0
+    distances = np.asarray(WGS84_GEOD.inv(lon[:-1], lat[:-1], lon[1:], lat[1:])[2]) if len(times) > 1 else np.array([])
+    distances = distances.astype(float)
+    if not np.isfinite(distances).all():
+        raise ValueError("Undefined burst geodesic distance")
+    speeds = distances[gaps > 0] / gaps[gaps > 0]
+    path = float(sum(distances))
+    net = geodesic_distance_meters(lon[0], lat[0], lon[-1], lat[-1]) if len(times) > 1 else 0.0
+    def statistic(values, operation):
+        return float(operation(values)) if len(values) else None
+    return {
+        "n_fixes": len(times), "start_time_ms": int(times[0]), "end_time_ms": int(times[-1]),
+        "duration_s": float((times[-1] - times[0]) / 1000.0),
+        "path_length_m": path, "net_displacement_m": net,
+        "straightness": net / path if path > 0 else None,
+        "mean_step_length_m": statistic(distances, np.mean),
+        "sd_step_length_m": statistic(distances, np.std),
+        "mean_speed_mps": statistic(speeds, np.mean),
+        "median_speed_mps": statistic(speeds, np.median),
+        "max_speed_mps": statistic(speeds, np.max),
+        "sd_speed_mps": statistic(speeds, np.std),
+        "max_time_gap_s": statistic(gaps, np.max),
+    }
 
 
 def _wgs84_inverse(

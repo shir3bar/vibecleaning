@@ -527,7 +527,7 @@ def test_score_bursts_excludes_precomputed_osm_burst_summaries_by_default_withou
                     "fix_key": second_key,
                     "individual": "alpha",
                     "time_ms": start_ms + 10_000,
-                    "lon": 0.001,
+                    "lon": 0.001 * (index + 1),
                     "lat": 0.0,
                     "attributes": {
                         "step_length_m": 10.0 + index,

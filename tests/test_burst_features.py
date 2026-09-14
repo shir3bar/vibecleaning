@@ -159,9 +159,10 @@ def test_transition_on_first_fix_of_later_burst_is_excluded():
 
     later_row = build_burst_feature_rows(fixes, bursts)[1]
 
-    assert later_row["path_length_m"] == 7.0
-    assert later_row["mean_step_length_m"] == 7.0
-    assert later_row["max_speed_mps"] == 1.4
+    actual_step = geodesic_distance_meters(0.010, 0, 0.011, 0)
+    assert later_row["path_length_m"] == pytest.approx(actual_step)
+    assert later_row["mean_step_length_m"] == pytest.approx(actual_step)
+    assert later_row["max_speed_mps"] == pytest.approx(actual_step / 5)
     assert later_row["max_time_gap_s"] == 5.0
 
 

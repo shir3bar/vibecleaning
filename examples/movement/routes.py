@@ -19,6 +19,7 @@ from app.edit_locks import (
     EditLockedError,
     build_edit_lock_profile,
     create_guarded_step,
+    require_editable_dataset,
     restore_forward_head_guarded,
     resume_from_dataset,
     undo_guarded,
@@ -65,6 +66,7 @@ from app.state import (
 from app.web import get_project_dir, json_error, parse_json_body, validate_path_part
 
 from .analysis_history import (
+    BURST_FEATURE_SIGNATURE,
     artifact_signature,
     build_movement_analysis_history,
     review_exclusion_signature,
@@ -79,6 +81,7 @@ from .review_annotations import (
     compress_fix_keys,
     confirmed_exclusion_scopes,
     load_review_annotations,
+    point_in_polygon,
     resolve_filter_row_ranges,
     row_tokens_for_scope,
 )
@@ -106,6 +109,7 @@ from .rds_index import (
     ensure_rds_index,
     rds_burst_feature_rows,
     rds_report_row_ranges,
+    rds_source_annotations_for_fix_keys,
     resolve_rds_review_scope,
     source_outlier_ranking,
     source_rows_from_fix_keys,
@@ -125,13 +129,9 @@ SUPPORTED_RANKING_METHODS = {
     RANKING_SOURCE_IS_OUTLIER,
 }
 RANKING_DEFINITION_SIGNATURES = {
-    RANKING_ISOLATION_FOREST: "isolation_forest:combined_individual_rankings:v2",
-    RANKING_ISOLATION_FOREST_DECISION_MARGIN: "isolation_forest:combined_individual_rankings:v2",
+    RANKING_ISOLATION_FOREST: "isolation_forest:adjacent_retained_fixes:v3",
+    RANKING_ISOLATION_FOREST_DECISION_MARGIN: "isolation_forest:adjacent_retained_fixes:v3",
     RANKING_SOURCE_IS_OUTLIER: "source_is_outlier:sum_fix_counts:v1",
-}
-LEGACY_RANKING_DEFINITION_SIGNATURES = {
-    RANKING_ISOLATION_FOREST: "isolation_forest:maximum_burst_score:v1",
-    RANKING_ISOLATION_FOREST_DECISION_MARGIN: "isolation_forest:sum_positive_decision_margin:v1",
 }
 
 
@@ -146,15 +146,9 @@ def ranking_provider(ranking_method: str) -> str:
 def _ranking_definition_matches(ranking_method: str, stored_signature: object) -> bool:
     stored = str(stored_signature or "")
     expected = RANKING_DEFINITION_SIGNATURES[ranking_method]
-    if stored:
-        return stored in {
-            expected,
-            LEGACY_RANKING_DEFINITION_SIGNATURES.get(ranking_method),
-        }
-    # Existing maximum-burst Isolation Forest analyses keep their original
-    # meaning. Pre-sum source analyses do not: they ranked individuals by only
-    # their worst burst and must not be restored as source-total rankings.
-    return ranking_method != RANKING_SOURCE_IS_OUTLIER
+    # Feature semantics changed, not review state. Old analyses remain in
+    # history but must not be presented as results of the corrected recipe.
+    return stored == expected
 
 
 def _edit_locked_response(exc: EditLockedError) -> JSONResponse:
@@ -669,6 +663,46 @@ def _validate_filter_scope(value: object) -> dict:
     return result
 
 
+def _validate_roi_scope(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("ROI scope is required")
+    raw_polygon = value.get("polygon")
+    if not isinstance(raw_polygon, list) or not 3 <= len(raw_polygon) <= 200:
+        raise ValueError("ROI polygon must contain between 3 and 200 vertices")
+    polygon = []
+    for raw_vertex in raw_polygon:
+        if not isinstance(raw_vertex, (list, tuple)) or len(raw_vertex) != 2:
+            raise ValueError("Invalid ROI polygon vertex")
+        try:
+            longitude = float(raw_vertex[0])
+            latitude = float(raw_vertex[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid ROI polygon vertex") from exc
+        if not isfinite(longitude) or not isfinite(latitude):
+            raise ValueError("ROI polygon vertices must be finite")
+        if not -180.0 <= longitude <= 180.0 or not -90.0 <= latitude <= 90.0:
+            raise ValueError("ROI polygon vertex is outside WGS84 bounds")
+        polygon.append([longitude, latitude])
+    if len({(item[0], item[1]) for item in polygon}) < 3:
+        raise ValueError("ROI polygon must contain at least three distinct vertices")
+    raw_individuals = value.get("individuals", [])
+    if not isinstance(raw_individuals, list):
+        raise ValueError("ROI individuals must be a list")
+    individuals = list(
+        dict.fromkeys(_normalize_individual_name(item) for item in raw_individuals)
+    )
+    review_status = str(value.get("review_status") or "").strip().lower()
+    if review_status not in {"", "unreviewed"}:
+        raise ValueError("Invalid ROI review status")
+    return {
+        "kind": "roi",
+        "polygon": polygon,
+        "individuals": individuals,
+        "review_status": review_status,
+        "selection_method": "map_polygon",
+    }
+
+
 def _validate_required_text(value: object, *, label: str, max_length: int) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{label} is required")
@@ -709,7 +743,7 @@ def _validate_issue_workflow_context(value: object) -> dict:
         max_length=40,
     )
     if scope_kind and scope_kind not in {
-        "fix", "segment", "burst", "bursts", "individual", "filter"
+        "fix", "segment", "burst", "bursts", "individual", "filter", "roi"
     }:
         raise ValueError("Invalid issue workflow scope")
     active_individual = _validate_optional_text(
@@ -734,6 +768,7 @@ def _validate_issue_workflow_context(value: object) -> dict:
         "map_double_click",
         "table_shift_click",
         "color_threshold",
+        "map_polygon",
     }
     methods = list(
         dict.fromkeys(
@@ -1280,6 +1315,13 @@ def register_movement_routes(
         actor = current_actor(request)
         if actor is None:
             return payload, None, None
+        selected_dataset_id = str(
+            payload.get("parent_dataset_id") or body.get("dataset_id") or ""
+        )
+        if selected_dataset_id:
+            # Surface the stable historical-version lock contract before a
+            # stale review revision can mask it as a generic conflict.
+            require_editable_dataset(study_dir, selected_dataset_id)
         expected_revision = body.get("expected_review_revision")
         review = authorize_persistent_change(
             study_dir,
@@ -2267,6 +2309,7 @@ def register_movement_routes(
                 "ranking_method": ranking_method,
                 "ranking_provider": ranking_method,
                 "ranking_schema_version": 2 if ranking_method == RANKING_ISOLATION_FOREST else 1,
+                "burst_feature_signature": BURST_FEATURE_SIGNATURE,
                 "ranking_definition_signature": ranking_definition_signature(
                     ranking_method
                 ),
@@ -3138,6 +3181,105 @@ def register_movement_routes(
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/preview-roi")
+    async def post_movement_preview_roi(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            load_dataset(study_dir, dataset_id)
+            get_dataset_artifact(study_dir, dataset_id, logical_name)
+            scope = _validate_roi_scope(body.get("scope"))
+            annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+            if configured_source.bundle_scoped:
+                bundle, _index_path = await run_in_threadpool(
+                    ensure_rds_index, study_dir, dataset_id
+                )
+                validate_requested_bundle(body, bundle.signature)
+            movement, source_signature = await run_in_threadpool(
+                source_fixes,
+                configured_source,
+                study_dir,
+                dataset_id,
+                logical_name,
+                individuals=scope["individuals"],
+                limit=None,
+                annotations=annotations,
+                burst_gap_mode=parse_burst_gap_mode(body.get("burst_gap_mode")),
+                burst_gap_seconds=parse_burst_gap_seconds(body.get("burst_gap_seconds")),
+                burst_gap_quantile=parse_burst_gap_quantile(body.get("burst_gap_quantile")),
+            )
+            movement = apply_review_annotations(
+                movement,
+                annotations,
+                source_artifact="" if configured_source.bundle_scoped else logical_name,
+            )
+            matches = [
+                fix
+                for fix in movement.get("fixes") or []
+                if point_in_polygon(
+                    float(fix.get("lon") or 0),
+                    float(fix.get("lat") or 0),
+                    scope["polygon"],
+                )
+            ]
+            counts = {"unreviewed": 0, "suspected": 0, "confirmed": 0}
+            dismissals_by_parent: dict[str, set[str]] = {}
+            for fix in matches:
+                status = str((fix.get("review") or {}).get("status") or "").strip().lower()
+                status = status if status in counts else "unreviewed"
+                counts[status] += 1
+                if status != "suspected":
+                    continue
+                review = fix.get("review") or {}
+                issues = review.get("effective_issues") or review.get("issues") or []
+                found_parent = False
+                for issue in issues:
+                    if str(issue.get("status") or "") != "suspected":
+                        continue
+                    parent_id = str(
+                        issue.get("parent_issue_id") or issue.get("issue_id") or ""
+                    ).strip()
+                    fix_key = str(fix.get("fix_key") or "").strip()
+                    if parent_id and fix_key:
+                        dismissals_by_parent.setdefault(parent_id, set()).add(fix_key)
+                        found_parent = True
+                if not found_parent:
+                    fix_key = str(fix.get("fix_key") or "").strip()
+                    if fix_key:
+                        dismissals_by_parent.setdefault(
+                            f"source:{fix_key}", set()
+                        ).add(fix_key)
+            dismissals = [
+                {
+                    "parent_annotation_id": parent_id,
+                    "fix_keys": sorted(fix_keys),
+                }
+                for parent_id, fix_keys in sorted(dismissals_by_parent.items())
+            ]
+            return JSONResponse({
+                "scope": scope,
+                "match_count": len(matches),
+                "unreviewed_count": counts["unreviewed"],
+                "suspected_count": counts["suspected"],
+                "confirmed_count": counts["confirmed"],
+                "dismissible_fix_count": len({
+                    fix_key
+                    for item in dismissals
+                    for fix_key in item["fix_keys"]
+                }),
+                "dismissals": dismissals,
+                "source_signature": source_signature,
+            })
+        except ReviewForbiddenError as exc:
+            return json_error(str(exc), 404)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/annotate-scope")
     async def post_movement_annotate_scope(family_name: str, study_name: str, request: Request):
         body = await parse_json_body(request)
@@ -3159,7 +3301,7 @@ def register_movement_routes(
             if not isinstance(raw_scope, dict):
                 raise ValueError("Review scope is required")
             scope_kind = str(raw_scope.get("kind") or "").strip().lower()
-            if scope_kind not in {"fix", "segment", "burst", "bursts", "individual", "filter"}:
+            if scope_kind not in {"fix", "segment", "burst", "bursts", "individual", "filter", "roi"}:
                 raise ValueError("Invalid review scope")
             scope: dict[str, object] = {"kind": scope_kind}
             rds_scope: dict[str, object] = {"kind": scope_kind}
@@ -3219,6 +3361,10 @@ def register_movement_routes(
             elif scope_kind == "filter":
                 scope["filter"] = _validate_filter_scope(raw_scope.get("filter"))
                 rds_scope["filter"] = scope["filter"]
+            elif scope_kind == "roi":
+                scope = _validate_roi_scope(raw_scope)
+                scope["review_status"] = "unreviewed"
+                rds_scope = dict(scope)
             elif scope_kind == "burst":
                 scope["burst_id"] = _validate_required_text(
                     raw_scope.get("burst_id"),
@@ -3282,7 +3428,12 @@ def register_movement_routes(
                 )
                 validate_requested_bundle(body, bundle.signature)
                 resolved_scope, resolved_fix_count = await run_in_threadpool(
-                    resolve_rds_review_scope, index_path, rds_scope
+                    resolve_rds_review_scope,
+                    index_path,
+                    rds_scope,
+                    annotations=_load_dataset_review_annotations(
+                        study_dir, dataset_id=dataset_id
+                    ),
                 )
                 if resolved_fix_count <= 0:
                     raise ValueError("Review scope did not resolve to any fixes")
@@ -3324,6 +3475,8 @@ def register_movement_routes(
                 if scope_kind == "bursts"
                 else "dataset filter"
                 if scope_kind == "filter"
+                else "map ROI"
+                if scope_kind == "roi"
                 else scope_kind
             )
             payload = {
@@ -3531,12 +3684,26 @@ def register_movement_routes(
             source_bundle_signature = ""
             input_artifacts = [logical_name]
             if configured_source.bundle_scoped:
-                bundle, _index_path = await run_in_threadpool(
+                bundle, index_path = await run_in_threadpool(
                     ensure_rds_index, study_dir, dataset_id
                 )
                 validate_requested_bundle(body, bundle.signature)
+                annotations = _load_dataset_review_annotations(
+                    study_dir, dataset_id=dataset_id
+                )
+                requested_fix_keys = [
+                    str(fix_key)
+                    for item in body.get("dismissals") or []
+                    if isinstance(item, dict)
+                    for fix_key in item.get("fix_keys") or []
+                ]
+                annotations.extend(await run_in_threadpool(
+                    rds_source_annotations_for_fix_keys,
+                    index_path,
+                    requested_fix_keys,
+                ))
                 records = _rds_resolution_records(
-                    _load_dataset_review_annotations(study_dir, dataset_id=dataset_id),
+                    annotations,
                     body.get("dismissals"),
                     status="dismissed",
                     note=note,

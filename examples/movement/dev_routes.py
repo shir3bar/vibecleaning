@@ -15,6 +15,7 @@ from app.edit_locks import (
     require_editable_dataset,
 )
 from app.execution import create_analysis
+from .analysis_history import BURST_FEATURE_SIGNATURE
 from app.query_library import get_query
 from app.reviews import (
     ReviewConflictError,
@@ -514,6 +515,7 @@ def register_movement_dev_routes(
                         "parameters": {
                             "app": "movement",
                             "action": "run_burst_feature_space",
+                            "burst_feature_signature": BURST_FEATURE_SIGNATURE,
                             "target_artifact": logical_name,
                             "dataset_id": dataset_id,
                             "burst_gap_mode": _parse_burst_gap_mode(

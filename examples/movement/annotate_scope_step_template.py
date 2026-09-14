@@ -14,10 +14,12 @@ def main():
     params = dict(spec["step"].get("parameters") or {})
     step_id = str(spec["step"].get("step_id") or "").strip()
     from examples.movement.review_annotations import (
+        apply_review_annotations,
         compress_fix_keys,
         confirmed_exclusion_scopes,
         load_review_annotations,
         normalize_row_ranges,
+        point_in_polygon,
         resolve_filter_row_ranges,
     )
     from examples.movement.summary import build_movement_fixes
@@ -87,6 +89,47 @@ def main():
         resolved_scopes.append(
             (
                 {"kind": kind, "individual": individual, "set_name": set_name},
+                len(resolved_fix_keys),
+            )
+        )
+    elif kind == "roi":
+        movement = build_movement_fixes(
+            Path(source["path"]),
+            limit=None,
+            burst_gap_mode=params.get("burst_gap_mode"),
+            burst_gap_seconds=params.get("burst_gap_seconds"),
+            burst_gap_quantile=params.get("burst_gap_quantile"),
+        )
+        movement = apply_review_annotations(
+            movement,
+            annotations,
+            source_artifact=target_artifact,
+        )
+        polygon = [list(item) for item in raw_scope.get("polygon") or []]
+        individuals = {
+            str(item) for item in raw_scope.get("individuals") or [] if str(item)
+        }
+        resolved_fix_keys = [
+            str(item.get("fix_key") or "")
+            for item in movement.get("fixes") or []
+            if (not individuals or str(item.get("individual") or "") in individuals)
+            and str((item.get("review") or {}).get("status") or "") not in {"suspected", "confirmed"}
+            and point_in_polygon(
+                float(item.get("lon") or 0),
+                float(item.get("lat") or 0),
+                polygon,
+            )
+        ]
+        resolved_scopes.append(
+            (
+                {
+                    "kind": "roi",
+                    "polygon": polygon,
+                    "individuals": sorted(individuals),
+                    "review_status": "unreviewed",
+                    "selection_method": "map_polygon",
+                    "row_ranges": compress_fix_keys(resolved_fix_keys),
+                },
                 len(resolved_fix_keys),
             )
         )

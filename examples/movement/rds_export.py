@@ -228,7 +228,7 @@ saveRDS(x, args[[3]], compress=TRUE)
             raise RuntimeError(result.stderr.strip() or "R reviewed-RDS writer failed")
 
 
-def _compare_original_columns(source_path: Path, output_path: Path) -> None:
+def _compare_original_columns(source_path: Path, output_path: Path, expected_review: dict | None = None) -> None:
     source = read_movement_rds(source_path)
     output = read_movement_rds(output_path)
     original_names = list(map(str, source.columns))
@@ -241,6 +241,8 @@ def _compare_original_columns(source_path: Path, output_path: Path) -> None:
     if len(source) != len(output):
         raise ValueError(f"Reviewed RDS changed row count in {source_path.name}")
     for name in original_names:
+        if name in RDS_REVIEW_COLUMNS:
+            continue  # App-owned annotations may change on reimport/review.
         left = source[name].to_numpy()
         right = output[name].to_numpy()
         if name == "geometry":
@@ -256,11 +258,17 @@ def _compare_original_columns(source_path: Path, output_path: Path) -> None:
                     f"Reviewed RDS changed {name} in {source_path.name}"
                 ) from exc
     for attr in (
-        "class", "sf_column", "time_column", "track_id_column", "crs_",
+        "class", "sf_column", "time_column", "track_id_column", "crs_", "geometry_crs",
         "row.names", "track_data", "convergence", "v_max_used",
     ):
         if repr(source.attrs.get(attr)) != repr(output.attrs.get(attr)):
             raise ValueError(f"Reviewed RDS changed {attr} in {source_path.name}")
+    if expected_review is not None:
+        for name in RDS_REVIEW_COLUMNS:
+            actual = output[name].fillna("").astype(str).tolist()
+            expected = ["" if value is None else str(value) for value in expected_review[name]]
+            if actual != expected:
+                raise ValueError(f"Reviewed RDS has incorrect generated {name} in {source_path.name}")
 
 
 def export_reviewed_rds_bundle(
@@ -289,7 +297,7 @@ def export_reviewed_rds_bundle(
                 write_reviewed_rds_r(source_path, output_path, columns)
             else:
                 write_reviewed_rds_python(source_path, output_path, columns)
-            _compare_original_columns(source_path, output_path)
+            _compare_original_columns(source_path, output_path, columns)
             manifest_files.append({
                 "logical_name": logical_name,
                 "row_count": len(rows),

@@ -35,14 +35,16 @@ from rdata.conversion import DEFAULT_CLASS_MAP, dataframe_constructor
 from app.state import ProjectStateError, load_dataset, resolve_artifact_path
 
 from .movement_features import (
+    burst_movement_summary,
     compute_track_movement,
     geodesic_distance_meters,
-    step_movement_metrics,
 )
+from .review_annotations import point_in_polygon
 from .summary import DERIVED_FIELDS, quantile, span_to_zoom
 
 
-RDS_INDEX_SCHEMA_VERSION = 3
+# Adding optional colour columns requires rebuilding older disposable indexes.
+RDS_INDEX_SCHEMA_VERSION = 6
 RDS_SOURCE_FORMAT = "rds"
 RDS_IMPLICIT_SET = "train"
 RDS_REQUIRED_COLUMNS = {
@@ -63,7 +65,7 @@ RDS_REVIEW_COLUMNS = (
     "outlier_comments",
     "outlier_flag_step_ids",
 )
-RDS_COLOR_FIELDS = [
+RDS_BASE_COLOR_FIELDS = [
     *DERIVED_FIELDS,
     {
         "key": "is_outlier",
@@ -73,6 +75,96 @@ RDS_COLOR_FIELDS = [
         "column_name": "is_outlier",
     },
 ]
+
+RDS_RESULT_SUFFIXES = (
+    "",
+    "_class_aware",
+    "_weighted_evidence",
+    "_physiology",
+    "_no_detour",
+    "_no_block_expansion",
+    "_state_conditioned",
+)
+RDS_RESULT_NUMERIC_FIELDS = (
+    "combined_evidence",
+    "loglr_bridge",
+    "loglr_prob",
+    "loglr_speed",
+    "loglr_detour",
+)
+RDS_RESULT_BOOLEAN_FIELDS = (
+    "flagged_by_bridge",
+    "flagged_by_prob",
+    "flagged_by_speed",
+    "flagged_by_detour",
+)
+
+
+def _detector_color_fields() -> list[dict]:
+    fields: list[dict] = []
+    for suffix in RDS_RESULT_SUFFIXES:
+        label_suffix = suffix.removeprefix("_").replace("_", " ")
+        if suffix == "_state_conditioned":
+            label_suffix = "state conditioned; multimodal tracks"
+        for base in RDS_RESULT_NUMERIC_FIELDS:
+            key = f"{base}{suffix}"
+            fields.append({
+                "key": key,
+                "label": key if not label_suffix else f"{base} ({label_suffix})",
+                "kind": "numeric",
+                "source": "raw",
+                "column_name": key,
+            })
+        for base in RDS_RESULT_BOOLEAN_FIELDS:
+            key = f"{base}{suffix}"
+            fields.append({
+                "key": key,
+                "label": key if not label_suffix else f"{base} ({label_suffix})",
+                "kind": "boolean",
+                "source": "raw",
+                "column_name": key,
+            })
+        if suffix:
+            key = f"is_outlier{suffix}"
+            fields.append({
+                "key": key,
+                "label": f"is_outlier ({label_suffix})",
+                "kind": "boolean",
+                "source": "raw",
+                "column_name": key,
+            })
+        error_key = f"error_class{suffix}"
+        fields.append({
+            "key": error_key,
+            "label": error_key if not label_suffix else f"error_class ({label_suffix})",
+            "kind": "categorical",
+            "source": "raw",
+            "column_name": error_key,
+        })
+    fields.extend([
+        {
+            "key": "persistence_count",
+            "label": "persistence_count",
+            "kind": "numeric",
+            "source": "raw",
+            "column_name": "persistence_count",
+        },
+        {
+            "key": "state_speed_regime",
+            "label": "state speed regime (multimodal tracks)",
+            "kind": "categorical",
+            "source": "raw",
+            "column_name": "state_speed_regime",
+        },
+    ])
+    return fields
+
+
+RDS_OPTIONAL_COLOR_FIELDS = _detector_color_fields()
+RDS_COLOR_FIELDS = [*RDS_BASE_COLOR_FIELDS, *RDS_OPTIONAL_COLOR_FIELDS]
+RDS_OPTIONAL_COLOR_BY_KEY = {
+    str(item["key"]): item for item in RDS_OPTIONAL_COLOR_FIELDS
+}
 
 
 @dataclass(frozen=True)
@@ -166,13 +258,27 @@ def _sf_constructor(obj, attrs):
     }
     frame = dataframe_constructor(safe_obj, attrs)
     frame.attrs.update(attrs)
+    geometry = obj.get("geometry")
+    if hasattr(geometry, "crs"):
+        frame.attrs["geometry_crs"] = geometry.crs
     return frame
+
+
+class _GeometryColumn(list):
+    """Retain standard sf geometry CRS through rdata's dataframe conversion."""
+
+
+def _geometry_constructor(obj, attrs):
+    result = _GeometryColumn(obj)
+    result.crs = attrs.get("crs")
+    return result
 
 
 def _rds_constructors() -> dict:
     constructors = dict(DEFAULT_CLASS_MAP)
     constructors["integer64"] = _integer64_constructor
     constructors["sf"] = _sf_constructor
+    constructors["sfc_POINT"] = _geometry_constructor
     return constructors
 
 
@@ -223,19 +329,39 @@ def _attr_string(frame: pd.DataFrame, name: str) -> str:
 
 
 def _validate_crs(frame: pd.DataFrame, *, filename: str) -> None:
-    crs = frame.attrs.get("crs_")
-    crs_input = ""
-    if isinstance(crs, dict):
-        for key, value in crs.items():
-            if str(key) == "input":
-                if isinstance(value, np.ndarray) and len(value):
-                    crs_input = _scalar_text(value[0])
-                else:
-                    crs_input = _scalar_text(value)
-                break
-    normalized = crs_input.upper().replace(" ", "")
-    if normalized not in {"EPSG:4326", "WGS84"}:
-        raise ValueError(f"{filename} must use EPSG:4326 coordinates")
+    from pyproj import CRS
+    from pyproj.exceptions import CRSError
+
+    # sf's geometry CRS is authoritative. crs_ is optional legacy amt metadata,
+    # not a required fix column. If both exist they must agree semantically.
+    present = [frame.attrs.get(key) for key in ("geometry_crs", "crs_") if frame.attrs.get(key) is not None]
+    if not present:
+        raise ValueError(f"{filename} has no coordinate reference system metadata")
+    for crs in present:
+        if not isinstance(crs, dict):
+            raise ValueError(f"{filename} has invalid CRS metadata")
+        raw = crs.get("wkt", crs.get("input"))
+        if isinstance(raw, np.ndarray):
+            raw = raw[0] if len(raw) else ""
+        try:
+            valid = CRS.from_user_input(str(raw)).equals(CRS.from_epsg(4326), ignore_axis_order=True)
+        except (ValueError, TypeError, CRSError):
+            valid = False
+        if not valid:
+            raise ValueError(f"{filename} must use consistent EPSG:4326 coordinates")
+
+
+def _parse_rds_boolean(value, *, allow_missing=False):
+    if value is None or value is pd.NA or bool(pd.isna(value)):
+        if allow_missing:
+            return None
+        raise ValueError("Missing required boolean value")
+    normalized = _scalar_text(value).lower()
+    if normalized in {"true", "1"}:
+        return True
+    if normalized in {"false", "0"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value!r}")
 
 
 def validate_movement_rds(path: Path, frame: pd.DataFrame) -> dict[str, str | int]:
@@ -306,9 +432,8 @@ def validate_movement_rds(path: Path, frame: pd.DataFrame) -> dict[str, str | in
     outliers = frame["is_outlier"]
     if outliers.isna().any():
         raise ValueError(f"{filename} contains missing is_outlier values")
-    normalized_outliers = {_scalar_text(value).lower() for value in outliers.tolist()}
-    if not normalized_outliers.issubset({"true", "false", "1", "0"}):
-        raise ValueError(f"{filename} contains non-boolean is_outlier values")
+    for value in outliers:
+        _parse_rds_boolean(value)
 
     return {
         "study_id": study_id,
@@ -371,12 +496,40 @@ def _schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX fixes_individual_time ON fixes(individual_key, time_ms, source_row);
         """
     )
+    sqlite_types = {
+        "numeric": "REAL",
+        "boolean": "INTEGER",
+        "categorical": "TEXT",
+    }
+    for field in RDS_OPTIONAL_COLOR_FIELDS:
+        column = str(field["column_name"])
+        sql_type = sqlite_types[str(field["kind"])]
+        connection.execute(f'ALTER TABLE fixes ADD COLUMN "{column}" {sql_type}')
 
 
 def _source_review_value(frame: pd.DataFrame, column: str, index: int) -> str:
     if column not in frame.columns:
         return ""
     return _scalar_text(frame.iloc[index][column])
+
+
+def _optional_rds_value(value: object, field: dict) -> object:
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, (float, np.floating)) and np.isnan(value):
+        return None
+    kind = str(field["kind"])
+    if kind == "numeric":
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if np.isfinite(number) else None
+    if kind == "boolean":
+        parsed = _parse_rds_boolean(value, allow_missing=True)
+        return None if parsed is None else int(parsed)
+    text_value = _scalar_text(value)
+    return text_value or None
 
 
 def _insert_frame(
@@ -408,7 +561,7 @@ def _insert_frame(
     t_values = pd.to_numeric(frame["t_"], errors="raise").to_numpy(dtype=np.float64)
     time_ms_values = np.rint(t_values * 1000.0).astype(np.int64)
     burst_values = pd.to_numeric(frame["burst_"], errors="raise").to_numpy(dtype=np.int64)
-    outlier_values = frame["is_outlier"].astype(bool).to_numpy(dtype=np.bool_)
+    outlier_values = np.array([_parse_rds_boolean(value) for value in frame["is_outlier"]], dtype=np.bool_)
     tags = (
         frame["tag_local_identifier"].tolist()
         if "tag_local_identifier" in frame.columns
@@ -432,6 +585,14 @@ def _insert_frame(
             float(y_values.max()),
         ),
     )
+    optional_columns = [str(field["column_name"]) for field in RDS_OPTIONAL_COLOR_FIELDS]
+    optional_values = []
+    for field in RDS_OPTIONAL_COLOR_FIELDS:
+        column = str(field["column_name"])
+        raw_values = frame[column].tolist() if column in frame.columns else [None] * row_count
+        optional_values.append([
+            _optional_rds_value(value, field) for value in raw_values
+        ])
     rows = []
     for zero_index in range(row_count):
         source_row = zero_index + 1
@@ -454,17 +615,20 @@ def _insert_frame(
                 _source_review_value(frame, "outlier_issue_type", zero_index),
                 _source_review_value(frame, "outlier_comments", zero_index),
                 _source_review_value(frame, "outlier_flag_step_ids", zero_index),
+                *(values[zero_index] for values in optional_values),
             )
         )
+    insert_columns = [
+        "ordinal", "artifact_id", "source_row", "fix_key", "individual_key",
+        "time_ms", "lon", "lat", "burst_value", "is_outlier", "tag_identifier",
+        "source_outlier_status", "source_outlier_issue_type",
+        "source_outlier_comments", "source_outlier_flag_step_ids",
+        *optional_columns,
+    ]
+    quoted_columns = ", ".join(f'"{column}"' for column in insert_columns)
+    placeholders = ", ".join("?" for _ in insert_columns)
     connection.executemany(
-        """
-        INSERT INTO fixes (
-            ordinal, artifact_id, source_row, fix_key, individual_key,
-            time_ms, lon, lat, burst_value, is_outlier, tag_identifier,
-            source_outlier_status, source_outlier_issue_type,
-            source_outlier_comments, source_outlier_flag_step_ids
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
+        f"INSERT INTO fixes ({quoted_columns}) VALUES ({placeholders})",
         rows,
     )
     return ordinal_start + row_count
@@ -532,12 +696,17 @@ def build_rds_index(bundle: RdsBundle, output_path: Path) -> None:
             study_ids: set[str] = set()
             individual_ids: set[str] = set()
             identifiers: set[str] = set()
+            available_color_keys: set[str] = set()
             for artifact_id, (artifact, path) in enumerate(
                 zip(bundle.artifacts, bundle.paths, strict=True), start=1
             ):
                 logical_name = str(artifact.get("logical_name") or "")
                 frame = read_movement_rds(path)
                 info = validate_movement_rds(path, frame)
+                for field in RDS_OPTIONAL_COLOR_FIELDS:
+                    column = str(field["column_name"])
+                    if column in frame.columns and frame[column].notna().any():
+                        available_color_keys.add(str(field["key"]))
                 study_ids.add(str(info["study_id"]))
                 if str(info["individual_id"]) in individual_ids:
                     raise ValueError(f"Duplicate individual_id {info['individual_id']} in RDS bundle")
@@ -565,6 +734,7 @@ def build_rds_index(bundle: RdsBundle, output_path: Path) -> None:
                 "study_id": next(iter(study_ids)),
                 "fix_count": str(ordinal),
                 "artifact_count": str(len(bundle.artifacts)),
+                "color_field_keys": json.dumps(sorted(available_color_keys)),
             }
             connection.executemany("INSERT INTO meta VALUES (?, ?)", meta.items())
             connection.commit()
@@ -605,9 +775,9 @@ def ensure_rds_index(study_dir: Path, dataset_id: str) -> tuple[RdsBundle, Path]
     path = rds_index_path(bundle)
     if not _index_matches(path, bundle.signature):
         build_rds_index(bundle, path)
-    for stale_path in path.parent.glob("*.sqlite"):
-        if stale_path != path:
-            stale_path.unlink(missing_ok=True)
+    # Annotation-only dataset revisions have the SAME source bundle signature
+    # and reuse this index. Never delete another content version here: another
+    # local app can still be reading it over the shared deployment filesystem.
     return bundle, path
 
 
@@ -631,6 +801,17 @@ def _fix_from_row(row: sqlite3.Row) -> dict:
         "turn_angle_deg": row["turn_angle_deg"],
         "is_outlier": bool(row["is_outlier"]),
     }
+    for field in RDS_OPTIONAL_COLOR_FIELDS:
+        key = str(field["key"])
+        value = row[str(field["column_name"])]
+        if value is None:
+            continue
+        if field["kind"] == "boolean":
+            attributes[key] = bool(value)
+        elif field["kind"] == "numeric":
+            attributes[key] = float(value)
+        else:
+            attributes[key] = str(value)
     return {
         "fix_key": str(row["fix_key"]),
         "source_artifact": str(row["logical_name"]),
@@ -704,6 +885,21 @@ def _connect(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _available_rds_color_fields(connection: sqlite3.Connection) -> list[dict]:
+    row = connection.execute(
+        "SELECT value FROM meta WHERE key='color_field_keys'"
+    ).fetchone()
+    optional_keys = set(json.loads(str(row[0]))) if row is not None else set()
+    return [
+        *[dict(item) for item in RDS_BASE_COLOR_FIELDS],
+        *[
+            dict(item)
+            for item in RDS_OPTIONAL_COLOR_FIELDS
+            if str(item["key"]) in optional_keys
+        ],
+    ]
+
+
 def build_rds_fixes(
     index_path: Path,
     *,
@@ -753,20 +949,17 @@ def build_rds_fixes(
         else 0
         for row in rows
     ], dtype=np.uint8)
-    artifact_rows: dict[str, np.ndarray] = {}
+    # Allocate each inverse row map once. Growing it per fix copied O(n^2)
+    # entries on the JSON path. Source row numbers remain one-based.
+    max_source_rows: dict[str, int] = {}
+    for row in rows:
+        name = str(row["logical_name"])
+        max_source_rows[name] = max(max_source_rows.get(name, 0), int(row["source_row"]))
+    artifact_rows = {name: np.full(size + 1, -1, dtype=np.int64) for name, size in max_source_rows.items()}
     for index, row in enumerate(rows):
         logical_name = str(row["logical_name"])
         source_row = int(row["source_row"])
-        inverse = artifact_rows.get(logical_name)
-        if inverse is None:
-            inverse = np.full(source_row + 1, -1, dtype=np.int64)
-            artifact_rows[logical_name] = inverse
-        elif source_row >= len(inverse):
-            expanded = np.full(source_row + 1, -1, dtype=np.int64)
-            expanded[: len(inverse)] = inverse
-            inverse = expanded
-            artifact_rows[logical_name] = inverse
-        inverse[source_row] = index
+        artifact_rows[logical_name][source_row] = index
     projected_status = _review_projection(
         source_status=source_status,
         annotations=list(annotations or []),
@@ -840,6 +1033,7 @@ def build_rds_overview(
     max_series_points: int = 1_500,
 ) -> dict:
     with closing(_connect(index_path)) as connection:
+        color_fields = _available_rds_color_fields(connection)
         individuals = connection.execute(
             "SELECT * FROM individuals ORDER BY identifier"
         ).fetchall()
@@ -942,7 +1136,7 @@ def build_rds_overview(
         "stats": stats,
         "coverage_by_individual": coverage_by_individual,
         "series_by_individual": series_by_individual,
-        "color_fields": [dict(item) for item in RDS_COLOR_FIELDS],
+        "color_fields": color_fields,
         "review_counts": {
             "suspected": int(review_counts.get("suspected", 0)),
             "confirmed": int(review_counts.get("confirmed", 0)),
@@ -1331,49 +1525,15 @@ def rds_burst_feature_rows(
                 return
             individual = str(eligible_rows[0]["identifier"])
             burst_value = int(eligible_rows[0]["burst_value"])
-            step_lengths = []
-            speeds = []
-            time_gaps = []
-            for previous, current in zip(eligible_rows, eligible_rows[1:]):
-                metrics = step_movement_metrics(
-                    int(previous["time_ms"]), float(previous["lon"]), float(previous["lat"]),
-                    int(current["time_ms"]), float(current["lon"]), float(current["lat"]),
-                )
-                if metrics["step_length_m"] is not None:
-                    step_lengths.append(float(metrics["step_length_m"]))
-                if metrics["speed_mps"] is not None:
-                    speeds.append(float(metrics["speed_mps"]))
-                if metrics["time_delta_s"] is not None:
-                    time_gaps.append(float(metrics["time_delta_s"]))
-            first = eligible_rows[0]
-            last = eligible_rows[-1]
-            path_length = float(sum(step_lengths))
-            net_displacement = (
-                0.0 if len(eligible_rows) == 1 else geodesic_distance_meters(
-                    float(first["lon"]), float(first["lat"]),
-                    float(last["lon"]), float(last["lat"]),
-                )
-            )
-            mean = lambda values: float(np.mean(values)) if values else None
-            sd = lambda values: float(np.std(values)) if values else None
             feature_rows.append({
                 "burst_id": f"{individual}:{RDS_IMPLICIT_SET}:source_{burst_value}",
                 "individual": individual,
                 "set_name": RDS_IMPLICIT_SET,
-                "start_time_ms": int(first["time_ms"]),
-                "end_time_ms": int(last["time_ms"]),
-                "n_fixes": len(eligible_rows),
-                "duration_s": float((int(last["time_ms"]) - int(first["time_ms"])) / 1000.0),
-                "path_length_m": path_length,
-                "mean_step_length_m": mean(step_lengths),
-                "sd_step_length_m": sd(step_lengths),
-                "net_displacement_m": float(net_displacement),
-                "straightness": float(net_displacement / path_length) if path_length > 0 else None,
-                "mean_speed_mps": mean(speeds),
-                "median_speed_mps": float(np.median(speeds)) if speeds else None,
-                "max_speed_mps": float(max(speeds)) if speeds else None,
-                "sd_speed_mps": sd(speeds),
-                "max_time_gap_s": float(max(time_gaps)) if time_gaps else None,
+                **burst_movement_summary(
+                    [row["time_ms"] for row in eligible_rows],
+                    [row["lon"] for row in eligible_rows],
+                    [row["lat"] for row in eligible_rows],
+                ),
             })
 
         for row in cursor:
@@ -1413,6 +1573,46 @@ def source_rows_from_fix_keys(fix_keys: Iterable[str]) -> list[dict]:
             else:
                 ranges.append([row_number, row_number])
         result.append({"logical_name": logical_name, "row_ranges": ranges})
+    return result
+
+
+def rds_source_annotations_for_fix_keys(
+    index_path: Path,
+    fix_keys: Iterable[str],
+) -> list[dict]:
+    requested = sorted({str(item).strip() for item in fix_keys if str(item).strip()})
+    rows = []
+    with closing(_connect(index_path)) as connection:
+        for start in range(0, len(requested), 500):
+            batch = requested[start : start + 500]
+            if not batch:
+                continue
+            rows.extend(connection.execute(
+                "SELECT fix_key, source_outlier_status, source_outlier_issue_type, "
+                "source_outlier_comments FROM fixes WHERE fix_key IN ("
+                + ",".join("?" for _ in batch) + ")",
+                tuple(batch),
+            ).fetchall())
+    result = []
+    for row in rows:
+        status = str(row["source_outlier_status"] or "").strip().lower()
+        if status not in {"suspected", "confirmed"}:
+            continue
+        fix_key = str(row["fix_key"])
+        result.append({
+            "annotation_id": f"source:{fix_key}",
+            "source_artifact": "",
+            "status": status,
+            "origin": "manual",
+            "issue_type": str(row["source_outlier_issue_type"] or ""),
+            "comment": str(row["source_outlier_comments"] or ""),
+            "owner_question": "",
+            "source_analysis_id": "",
+            "scope": {
+                "kind": "fix",
+                "source_rows": source_rows_from_fix_keys([fix_key]),
+            },
+        })
     return result
 
 
@@ -1610,7 +1810,12 @@ def _source_rows_from_query(
     return source_rows_from_fix_keys(fix_keys), fix_keys
 
 
-def resolve_rds_review_scope(index_path: Path, raw_scope: dict) -> tuple[dict, int]:
+def resolve_rds_review_scope(
+    index_path: Path,
+    raw_scope: dict,
+    *,
+    annotations: list[dict] | None = None,
+) -> tuple[dict, int]:
     kind = str(raw_scope.get("kind") or "").strip().lower()
     if kind in {"fix", "segment"}:
         fix_keys = [str(item) for item in raw_scope.get("fix_keys") or []]
@@ -1636,6 +1841,48 @@ def resolve_rds_review_scope(index_path: Path, raw_scope: dict) -> tuple[dict, i
             "individual": individual,
             "set_name": RDS_IMPLICIT_SET,
             "source_rows": source_rows,
+        }, len(fix_keys)
+    if kind == "roi":
+        polygon = [list(item) for item in raw_scope.get("polygon") or []]
+        individuals = [
+            str(item).strip() for item in raw_scope.get("individuals") or []
+            if str(item).strip()
+        ]
+        min_lon = min(float(item[0]) for item in polygon)
+        max_lon = max(float(item[0]) for item in polygon)
+        min_lat = min(float(item[1]) for item in polygon)
+        max_lat = max(float(item[1]) for item in polygon)
+        clauses = ["f.lat BETWEEN ? AND ?"]
+        values: list[object] = [min_lat, max_lat]
+        if max_lon - min_lon <= 180.0:
+            clauses.append("f.lon BETWEEN ? AND ?")
+            values.extend((min_lon, max_lon))
+        if individuals:
+            clauses.append(
+                "i.identifier IN (" + ",".join("?" for _ in individuals) + ")"
+            )
+            values.extend(individuals)
+        with closing(_connect(index_path)) as connection:
+            projected_status = _index_review_status(connection, annotations)
+            rows = connection.execute(
+                FIX_SELECT + " WHERE " + " AND ".join(clauses)
+                + " ORDER BY a.logical_name, f.source_row",
+                tuple(values),
+            ).fetchall()
+        require_unreviewed = str(raw_scope.get("review_status") or "") == "unreviewed"
+        fix_keys = [
+            str(row["fix_key"])
+            for row in rows
+            if point_in_polygon(float(row["lon"]), float(row["lat"]), polygon)
+            and (not require_unreviewed or int(projected_status[int(row["ordinal"])]) == 0)
+        ]
+        return {
+            "kind": "roi",
+            "polygon": polygon,
+            "individuals": individuals,
+            "review_status": str(raw_scope.get("review_status") or ""),
+            "selection_method": "map_polygon",
+            "source_rows": source_rows_from_fix_keys(fix_keys),
         }, len(fix_keys)
     if kind in {"burst", "bursts"}:
         burst_ids = (
@@ -1853,6 +2100,11 @@ def build_rds_binary_columns(
     individuals: list[str] | tuple[str, ...] | None = None,
 ) -> bytes:
     with closing(_connect(index_path)) as connection:
+        available_color_fields = _available_rds_color_fields(connection)
+        optional_color_fields = [
+            field for field in available_color_fields
+            if str(field["key"]) in RDS_OPTIONAL_COLOR_BY_KEY
+        ]
         artifacts = connection.execute(
             "SELECT artifact_id, logical_name, row_count FROM artifacts ORDER BY artifact_id"
         ).fetchall()
@@ -1897,6 +2149,15 @@ def build_rds_binary_columns(
             name: np.empty(count, dtype=np.float32)
             for name in ("step_length_m", "speed_mps", "time_delta_s", "turn_angle_deg")
         }
+        optional_values: dict[str, object] = {}
+        for field in optional_color_fields:
+            key = str(field["key"])
+            if field["kind"] == "numeric":
+                optional_values[key] = np.full(count, np.nan, dtype=np.float64)
+            elif field["kind"] == "boolean":
+                optional_values[key] = np.full(count, 255, dtype=np.uint8)
+            else:
+                optional_values[key] = [None] * count
         artifact_inverse = {
             str(row["logical_name"]): np.full(int(row["row_count"]) + 1, -1, dtype=np.int64)
             for row in artifacts
@@ -1926,6 +2187,17 @@ def build_rds_binary_columns(
                 for name, target in derived.items():
                     value = row[name]
                     target[index] = np.nan if value is None else float(value)
+                for field in optional_color_fields:
+                    key = str(field["key"])
+                    value = row[str(field["column_name"])]
+                    if value is None:
+                        continue
+                    if field["kind"] == "numeric":
+                        optional_values[key][index] = float(value)
+                    elif field["kind"] == "boolean":
+                        optional_values[key][index] = 1 if bool(value) else 0
+                    else:
+                        optional_values[key][index] = str(value)
                 artifact_inverse[str(row["logical_name"])][int(row["source_row"])] = index
                 index += 1
     review_status = _review_projection(
@@ -2014,6 +2286,39 @@ def build_rds_binary_columns(
                 "q01": float(np.quantile(finite, 0.01)),
                 "q99": float(np.quantile(finite, 0.99)),
             }
+    optional_arrays: dict[str, np.ndarray] = {}
+    optional_columns: dict[str, dict] = {}
+    for field_index, field in enumerate(optional_color_fields):
+        key = str(field["key"])
+        array_name = f"rds_color_{field_index}"
+        values = optional_values[key]
+        if field["kind"] == "categorical":
+            levels = sorted({str(value) for value in values if value not in (None, "")})
+            level_codes = {value: index + 1 for index, value in enumerate(levels)}
+            dtype = np.uint16 if len(levels) <= 65534 else np.uint32
+            encoded = np.zeros(count, dtype=dtype)
+            for value_index, value in enumerate(values):
+                if value not in (None, ""):
+                    encoded[value_index] = level_codes[str(value)]
+            optional_arrays[array_name] = encoded
+            optional_columns[key] = {
+                "array": array_name,
+                "kind": "categorical",
+                "levels": levels,
+                "null_code": 0,
+            }
+            continue
+        optional_arrays[array_name] = values
+        optional_columns[key] = {"array": array_name, "kind": str(field["kind"])}
+        if field["kind"] == "numeric":
+            finite = values[np.isfinite(values) & eligible]
+            if len(finite):
+                color_stats[key] = {
+                    "observed_min": float(np.min(finite)),
+                    "observed_max": float(np.max(finite)),
+                    "q01": float(np.quantile(finite, 0.01)),
+                    "q99": float(np.quantile(finite, 0.99)),
+                }
     arrays = {
         "positions": positions,
         "time_ms": time_ms,
@@ -2024,6 +2329,7 @@ def build_rds_binary_columns(
         "is_outlier": is_outlier,
         "review_status": review_status,
         **derived,
+        **optional_arrays,
         "line_source_indexes": line_sources_array,
         "line_target_indexes": line_targets_array,
     }
@@ -2050,6 +2356,7 @@ def build_rds_binary_columns(
                 "time_delta_s": {"array": "time_delta_s", "kind": "numeric"},
                 "turn_angle_deg": {"array": "turn_angle_deg", "kind": "numeric"},
                 "is_outlier": {"array": "is_outlier", "kind": "boolean"},
+                **optional_columns,
             },
             "color_stats": color_stats,
         },

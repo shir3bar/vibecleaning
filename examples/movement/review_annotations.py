@@ -118,6 +118,42 @@ def _compress_row_numbers(row_numbers: list[int]) -> list[list[int]]:
     return ranges
 
 
+def point_in_polygon(longitude: float, latitude: float, polygon: list[list[float]]) -> bool:
+    """Return whether a WGS84 point is inside or on the boundary of a polygon."""
+    if len(polygon) < 3:
+        return False
+    reference = float(polygon[0][0])
+
+    def unwrap(value: float) -> float:
+        result = float(value)
+        while result - reference > 180.0:
+            result -= 360.0
+        while result - reference < -180.0:
+            result += 360.0
+        return result
+
+    x = unwrap(longitude)
+    y = float(latitude)
+    vertices = [(unwrap(item[0]), float(item[1])) for item in polygon]
+    inside = False
+    for index, current in enumerate(vertices):
+        previous = vertices[index - 1]
+        x1, y1 = previous
+        x2, y2 = current
+        cross = ((x - x1) * (y2 - y1)) - ((y - y1) * (x2 - x1))
+        if abs(cross) <= 1e-10 and (
+            min(x1, x2) - 1e-10 <= x <= max(x1, x2) + 1e-10
+            and min(y1, y2) - 1e-10 <= y <= max(y1, y2) + 1e-10
+        ):
+            return True
+        if (y1 > y) == (y2 > y):
+            continue
+        intersection_x = x1 + ((y - y1) * (x2 - x1) / (y2 - y1))
+        if x < intersection_x:
+            inside = not inside
+    return inside
+
+
 def _filter_value_matches(value: object, filter_spec: dict) -> bool:
     field_kind = str(filter_spec.get("field_kind") or "").strip().lower()
     if field_kind == "numeric":

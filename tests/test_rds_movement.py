@@ -36,6 +36,7 @@ from examples.rds_movement.app import create_rds_movement_app
 
 
 SAMPLE_ROOT = REPO_ROOT / "data" / "movement_rds"
+KAMI_SAMPLE_ROOT = REPO_ROOT / "data" / "movement_rds_b" / "268904527"
 MOVEMENT_STATIC_ROOT = REPO_ROOT / "examples" / "movement" / "static"
 MOVEMENT_INDEX = MOVEMENT_STATIC_ROOT / "index.html"
 
@@ -52,6 +53,33 @@ def _client(tmp_path: Path) -> tuple[TestClient, Path]:
     study_dir.mkdir(parents=True)
     for source in _sample_files():
         shutil.copy2(source, study_dir / source.name)
+    app = create_rds_movement_app(
+        data_root=tmp_path / "data",
+        static_root=MOVEMENT_STATIC_ROOT,
+        index_path=MOVEMENT_INDEX,
+        auth_manager=AuthManager.for_testing(
+            username="rds-reviewer",
+            password="test-password-long",
+            role="editor",
+        ),
+    )
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "rds-reviewer", "password": "test-password-long"},
+    )
+    assert login.status_code == 200
+    return client, study_dir
+
+
+def _detector_client(tmp_path: Path) -> tuple[TestClient, Path]:
+    sources = sorted(KAMI_SAMPLE_ROOT.glob("*_KAMI.rds"))[:2]
+    if len(sources) < 2:
+        pytest.skip("KAMI detector-score RDS samples are unavailable")
+    study_dir = tmp_path / "data" / "movement_rds" / "268904527"
+    study_dir.mkdir(parents=True)
+    for source in sources:
+        shutil.copy2(source, study_dir / source.name.replace("_KAMI.rds", ".rds"))
     app = create_rds_movement_app(
         data_root=tmp_path / "data",
         static_root=MOVEMENT_STATIC_ROOT,
@@ -234,7 +262,7 @@ def test_pre_sum_source_ranking_is_not_treated_as_a_source_total_ranking():
         "source_is_outlier",
         "source_is_outlier:sum_fix_counts:v1",
     ) is True
-    assert _ranking_definition_matches("isolation_forest", "") is True
+    assert _ranking_definition_matches("isolation_forest", "") is False
 
 
 def test_rds_ranking_survives_individual_review_decision_steps(tmp_path):
@@ -769,6 +797,47 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
         assert set(header["artifacts"]).issubset(bundle_zip.namelist())
 
 
+def test_rds_detector_scores_are_available_as_color_fields(tmp_path):
+    client, _study_dir = _detector_client(tmp_path)
+    loaded = client.get(
+        "/api/apps/movement/family/movement_rds/study/268904527/load"
+    ).json()
+    dataset_id = loaded["dataset_id"]
+    logical_name = loaded["logical_name"]
+    overview = client.get(
+        f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{dataset_id}/overview",
+        params={"logical_name": logical_name},
+    ).json()
+
+    fields = {field["key"]: field for field in overview["color_fields"]}
+    assert fields["combined_evidence"]["kind"] == "numeric"
+    assert fields["loglr_bridge"]["kind"] == "numeric"
+    assert fields["flagged_by_bridge"]["kind"] == "boolean"
+    assert fields["error_class"]["kind"] == "categorical"
+    assert "combined_evidence_physiology" not in fields
+
+    response = client.get(
+        f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{dataset_id}/fixes-binary"
+    )
+    assert response.status_code == 200
+    header = _binary_header(response.content)
+    color_columns = header["color_columns"]
+    assert color_columns["combined_evidence"]["kind"] == "numeric"
+    assert color_columns["loglr_bridge"]["kind"] == "numeric"
+    assert color_columns["flagged_by_bridge"]["kind"] == "boolean"
+    assert color_columns["error_class"]["kind"] == "categorical"
+    assert color_columns["error_class"]["levels"]
+    assert "combined_evidence" in header["color_stats"]
+
+    frontend_source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    worker_source = (MOVEMENT_STATIC_ROOT / "movement_binary_worker.js").read_text(
+        encoding="utf-8"
+    )
+    assert 'column = binary.header.color_columns?.[field.key]' in frontend_source
+    assert 'data.colorStyles.set(field.key, { kind: "categorical", categories })' in frontend_source
+    assert "spec.categoryColors?.[level] || categoricalColor(level)" in worker_source
+
+
 def test_rds_binary_subset_contains_only_requested_individual(tmp_path):
     client, _study_dir = _client(tmp_path)
     loaded = client.get(
@@ -794,6 +863,41 @@ def test_rds_binary_subset_contains_only_requested_individual(tmp_path):
     assert list(header["individual_point_ranges"]) == [individual]
     assert header["row_count"] == overview["stats"][individual]["row_count"]
     assert header["line_count"] == max(0, header["row_count"] - 1)
+
+
+def test_rds_roi_scope_resolves_exact_source_rows(tmp_path):
+    client, study_dir = _client(tmp_path)
+    loaded = client.get(
+        "/api/apps/movement/family/movement_rds/study/268904527/load"
+    ).json()
+    dataset_id = loaded["dataset_id"]
+    _bundle, index_path = ensure_rds_index(study_dir, dataset_id)
+    movement = build_rds_fixes(index_path, limit=1)
+    fix = movement["fixes"][0]
+    longitude = float(fix["lon"])
+    latitude = float(fix["lat"])
+    polygon = [
+        [longitude - 0.0001, latitude - 0.0001],
+        [longitude + 0.0001, latitude - 0.0001],
+        [longitude + 0.0001, latitude + 0.0001],
+        [longitude - 0.0001, latitude + 0.0001],
+    ]
+
+    scope, count = resolve_rds_review_scope(
+        index_path,
+        {
+            "kind": "roi",
+            "polygon": polygon,
+            "individuals": [fix["individual"]],
+            "review_status": "unreviewed",
+        },
+        annotations=[],
+    )
+
+    assert count >= 1
+    assert scope["kind"] == "roi"
+    assert scope["individuals"] == [fix["individual"]]
+    assert scope["source_rows"]
 
 
 def test_python_reviewed_rds_export_adds_only_permitted_columns(tmp_path):

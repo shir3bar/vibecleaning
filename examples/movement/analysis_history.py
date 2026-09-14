@@ -24,6 +24,7 @@ RESTORABLE_ANALYSIS_OUTPUTS = {
     "run_burst_anomaly_ranking": "burst_anomaly_ranking.json",
     "run_burst_feature_space": "burst_feature_space.json",
 }
+BURST_FEATURE_SIGNATURE = "adjacent_retained_fixes:wgs84:v2"
 
 
 def _artifact_signature(artifact: dict) -> str:
@@ -115,6 +116,8 @@ def _analysis_parameters_match(
         return True, []
 
     reasons = []
+    if parameters.get("ranking_method", "isolation_forest") != "source_is_outlier" and parameters.get("burst_feature_signature") != BURST_FEATURE_SIGNATURE:
+        reasons.append("burst feature implementation differs")
     stored_mode = str(parameters.get("burst_gap_mode") or DEFAULT_BURST_GAP_MODE)
     stored_feature_set = str(parameters.get("feature_set") or "movement_only")
     if stored_mode != burst_gap_mode:

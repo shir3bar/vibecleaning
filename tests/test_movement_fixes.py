@@ -45,6 +45,7 @@ from examples.movement.review_annotations import (
     effective_review_status,
     export_reviewed_csv,
     normalize_annotation,
+    point_in_polygon,
     resolve_filter_row_ranges,
 )
 from examples.movement.bursts import build_auto_bursts
@@ -1270,6 +1271,81 @@ def test_movement_frontend_uses_cached_binary_searched_temporal_focus():
     assert "lastThresholdMatchKeys" not in renderer
 
 
+def test_movement_frontend_has_queue_scoped_individual_track_player():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    player = source[
+        source.index("  buildTrackPlayerSequence("):
+        source.index("  getExactMapIndividuals()")
+    ]
+
+    assert "const TRACK_PLAYER_WINDOW_SIZES = Object.freeze([24, 72]);" in source
+    assert "const TRACK_PLAYER_SPEEDS = Object.freeze([0.5, 1, 2]);" in source
+    assert 'data-role="track-player-canvas"' in source
+    assert 'data-role="track-player-window"' in source
+    assert 'data-role="track-player-speed"' in source
+    assert 'data-role="track-player-play"' in source
+    assert 'data-role="track-player-slider"' in source
+    assert 'data-role="track-player-hide"' in source
+    assert 'data-role="track-player-show"' in source
+    assert 'data-role="track-player-view"' in source
+    assert 'data-role="track-player-playback"' in source
+    assert "new Uint32Array(count)" in player
+    assert "arrays.time_ms?.[left]" in player
+    assert "arrays.source_rows?.[left]" in player
+    assert "arrays.set_codes" not in player
+    assert "medianTrackPlayerGapMs" in source
+    assert "trackPlayerDelayMs" in source
+    assert "trackPlayerFastScanStep" in source
+    assert "TRACK_PLAYER_SCAN_TARGET_STEPS" in source
+    assert "normalizedWindow" in source
+    assert "TRACK_PLAYER_MIN_DELAY_MS" in source
+    assert "TRACK_PLAYER_MAX_DELAY_MS" in source
+    assert 'id: "movement-track-player-position"' in source
+    assert "pickable: false" in source
+    assert "this.refs.slider.max = String(Math.max(0, count - 1));" in player
+    assert "this.clearTrackPlayer();" in source
+    assert 'document.addEventListener("visibilitychange"' in source
+    assert "trackPlayerSequenceBytes" in source
+    assert 'this.trackPlayer.viewMode === "context"' in player
+    assert "Math.floor(current / windowSize) * windowSize" in player
+    assert "this.trackPlayer.index >= pageEnd" in player
+
+
+def test_movement_frontend_has_mode_scoped_map_roi_controls():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+
+    for role in (
+        "roi-draw",
+        "roi-panel",
+        "roi-start",
+        "roi-finish",
+        "roi-scope",
+        "roi-flag",
+        "roi-unflag",
+    ):
+        assert f'data-role="{role}"' in source
+    assert "this.roiSelection.drawing" in source
+    assert 'id: "movement-roi-fill"' in source
+    assert 'id: "movement-roi-vertices"' in source
+    assert 'scopeMode = "active_individual"' in source
+    assert 'requested === "selected_individuals"' in source
+    assert 'actions/preview-roi' in source
+    assert 'kind: "roi"' in source
+    assert "preview.dismissals" in source
+
+
+def test_queue_binary_colors_keep_color_by_values():
+    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
+    worker_source = MOVEMENT_APP_JS.with_name("movement_binary_worker.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "|| queueContextGray" not in source
+    assert "|| queueContextGray" not in worker_source
+    assert "queueContextColoredCount += 1" in source
+    assert "queueContextColoredCount += 1" in worker_source
+
+
 def test_movement_frontend_loads_ephemeral_osm_helpers_only_in_dev_mode():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     helper = OSM_LAYER_JS.read_text(encoding="utf-8")
@@ -2304,6 +2380,7 @@ Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text(json.dumps({{"run_statu
             "parameters": {
                 "app": "movement",
                 "action": action,
+                "burst_feature_signature": "adjacent_retained_fixes:wgs84:v2",
                 "target_artifact": "movement.csv",
                 "burst_gap_mode": "manual",
                 "burst_gap_seconds": 60,
@@ -3950,6 +4027,88 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
     )
     assert repeated.status_code == 400
     assert "already resolved" in repeated.json()["error"]
+
+
+def test_roi_preview_flag_and_unflag_are_exact_and_individual_scoped(tmp_path):
+    clean_csv = """eventid,individual,timestamp,longitude,latitude,set,outlier_status,outlier_issue_type,outlier_comments
+fix_a_1,alpha,2024-01-01T00:00:00Z,-70.00,40.00,train,suspected,drift,Existing suspicion
+fix_a_2,alpha,2024-01-01T01:00:00Z,-70.05,40.05,test,,,
+fix_a_3,alpha,2024-01-01T02:00:00Z,-72.00,42.00,train,,,
+fix_b_1,beta,2024-01-01T00:30:00Z,-70.02,40.02,test,,,
+"""
+    client, dataset_id = create_movement_test_client(tmp_path, csv_content=clean_csv)
+    base_url = "/api/apps/movement/family/movement_clean/study/test_study"
+    polygon = [[-70.2, 39.9], [-69.9, 39.9], [-69.9, 40.2], [-70.2, 40.2]]
+
+    assert point_in_polygon(-70.0, 40.0, polygon) is True
+    assert point_in_polygon(-72.0, 42.0, polygon) is False
+    preview = client.post(
+        f"{base_url}/actions/preview-roi",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "roi", "polygon": polygon, "individuals": ["alpha"]},
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["match_count"] == 2
+    assert preview.json()["unreviewed_count"] == 1
+    assert preview.json()["suspected_count"] == 1
+    assert preview.json()["dismissible_fix_count"] == 1
+
+    flagged = client.post(
+        f"{base_url}/actions/annotate-scope",
+        json={
+            "dataset_id": dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "roi", "polygon": polygon, "individuals": ["alpha"]},
+            "status": "suspected",
+            "origin": "manual",
+            "issue_type": "location review",
+            "comment": "Inside the ROI",
+            "workflow_context": {
+                "entry_point": "individual_review_queue",
+                "scope_kind": "roi",
+                "active_individual": "alpha",
+                "selection_methods": ["map_polygon"],
+            },
+            "user": "reviewer",
+        },
+    )
+    assert flagged.status_code == 200, flagged.text
+    assert flagged.json()["step"]["summary"]["resolved_fix_count"] == 1
+    flagged_dataset_id = flagged.json()["dataset"]["dataset_id"]
+    persisted_scope = flagged.json()["step"]["parameters"]["scope"]
+    assert persisted_scope["kind"] == "roi"
+    assert persisted_scope["polygon"] == polygon
+    assert persisted_scope["individuals"] == ["alpha"]
+
+    flagged_preview = client.post(
+        f"{base_url}/actions/preview-roi",
+        json={
+            "dataset_id": flagged_dataset_id,
+            "logical_name": "movement.csv",
+            "scope": {"kind": "roi", "polygon": polygon, "individuals": ["alpha"]},
+        },
+    )
+    assert flagged_preview.status_code == 200, flagged_preview.text
+    flagged_preview_payload = flagged_preview.json()
+    assert flagged_preview_payload["suspected_count"] == 2
+    assert flagged_preview_payload["dismissible_fix_count"] == 2
+
+    dismissed = client.post(
+        f"{base_url}/actions/dismiss-issues",
+        json={
+            "dataset_id": flagged_dataset_id,
+            "expected_current_dataset_id": flagged_dataset_id,
+            "logical_name": "movement.csv",
+            "dismissals": flagged_preview_payload["dismissals"],
+            "note": "Region checked",
+            "user": "reviewer",
+        },
+    )
+    assert dismissed.status_code == 200, dismissed.text
+    assert dismissed.json()["step"]["summary"]["dismissed_fix_count"] == 2
 
 
 def test_movement_fixes_route_rejects_invalid_repeated_individual(tmp_path):

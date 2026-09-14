@@ -21,6 +21,7 @@ from app.auth import AuthManager
 from app.execution import create_analysis, create_step
 from app.state import ensure_project_state
 from app.web import create_app
+from examples.movement.analysis_history import BURST_FEATURE_SIGNATURE
 from examples.movement.routes import register_movement_routes
 from examples.rds_movement.app import create_rds_movement_app
 
@@ -52,6 +53,22 @@ e2,epsilon,2024-01-01T01:00:00Z,-74.1,44.1,train
 z1,zeta,2024-01-01T00:00:00Z,-75.0,45.0,train
 z2,zeta,2024-01-01T01:00:00Z,-75.1,45.1,train
 """
+
+CSV_TRACK_PLAYER_FIXTURE = (
+    """eventid,individual,timestamp,longitude,latitude,set
+a0,alpha,2024-01-01T00:00:00Z,-70.0000,40.0000,train
+a2,alpha,2024-01-01T02:00:00Z,-70.0004,40.0003,train
+a1,alpha,2024-01-01T01:00:00Z,-70.0002,40.0001,test
+a3,alpha,2024-01-01T10:00:00Z,-70.0005,40.0005,test
+a1b,alpha,2024-01-01T01:00:00Z,-70.0002,40.0001,test
+"""
+    + "".join(
+        f"ax{index},alpha,2024-01-02T{index:02d}:00:00Z,"
+        f"{-70.001 - (index * 0.0001):.4f},{40.001 + (index * 0.0001):.4f},train\n"
+        for index in range(20)
+    )
+    + "b0,beta,2024-01-01T00:30:00Z,-71.0000,41.0000,train\n"
+)
 
 FORWARD_HEAD_STEP_SCRIPT = '''import json
 import os
@@ -119,6 +136,7 @@ Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text(
                 "feature_set": "movement_only",
                 "ranking_method": "isolation_forest",
                 "ranking_provider": "isolation_forest",
+                "burst_feature_signature": BURST_FEATURE_SIGNATURE,
             },
         },
     )
@@ -384,6 +402,257 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path):
         assert page.locator("[data-queue-ranking-score]").count() == 0
 
         page.evaluate("window.__movementMonitorActive = false")
+        browser.close()
+
+
+def test_queue_track_player_uses_fix_index_timeline_and_ignores_sets(tmp_path):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    study_dir = tmp_path / "data" / "movement_clean" / "track_player"
+    study_dir.mkdir(parents=True)
+    (study_dir / "movement.csv").write_text(
+        CSV_TRACK_PLAYER_FIXTURE,
+        encoding="utf-8",
+    )
+    app = create_app(
+        data_root=tmp_path / "data",
+        static_root=STATIC_ROOT,
+        index_path=INDEX_PATH,
+        auth_manager=_auth_manager(),
+    )
+    register_movement_routes(app, data_root=tmp_path / "data")
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        binary_requests = []
+        page.on(
+            "request",
+            lambda request: binary_requests.append(request.url)
+            if "/fixes-binary?" in request.url else None,
+        )
+        _login_and_wait(page, base_url, "track_player")
+        page.locator('[data-individual-checkbox="alpha"]').wait_for(
+            state="attached", timeout=20_000
+        )
+        page.locator('[data-role="individual-view-queue"]').click()
+        player = page.locator('[data-role="track-player"]')
+        player.wait_for(state="visible", timeout=20_000)
+        page.wait_for_function(
+            "() => document.querySelector('[data-role=track-player-canvas]')?.dataset.count === '25'",
+            timeout=20_000,
+        )
+        assert page.locator('[data-role="legend"]').evaluate(
+            "element => element.classList.contains('hidden')"
+        )
+        assert page.locator('[data-role="threshold-pane"]').evaluate(
+            "element => element.classList.contains('hidden')"
+        )
+        page.locator('[data-role="color-by"]').select_option("speed_mps")
+        page.wait_for_function(
+            "() => window.__movementDiagnostics.queueContextGrayCount === 0"
+            " && window.__movementDiagnostics.queueContextColoredCount > 0",
+            timeout=20_000,
+        )
+
+        timeline_slider = page.locator('[data-role="slider"]')
+        slider = page.locator('[data-role="track-player-slider"]')
+        canvas = page.locator('[data-role="track-player-canvas"]')
+        assert slider.get_attribute("min") == "0"
+        assert slider.get_attribute("max") == "24"
+        assert slider.get_attribute("step") == "1"
+        assert page.locator('[data-role="track-player-position"]').text_content() == "fix 1 of 25"
+        assert int(canvas.get_attribute("data-time-ms")) == 1_704_067_200_000
+        assert canvas.get_attribute("data-window-start") == "0"
+        assert canvas.get_attribute("data-window-end") == "23"
+        assert page.locator("canvas.maplibregl-canvas").count() == 1
+
+        canvas.click(position={"x": 40, "y": 40})
+        assert page.evaluate(
+            "() => document.activeElement?.dataset?.role === 'track-player'"
+        )
+        page.keyboard.press("ArrowRight")
+        assert canvas.get_attribute("data-index") == "1"
+        assert slider.input_value() == "1"
+        page.keyboard.press("ArrowLeft")
+        assert canvas.get_attribute("data-index") == "0"
+        assert slider.input_value() == "0"
+
+        page.locator('[data-role="track-player-view"]').select_option("trail")
+        assert canvas.get_attribute("data-window-end") == "0"
+        page.locator('[data-role="track-player-view"]').select_option("context")
+        assert canvas.get_attribute("data-window-end") == "23"
+
+        page.locator('[data-role="track-player-hide"]').click()
+        player.wait_for(state="hidden", timeout=20_000)
+        show_player = page.locator('[data-role="track-player-show"]')
+        show_player.wait_for(state="visible", timeout=20_000)
+        show_player.click()
+        player.wait_for(state="visible", timeout=20_000)
+
+        page.wait_for_function("() => window.__movementDiagnostics.mapView !== null")
+        map_view_before = page.evaluate(
+            "() => structuredClone(window.__movementDiagnostics.mapView)"
+        )
+        canvas.click(position={"x": 40, "y": 40})
+        page.keyboard.press("ArrowRight")
+        page.wait_for_function(
+            "() => document.querySelector('[data-role=track-player-canvas]')?.dataset.index === '1'"
+        )
+        assert int(canvas.get_attribute("data-time-ms")) == 1_704_070_800_000
+        first_equal_time_source_row = int(canvas.get_attribute("data-source-row"))
+        page.keyboard.press("ArrowRight")
+        assert int(canvas.get_attribute("data-time-ms")) == 1_704_070_800_000
+        assert int(canvas.get_attribute("data-source-row")) > first_equal_time_source_row
+        map_view_after = page.evaluate(
+            "() => structuredClone(window.__movementDiagnostics.mapView)"
+        )
+        assert map_view_after["center"] == pytest.approx(map_view_before["center"])
+        assert map_view_after["zoom"] == pytest.approx(map_view_before["zoom"])
+
+        page.locator('[data-queue-individual="beta"]').click()
+        page.wait_for_function(
+            "() => document.querySelector('[data-role=track-player-canvas]')?.dataset.individual === 'beta' && document.querySelector('[data-role=track-player-canvas]')?.dataset.count === '1'",
+            timeout=20_000,
+        )
+        assert canvas.get_attribute("data-index") == "0"
+        assert page.locator('[data-role="track-player-play"]').is_disabled()
+        page.locator('[data-queue-individual="alpha"]').click()
+        page.wait_for_function(
+            "() => document.querySelector('[data-role=track-player-canvas]')?.dataset.individual === 'alpha' && document.querySelector('[data-role=track-player-canvas]')?.dataset.count === '25'",
+            timeout=20_000,
+        )
+        assert canvas.get_attribute("data-index") == "0"
+
+        page.locator('[data-role="track-player-play"]').click()
+        page.wait_for_function(
+            "() => window.__movementDiagnosticsSnapshot().trackPlayerPlaying === true"
+        )
+        page.keyboard.press("ArrowRight")
+        assert page.evaluate(
+            "() => window.__movementDiagnosticsSnapshot().trackPlayerPlaying"
+        ) is False
+
+        request_count = len(binary_requests)
+        page.locator('[data-role="show-train"]').uncheck()
+        assert canvas.get_attribute("data-count") == "25"
+        assert slider.get_attribute("max") == "24"
+        slider.evaluate("element => { element.value = '23'; element.dispatchEvent(new Event('input', {bubbles: true})); }")
+        assert canvas.get_attribute("data-window-start") == "0"
+        assert canvas.get_attribute("data-window-end") == "23"
+        canvas.click(position={"x": 40, "y": 40})
+        page.keyboard.press("ArrowRight")
+        assert canvas.get_attribute("data-index") == "24"
+        assert canvas.get_attribute("data-window-start") == "24"
+        assert canvas.get_attribute("data-window-end") == "24"
+        page.locator('[data-role="track-player-window"]').select_option("72")
+        assert page.locator('[data-role="track-player-window"]').input_value() == "72"
+        page.locator('[data-role="track-player-playback"]').select_option("scan")
+        assert page.locator('[data-role="track-player-playback"]').input_value() == "scan"
+        page.locator('[data-role="track-player-speed"]').select_option("2")
+        assert page.locator('[data-role="track-player-speed"]').input_value() == "2"
+
+        slider.evaluate("element => { element.value = '24'; element.dispatchEvent(new Event('input', {bubbles: true})); }")
+        page.wait_for_function(
+            "() => document.querySelector('[data-role=track-player-canvas]')?.dataset.index === '24'"
+        )
+        page.locator('[data-role="track-player-play"]').click()
+        page.wait_for_function(
+            "() => window.__movementDiagnosticsSnapshot().trackPlayerPlaying === true"
+        )
+        page.wait_for_function(
+            "() => { const value = window.__movementDiagnosticsSnapshot(); return !value.trackPlayerPlaying && value.trackPlayerIndex === 24; }",
+            timeout=5_000,
+        )
+        assert len(binary_requests) == request_count
+        assert canvas.get_attribute("data-window-start") == "0"
+        assert canvas.get_attribute("data-window-end") == "24"
+
+        page.locator('[data-role="individual-view-browse"]').click()
+        player.wait_for(state="hidden", timeout=20_000)
+        page.locator('[data-role="legend"]').wait_for(state="visible", timeout=20_000)
+        page.locator('[data-role="threshold-pane"]').wait_for(state="visible", timeout=20_000)
+        assert int(timeline_slider.get_attribute("max")) > 1_000_000_000_000
+        assert page.evaluate(
+            "() => JSON.parse(localStorage.getItem('vibecleaning_movement_example_state') || '{}').trackPlayerWindowSize",
+        ) == 72
+        assert page.evaluate(
+            "() => JSON.parse(localStorage.getItem('vibecleaning_movement_example_state') || '{}').trackPlayerSpeed",
+        ) == 2
+        assert page.evaluate(
+            "() => JSON.parse(localStorage.getItem('vibecleaning_movement_example_state') || '{}').trackPlayerViewMode",
+        ) == "context"
+        assert page.evaluate(
+            "() => JSON.parse(localStorage.getItem('vibecleaning_movement_example_state') || '{}').trackPlayerPlaybackMode",
+        ) == "scan"
+        assert page.evaluate(
+            "() => JSON.parse(localStorage.getItem('vibecleaning_movement_example_state') || '{}').trackPlayerHidden",
+        ) is False
+        browser.close()
+
+
+def test_roi_drawing_uses_queue_and_browse_scopes(tmp_path):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    study_dir = tmp_path / "data" / "movement_clean" / "roi_ui"
+    study_dir.mkdir(parents=True)
+    (study_dir / "movement.csv").write_text(
+        CSV_TRACK_PLAYER_FIXTURE,
+        encoding="utf-8",
+    )
+    app = create_app(
+        data_root=tmp_path / "data",
+        static_root=STATIC_ROOT,
+        index_path=INDEX_PATH,
+        auth_manager=_auth_manager(),
+    )
+    register_movement_routes(app, data_root=tmp_path / "data")
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        _login_and_wait(page, base_url, "roi_ui")
+        page.locator('[data-role="individual-view-queue"]').click()
+        page.locator('[data-role="track-player"]').wait_for(
+            state="visible", timeout=20_000
+        )
+        page.locator('[data-role="track-player-hide"]').click()
+        page.locator('[data-role="roi-draw"]').click()
+        roi_panel = page.locator('[data-role="roi-panel"]')
+        roi_panel.wait_for(state="visible", timeout=20_000)
+        roi_scope = page.locator('[data-role="roi-scope"]')
+        assert roi_scope.input_value() == "active_individual"
+        assert roi_scope.is_disabled()
+
+        map_box = page.locator('[data-role="map"]').bounding_box()
+        assert map_box is not None
+        for x_fraction, y_fraction in (
+            (0.10, 0.30),
+            (0.90, 0.30),
+            (0.90, 0.90),
+            (0.10, 0.90),
+        ):
+            page.mouse.click(
+                map_box["x"] + (map_box["width"] * x_fraction),
+                map_box["y"] + (map_box["height"] * y_fraction),
+            )
+        page.wait_for_function(
+            "() => window.__movementDiagnosticsSnapshot().roiVertexCount === 4"
+        )
+        page.locator('[data-role="roi-finish"]').click()
+        page.wait_for_function(
+            "() => !window.__movementDiagnosticsSnapshot().roiDrawing"
+            " && document.querySelector('[data-role=roi-status]').textContent.includes('fixes inside ROI')",
+            timeout=20_000,
+        )
+
+        page.locator('[data-role="individual-view-browse"]').click()
+        roi_panel.wait_for(state="hidden", timeout=20_000)
+        assert page.evaluate(
+            "() => window.__movementDiagnosticsSnapshot().roiVertexCount"
+        ) == 0
+        page.locator('[data-role="roi-draw"]').click()
+        roi_panel.wait_for(state="visible", timeout=20_000)
+        assert roi_scope.input_value() == "whole_study"
+        assert not roi_scope.is_disabled()
         browser.close()
 
 
@@ -819,7 +1088,14 @@ def test_second_round_prior_ok_order_toggle_does_not_touch_map(tmp_path):
         assert toggle.is_checked()
         assert page.locator(".movement-card .movement-title").first.text_content() == "beta"
         _wait_for_layer(page, "movement-binary-paths-individual-")
-        page.wait_for_timeout(300)
+        page.wait_for_function("""() => (
+          !window.__movementDiagnostics.renderedLayerIds.some(
+            id => id.startsWith('movement-overview-preview-')
+          )
+          && window.__movementDiagnostics.renderedLayerIds.includes(
+            'movement-track-player-position'
+          )
+        )""")
         before = page.evaluate("""() => ({
           canvas: document.querySelector('[data-role=map] canvas'),
           map: document.querySelector('[data-role=map]'),
@@ -1176,16 +1452,11 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path):
                 timeout=20_000,
             )
             page.wait_for_function(
-                "() => window.__movementDiagnostics.queueContextColoredCount === 3"
-                " && window.__movementDiagnostics.queueContextGrayCount > 0",
+                "() => window.__movementDiagnostics.queueContextColoredCount > 3"
+                " && window.__movementDiagnostics.queueContextGrayCount === 0",
                 timeout=20_000,
             )
-            queue_true_level = page.locator(
-                'input[data-action="toggle-threshold-level"][data-level="True"]'
-            )
-            queue_true_level.wait_for(state="attached", timeout=20_000)
-            queue_true_level.check()
-            page.locator('button[data-action="check-above-threshold"]').click()
+            page.locator('[data-role="select-suspicious"]').click()
             queue_unflag_button = page.locator('[data-role="dismiss-suspected"]')
             page.wait_for_function(
                 "() => !document.querySelector('[data-role=dismiss-suspected]').disabled",

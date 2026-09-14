@@ -1,3 +1,5 @@
+from bisect import bisect_left, bisect_right
+
 from examples.movement.burst_feature_matrix import (
     DEFAULT_FEATURE_SET,
     FEATURE_SET_EXCLUSION_CONTEXT,
@@ -68,12 +70,10 @@ def _empirical_percentile(value: float, sorted_values: list[float]) -> float | N
         return None
     if len(sorted_values) == 1:
         return 50.0
-    matching_indexes = [
-        index for index, candidate in enumerate(sorted_values) if candidate == value
-    ]
-    if not matching_indexes:
+    left, right = bisect_left(sorted_values, value), bisect_right(sorted_values, value)
+    if left == right:
         return None
-    average_rank = sum(matching_indexes) / len(matching_indexes)
+    average_rank = (left + right - 1) / 2.0
     return float((average_rank / (len(sorted_values) - 1)) * 100.0)
 
 
@@ -98,6 +98,10 @@ def _build_observed_quantile_explanations(
             if (numeric := _numeric_value(row.get(field))) is not None
         )
         for field in fitted_features
+    }
+    percentiles = {
+        field: {value: _empirical_percentile(value, values) for value in set(values)}
+        for field, values in observed_values_by_feature.items()
     }
 
     explained_rows = []
@@ -124,10 +128,7 @@ def _build_observed_quantile_explanations(
                 missing_features.append(item)
                 continue
 
-            percentile = _empirical_percentile(
-                observed_value,
-                observed_values_by_feature[field],
-            )
+            percentile = percentiles[field][observed_value]
             item = {
                 "feature": field,
                 "value": observed_value,
@@ -233,7 +234,9 @@ def score_bursts(feature_rows: list[dict], config: dict | None = None) -> dict:
     model = IsolationForest(**model_config)
     model.fit(prepared["matrix"])
     sample_scores = model.score_samples(prepared["matrix"])
-    decision_scores = model.decision_function(prepared["matrix"])
+    # decision_function is score_samples minus the fitted offset. Reuse the
+    # expensive tree traversal while preserving sklearn's exact definition.
+    decision_scores = sample_scores - model.offset_
     anomaly_scores = -sample_scores
     result["score_offset"] = float(model.offset_)
     result["decision_boundary"] = 0.0

@@ -1,12 +1,9 @@
 from math import isfinite
 from statistics import fmean, median, pstdev
 
-from .movement_features import geodesic_distance_meters
+from .movement_features import burst_movement_summary
 
 
-STEP_LENGTH_FIELD = "step_length_m"
-SPEED_FIELD = "speed_mps"
-TIME_GAP_FIELD = "time_delta_s"
 RAW_NUMERIC_PREFIXES = ("gps:", "height-above")
 
 
@@ -115,46 +112,22 @@ def build_burst_feature_rows(fixes: list[dict], bursts: list[dict]) -> list[dict
                 f"Burst {burst.get('burst_id', '')} references missing fixes: {missing_fix_keys}"
             )
 
-        burst_fixes = [fixes_by_key[fix_key] for fix_key in fix_keys]
-        transition_fixes = burst_fixes[1:]
-        step_lengths = _numeric_values(transition_fixes, STEP_LENGTH_FIELD)
-        speeds = _numeric_values(transition_fixes, SPEED_FIELD)
-        time_gaps = _numeric_values(transition_fixes, TIME_GAP_FIELD)
-        start_time_ms = int(burst.get("start_time_ms", burst_fixes[0]["time_ms"]))
-        end_time_ms = int(burst.get("end_time_ms", burst_fixes[-1]["time_ms"]))
-        path_length_m = float(sum(step_lengths))
-        if len(burst_fixes) == 1:
-            net_displacement_m = 0.0
-        else:
-            net_displacement_m = geodesic_distance_meters(
-                float(burst_fixes[0]["lon"]),
-                float(burst_fixes[0]["lat"]),
-                float(burst_fixes[-1]["lon"]),
-                float(burst_fixes[-1]["lat"]),
-            )
-
-        step_summary = _numeric_summary(step_lengths)
-        speed_summary = _numeric_summary(speeds)
+        burst_fixes = sorted(
+            (fixes_by_key[key] for key in fix_keys if not fixes_by_key[key].get("analytically_excluded", False)),
+            key=lambda fix: (int(fix["time_ms"]), str(fix["fix_key"])),
+        )
+        if not burst_fixes:
+            continue
+        fix_keys = [str(fix["fix_key"]) for fix in burst_fixes]
         row = {
             "burst_id": str(burst["burst_id"]),
             "individual": str(burst.get("individual", burst_fixes[0].get("individual", ""))),
-            "start_time_ms": start_time_ms,
-            "end_time_ms": end_time_ms,
-            "n_fixes": len(burst_fixes),
             "fix_keys": fix_keys,
-            "duration_s": float((end_time_ms - start_time_ms) / 1000.0),
-            "path_length_m": path_length_m,
-            "mean_step_length_m": step_summary["mean"],
-            "sd_step_length_m": step_summary["sd"],
-            "net_displacement_m": float(net_displacement_m),
-            "straightness": (
-                float(net_displacement_m / path_length_m) if path_length_m > 0.0 else None
+            **burst_movement_summary(
+                [fix["time_ms"] for fix in burst_fixes],
+                [fix["lon"] for fix in burst_fixes],
+                [fix["lat"] for fix in burst_fixes],
             ),
-            "mean_speed_mps": speed_summary["mean"],
-            "median_speed_mps": speed_summary["median"],
-            "max_speed_mps": speed_summary["max"],
-            "sd_speed_mps": speed_summary["sd"],
-            "max_time_gap_s": float(max(time_gaps)) if time_gaps else None,
         }
         if "set_name" in burst:
             row["set_name"] = str(burst["set_name"])
