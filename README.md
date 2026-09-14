@@ -19,6 +19,9 @@ uv sync --locked
 See [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) for uv commands, standard venv,
 Conda, minimal `move_viz`, verification, and configuration instructions.
 
+For a shared institutional deployment, see the
+[University IT deployment requirements](docs/IT_DEPLOYMENT_REQUIREMENTS.md).
+
 Key rules:
 
 - Top-level non-hidden files under `data/<project>/` become the initial dataset automatically.
