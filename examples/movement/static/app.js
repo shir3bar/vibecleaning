@@ -4851,13 +4851,14 @@ class MovementExampleApp {
     });
     this.refs.selectAll.addEventListener("click", () => {
       if (!this.data) return;
-      this.clearThresholdState();
+      this.invalidateThresholdSelectionPreview();
       if (this.individualReviewQueue.mode === "queue") {
         this.individualReviewQueue.mapScope = "all";
       }
       this.data.selectedIndividuals = new Set(this.data.individuals);
       this.saveUiState();
       this.syncIndividualSelectionUi();
+      this.renderSelectedFixes();
       this.renderThresholdPane();
       this.renderLayers();
       this.updateActionButtons();
@@ -4866,7 +4867,7 @@ class MovementExampleApp {
     this.refs.selectNone.addEventListener("click", () => {
       if (!this.data) return;
       this.cancelBinaryRequests();
-      this.clearThresholdState();
+      this.invalidateThresholdSelectionPreview();
       this.data.selectedIndividuals = new Set();
       this.data.selectedFixKeys = new Set();
       this.saveUiState();
@@ -10867,7 +10868,7 @@ class MovementExampleApp {
     if (!this.data) {
       return;
     }
-    this.clearThresholdState();
+    this.invalidateThresholdSelectionPreview();
     if (shouldSelect) {
       this.data.selectedIndividuals.add(individual);
     } else {
@@ -10876,6 +10877,8 @@ class MovementExampleApp {
     this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(this.data.selectedFixKeys, this.getSelectedIndividuals());
     this.saveUiState();
     this.syncIndividualSelectionUi([individual]);
+    this.renderSelectedFixes();
+    this.renderThresholdPane();
     this.renderLayers();
     this.updateActionButtons();
     void this.loadDetailForCurrentSelection();
@@ -14890,6 +14893,20 @@ class MovementExampleApp {
     );
   }
 
+  invalidateThresholdSelectionPreview() {
+    // Changing visible individuals changes the filter's scope, not its definition.
+    // Keep the cutoff/direction/levels/plot limits for both CSV and RDS views, but
+    // discard a checked preview computed for the previous set of individuals.
+    if (this.checkedThresholdSignature && this.data) {
+      this.data.selectedFixKeys = new Set();
+    }
+    this.checkedThresholdSignature = "";
+    if (this.hasActiveThreshold(this.getCurrentColorField())) {
+      this.resetManualFlagTarget({ resetKind: false });
+      this.flagTargetKind = "filter";
+    }
+  }
+
   clearThresholdState() {
     this.thresholdState = {
       fieldKey: "",
@@ -16248,6 +16265,7 @@ class MovementExampleApp {
         this.data.detailIndividuals = [...currentSelection];
         this.syncIndividualSelectionUi(currentSelection);
         this.renderBurstCountIndicator();
+        this.renderThresholdPane();
         this.renderLayers();
         this.updateActionButtons();
         this.setStatus(stillMissing.length
@@ -16261,6 +16279,7 @@ class MovementExampleApp {
       this.movementDiagnostics.binaryCacheHits += selectedIndividuals.length;
       this.data.detailState = "map_loaded";
       this.data.detailIndividuals = [...selectedIndividuals];
+      this.renderThresholdPane();
       this.renderLayers();
       this.updateActionButtons();
       return;
@@ -17265,6 +17284,9 @@ class MovementExampleApp {
           ready: fixes.length > 0,
         };
       }
+      // A retained threshold may have no matches in the new individual scope.
+      // Never fall through and flag unrelated manually checked fixes instead.
+      return { kind: "filter", fixes: [], matchCount: 0, ready: false };
     }
     if (this.flagTargetKind === "none") {
       return { kind: "none", fixes: [], ready: false };
