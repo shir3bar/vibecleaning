@@ -15437,7 +15437,7 @@ class MovementExampleApp {
       ? `<div class="movement-threshold-note">The map can outline matches only on currently visible tracks. Flag thresholded fixes resolves the filter across every individual in the study, including hidden and not-yet-loaded individuals.</div>`
       : "";
     const thresholdPreviewActionLabel = thresholdFlagScope.kind === "whole_study"
-      ? "Outline visible matches"
+      ? "Check fixes"
       : "Select fixes";
     const gpsSpikeControl = gpsSpikeMode
       ? `

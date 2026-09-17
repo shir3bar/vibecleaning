@@ -1194,7 +1194,7 @@ def test_movement_frontend_uses_one_scope_aware_flag_action():
     assert '["individual", "bursts", "filter"].includes(flagTarget.kind)' in source
     assert "Checking matches only changes the local checked-fix preview." in source
     assert source.count(">${thresholdPreviewActionLabel}</button>") == 2
-    assert '? "Outline visible matches"' in source
+    assert '? "Check fixes"' in source
     assert "Check visible sample" not in source
     assert "Add preview matches" not in source
     assert 'selectionMethod: "map_double_click"' in source
