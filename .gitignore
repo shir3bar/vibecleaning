@@ -4,4 +4,6 @@ __pycache__/
 .venv/
 *.pyc
 *.csv
+*.rds
+*.RDS
 data/**/.vibecleaning/
