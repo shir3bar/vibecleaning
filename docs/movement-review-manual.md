@@ -110,4 +110,3 @@ Every persistent review action creates a new dataset node. **Undo** moves the he
 back one step; it does not erase the recorded lineage. Opening an older dataset
 may be read-only when it is not the active graph head. Use the version controls
 and the existing resume workflow rather than editing raw source files.
-
