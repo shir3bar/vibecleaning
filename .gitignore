@@ -7,3 +7,5 @@ __pycache__/
 *.rds
 *.RDS
 data/**/.vibecleaning/
+/data/move_viz_*/
+/examples/move_viz/sample_data/Kays_*.sqlite
