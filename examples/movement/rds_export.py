@@ -129,7 +129,11 @@ def write_reviewed_rds_python(
     output_path: Path,
     columns: dict[str, list[str | None]],
 ) -> None:
-    parsed = rdata.parser.parse_file(source_path)
+    # This is a lossless edit of the serialized R object, not a conversion to
+    # Python data. Expanding ALTREP can remove symbols from the serialized
+    # reference table while leaving later REF indexes unchanged (including
+    # nested data.frame row.names). Keep the original representation intact.
+    parsed = rdata.parser.parse_file(source_path, expand_altrep=False)
     root = parsed.object
     if root.info.type != RObjectType.VEC:
         raise ValueError(f"{source_path.name} is not an R data.frame")
@@ -138,8 +142,9 @@ def write_reviewed_rds_python(
     if names_obj is None or names_obj.info.type != RObjectType.STR:
         raise ValueError(f"{source_path.name} is missing data.frame names")
     names = _str_values(names_obj)
-    first_column = _resolve(root.value[0]) if root.value else None
-    row_count = len(first_column.value) if first_column is not None else 0
+    # The first column may itself be a compact ALTREP vector; its serialized
+    # payload length is not its number of rows. Use a separate decoded view.
+    row_count = len(read_movement_rds(source_path))
     for name in RDS_REVIEW_COLUMNS:
         values = columns[name]
         if len(values) != row_count:
@@ -213,6 +218,7 @@ def write_reviewed_rds_r(
 args <- commandArgs(trailingOnly=TRUE)
 x <- readRDS(args[[1]])
 review <- read.delim(args[[2]], stringsAsFactors=FALSE, check.names=FALSE,
+                     colClasses="character",
                      na.strings="<NA>", quote="\\\"")
 stopifnot(nrow(x) == nrow(review))
 for (name in names(review)) x[[name]] <- review[[name]]
@@ -265,7 +271,10 @@ def _compare_original_columns(source_path: Path, output_path: Path, expected_rev
             raise ValueError(f"Reviewed RDS changed {attr} in {source_path.name}")
     if expected_review is not None:
         for name in RDS_REVIEW_COLUMNS:
-            actual = output[name].fillna("").astype(str).tolist()
+            # Legacy exports can represent an all-missing review column as
+            # logical. Compare missing values without inserting text into a
+            # nullable Boolean array; non-missing mismatches must still fail.
+            actual = ["" if pd.isna(value) else str(value) for value in output[name]]
             expected = ["" if value is None else str(value) for value in expected_review[name]]
             if actual != expected:
                 raise ValueError(f"Reviewed RDS has incorrect generated {name} in {source_path.name}")
