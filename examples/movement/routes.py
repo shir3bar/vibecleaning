@@ -2958,6 +2958,7 @@ def register_movement_routes(
 
         async def stream():
             key = study_event_key(family_name, study_name)
+            is_shutting_down = getattr(app.state, "is_shutting_down", lambda: False)
             async with event_broker.subscribe(key) as queue:
                 snapshot = state_event_payload(
                     study_dir,
@@ -2966,12 +2967,14 @@ def register_movement_routes(
                 )
                 last_fingerprint = str(snapshot["state_fingerprint"])
                 yield f"event: study_state_changed\ndata: {json.dumps(snapshot)}\n\n"
-                while True:
+                while not is_shutting_down():
                     if await request.is_disconnected():
                         break
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=3)
                     except asyncio.TimeoutError:
+                        if is_shutting_down():
+                            break
                         try:
                             event = state_event_payload(
                                 study_dir,

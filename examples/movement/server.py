@@ -39,9 +39,9 @@ register_movement_routes(app, data_root=DATA_ROOT, cache_root=CACHE_ROOT)
 
 
 if __name__ == "__main__":
-    import uvicorn
+    from app.server import run_server
 
     if SHARED_LOCKING == "disabled":
         print(f"\n  WARNING: {COOPERATIVE_MODE_WARNING}")
     print(f"\n  Vibecleaning Movement Example: http://{HOST}:{PORT}\n")
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    run_server(app, host=HOST, port=PORT, log_level="info")

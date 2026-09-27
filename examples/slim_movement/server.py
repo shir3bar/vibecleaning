@@ -38,9 +38,9 @@ app = create_slim_movement_app(
 
 
 if __name__ == "__main__":
-    import uvicorn
+    from app.server import run_server
 
     if SHARED_LOCKING == "disabled":
         print(f"\nWARNING: {COOPERATIVE_MODE_WARNING}")
     print(f"\nVibecleaning Slim Movement: http://{HOST}:{PORT}")
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    run_server(app, host=HOST, port=PORT, log_level="info")
