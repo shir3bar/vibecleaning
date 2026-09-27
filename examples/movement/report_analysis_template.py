@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from examples.movement.review_annotations import (
+    effective_review_status,
     fix_key_row_number,
+    individual_review_decisions,
     normalize_row_ranges,
     row_number_in_ranges,
 )
@@ -193,6 +195,8 @@ def normalize_segment_status(raw_value):
 
 
 def clean_issue_payload(item, fallback_status=""):
+    if item.get("status") == "dismissed":
+        return {}
     status = normalize_review_status(item.get("status")) or normalize_review_status(fallback_status)
     if not status:
         return {}
@@ -398,7 +402,7 @@ def selected_contexts(valid_records, selected_fix_row_ranges=None, selected_issu
 
 
 def write_json(path, payload):
-    Path(path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    Path(path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def html_escape(value):
@@ -413,12 +417,33 @@ def issue_type_for(record):
 
 
 def issue_types_for(record):
-    issues = record["review"].get("issues", [])
+    issues = active_report_issues(record)
     issue_types = sorted({
         str(item.get("issue_type", "")).strip() or "Unspecified issue"
         for item in issues
     })
+    if not issue_types and "effective_issues" in record["review"]:
+        return []
     return issue_types or [issue_type_for(record)]
+
+
+def active_report_issues(record):
+    """Use resolved allegations; the original history stays in the sidecar."""
+    review = record["review"]
+    issues = review.get("effective_issues", review.get("issues", []))
+    if not issues and "effective_issues" not in review:
+        issues = [review]
+    return [item for item in issues if normalize_review_status(item.get("status"))]
+
+
+def record_for_issue_type(record, issue_type):
+    issues = [item for item in active_report_issues(record)
+              if (str(item.get("issue_type") or "").strip() or "Unspecified issue") == issue_type]
+    if not issues:
+        return record
+    primary = next((item for item in issues if item.get("status") == "confirmed"), issues[-1])
+    return {**record, "review": {**primary, "status": effective_review_status(issues),
+                                "issues": issues, "effective_issues": issues}}
 
 
 def issue_id_for(record):
@@ -426,11 +451,11 @@ def issue_id_for(record):
 
 
 def issue_ids_for(record):
-    issues = record["review"].get("issues", [])
+    issues = active_report_issues(record)
     issue_ids = sorted({
-        str(item.get("issue_id", "")).strip()
+        str(item.get("parent_issue_id") or item.get("issue_id") or "").strip()
         for item in issues
-        if str(item.get("issue_id", "")).strip()
+        if str(item.get("parent_issue_id") or item.get("issue_id") or "").strip()
     })
     if issue_ids:
         return issue_ids
@@ -446,7 +471,7 @@ def issue_field_for(record):
 
 
 def issue_threshold_for_type(record, issue_type):
-    for item in record["review"].get("issues", []):
+    for item in active_report_issues(record):
         item_issue_type = str(item.get("issue_type", "")).strip() or "Unspecified issue"
         if item_issue_type == issue_type:
             return str(item.get("issue_threshold", "")).strip()
@@ -456,7 +481,7 @@ def issue_threshold_for_type(record, issue_type):
 
 
 def issue_field_for_type(record, issue_type):
-    for item in record["review"].get("issues", []):
+    for item in active_report_issues(record):
         item_issue_type = str(item.get("issue_type", "")).strip() or "Unspecified issue"
         if item_issue_type == issue_type:
             return str(item.get("issue_field", "")).strip()
@@ -465,7 +490,7 @@ def issue_field_for_type(record, issue_type):
 
 def issue_detail_values_for_type(record, issue_type, key):
     values = []
-    for item in record["review"].get("issues", []):
+    for item in active_report_issues(record):
         item_issue_type = str(item.get("issue_type", "")).strip() or "Unspecified issue"
         if item_issue_type != issue_type:
             continue
@@ -921,7 +946,7 @@ def build_issue_sections(matched_records, snapshot_windows, fieldnames, columns)
     records_by_issue_type = {}
     for record in matched_records:
         for issue_type in issue_types_for(record):
-            records_by_issue_type.setdefault(issue_type, []).append(record)
+            records_by_issue_type.setdefault(issue_type, []).append(record_for_issue_type(record, issue_type))
 
     examples_by_issue_type = {}
     for window in snapshot_windows:
@@ -933,11 +958,12 @@ def build_issue_sections(matched_records, snapshot_windows, fieldnames, columns)
                 fix_key_row_number(record["fix_key"]),
                 window.get("report_row_ranges", []),
             )
+            and target_issue_type in issue_types_for(record)
         ]
         if not records:
             continue
         examples_by_issue_type.setdefault(target_issue_type, []).append(
-            build_example_entry(window, records, quality_fields)
+            build_example_entry(window, [record_for_issue_type(record, target_issue_type) for record in records], quality_fields)
         )
 
     sections = []
@@ -1264,6 +1290,7 @@ def issue_breakdown_for_records(records):
     grouped = {}
     for record in records:
         for issue_type in issue_types_for(record):
+            issue_record = record_for_issue_type(record, issue_type)
             item = grouped.setdefault(
                 issue_type,
                 {
@@ -1274,10 +1301,10 @@ def issue_breakdown_for_records(records):
                 },
             )
             item["fix_count"] += 1
-            for issue_id in issue_ids_for(record):
+            for issue_id in issue_ids_for(issue_record):
                 if issue_id:
                     item["issue_ids"].add(issue_id)
-            status = status_for(record)
+            status = status_for(issue_record)
             item["status_counts"][status] = item["status_counts"].get(status, 0) + 1
     rows = []
     for item in grouped.values():
@@ -1306,7 +1333,8 @@ def best_effort_value(record, column_name, fallback=""):
     return value or fallback
 
 
-def build_individual_profile_sections(valid_records, fieldnames, columns, selected_individuals, target_artifact):
+def build_individual_profile_sections(valid_records, fieldnames, columns, selected_individuals, target_artifact, review_decisions=None):
+    review_decisions = review_decisions or {}
     selected_set = set(selected_individuals or [])
     if not selected_set:
         return []
@@ -1377,7 +1405,7 @@ def build_individual_profile_sections(valid_records, fieldnames, columns, select
         study_id = most_common_non_empty(item["study_ids"], "")
         animal_id = most_common_non_empty(item["animal_ids"], individual)
         species = most_common_non_empty(item["species"], "Unknown species")
-        source = most_common_non_empty(item["sources"], target_artifact)
+        source = ", ".join(sorted(set(filter(None, item["sources"])))) or target_artifact
         monitoring_text = format_monitoring_span(item["start_ms"], item["end_ms"])
         points = [
             {"lon": record["lon"], "lat": record["lat"]}
@@ -1404,6 +1432,7 @@ def build_individual_profile_sections(valid_records, fieldnames, columns, select
                 "monitoring_end_ms": item["end_ms"],
                 "monitoring_text": monitoring_text,
                 "source": source,
+                "review_decision": review_decisions.get(individual, {}),
                 "burst_count": len(item["bursts"]) if item["bursts"] else None,
                 "row_count": len(item["records"]),
                 "reviewed_fix_count": len(item["reviewed_records"]),
@@ -1414,6 +1443,19 @@ def build_individual_profile_sections(valid_records, fieldnames, columns, select
             }
         )
     return sections
+
+
+def profile_decision_details(section):
+    decision = section.get("review_decision") or {}
+    labels = {"ok": "OK", "fix_keep": "Fix & Keep", "remove": "Remove"}
+    details = [("Review decision", labels.get(decision.get("review_decision"), "Not reviewed"))]
+    if decision:
+        details.append(("Needs check", "Yes" if decision.get("needs_check") else "No"))
+        for label, key in (("Decision notes", "comment"), ("Owner question", "owner_question"),
+                           ("Reviewer", "user"), ("Reviewed at", "created_at")):
+            if decision.get(key):
+                details.append((label, decision[key]))
+    return details
 
 
 def profile_snapshot_href(section, snapshot):
@@ -1441,11 +1483,13 @@ def build_individual_profile_markdown_section(section, snapshots_by_key):
             f"- Median temporal resolution: {section['median_temporal_resolution_text']}",
             f"- Median speed: {section['median_speed_text']}",
             f"- Monitoring: {section['monitoring_text']}",
-            f"- Source csv: {section['source']}",
+            f"- Source file: {section['source']}",
         ]
     )
     if section["burst_count"] is not None:
         lines.append(f"- No. of bursts: {section['burst_count']}")
+    for label, value in profile_decision_details(section):
+        lines.append(f"- {label}: {value}")
     lines.extend(
         [
             f"- Total fixes: {section['row_count']}",
@@ -1475,6 +1519,7 @@ def build_individual_profile_markdown_section(section, snapshots_by_key):
 
 
 def build_individual_profile_markdown_report(target_artifact, user, sections, snapshots_by_key=None, needs_check_individuals=None):
+    target_artifact = ", ".join(sorted({section["source"] for section in sections})) or target_artifact
     snapshots_by_key = snapshots_by_key or {}
     needs_check_individuals = list(needs_check_individuals or [])
     lines = [
@@ -1506,12 +1551,14 @@ def build_individual_profile_html_section(section, snapshots_by_key):
             f"<li><strong>Median temporal resolution:</strong> {html_escape(section['median_temporal_resolution_text'])}</li>",
             f"<li><strong>Median speed:</strong> {html_escape(section['median_speed_text'])}</li>",
             f"<li><strong>Monitoring:</strong> {html_escape(section['monitoring_text'])}</li>",
-            f"<li><strong>Source csv:</strong> {html_escape(section['source'])}</li>",
+            f"<li><strong>Source file:</strong> {html_escape(section['source'])}</li>",
         ]
     )
     if section["burst_count"] is not None:
         meta.append(f"<li><strong>No. of bursts:</strong> {section['burst_count']}</li>")
     meta.append(f"<li><strong>Total fixes:</strong> {section['row_count']}</li>")
+    meta.extend(f"<li><strong>{html_escape(label)}:</strong> {html_escape(value)}</li>"
+                for label, value in profile_decision_details(section))
 
     issue_markup = ""
     if section["reviewed_fix_count"]:
@@ -1553,6 +1600,7 @@ def build_individual_profile_html_section(section, snapshots_by_key):
 
 
 def build_individual_profile_html_report(target_artifact, user, sections, snapshots_by_key=None, needs_check_individuals=None):
+    target_artifact = ", ".join(sorted({section["source"] for section in sections})) or target_artifact
     snapshots_by_key = snapshots_by_key or {}
     needs_check_individuals = list(needs_check_individuals or [])
     parts = [
@@ -1692,7 +1740,7 @@ def normalize_snapshot_windows(items):
 def main():
         spec_path = Path(os.environ["VIBECLEANING_SPEC_PATH"])
         summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
-        spec = json.loads(spec_path.read_text())
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
         params = dict(spec["analysis"].get("parameters") or {})
         target_artifact = str(params.get("target_artifact") or "").strip()
         report_type = str(params.get("report_type") or "issue_first").strip().lower()
@@ -1967,16 +2015,21 @@ def main():
             source["path"],
             selected_individuals=selected_individuals,
         )
+        annotations = []
         if sidecar is not None:
             from examples.movement.review_annotations import (
                 apply_annotations_to_report_records,
                 load_review_annotations,
             )
+            annotations = load_review_annotations(Path(sidecar["path"]))
             apply_annotations_to_report_records(
                 valid_records,
-                load_review_annotations(Path(sidecar["path"])),
+                annotations,
                 source_artifact=target_artifact,
             )
+        decisions = individual_review_decisions(annotations, source_artifact=target_artifact)
+        needs_check_individuals = sorted(individual for individual in selected_individuals
+                                         if decisions.get(individual, {}).get("needs_check"))
         recompute_analytical_movement_context(valid_records)
         sections = build_individual_profile_sections(
             valid_records,
@@ -1984,6 +2037,7 @@ def main():
             columns,
             selected_individuals,
             target_artifact,
+            decisions,
         )
         if not sections:
             raise SystemExit("None of the selected individuals were found")

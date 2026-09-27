@@ -45,8 +45,8 @@ from .review_annotations import point_in_polygon
 from .summary import DERIVED_FIELDS, quantile, span_to_zoom
 
 
-# Adding optional colour columns requires rebuilding older disposable indexes.
-RDS_INDEX_SCHEMA_VERSION = 6
+# Report metadata is disposable too; older indexes rebuild without changing lineage.
+RDS_INDEX_SCHEMA_VERSION = 7
 RDS_SOURCE_FORMAT = "rds"
 RDS_IMPLICIT_SET = "train"
 RDS_REQUIRED_COLUMNS = {
@@ -458,7 +458,8 @@ def _schema(connection: sqlite3.Connection) -> None:
             row_count INTEGER NOT NULL,
             study_id TEXT NOT NULL,
             individual_identifier TEXT NOT NULL,
-            individual_id TEXT NOT NULL
+            individual_id TEXT NOT NULL,
+            report_metadata TEXT NOT NULL
         );
         CREATE TABLE individuals (
             individual_key INTEGER PRIMARY KEY,
@@ -534,6 +535,40 @@ def _optional_rds_value(value: object, field: dict) -> object:
     return text_value or None
 
 
+def _report_metadata(frame: pd.DataFrame) -> dict[str, str]:
+    """Retain descriptive metadata without guessing species from identifiers."""
+    aliases = {
+        "species": ("individualtaxoncommonname", "taxoncommonname", "commonname",
+                    "individualtaxoncanonicalname", "taxoncanonicalname", "scientificname", "species", "taxon"),
+        "study_name": ("studyname",),
+    }
+    sources = [frame]
+    track_data = frame.attrs.get("track_data")
+    if isinstance(track_data, pd.DataFrame):
+        if "individual_local_identifier" in track_data:
+            track_data = track_data.loc[
+                track_data["individual_local_identifier"].astype(str)
+                == str(frame["individual_local_identifier"].iloc[0])
+            ]
+        if len(track_data) == 1:
+            sources.append(track_data)
+    result = {}
+    for key, names in aliases.items():
+        for source in sources:
+            columns = {str(name).lower().replace("-", "").replace("_", "").replace(":", "").replace(" ", ""): name
+                       for name in source.columns}
+            for name in names:
+                if name not in columns:
+                    continue
+                values = sorted({_scalar_text(value) for value in source[columns[name]].dropna() if _scalar_text(value)})
+                if values:
+                    result[key] = "; ".join(values)
+                    break
+            if key in result:
+                break
+    return result
+
+
 def _insert_frame(
     connection: sqlite3.Connection,
     *,
@@ -547,7 +582,7 @@ def _insert_frame(
     row_count = int(info["row_count"])
     sha256 = _sha256_file(path)
     connection.execute(
-        "INSERT INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             artifact_id,
             logical_name,
@@ -556,6 +591,7 @@ def _insert_frame(
             info["study_id"],
             info["individual"],
             info["individual_id"],
+            json.dumps(_report_metadata(frame), ensure_ascii=False),
         ),
     )
     x_values = pd.to_numeric(frame["x_"], errors="raise").to_numpy(dtype=np.float64)
@@ -1666,7 +1702,7 @@ def build_rds_report_inputs(
     with closing(_connect(index_path)) as connection:
         artifact_rows = connection.execute(
             """
-            SELECT a.logical_name, a.row_count, i.identifier
+            SELECT a.logical_name, a.row_count, a.study_id, a.report_metadata, i.identifier
             FROM artifacts a JOIN individuals i ON i.artifact_id=a.artifact_id
             ORDER BY a.artifact_id
             """
@@ -1688,6 +1724,10 @@ def build_rds_report_inputs(
             raise ValueError("The requested RDS report scope did not resolve to an individual")
 
         artifact_offsets: dict[str, int] = {}
+        metadata_by_artifact = {
+            str(row["logical_name"]): {**json.loads(row["report_metadata"]), "study_id": row["study_id"]}
+            for row in included
+        }
         next_row = 0
         for row in included:
             artifact_offsets[str(row["logical_name"])] = next_row
@@ -1720,6 +1760,10 @@ def build_rds_report_inputs(
             "location-lat",
             "burst_",
             "is_outlier",
+            "source",
+            "species",
+            "study-name",
+            "study-id",
             *RDS_REVIEW_COLUMNS,
         ])
         while True:
@@ -1738,6 +1782,10 @@ def build_rds_report_inputs(
                     format(float(row["lat"]), ".17g"),
                     int(row["burst_value"]),
                     "true" if int(row["is_outlier"]) else "false",
+                    row["logical_name"],
+                    metadata_by_artifact[row["logical_name"]].get("species", ""),
+                    metadata_by_artifact[row["logical_name"]].get("study_name", ""),
+                    metadata_by_artifact[row["logical_name"]]["study_id"],
                     row["source_outlier_status"],
                     row["source_outlier_issue_type"],
                     row["source_outlier_comments"],

@@ -4526,7 +4526,7 @@ def test_build_individual_profile_html_report_omits_optional_fields_when_missing
     assert "Study ID" not in html
     assert "No. of bursts" not in html
     assert "<strong>Median speed:</strong> 4.20 m/s" in html
-    assert "<strong>Source csv:</strong> movement.csv" in html
+    assert "<strong>Source file:</strong> movement.csv" in html
     assert "<strong>Total fixes:</strong> 2" in html
     assert "<strong>Median speed excluding suspected fixes:</strong> 3.80 m/s" not in html
     assert "Issue Summary" not in html

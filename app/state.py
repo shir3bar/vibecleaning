@@ -24,7 +24,7 @@ def make_id(prefix: str) -> str:
 
 def load_json(path: Path) -> dict:
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ProjectStateError(f"Missing file: {path.name}") from exc
     except json.JSONDecodeError as exc:

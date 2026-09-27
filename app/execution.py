@@ -107,10 +107,13 @@ def run_python_script(script_path: Path, spec_path: Path, summary_path: Path):
     env = os.environ.copy()
     env["VIBECLEANING_SPEC_PATH"] = str(spec_path.resolve())
     env["VIBECLEANING_SUMMARY_PATH"] = str(summary_path.resolve())
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.run(
         [sys.executable, str(script_path.resolve())],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env=env,
         cwd=str(script_path.parent.resolve()),
         check=False,
@@ -119,7 +122,7 @@ def run_python_script(script_path: Path, spec_path: Path, summary_path: Path):
         raise ProjectStateError(proc.stderr.strip() or proc.stdout.strip() or "Script failed")
 
     if summary_path.exists():
-        summary = json.loads(summary_path.read_text())
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
     else:
         summary = {"stdout": proc.stdout.strip()}
         save_json(summary_path, summary)
@@ -213,7 +216,7 @@ def create_analysis(project_dir: Path, payload: dict) -> dict:
         payload.get("input_attachments"),
     )
 
-    script_path.write_text(script)
+    script_path.write_text(script, encoding="utf-8", newline="\n")
     spec = {
         "mode": "analysis",
         "project_name": project_dir.name,
@@ -321,7 +324,7 @@ def create_step(project_dir: Path, payload: dict) -> dict:
     script_path = step_dir / "transform.py"
     spec_path = step_dir / "spec.json"
     summary_path = step_dir / "summary.json"
-    script_path.write_text(script)
+    script_path.write_text(script, encoding="utf-8", newline="\n")
 
     output_entries = []
     output_specs = []
