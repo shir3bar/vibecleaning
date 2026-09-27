@@ -186,12 +186,39 @@ def _review_error_response(exc: Exception) -> JSONResponse:
     return json_error(str(exc), 400)
 
 
+def _movement_graph_payload(study_dir: Path, history: dict | None = None) -> dict:
+    """Attach compact display metadata, without sending scopes' resolved fix lists."""
+    graph = graph_payload(study_dir)
+    history = history if history is not None else list_history(study_dir)
+    parameters = {
+        step["step_id"]: step.get("parameters") or {}
+        for step in history.get("steps", [])
+    }
+    for step in graph["steps"]:
+        params = parameters.get(step["step_id"], {})
+        spec = (params.get("scope") or {}).get("filter") or {}
+        step["label_parameters"] = {
+            key: params[key]
+            for key in ("action", "status", "issue_field", "issue_threshold", "issue_type")
+            if key in params
+        }
+        step["label_parameters"]["filter"] = {
+            key: spec[key]
+            for key in (
+                "kind", "field_key", "field_kind", "operator", "threshold_value",
+                "selected_levels", "step_length_threshold_m", "minimum_abs_turn_angle_deg",
+            )
+            if key in spec
+        }
+    return graph
+
+
 def _build_initial_study_payload(
     study_dir: Path,
     artifact_filter: ArtifactFilter | None = None,
 ) -> dict:
     state = project_state_payload(study_dir)
-    graph = graph_payload(study_dir)
+    graph = _movement_graph_payload(study_dir, state["history"])
     dataset_id = state["current_dataset"]["dataset_id"]
     dataset = load_dataset(study_dir, dataset_id)
     artifacts = [
@@ -1730,7 +1757,7 @@ def register_movement_routes(
         try:
             study_dir = configured_study_dir(family_name, study_name)
             require_read(request, study_dir)
-            return JSONResponse(graph_payload(study_dir))
+            return JSONResponse(_movement_graph_payload(study_dir))
         except ReviewForbiddenError as exc:
             return json_error(str(exc), 404)
         except (ValueError, ProjectStateError) as exc:

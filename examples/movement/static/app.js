@@ -9086,7 +9086,12 @@ class MovementExampleApp {
     for (const dataset of this.datasets) {
       const option = document.createElement("option");
       option.value = dataset.dataset_id;
-      option.textContent = formatDatasetLabel(dataset, this.graph?.current_dataset_id || "");
+      option.textContent = formatDatasetLabel(
+        dataset,
+        this.graph?.current_dataset_id || "",
+        this.stepByOutputDatasetId.get(dataset.dataset_id),
+      );
+      option.title = option.textContent;
       this.refs.dataset.appendChild(option);
     }
     if (!this.datasets.length) {
@@ -20949,8 +20954,46 @@ function formatTimestamp(timeMs) {
   return date.toISOString().replace("T", " ").replace(".000Z", "Z");
 }
 
-function formatDatasetLabel(dataset, currentHeadDatasetId) {
-  const parts = [shortId(dataset.dataset_id), formatDateTime(dataset.created_at)];
+function formatStepLabel(step, dataset) {
+  // Graph responses carry a compact projection; newly created steps carry
+  // their full parameters. Both describe the saved action, not current UI state.
+  const params = step?.label_parameters || step?.parameters || {};
+  const filter = params.filter || params.scope?.filter || {};
+  const fields = {
+    speed_mps: ["Speed", "m/s"],
+    step_length_m: ["Step length", "m"],
+    time_delta_s: ["Time gap", "s"],
+    turn_angle_deg: ["Turn angle", "°"],
+    is_outlier: ["Outlier flag", ""],
+  };
+  let criterion = "";
+  if (params.action === "annotate_scope") {
+    if (filter.kind === "gps_spike") {
+      criterion = `GPS spike: both steps > ${filter.step_length_threshold_m} m, |turn| ≥ ${filter.minimum_abs_turn_angle_deg}°`;
+    } else if (filter.field_key) {
+      const [name, unit] = fields[filter.field_key] || [filter.field_key, ""];
+      const operator = {gt: ">", lt: "<", gte: "≥", lte: "≤", eq: "="}[filter.operator || "gt"];
+      if (operator && typeof filter.threshold_value === "number") {
+        criterion = `${name} ${operator} ${filter.threshold_value}${unit ? ` ${unit}` : ""}`;
+      } else if (Array.isArray(filter.selected_levels) && filter.selected_levels.length) {
+        criterion = `${name} in ${filter.selected_levels.join(", ")}`;
+      }
+    }
+    if (!criterion && params.issue_threshold) {
+      const [name, unit] = fields[params.issue_field] || [params.issue_field || params.issue_type || "Filter", ""];
+      criterion = `${name} ${params.issue_threshold}${unit ? ` ${unit}` : ""}`;
+    }
+    if (criterion) return `${params.status || "Flag"}: ${criterion}`;
+  }
+  return step?.title || dataset.note || (dataset.parent_dataset_id ? "Review step" : "Original input");
+}
+
+function formatDatasetLabel(dataset, currentHeadDatasetId, step = null) {
+  const parts = [
+    shortId(dataset.dataset_id),
+    formatStepLabel(step, dataset),
+    formatDateTime(dataset.created_at),
+  ];
   if (dataset.dataset_id === currentHeadDatasetId) {
     parts.unshift("head");
   }
