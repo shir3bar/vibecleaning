@@ -5223,6 +5223,7 @@ class MovementExampleApp {
       ...this.movementDiagnostics,
       capturedAt: performance.now(),
       datasetId: this.currentDatasetId,
+      mapReady: this.mapLoaded === true,
       activeIndividual: this.individualReviewQueue?.activeIndividual || "",
       trackPlayerIndividual: this.trackPlayer?.individual || "",
       trackPlayerFixCount: this.trackPlayer?.sequence?.length || 0,

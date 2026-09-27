@@ -1,7 +1,7 @@
 // Exercise production methods/handlers, stubbing only rendering and network I/O.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const source = fs.readFileSync(process.argv[2] === '--stdin' ? 0 : process.argv[2], 'utf8');
+const source = fs.readFileSync(process.argv[2] === '--stdin' ? 0 : process.argv[2], 'utf8').replace(/\r\n/g, '\n');
 const profile = process.argv[3] || 'rds_movement';
 const start = source.indexOf('class MovementExampleApp {');
 const end = source.indexOf('\n}\n', start) + 2;

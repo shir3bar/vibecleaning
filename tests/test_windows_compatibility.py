@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import json
 import multiprocessing
 import os
@@ -299,10 +300,11 @@ def test_shared_study_fingerprint_tracks_assignment_control_and_head(tmp_path):
 def test_local_sqlite_cache_can_be_deleted_and_rebuilt(tmp_path):
     cache = tmp_path / "cache" / "movement" / "rds" / "signature.sqlite"
     cache.parent.mkdir(parents=True)
-    with sqlite3.connect(cache) as connection:
+    with closing(sqlite3.connect(cache)) as connection:
         connection.execute("CREATE TABLE marker (value TEXT)")
+        connection.commit()
     cache.unlink()
-    with sqlite3.connect(cache) as connection:
+    with closing(sqlite3.connect(cache)) as connection:
         connection.execute("CREATE TABLE marker (value TEXT)")
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
