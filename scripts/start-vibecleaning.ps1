@@ -61,7 +61,15 @@ try {
     $Probe.Stop()
 }
 
-$EnvironmentRoot = Join-Path $env:LOCALAPPDATA "Vibecleaning\venv"
+$ReleaseId = "development"
+$ManifestPath = Join-Path $RepositoryRoot "release-manifest.json"
+if (Test-Path -LiteralPath $ManifestPath) {
+    $ReleaseId = (Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json).release_id
+    if ($ReleaseId -notmatch '^p0-[a-f0-9]{12}$') {
+        throw "Invalid release identity in release-manifest.json"
+    }
+}
+$EnvironmentRoot = Join-Path $env:LOCALAPPDATA "Vibecleaning\venvs\$ReleaseId"
 $EntryPoint = if ($Profile -eq "Rds") {
     Join-Path $RepositoryRoot "examples\rds_movement\server.py"
 } else {
@@ -74,6 +82,7 @@ $env:VIBECLEANING_CACHE_ROOT = (Resolve-Path -LiteralPath $CacheRoot).Path
 $env:VIBECLEANING_SHARED_LOCKING = $SharedLocking
 $env:HOST = "127.0.0.1"
 $env:PORT = [string]$Port
+$env:PYTHONUTF8 = "1"
 
 Push-Location $RepositoryRoot
 try {

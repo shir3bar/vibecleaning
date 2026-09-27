@@ -6,6 +6,9 @@ __pycache__/
 *.csv
 *.rds
 *.RDS
+!tests/fixtures/deployment/data/**/*.rds
+!tests/fixtures/deployment/data/**/*.csv
+/dist/
 data/**/.vibecleaning/
 /data/move_viz_*/
 /examples/move_viz/sample_data/Kays_*.sqlite
