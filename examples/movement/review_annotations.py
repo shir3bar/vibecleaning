@@ -955,6 +955,7 @@ def build_review_projection(
     *,
     source_artifact: str,
     individuals: list[str] | tuple[str, ...] | set[str] | None = None,
+    include_global_counts: bool = True,
 ) -> dict:
     """Build only the review information needed to update an already-loaded view."""
     relevant = [
@@ -982,6 +983,8 @@ def build_review_projection(
         fix_key = str(fix_key)
         individual = str(individual)
         set_name = str(set_name)
+        if not include_global_counts and not include_all_individuals and individual not in requested_individuals:
+            continue
         review = _review_payload_for_context(
             relevant,
             fix_key=fix_key,

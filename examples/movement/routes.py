@@ -1974,6 +1974,83 @@ def register_movement_routes(
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 404)
 
+    async def individual_issue_groups(study_dir, dataset_id, logical_name, individual):
+        from .issue_groups import group_unresolved_issues
+
+        artifact, path = get_dataset_artifact(study_dir, dataset_id, logical_name)
+        annotations = display_annotations(
+            study_dir, dataset_id,
+            _load_dataset_review_annotations(study_dir, dataset_id=dataset_id),
+        )
+        if configured_source.bundle_scoped:
+            payload, signature = await run_in_threadpool(
+                source_fixes, configured_source, study_dir, dataset_id, logical_name,
+                individuals=[individual], review_status="reviewed", limit=None,
+                annotations=annotations,
+            )
+            payload = apply_review_annotations(payload, annotations, source_artifact="")
+        else:
+            payload = await run_in_threadpool(
+                build_review_projection, path, annotations,
+                source_artifact=logical_name, individuals=[individual],
+                include_global_counts=False,
+            )
+            signature = artifact_signature(artifact)
+        result = group_unresolved_issues(payload.get("fixes") or [], individual)
+        result["source_signature"] = signature
+        return result
+
+    async def expand_issue_group(study_dir, dataset_id, logical_name, body, list_key):
+        """Resolve the whole saved group; never use a capped browser selection."""
+        selection = body.get("issue_group")
+        if selection is None:
+            return body.get(list_key)
+        if not isinstance(selection, dict) or body.get(list_key):
+            raise ValueError("Choose an issue group or selected fixes, not both")
+        individual = _normalize_individual_name(selection.get("individual"))
+        issue_type = _validate_optional_text(selection.get("issue_type"), label="Issue type", max_length=120)
+        payload = await individual_issue_groups(study_dir, dataset_id, logical_name, individual)
+        if body.get("source_bundle_signature") and body["source_bundle_signature"] != payload["source_signature"]:
+            raise ValueError("Source data changed; reload the individual before resolving flags")
+        group = next((item for item in payload["groups"] if item["issue_type"] == issue_type), None)
+        if not group:
+            raise ValueError("This individual has no unresolved flags of that type")
+        if selection.get("expected_fix_count") != group["fix_count"]:
+            raise ValueError("The flag count changed; reload the individual before resolving flags")
+        body["issue_group"] = {
+            "individual": individual, "issue_type": issue_type,
+            "expected_fix_count": group["fix_count"],
+        }
+        return group["resolutions"]
+
+    @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}/issue-groups")
+    async def get_individual_issue_groups(
+        family_name: str, study_name: str, dataset_id: str,
+        logical_name: str, individual: str, request: Request,
+    ):
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
+            individual = _normalize_individual_name(individual)
+            payload = await individual_issue_groups(
+                study_dir, dataset_id, logical_name, individual,
+            )
+            # The browser needs counts and map positions, not every allegation's
+            # repeated provenance. Mutations resolve the parent links on the server.
+            payload["groups"] = [
+                {key: value for key, value in group.items() if key != "resolutions"}
+                for group in payload["groups"]
+            ]
+            payload["fixes"] = [
+                {key: fix[key] for key in ("fix_key", "individual", "time_ms", "lon", "lat")}
+                for fix in payload["fixes"]
+            ]
+            return JSONResponse(payload)
+        except ReviewForbiddenError as exc:
+            return json_error(str(exc), 404)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}/fixes")
     async def get_movement_study_fixes(
         family_name: str,
@@ -3645,7 +3722,10 @@ def register_movement_routes(
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             dataset = load_dataset(study_dir, dataset_id)
             get_dataset_artifact(study_dir, dataset_id, logical_name)
-            confirmations = _validate_confirmations(body.get("confirmations"))
+            raw_confirmations = await expand_issue_group(
+                study_dir, dataset_id, logical_name, body, "confirmations",
+            )
+            confirmations = _validate_confirmations(raw_confirmations)
             note = _validate_optional_text(
                 body.get("note"),
                 label="Confirmation note",
@@ -3657,13 +3737,18 @@ def register_movement_routes(
             source_bundle_signature = ""
             input_artifacts = [logical_name]
             if configured_source.bundle_scoped:
-                bundle, _index_path = await run_in_threadpool(
+                bundle, index_path = await run_in_threadpool(
                     ensure_configured_rds_index, study_dir, dataset_id
                 )
                 validate_requested_bundle(body, bundle.signature)
+                annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+                annotations.extend(await run_in_threadpool(
+                    rds_source_annotations_for_fix_keys, index_path,
+                    [key for item in raw_confirmations for key in item["fix_keys"]],
+                ))
                 records = _rds_resolution_records(
-                    _load_dataset_review_annotations(study_dir, dataset_id=dataset_id),
-                    body.get("confirmations"),
+                    annotations,
+                    raw_confirmations,
                     status="confirmed",
                     note=note,
                 )
@@ -3683,12 +3768,13 @@ def register_movement_routes(
             user = effective_user(request, body)
             payload = {
                 "user": user,
-                "title": f"Confirm {sum(item['fix_count'] for item in confirmations)} suspected fix(es) in {logical_name}",
+                "title": f"Confirm {len({key for item in raw_confirmations for key in item['fix_keys']})} suspected fix(es) in {logical_name}",
                 "kind": "python",
                 "script": step_script,
                 "parameters": {
                     "app": "movement",
                     "action": "confirm_issues",
+                    "issue_group": body.get("issue_group"),
                     "target_artifact": logical_name,
                     "dataset_id": dataset_id,
                     "confirmations": step_parameters_confirmations,
@@ -3749,7 +3835,10 @@ def register_movement_routes(
             dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
             dataset = load_dataset(study_dir, dataset_id)
             get_dataset_artifact(study_dir, dataset_id, logical_name)
-            dismissals = _validate_dismissals(body.get("dismissals"))
+            raw_dismissals = await expand_issue_group(
+                study_dir, dataset_id, logical_name, body, "dismissals",
+            )
+            dismissals = _validate_dismissals(raw_dismissals)
             note = _validate_optional_text(
                 body.get("note"),
                 label="Dismissal note",
@@ -3770,7 +3859,7 @@ def register_movement_routes(
                 )
                 requested_fix_keys = [
                     str(fix_key)
-                    for item in body.get("dismissals") or []
+                    for item in raw_dismissals
                     if isinstance(item, dict)
                     for fix_key in item.get("fix_keys") or []
                 ]
@@ -3781,7 +3870,7 @@ def register_movement_routes(
                 ))
                 records = _rds_resolution_records(
                     annotations,
-                    body.get("dismissals"),
+                    raw_dismissals,
                     status="dismissed",
                     note=note,
                 )
@@ -3799,7 +3888,7 @@ def register_movement_routes(
             ):
                 input_artifacts.append("movement_review_annotations.json")
             user = effective_user(request, body)
-            dismissed_fix_count = sum(item["fix_count"] for item in dismissals)
+            dismissed_fix_count = len({key for item in raw_dismissals for key in item["fix_keys"]})
             payload = {
                 "user": user,
                 "title": f"Dismiss suspicion for {dismissed_fix_count} fix(es) in {logical_name}",
@@ -3808,6 +3897,7 @@ def register_movement_routes(
                 "parameters": {
                     "app": "movement",
                     "action": "dismiss_issues",
+                    "issue_group": body.get("issue_group"),
                     "target_artifact": logical_name,
                     "dataset_id": dataset_id,
                     "dismissals": step_parameters_dismissals,

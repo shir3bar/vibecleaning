@@ -713,6 +713,9 @@ class MovementExampleApp {
       priorOkLast: true,
       priorOkLastReviewId: "",
     };
+    this.queueIssueGroups = null;
+    this.queueIssueHighlight = null;
+    this.queueIssueMutation = false;
     this.trackPlayer = {
       individual: "",
       binary: null,
@@ -2921,6 +2924,7 @@ class MovementExampleApp {
         .movement-individual-view-tabs button,
         .movement-queue-controls button,
         .movement-queue-controls select,
+        .movement-queue-issue-row button,
         .movement-queue-card-actions button,
         .movement-queue-card-comment {
           min-width: 0;
@@ -2934,6 +2938,7 @@ class MovementExampleApp {
         }
         .movement-individual-view-tabs button,
         .movement-queue-controls button,
+        .movement-queue-issue-row button,
         .movement-queue-card-actions button {
           cursor: pointer;
         }
@@ -3103,6 +3108,13 @@ class MovementExampleApp {
         .movement-queue-card-actions {
           padding-top: 3px;
         }
+        .movement-queue-issues { margin: 8px 0; display: grid; gap: 6px; }
+        .movement-queue-issue-row { display: flex; align-items: center; gap: 6px; }
+        .movement-queue-issue-row button { padding: 5px 7px; }
+        .movement-queue-issue-row .movement-queue-issue-name {
+          flex: 1; min-width: 0; text-align: left; overflow-wrap: anywhere;
+        }
+        .movement-queue-issue-name[aria-pressed="true"] { outline: 2px solid #e6b800; }
         .movement-queue-flag-target {
           display: grid;
           gap: 6px;
@@ -4669,6 +4681,19 @@ class MovementExampleApp {
       }
     });
     this.refs.individuals.addEventListener("click", event => {
+      const issueButton = event.target.closest("button[data-queue-issue-action]");
+      if (issueButton) {
+        const {queueIssueAction: action, issueType, individual} = issueButton.dataset;
+        if (action === "retry") {
+          this.queueIssueGroups = null;
+          this.renderIndividuals();
+        } else if (action === "highlight") {
+          this.highlightQueueIssueGroup(individual, issueType);
+        } else {
+          void this.resolveQueueIssueGroup(individual, issueType, action);
+        }
+        return;
+      }
       const reviewButton = event.target.closest("button[data-review-decision]");
       if (reviewButton) {
         const individual = reviewButton.dataset.individual || "";
@@ -10023,7 +10048,7 @@ class MovementExampleApp {
   }
 
   async focusIndividualQueueItem(individual, { zoom = false, saveBeforeChange = true } = {}) {
-    if (!this.data || !individual) {
+    if (!this.data || !individual || this.queueIssueMutation) {
       return false;
     }
     const shouldZoom = zoom === true;
@@ -10707,6 +10732,128 @@ class MovementExampleApp {
     }
   }
 
+  queueIssueGroupsKey() {
+    if (!this.data || this.individualReviewQueue.mode !== "queue"
+        || !this.individualReviewQueue.activeIndividual) return "";
+    return JSON.stringify([this.currentFamily, this.currentStudy, this.currentDatasetId,
+      this.currentArtifact, this.individualReviewQueue.activeIndividual]);
+  }
+
+  async loadQueueIssueGroups(key, individual) {
+    const state = {key, status: "loading", groups: [], fixes: []};
+    this.queueIssueGroups = state;
+    try {
+      const params = new URLSearchParams({logical_name: this.currentArtifact, individual});
+      const controller = this.beginRequest("queueIssueGroups");
+      const payload = await this.fetchJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/dataset/${encodeURIComponent(this.currentDatasetId)}/issue-groups?${params}`,
+        {signal: controller.signal, cache: "no-store"},
+      );
+      if (this.queueIssueGroups !== state) return;
+      if (key !== this.queueIssueGroupsKey()) {
+        this.queueIssueGroups = null;
+        return;
+      }
+      state.groups = payload.groups || [];
+      state.fixes = parseMovementFixes(payload.fixes || []);
+      state.sourceSignature = payload.source_signature || "";
+      state.status = "ready";
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        if (this.queueIssueGroups === state) this.queueIssueGroups = null;
+        return;
+      }
+      state.status = "error";
+      state.error = error.message;
+    } finally {
+      if (this.queueIssueGroups === state && key === this.queueIssueGroupsKey()) {
+        this.renderIndividuals();
+      }
+    }
+  }
+
+  queueIssueGroupsHtml(individual) {
+    const key = this.queueIssueGroupsKey();
+    if (!key || individual !== this.individualReviewQueue.activeIndividual) return "";
+    if (this.queueIssueGroups?.key !== key) void this.loadQueueIssueGroups(key, individual);
+    const state = this.queueIssueGroups;
+    if (state.status === "loading") return '<div class="movement-queue-issues" aria-live="polite">Loading saved flags…</div>';
+    if (state.status === "error") return `<div class="movement-queue-issues">Could not load saved flags: ${escapeHtml(state.error)} <button type="button" data-queue-issue-action="retry">Retry</button></div>`;
+    if (!state.groups.length) return '<div class="movement-queue-issues movement-subtle">No unresolved flags.</div>';
+    const disabled = this.individualReviewQueue.saving || !this.canPersistEdits();
+    return `<div class="movement-queue-issues" data-queue-issues>
+      <strong>Unresolved flags for ${escapeHtml(individual)}</strong>
+      ${state.groups.map(group => {
+        const label = group.issue_type || "Unspecified issue";
+        const attrs = `data-individual="${escapeHtml(individual)}" data-issue-type="${escapeHtml(group.issue_type)}"`;
+        const highlighted = this.queueIssueHighlight?.key === key && this.queueIssueHighlight.issueType === group.issue_type;
+        return `<div class="movement-queue-issue-row">
+          <button type="button" class="movement-queue-issue-name" data-queue-issue-action="highlight" ${attrs} aria-pressed="${highlighted}" title="Highlight these saved flags on the map">${escapeHtml(label)} · ${formatCount(group.fix_count)} fixes</button>
+          <button type="button" data-queue-issue-action="confirm" ${attrs} ${disabled ? "disabled" : ""} title="Exclude these ${formatCount(group.fix_count)} fixes for ${escapeHtml(individual)} under ${escapeHtml(label)}">Confirm</button>
+          <button type="button" data-queue-issue-action="unflag" ${attrs} ${disabled ? "disabled" : ""} title="Dismiss these flags for ${escapeHtml(individual)}; other issue types are unchanged">Unflag</button>
+        </div>`;
+      }).join("")}
+      <span class="movement-subtle">Confirm excludes; Unflag dismisses that issue. Leave uncertain flags unresolved.</span>
+    </div>`;
+  }
+
+  highlightQueueIssueGroup(individual, issueType) {
+    const key = this.queueIssueGroupsKey();
+    const state = this.queueIssueGroups;
+    if (individual !== this.individualReviewQueue.activeIndividual || state?.key !== key || state.status !== "ready") return;
+    const group = state.groups.find(item => item.issue_type === issueType);
+    if (!group) return;
+    if (this.queueIssueHighlight?.key === key && this.queueIssueHighlight.issueType === issueType) {
+      this.queueIssueHighlight = null;
+    } else {
+      const keys = new Set(group.fix_keys);
+      this.queueIssueHighlight = {key, issueType, fixes: state.fixes.filter(fix => keys.has(fix.fixKey))};
+    }
+    this.renderIndividuals();
+    this.renderLayers();
+  }
+
+  async resolveQueueIssueGroup(individual, issueType, action) {
+    const queue = this.individualReviewQueue;
+    const state = this.queueIssueGroups;
+    if (!["confirm", "unflag"].includes(action) || queue.saving || this.queueIssueMutation
+        || individual !== queue.activeIndividual || state?.key !== this.queueIssueGroupsKey()
+        || state.status !== "ready" || this.rejectLockedEdit()) return;
+    const group = state.groups.find(item => item.issue_type === issueType);
+    if (!group) return;
+    const family = this.currentFamily, study = this.currentStudy, artifact = this.currentArtifact;
+    const datasetId = this.currentDatasetId;
+    queue.saving = true;
+    this.queueIssueMutation = true;
+    this.renderIndividuals();
+    this.setStatus(`${action === "confirm" ? "Confirming" : "Unflagging"} ${formatCount(group.fix_count)} fixes for ${individual}…`);
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(family)}/study/${encodeURIComponent(study)}/actions/${action === "confirm" ? "confirm" : "dismiss"}-issues`,
+        {method: "POST", body: JSON.stringify({
+          dataset_id: datasetId, expected_current_dataset_id: this.expectedCurrentDatasetId(),
+          expected_review_revision: this.expectedReviewRevision(), logical_name: artifact,
+          source_bundle_signature: state.sourceSignature,
+          issue_group: {individual, issue_type: issueType, expected_fix_count: group.fix_count},
+          note: "", user: this.getUser() || "reviewer",
+        })},
+      );
+      if (family !== this.currentFamily || study !== this.currentStudy || artifact !== this.currentArtifact
+          || datasetId !== this.currentDatasetId) return;
+      this.queueIssueHighlight = null;
+      await this.loadStudyAtDataset(result.dataset.dataset_id, {preserveAnnotationContext: true, result});
+      this.setStatus(`${action === "confirm" ? "Confirmed exclusions" : "Unflagged"}: ${formatCount(group.fix_count)} fixes · ${issueType || "Unspecified issue"} · ${individual}.`);
+    } catch (error) {
+      await this.handleEditRequestError(error);
+      this.queueIssueGroups = null;
+      this.setStatus(`Could not ${action} this group: ${error.message}`, true);
+    } finally {
+      queue.saving = false;
+      this.queueIssueMutation = false;
+      this.renderIndividuals();
+    }
+  }
+
   renderIndividualReviewQueue() {
     this.movementDiagnostics.queueRenderCalls += 1;
     this.syncPriorOkLastControl();
@@ -10738,7 +10885,7 @@ class MovementExampleApp {
         + ` • ${formatCount(queue.stagedDecisions.size)} unsaved`
       )
       : "No individuals are available.";
-    const editsLocked = !this.canPersistEdits();
+    const editsLocked = queue.saving || !this.canPersistEdits();
     this.updateIndividualDecisionSaveButton(editsLocked);
     const activePageIndex = position.page.indexOf(queue.activeIndividual);
     const navDisabled = {
@@ -10838,6 +10985,7 @@ class MovementExampleApp {
         </div>
         ${unresolvedCount ? `<div class="movement-fix-note"><strong>Unresolved issues:</strong> ${escapeHtml(formatCount(unresolvedCount))}${origins.length ? ` • ${escapeHtml(origins.join(", "))}` : ""}</div>` : ""}
         ${isActive ? `
+          ${this.queueIssueGroupsHtml(individual)}
           <div class="movement-queue-card-actions">
             <span class="movement-review-choice">
               <button type="button" class="${selectedDecision === "ok" ? "is-selected" : ""}" data-review-decision="ok" data-individual="${escapeHtml(individual)}" aria-describedby="movement-review-help-ok"${editsLocked ? " disabled" : ""}>OK</button>
@@ -14021,6 +14169,15 @@ class MovementExampleApp {
         radiusMinPixels: 9,
         radiusMaxPixels: 18,
         pickable: false,
+      }));
+    }
+    const queueHighlight = this.queueIssueHighlight;
+    if (queueHighlight?.key && queueHighlight.key === this.queueIssueGroupsKey()) {
+      layers.push(new deck.ScatterplotLayer({
+        id: "movement-queue-issue-highlight", data: queueHighlight.fixes,
+        getPosition: fix => fix.position, getLineColor: [255, 204, 40, 255],
+        filled: false, stroked: true, lineWidthMinPixels: 3,
+        getRadius: 150, radiusMinPixels: 9, radiusMaxPixels: 16, pickable: false,
       }));
     }
     const isSuspiciousPointLayer = layer => {

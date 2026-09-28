@@ -831,7 +831,13 @@ def _row_review(row: sqlite3.Row) -> dict:
         "status": status,
         "issue_type": str(row["source_outlier_issue_type"] or "").strip(),
         "comments": str(row["source_outlier_comments"] or "").strip(),
+        "issue_id": f"source:{row['fix_key']}",
     }
+    result["issues"] = [{
+        "issue_id": result["issue_id"], "status": status,
+        "issue_type": result["issue_type"], "issue_note": result["comments"],
+        "origin": "manual",
+    }]
     return {key: value for key, value in result.items() if value}
 
 

@@ -13,7 +13,7 @@ def main():
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     params = dict(spec["step"].get("parameters") or {})
     step_id = str(spec["step"].get("step_id") or "").strip()
-    from examples.movement.review_annotations import load_review_annotations
+    from examples.movement.review_annotations import load_review_annotations, row_tokens_for_scope
 
     inputs = {item["logical_name"]: item for item in spec.get("input_artifacts", [])}
     outputs = {item["logical_name"]: item for item in spec.get("output_artifacts", [])}
@@ -62,6 +62,10 @@ def main():
         "source_bundle_signature": str(params.get("source_bundle_signature") or ""),
         "materialized_rds": False,
     }
+    if params.get("action") in {"confirm_issues", "dismiss_issues"}:
+        summary["resolved_fix_count"] = len({
+            token for item in appended for token in row_tokens_for_scope(item.get("scope") or {})
+        })
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
