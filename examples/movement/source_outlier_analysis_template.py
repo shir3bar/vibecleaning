@@ -23,8 +23,8 @@ def _declared(spec: dict, section: str, logical_name: str) -> dict | None:
 def main():
     from examples.movement.anomaly_ranking import rank_individuals
 
-    spec_path = Path(os.environ["VIBECLEANING_SPEC_PATH"])
-    summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
+    spec_path = Path(os.environ["SCRUBDATA_SPEC_PATH"])
+    summary_path = Path(os.environ["SCRUBDATA_SUMMARY_PATH"])
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     attachment = _declared(spec, "input_attachments", INPUT_ATTACHMENT_NAME)
     output = _declared(spec, "output_artifacts", OUTPUT_ARTIFACT_NAME)

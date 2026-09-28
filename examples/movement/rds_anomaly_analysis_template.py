@@ -41,8 +41,8 @@ def _summary_ranking(ranking: dict) -> dict:
 def main():
     from examples.movement.anomaly_ranking import rank_individuals, score_bursts
 
-    spec = json.loads(Path(os.environ["VIBECLEANING_SPEC_PATH"]).read_text(encoding="utf-8"))
-    summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
+    spec = json.loads(Path(os.environ["SCRUBDATA_SPEC_PATH"]).read_text(encoding="utf-8"))
+    summary_path = Path(os.environ["SCRUBDATA_SUMMARY_PATH"])
     params = dict(spec["analysis"].get("parameters") or {})
     attachment = _declared(spec, "input_attachments", INPUT_ATTACHMENT_NAME)
     output = _declared(spec, "output_artifacts", OUTPUT_ARTIFACT_NAME)

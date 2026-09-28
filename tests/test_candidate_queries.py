@@ -153,7 +153,7 @@ def test_query_library_crud_and_immutable_versions(tmp_path):
         },
     )
 
-    assert query_library_path(data_root) == data_root.resolve() / ".vibecleaning" / "query_library.json"
+    assert query_library_path(data_root) == data_root.resolve() / "scrubdata" / "query_library.json"
     assert first["version"] == 1
     assert second["version"] == 2
     assert get_query(data_root, "fast_fixes", version=1)["name"] == "Fast fixes"
@@ -266,17 +266,17 @@ def test_query_library_routes(tmp_path):
 
 def test_hidden_project_name_rejected(tmp_path):
     data_root = tmp_path / "data"
-    (data_root / ".vibecleaning").mkdir(parents=True)
+    (data_root / "scrubdata").mkdir(parents=True)
 
     with pytest.raises(ValueError):
-        get_project_dir(data_root, ".vibecleaning")
+        get_project_dir(data_root, "scrubdata")
 
     app = create_app(
         data_root=data_root,
         static_root=REPO_ROOT / "examples" / "movement" / "static",
     )
     client = TestClient(app)
-    response = client.get("/api/project/.vibecleaning/state")
+    response = client.get("/api/project/scrubdata/state")
     assert response.status_code == 404
 
 

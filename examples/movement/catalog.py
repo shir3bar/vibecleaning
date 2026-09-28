@@ -2,6 +2,7 @@ from pathlib import Path
 import re
 
 from app.state import ensure_project_state, has_project_inputs, load_dataset
+from app.metadata import META_DIR_NAME, MetadataMigrationError
 
 
 FAMILY_SPECS = [
@@ -20,7 +21,7 @@ def validate_catalog_part(raw_value: object, *, label: str) -> str:
     value = raw_value.strip()
     if not value or not SAFE_PATH_PART.fullmatch(value):
         raise ValueError(f"Invalid {label}")
-    if value.startswith("."):
+    if value.startswith(".") or value.casefold() == META_DIR_NAME:
         raise ValueError(f"Invalid {label}")
     return value
 
@@ -97,13 +98,15 @@ def list_studies(data_root: Path, family_name: str) -> list[dict[str, object]]:
     family_dir = get_family_dir(data_root, family_name)
     studies = []
     for study_dir in sorted(family_dir.iterdir()):
-        if not study_dir.is_dir() or study_dir.name.startswith("."):
+        if not study_dir.is_dir() or study_dir.name.startswith(".") or study_dir.name.casefold() == META_DIR_NAME:
             continue
         if not has_project_inputs(study_dir):
             continue
         try:
             project_state = ensure_project_state(study_dir)
             dataset = load_dataset(study_dir, project_state["current_dataset_id"])
+        except MetadataMigrationError:
+            raise
         except ValueError:
             continue
         studies.append(

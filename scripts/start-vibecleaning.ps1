@@ -86,7 +86,7 @@ $env:PYTHONUTF8 = "1"
 
 Push-Location $RepositoryRoot
 try {
-    Write-Host "Preparing the local Vibecleaning environment at $EnvironmentRoot"
+    Write-Host "Preparing the local Scrub Data environment at $EnvironmentRoot"
     & uv sync --locked --no-dev
     if ($LASTEXITCODE -ne 0) {
         throw "Dependency installation failed. Check Python 3.11 availability and network/package access."

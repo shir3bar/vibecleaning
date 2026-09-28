@@ -43,7 +43,7 @@ Basemap tiles are part of the viewer; OSM feature-query tooling is not.
 - all compatible columns as color-by choices;
 - individual filtering, paged loading, tracks, points, and basemaps;
 - fix, segment, and individual manual review;
-- a compact but real Vibecleaning data graph with history and undo;
+- a compact but real Scrub Data data graph with history and undo;
 - graph-recorded CSV export; and
 - no mutation of the selected SQLite source.
 
@@ -161,7 +161,7 @@ Opening a database fingerprints its bytes and creates or resumes:
 ```text
 data/move_viz_<first-16-sha256>/
   source.sqlite
-  .vibecleaning/
+  scrubdata/
 ```
 
 `source.sqlite` is the immutable raw artifact. Upload bytes are staged on the

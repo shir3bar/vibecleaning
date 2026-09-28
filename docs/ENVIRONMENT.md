@@ -1,6 +1,6 @@
 # Environment setup
 
-Vibecleaning is a Python application. It has no Node/npm build step; the map
+Scrub Data is a Python application. It has no Node/npm build step; the map
 library and frontend assets used by the examples are served from the repository.
 
 Python 3.11 is the reference version in `environment.yml`. Newer Python
@@ -149,7 +149,7 @@ cache default is `%LOCALAPPDATA%\Vibecleaning\cache`. The macOS default is
 `~/.cache/vibecleaning`.
 
 Full and slim movement load the multi-user registry once from
-`<data-root>/.vibecleaning/users.json`. Bootstrap it before first startup:
+`<data-root>/scrubdata/users.json`. Bootstrap it before first startup:
 
 ```bash
 uv run python -m app.auth_cli bootstrap admin --display-name "Review Administrator"

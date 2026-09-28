@@ -7,8 +7,8 @@ REVIEW_SIDECAR_NAME = "movement_review_annotations.json"
 
 
 def main():
-    spec_path = Path(os.environ["VIBECLEANING_SPEC_PATH"])
-    summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
+    spec_path = Path(os.environ["SCRUBDATA_SPEC_PATH"])
+    summary_path = Path(os.environ["SCRUBDATA_SUMMARY_PATH"])
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     params = dict(spec["analysis"].get("parameters") or {})
     from examples.movement.review_annotations import export_reviewed_csv

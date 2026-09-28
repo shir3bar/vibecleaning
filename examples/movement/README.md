@@ -1,7 +1,7 @@
 # Movement Outlier Review Example
 
 This example app is the full movement-ecology development playground layered on
-top of Vibecleaning's generic DAG engine. The user-facing restricted profile is
+top of Scrub Data's generic DAG engine. The user-facing restricted profile is
 [`examples/slim_movement/`](../slim_movement/README.md); both applications reuse
 the review routes and viewer core implemented here. Development-only candidate
 queries, burst feature-space projection, and OSM enrichment live in
@@ -48,7 +48,7 @@ Movement sample data is organized into three top-level family folders:
 - `data/movement_clean/`
 - `data/movement_hightemporalres/`
 
-Each direct child study folder is its own lineage root and owns its own `.vibecleaning/`.
+Each direct child study folder is its own lineage root and owns its own `scrubdata/`.
 If a study has multiple CSVs, keep them together in the same study folder so they intentionally share lineage.
 
 The starter app and trajectory example do not use this nested study catalog. They stay on the generic top-level `data/<project>/` contract.

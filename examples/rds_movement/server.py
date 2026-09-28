@@ -43,5 +43,5 @@ if __name__ == "__main__":
 
     if SHARED_LOCKING == "disabled":
         print(f"\nWARNING: {COOPERATIVE_MODE_WARNING}")
-    print(f"\nVibecleaning RDS Movement: http://{HOST}:{PORT}")
+    print(f"\nScrub Data RDS Movement: http://{HOST}:{PORT}")
     run_server(app, host=HOST, port=PORT, log_level="info")

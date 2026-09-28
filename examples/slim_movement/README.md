@@ -67,5 +67,5 @@ deployment requires `HOST=0.0.0.0`, firewall the port so only the HTTPS proxy
 can reach it.
 
 Sessions exist only in server process memory. Account hashes live in
-`data/.vibecleaning/users.json`; keep that operator-owned file private and do not
+`data/scrubdata/users.json`; keep that operator-owned file private and do not
 commit it.

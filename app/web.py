@@ -13,6 +13,7 @@ from .execution import create_analysis, create_step, set_current_head, undo_to_p
 from .osm import OSMFetchError, OSMValidationError, fetch_osm_features, normalize_osm_request
 from .preview import preview_artifact
 from .query_library import get_query, list_queries, save_query
+from .metadata import META_DIR_NAME, MetadataMigrationError
 from .runtime import COOPERATIVE_MODE_WARNING, shared_locking_mode, shared_locking_scope
 from .state import (
     ProjectStateError,
@@ -46,7 +47,7 @@ def validate_path_part(raw_value: object, *, label: str) -> str:
 
 def get_project_dir(data_root: Path, project_name: str) -> Path:
     project = validate_path_part(project_name, label="project")
-    if project.startswith("."):
+    if project.startswith(".") or project.casefold() == META_DIR_NAME:
         raise ValueError("Invalid project")
     path = resolve_project_dir(data_root, project).resolve()
     if data_root.resolve() not in path.parents:
@@ -79,6 +80,11 @@ def create_app(
     resolved_index_path = (index_path or (static_root / "index.html")).resolve()
 
     app = FastAPI()
+
+    @app.exception_handler(MetadataMigrationError)
+    async def metadata_migration_error(request: Request, exc: MetadataMigrationError):
+        return json_error(str(exc), 409)
+
     app.state.data_root = data_root
     app.state.static_root = static_root
     app.state.shared_locking = shared_locking_mode(shared_locking)

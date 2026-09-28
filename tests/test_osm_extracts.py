@@ -494,7 +494,7 @@ def test_cache_paths_keys_and_metadata_contract_are_deterministic(tmp_path):
 
     assert revision == same_revision
     assert geofabrik_registry_paths(tmp_path)["index"] == (
-        tmp_path / ".vibecleaning/osm/registry/geofabrik/index-v1.json"
+        tmp_path / "scrubdata/osm/registry/geofabrik/index-v1.json"
     )
     assert geofabrik_source_paths(
         tmp_path,
@@ -502,7 +502,7 @@ def test_cache_paths_keys_and_metadata_contract_are_deterministic(tmp_path):
         source_revision=revision,
     )["pbf"] == (
         tmp_path
-        / ".vibecleaning"
+        / "scrubdata"
         / "osm"
         / "sources"
         / "geofabrik"
@@ -973,7 +973,7 @@ def test_pbf_extraction_rejects_source_without_complete_extent_coverage(tmp_path
     with pytest.raises(OSMExtractSourceError, match="coverage"):
         extract_context_feature_cache(tmp_path, source_cache, extent)
 
-    assert not list((tmp_path / ".vibecleaning" / "osm" / "derived").rglob("*"))
+    assert not list((tmp_path / "scrubdata" / "osm" / "derived").rglob("*"))
 
 
 def test_multi_source_cached_features_merge_completed_road_and_railway_layers(tmp_path):

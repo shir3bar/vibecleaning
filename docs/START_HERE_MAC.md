@@ -1,4 +1,4 @@
-# Mac: install and open Vibecleaning
+# Mac: install and open Scrub Data
 
 These steps open the RDS app with the **two MoveTraits studies included in Git**.
 Use **Terminal**. Run each block in order; if it fails, stop and copy the error.
@@ -70,3 +70,7 @@ step 4.
 
 Shared folders and team accounts: [IT guide](IT_DEPLOYMENT_REQUIREMENTS.md).
 App controls: [review manual](movement-review-manual.md).
+
+**Upgrading an existing installation?** Stop all old app instances first. Saved
+accounts and studies are converted automatically to `scrubdata/`, with the old
+history retained as a backup. See [upgrade and rollback](SCRUBDATA_MIGRATION.md).

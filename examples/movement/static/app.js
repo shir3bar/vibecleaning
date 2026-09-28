@@ -8536,7 +8536,7 @@ class MovementExampleApp {
         if (remoteHead && remoteHead !== knownHead) {
           const viewContext = this.captureDatasetViewContext();
           await this.loadStudy({ preferredDatasetId: remoteHead, viewContext });
-          this.setStatus("A change from another Vibecleaning instance was loaded.");
+          this.setStatus("A change from another Scrub Data instance was loaded.");
         } else {
           await this.loadEditLockProfile();
           this.setStatus("Review assignment or editor control changed on another instance.");
@@ -12196,7 +12196,7 @@ class MovementExampleApp {
 
     const sourceFlaggedCount = (this.data.fixes || []).filter(isSourceOnlyFlaggedFix).length;
     const sourceFlagNote = sourceFlaggedCount
-      ? `<div class="movement-legend-note">Thin faded sections were flagged in the source data (${escapeHtml(formatCount(sourceFlaggedCount))} loaded fixes); they remain analytically included until confirmed in Vibecleaning.</div>`
+      ? `<div class="movement-legend-note">Thin faded sections were flagged in the source data (${escapeHtml(formatCount(sourceFlaggedCount))} loaded fixes); they remain analytically included until confirmed in Scrub Data.</div>`
       : "";
     const suspiciousCount = Number(this.data.suspiciousMatchingFixCount)
       || (this.data.fixes || []).filter(fix => fix.review?.status === "suspected").length;
@@ -21163,7 +21163,7 @@ function movementColorFieldDescription(field) {
     turn_angle_deg: "Signed change in WGS84 geodesic bearing at this fix, using the preceding and following fixes.",
     [GPS_SPIKE_COLOR_FIELD_KEY]: `Colors outbound step length. A filter match requires both adjacent steps above the distance threshold and |turn angle| at least ${DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG}° unless changed.`,
     [STATIONARITY_COLOR_FIELD_KEY]: "Highlights fixes in stationary periods using the radius, minimum duration and maximum gap below. Matches are review candidates, not confirmed errors.",
-    is_outlier: "Raw boolean outlier result supplied by move2utils. It is source data, not Vibecleaning review state.",
+    is_outlier: "Raw boolean outlier result supplied by move2utils. It is source data, not Scrub Data review state.",
   };
   if (descriptions[key]) return descriptions[key];
   return `Source column ${field?.label || key || "value"}, displayed without changing its source meaning.`;

@@ -33,5 +33,5 @@ register_move_viz_routes(
 if __name__ == "__main__":
     import uvicorn
 
-    print(f"\n  Vibecleaning Move Viz: http://{HOST}:{PORT}\n")
+    print(f"\n  Scrub Data Move Viz: http://{HOST}:{PORT}\n")
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")

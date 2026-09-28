@@ -45,8 +45,8 @@ def subtract_range(run, removed_ranges):
 
 
 def main():
-    spec_path = Path(os.environ["VIBECLEANING_SPEC_PATH"])
-    summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
+    spec_path = Path(os.environ["SCRUBDATA_SPEC_PATH"])
+    summary_path = Path(os.environ["SCRUBDATA_SUMMARY_PATH"])
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     params = dict(spec["step"].get("parameters") or {})
     step_id = str(spec["step"].get("step_id") or "").strip()

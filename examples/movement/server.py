@@ -43,5 +43,5 @@ if __name__ == "__main__":
 
     if SHARED_LOCKING == "disabled":
         print(f"\n  WARNING: {COOPERATIVE_MODE_WARNING}")
-    print(f"\n  Vibecleaning Movement Example: http://{HOST}:{PORT}\n")
+    print(f"\n  Scrub Data Movement Example: http://{HOST}:{PORT}\n")
     run_server(app, host=HOST, port=PORT, log_level="info")

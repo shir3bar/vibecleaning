@@ -1,4 +1,4 @@
-# Vibecleaning
+# Scrub Data: A Framework for Reproducible Data Curation with AI Coding Agents
 
 **To install and open the movement review app, start here:**
 
@@ -8,42 +8,39 @@
 Each guide covers getting the app through Git, creating a login, and reopening
 it later, using the two included MoveTraits studies.
 
-## Developer reference
 
-Vibecleaning is a small scaffold for local data apps backed by a reproducible dataset DAG.
+<p align="center">
+<!-- <img width="1672" height="941" alt="scrubdatalogo" src="https://github.com/user-attachments/assets/6cbe85f4-746e-4041-a711-4a3b961dab4d" /> -->
+<img width="650" alt="A logo for Scrub Data. It is a parody of the Scrub Daddy logo." src="https://github.com/user-attachments/assets/6cbe85f4-746e-4041-a711-4a3b961dab4d" />
+</p>
 
-The default workflow is:
+**What is data curation?** Data curation involves collecting, cleaning, and joining raw data sources to a common format. Most real-world machine learning or data science projects involve data curation to some extent in order to get data ready for analysis.
 
-1. Put input files in `data/<project>/`.
-2. Run `python server.py`.
-3. Ask Codex to extend the starter app in `server.py` and `static/`.
-4. Use `examples/trajectory/` only as a reference.
+**What are AI coding agents?** Agents like Codex, Claude Code, or Opencode wrap an LLM and allow it to execute _tool calls_: in addition to writing code, the LLM can invoke external programs a like a command-line interface or Python interpreter, giving it the ability to take actions on the user's behalf.
 
-Environment installation:
+**Why did we create this repo?** We have been experimenting with using agents for data cleaning and curation, and they are pretty great. It is very quick to write a script that, for example, reads in a raw data file, parses and visualizes its contents, and makes modifications according to a natural language prompt. There are risks, however---because agents can modify files themselves, it may be impossible to trace or reproduce all the changes that they make. So we came up with a framework that adds a layer of reproducibility to data curation with coding agents. It works like this:
 
-```bash
-python -m pip install uv
-uv sync --locked
-```
+<p align="center">
+<img width="85%" alt="scrubdata" src="https://github.com/user-attachments/assets/06b2b62e-04da-4b35-9f0d-eecd24d94a5f" />
+</p>
 
-See [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) for uv commands, standard venv,
-Conda, minimal `move_viz`, verification, and configuration instructions.
+The main user-facing process is an interactive loop with an agent and a browser-based graphical user interface (left). We use the agent to both help us perform data modifications as well as to create interactive visualization components that allow us to verify any data changes that were made. The agent does not touch the data directly, however; dataset modifications are mediated through a REST API that separates agents and raw data (center). On the backend, proposed data modifications are recorded in an executable data provenance graph, maintaining the full data version history in a reproducible manner (right). This version history is saved alongside the dataset, allowing any dataset version to be reconstructed from the raw data by playing forward the transformations stored in the graph, and providing a record of all modifications for posterity. Altogether, we call this framework **Scrub Data**: a **sc**affold for building data apps backed by a **r**eprod**u**ci**b**le data graph.
 
-For a shared institutional deployment, see the
-[University IT deployment requirements](docs/IT_DEPLOYMENT_REQUIREMENTS.md).
-Windows users can start either movement profile with the supported launcher:
+## Framework developer reference
 
-```powershell
-.\scripts\start-vibecleaning.ps1 -Profile Rds -DataRoot "\\server\share\movement"
-```
+The Scrub Data framework is implemented as a lightweight web application that is _designed to be modified by AI agents_ in response to user requests. This is an important design decision that is unique to agentic workflows—--the software itself is malleable and is meant to be customized by each individual user to suit their needs. You will clone this repository, and ask the agent to help you customize it in real time according to your visualization and curation needs.
 
-Key rules:
+Agents can perform data modifications, but are instructed to do so by submitting executable transformations through the API. The agents gather this context upon initialization so you don't have to worry about giving them instructions. Submitted transformations are logged in a directed acyclic graph that represents the full version history of a project and can be easily be used to reproduce any previous version of the dataset.
 
-- Top-level non-hidden files under `data/<project>/` become the initial dataset automatically.
-- Raw input files are immutable.
-- `analysis` records exploratory work and does not create a dataset.
-- `step` creates a new dataset node.
-- Domain logic belongs in the starter app or an example app, not in `app/`.
+To begin working with the codebase:
+
+0. Clone this repository.
+1. Put your raw data files in `data/<project>/`.
+2. Launch an agent instance from your terminal from inside the codebase, for example by running `codex`, `claude code`, or `opencode`.
+3. Launch the web application from another terminal window with `python server.py`, and direct your browser to the appropriate port on `localhost` (8420 by default).
+4. Ask your agent to extend the starter app in `server.py` and `static/` according to your needs.
+
+See `examples/trajectory/` for a reference starter app built for animal movement (GPS) data.
 
 Repository layout:
 
@@ -51,46 +48,21 @@ Repository layout:
 app/                  generic lineage, execution, preview, and HTTP internals
 server.py             default starter app server
 static/               default starter app frontend
-examples/trajectory/   richer reference app
-examples/movement/     full movement development playground
-examples/slim_movement/ user-facing movement review app
-examples/move_viz/      lightweight SQLite movement viewer
-data/<project>/        project inputs plus .vibecleaning state
-docs/                  minimal contracts for agents
+examples/trajectory/  reference starter app
+examples/movement/    shared movement review implementation
+examples/slim_movement/ CSV movement review
+examples/rds_movement/  RDS movement review
+data/<project>/       project inputs plus scrubdata state
+docs/                 minimal contracts for agents
 ```
 
-Reference example:
-
-```bash
-python examples/trajectory/server.py
-```
-
-Slim movement review:
-
-```bash
-uv run python -m app.auth_cli bootstrap admin --display-name "Review Administrator"
-uv run python -m app.auth_cli add reviewer1 --display-name "Taylor Reviewer" --role reviewer
-uv run python examples/slim_movement/server.py
-```
-
-Shared installations can configure authoritative data, local disposable caches,
-and cross-machine locking with `VIBECLEANING_DATA_ROOT`,
-`VIBECLEANING_CACHE_ROOT`, and `VIBECLEANING_SHARED_LOCKING`.
-
-See [examples/slim_movement/README.md](examples/slim_movement/README.md) for
-account management, reviewer/editor workflow, and secure HTTPS deployment guidance.
-
-SQLite movement viewer:
-
-```bash
-python examples/move_viz/server.py
-```
-
-Contracts:
+These contracts provide instructions for how the agent should behave and what actions it should take:
 
 - [AGENTS.md](AGENTS.md)
-- [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/STATE_MODEL.md](docs/STATE_MODEL.md)
 - [docs/EXECUTION_CONTRACT.md](docs/EXECUTION_CONTRACT.md)
-- [docs/multi-user-movement-review-design.md](docs/multi-user-movement-review-design.md)
+
+Movement deployment and operations: [IT guide](docs/IT_DEPLOYMENT_REQUIREMENTS.md).
+Development setup: [environment](docs/ENVIRONMENT.md) and [tests](docs/TESTING.md).
+Upgrading existing review data: [Scrub Data migration](docs/SCRUBDATA_MIGRATION.md).

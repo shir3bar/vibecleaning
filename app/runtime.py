@@ -118,13 +118,15 @@ def _probe_writable_directory(path: Path, *, label: str, create: bool) -> Path:
 
 
 def validate_data_root(path: Path) -> Path:
+    from .metadata import metadata_dir
+
     path = _normalized_path(path)
     if not path.exists():
         raise RuntimeConfigurationError(f"Data root does not exist: {path}")
     if not path.is_dir():
         raise RuntimeConfigurationError(f"Data root is not a directory: {path}")
     return _probe_writable_directory(
-        path / ".vibecleaning",
+        metadata_dir(path),
         label="Data-root metadata directory",
         create=True,
     ).parent

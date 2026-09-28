@@ -830,7 +830,9 @@ def apply_tiny_footprint_source_guardrail(
 def osm_cache_root(data_root: Path, *, cache_root: Path | None = None) -> Path:
     if cache_root is not None:
         return Path(cache_root)
-    return Path(data_root) / ".vibecleaning" / "osm"
+    from app.metadata import metadata_dir
+
+    return metadata_dir(Path(data_root)) / "osm"
 
 
 def geofabrik_registry_paths(data_root: Path, *, cache_root: Path | None = None) -> dict[str, Path]:

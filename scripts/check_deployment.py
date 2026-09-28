@@ -44,7 +44,9 @@ def checked(response):
 
 def hashes(root, *, include_state=False):
     return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in root.rglob("*") if path.is_file() and (include_state or ".vibecleaning" not in path.parts)}
+            for path in root.rglob("*") if path.is_file() and (include_state or not
+                {".vibecleaning", "scrubdata", ".vibecleaning-backup", ".scrubdata-migrating",
+                 ".scrubdata-migration.lock"}.intersection(path.parts))}
 
 
 def profile_check(root, profile):

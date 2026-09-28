@@ -75,4 +75,5 @@ commit or release ID.
 - [ ] Keep local installations on the same versioned release.
 
 Raw inputs remain immutable, lineage state stays under each project's
-`.vibecleaning` directory, and rollback is returning clients to the prior release.
+`scrubdata` directory. Returning to a version that uses `.vibecleaning` also
+requires the [metadata rollback steps](SCRUBDATA_MIGRATION.md#rollback).

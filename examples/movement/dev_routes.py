@@ -68,6 +68,7 @@ MOVEMENT_OSM_ENRICHMENT_MODULES = (
     "examples.movement.summary",
     "app.filesystem",
     "app.runtime",
+    "app.metadata",
     "app.osm",
     "examples.movement.osm_context",
     "examples.movement.osm_extracts",

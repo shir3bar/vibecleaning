@@ -225,7 +225,7 @@ def test_offline_osm_enrichment_cli_writes_csv_metadata_and_direct_cache_root(tm
     assert output_csv.is_file()
     assert metadata_json.is_file()
     assert (cache_root / "registry" / "geofabrik" / "index-v1.json").is_file()
-    assert not (cache_root / ".vibecleaning").exists()
+    assert not (cache_root / "scrubdata").exists()
     progress_events = [
         json.loads(line)
         for line in result.stderr.splitlines()

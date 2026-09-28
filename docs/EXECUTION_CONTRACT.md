@@ -46,14 +46,18 @@ Request rules:
 
 Script environment:
 
-- `VIBECLEANING_SPEC_PATH`
-- `VIBECLEANING_SUMMARY_PATH`
+- `SCRUBDATA_SPEC_PATH`
+- `SCRUBDATA_SUMMARY_PATH`
+
+The runner also supplies the legacy `VIBECLEANING_SPEC_PATH` and
+`VIBECLEANING_SUMMARY_PATH` names with the same values so saved scripts remain
+executable without changing their recorded source.
 
 Script responsibilities:
 
-- Read the spec JSON from `VIBECLEANING_SPEC_PATH`.
+- Read the spec JSON from `SCRUBDATA_SPEC_PATH`.
 - Write declared outputs to the declared paths.
-- Write a machine-readable summary to `VIBECLEANING_SUMMARY_PATH`.
+- Write a machine-readable summary to `SCRUBDATA_SUMMARY_PATH`.
 - Exit non-zero on failure.
 
 Framework responsibilities:

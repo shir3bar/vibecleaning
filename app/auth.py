@@ -17,9 +17,10 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .filesystem import atomic_write_json
+from .metadata import META_DIR_NAME, metadata_dir
 
 
-AUTH_DIR_NAME = ".vibecleaning"
+AUTH_DIR_NAME = META_DIR_NAME
 USERS_FILE_NAME = "users.json"
 SESSION_COOKIE = "vibecleaning_session"
 SESSION_SECONDS = 12 * 60 * 60
@@ -58,7 +59,7 @@ class _Session:
 
 
 def users_path(data_root: Path) -> Path:
-    return data_root.resolve() / AUTH_DIR_NAME / USERS_FILE_NAME
+    return metadata_dir(data_root) / USERS_FILE_NAME
 
 
 def normalize_username(value: object) -> str:

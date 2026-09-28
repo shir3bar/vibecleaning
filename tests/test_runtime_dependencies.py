@@ -12,7 +12,7 @@ def test_httpx_is_a_locked_runtime_dependency():
     # A developer environment masks this failure when httpx is dev-only.
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     lock = tomllib.loads((ROOT / "uv.lock").read_text())
-    package = next(p for p in lock["package"] if p["name"] == "vibecleaning")
+    package = next(p for p in lock["package"] if p["name"] == "scrubdata")
 
     assert "httpx" in project["project"]["dependencies"]
     assert "httpx" not in project["dependency-groups"]["dev"]

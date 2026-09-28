@@ -1,5 +1,5 @@
 [project]
-name = "vibecleaning"
+name = "scrubdata"
 version = "0.1.0"
 description = "Local data-cleaning apps backed by a reproducible dataset DAG"
 readme = "README.md"

@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .filesystem import atomic_write_json, exclusive_file_lock
-from .state import META_DIR_NAME, ProjectStateError
+from .state import ProjectStateError
+from .metadata import metadata_dir
 
 
 SAFE_QUERY_ID = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -104,7 +105,7 @@ def now_iso() -> str:
 
 
 def query_library_path(data_root: Path) -> Path:
-    return data_root.resolve() / META_DIR_NAME / "query_library.json"
+    return metadata_dir(data_root) / "query_library.json"
 
 
 def load_query_library(data_root: Path) -> dict:

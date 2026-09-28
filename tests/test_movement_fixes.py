@@ -307,13 +307,13 @@ def test_build_movement_fixes_supports_single_individual_and_truncation(tmp_path
 
 def test_movement_summary_does_not_write_full_response_disk_caches(tmp_path):
     project_dir = tmp_path / "study"
-    (project_dir / ".vibecleaning").mkdir(parents=True)
+    (project_dir / "scrubdata").mkdir(parents=True)
     csv_path = write_movement_csv(project_dir / "movement.csv")
 
     build_movement_overview(csv_path)
     build_movement_fixes(csv_path, individual="alpha")
 
-    assert not (project_dir / ".vibecleaning" / "cache" / "movement_summary").exists()
+    assert not (project_dir / "scrubdata" / "cache" / "movement_summary").exists()
 
 
 def test_movement_summary_memory_caches_are_strictly_bounded():

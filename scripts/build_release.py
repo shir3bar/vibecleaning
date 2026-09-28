@@ -36,7 +36,7 @@ def build(output):
         relative = path.relative_to(ROOT)
         if relative.parts[0] not in TREES and str(relative) not in ROOT_FILES:
             continue
-        if any(part.startswith(".") or part in {"__pycache__", "node_modules", "sample_data"}
+        if any(part.startswith(".") or part in {"__pycache__", "node_modules", "sample_data", "scrubdata"}
                for part in relative.parts) and str(relative) != ".python-version":
             continue
         if path.is_symlink():
@@ -51,7 +51,7 @@ def build(output):
                 "identity": "SHA-256 of packaged working-tree files, including intended local changes",
                 "files": hashes}
     output.mkdir(parents=True, exist_ok=True)
-    release_path = output / f"vibecleaning-{release_id}.zip"
+    release_path = output / f"scrubdata-{release_id}.zip"
     archive(release_path, files, manifest)
     fixture = ROOT / "tests/fixtures/deployment/data"
     data = {path.relative_to(fixture).as_posix(): path.read_bytes()
@@ -59,7 +59,7 @@ def build(output):
     data_manifest = {"release_id": release_id, "synthetic": True,
                      "studies_per_profile": 1, "individuals_per_study": 2, "fixes_per_study": 24,
                      "files": {name: digest(content) for name, content in sorted(data.items())}}
-    data_path = output / f"vibecleaning-{release_id}-test-data.zip"
+    data_path = output / f"scrubdata-{release_id}-test-data.zip"
     archive(data_path, data, data_manifest)
     checksums = {path.name: digest(path.read_bytes()) for path in (release_path, data_path)}
     (output / f"{release_id}-sha256.json").write_text(json.dumps(checksums, indent=2) + "\n", encoding="utf-8")

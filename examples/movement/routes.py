@@ -383,6 +383,7 @@ EXPORT_REVIEWED_RDS_SCRIPT = build_self_contained_script(
         *MOVEMENT_REVIEW_MODULES,
         "app.filesystem",
         "app.runtime",
+        "app.metadata",
         "app.state",
         "examples.movement.rds_index",
         "examples.movement.rds_export",

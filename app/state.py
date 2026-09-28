@@ -5,9 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .filesystem import atomic_write_json
-
-
-META_DIR_NAME = ".vibecleaning"
+from .metadata import META_DIR_NAME, metadata_dir
 
 
 class ProjectStateError(ValueError):
@@ -62,7 +60,7 @@ def normalize_dataset(dataset: dict) -> dict:
 
 
 def project_paths(project_dir: Path) -> dict[str, Path]:
-    meta_dir = project_dir / META_DIR_NAME
+    meta_dir = metadata_dir(project_dir)
     return {
         "meta": meta_dir,
         "project": meta_dir / "project.json",
@@ -163,7 +161,7 @@ def list_projects(data_root: Path) -> list[dict[str, object]]:
         return projects
 
     for project_dir in sorted(data_root.iterdir()):
-        if not project_dir.is_dir() or project_dir.name.startswith("."):
+        if not project_dir.is_dir() or project_dir.name.startswith(".") or project_dir.name.casefold() == META_DIR_NAME:
             continue
         if not has_project_inputs(project_dir):
             continue

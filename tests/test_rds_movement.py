@@ -205,7 +205,7 @@ def test_rds_filter_preview_returns_exact_scope_count_without_creating_step(tmp_
         "set_names": [],
     }
     before = ensure_project_state(study_dir)
-    step_count_before = len(list((study_dir / ".vibecleaning" / "steps").glob("*/step.json")))
+    step_count_before = len(list((study_dir / "scrubdata" / "steps").glob("*/step.json")))
 
     for individuals in ([], [overview["individuals"][0]]):
         filter_spec = {**base_filter, "individuals": individuals}
@@ -230,7 +230,7 @@ def test_rds_filter_preview_returns_exact_scope_count_without_creating_step(tmp_
 
     after = ensure_project_state(study_dir)
     assert after["current_dataset_id"] == before["current_dataset_id"]
-    assert len(list((study_dir / ".vibecleaning" / "steps").glob("*/step.json"))) == step_count_before
+    assert len(list((study_dir / "scrubdata" / "steps").glob("*/step.json"))) == step_count_before
 
 
 def test_pre_sum_source_ranking_is_not_treated_as_a_source_total_ranking():

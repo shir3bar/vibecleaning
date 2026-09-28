@@ -1,7 +1,7 @@
 # Move Viz
 
 `move_viz` is a lightweight, user-facing SQLite movement viewer. It opens a
-local database through the browser instead of presenting Vibecleaning projects
+local database through the browser instead of presenting Scrub Data projects
 or datasets.
 
 It provides:
@@ -16,7 +16,7 @@ It provides:
 - lightweight review overlays, so selecting or flagging one individual does
   not rebuild every loaded point and track
 - explicit manual flagging of fixes, two-click track segments, or entire
-  individuals as reproducible Vibecleaning graph steps
+  individuals as reproducible Scrub Data graph steps
 - a compact history control for loading earlier datasets or undoing the current
   step
 - export of manually flagged fixes as CSV, recorded as a graph analysis

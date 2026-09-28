@@ -93,7 +93,7 @@ approved saved definitions; only editors may create or revise the reusable libra
 
 ## Authentication and actor attribution
 
-Operator-managed users live at `data/.vibecleaning/users.json`. The file contains
+Operator-managed users live at `data/scrubdata/users.json`. The file contains
 stable user IDs, normalized usernames, display names, roles, enabled state,
 authentication versions, and salted scrypt password hashes. A CLI bootstraps the
 first editor and adds, lists, enables, disables, or resets users. Changes take
@@ -129,7 +129,7 @@ display-name snapshot.
 
 ## Review state and lifecycle
 
-Each study stores a versioned `.vibecleaning/reviews.json`. It contains review
+Each study stores a versioned `scrubdata/reviews.json`. It contains review
 history, the active review, editor-control state, and an append-only workflow-event
 log. Writes are atomic and occur while holding the same per-study mutation lock
 used for head changes.

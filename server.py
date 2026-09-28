@@ -35,5 +35,5 @@ if __name__ == "__main__":
 
     if SHARED_LOCKING == "disabled":
         print(f"\n  WARNING: {COOPERATIVE_MODE_WARNING}")
-    print(f"\n  Vibecleaning Starter App: http://{HOST}:{PORT}\n")
+    print(f"\n  Scrub Data Starter App: http://{HOST}:{PORT}\n")
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")

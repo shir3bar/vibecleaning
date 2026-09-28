@@ -48,7 +48,7 @@ def clear_rds_cache(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Manage disposable Vibecleaning caches")
+    parser = argparse.ArgumentParser(description="Manage disposable Scrub Data caches")
     parser.add_argument("--cache-root", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
     clear_rds = commands.add_parser("clear-rds", help="Remove local RDS SQLite indexes")

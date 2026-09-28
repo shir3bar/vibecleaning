@@ -1,4 +1,4 @@
-# Vibecleaning: IT deployment reference
+# Scrub Data: IT deployment reference
 
 **To install and open the app, follow [Windows](START_HERE_WINDOWS.md) or
 [Mac](START_HERE_MAC.md).** Each guide covers Git installation, login and startup.
@@ -9,7 +9,7 @@ backups. For the controls inside the app, use the
 
 ## Deployment model
 
-Each reviewer runs the same versioned Vibecleaning release locally on a
+Each reviewer runs the same versioned Scrub Data release locally on a
 university-managed Windows, macOS, or Linux computer. Every instance connects to
 one university file share containing authoritative inputs, lineage, review state,
 accounts, and exports. The server listens only on `127.0.0.1`; no central web
@@ -51,7 +51,7 @@ macOS:    /Volumes/research/movement-data
 Linux:    /mnt/research/movement-data
 ```
 
-University share ACLs protect `<data-root>/.vibecleaning/users.json`. A POSIX
+University share ACLs protect `<data-root>/scrubdata/users.json`. A POSIX
 `chmod` value is not a Windows security boundary.
 
 ## Runtime configuration
@@ -110,9 +110,9 @@ The normal installation uses Git, as shown in the quick-start guides above.
 The following packaging procedure is an alternative for an IT-managed handoff.
 
 Build a candidate with `python scripts/build_release.py`. This packages the
-current app, including reviewed local changes, as `dist/vibecleaning-p0-*.zip`.
+current app, including reviewed local changes, as `dist/scrubdata-p0-*.zip`.
 It also creates a small synthetic test-data ZIP and a SHA-256 file. Research
-data, accounts, caches, and live `.vibecleaning` state are excluded. The
+data, accounts, caches, and live `scrubdata` or legacy metadata are excluded. The
 `release-manifest.json` inside each ZIP identifies the candidate by its packaged
 file hashes and records the base Git commit; a dirty branch name alone is not
 the release identity. Rebuild after any code change, and test the new identity.
@@ -173,14 +173,14 @@ uv run --no-sync python -m app.auth_cli --data-root "<data-root>" list
 ```
 
 An editor assigns studies to reviewers through the existing review interface.
-Keep one registry at `<data-root>/.vibecleaning/users.json`; all clients must
+Keep one registry at `<data-root>/scrubdata/users.json`; all clients must
 point to that same root. Use `reset-password <username>` or `disable <username>`
 with the same `--data-root` for account administration. Do not bootstrap over an
 existing registry or distribute it with the public test bundle.
 
 CSV studies live at `<data-root>/movement_raw/<study-name>/*.csv`; RDS studies
-at `<data-root>/movement_rds/<study-name>/*.rds`. Keep each study's entire hidden
-`.vibecleaning` directory alongside its original inputs. The synthetic data root
+at `<data-root>/movement_rds/<study-name>/*.rds`. Keep each study's entire
+`scrubdata` directory alongside its original inputs. The synthetic data root
 already has both layouts. Use an independent copy for each personal acceptance
 run, and a separate disposable copy for the two-machine share pilot.
 
@@ -219,7 +219,7 @@ uv run --no-sync python -m app.cache_cli --cache-root "<local-cache-root>" clear
 ```
 
 Stop clients using that local cache before clearing it. Never delete a study's
-`.vibecleaning` directory to fix a cache problem. The candidate rebuilds older
+`scrubdata` directory to fix a cache problem. The candidate rebuilds older
 RDS indexes to include report metadata; the first load can therefore be slower.
 
 ## Troubleshooting
@@ -250,7 +250,7 @@ RDS indexes to include report metadata; the first load can therefore be slower.
 
 Arrange a period with no writers and stop all clients before copying. Back up
 the **entire data root**, including root account/workflow state, every raw input,
-and every study's hidden `.vibecleaning` directory (lineage, annotations, scripts,
+and every study's `scrubdata` directory (lineage, annotations, scripts,
 specifications, summaries and generated exports). Back up the release ZIP and
 checksum separately. Local Python environments and RDS caches are disposable.
 Protect account files under the same access rules as the originals.
@@ -267,8 +267,9 @@ generate reports and export again. Record the restored head and compare source
 hashes. A copied directory alone is not proof of a working restore.
 
 For rollback, stop all clients, take another complete backup, and switch every
-client to the previous versioned release and its environment. No lineage format
-change is introduced by this candidate. Verify that older release against a
+client to the previous versioned release and its environment. To return to a
+version that uses `.vibecleaning`, follow the [metadata rollback steps](SCRUBDATA_MIGRATION.md#rollback).
+Verify that older release against a
 copy of current state before resuming writes; clear only disposable caches if
 needed. Restore an earlier authoritative snapshot only as a coordinated recovery
 decision, since doing so discards acknowledged work after that snapshot.

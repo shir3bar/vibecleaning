@@ -12,3 +12,7 @@ __pycache__/
 data/**/.vibecleaning/
 /data/move_viz_*/
 /examples/move_viz/sample_data/Kays_*.sqlite
+data/**/scrubdata/
+data/**/.vibecleaning-backup/
+data/**/.scrubdata-migrating/
+data/**/.scrubdata-migration.lock

@@ -42,7 +42,7 @@ def _find_user(users: list[dict], username: str) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Manage Vibecleaning local users")
+    parser = argparse.ArgumentParser(description="Manage Scrub Data local users")
     parser.add_argument("--data-root", type=Path)
     subparsers = parser.add_subparsers(dest="command", required=True)
 

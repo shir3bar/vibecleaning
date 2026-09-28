@@ -78,3 +78,12 @@ Validation on 28 September 2026: a fresh copy containing only tracked files and
 these changes, with a new locked Python 3.11.16 environment on Linux, passed
 423 tests in five minutes. The only skip was the Windows default-path check.
 All 25 browser cases passed, including Car Talk and CSV/RDS stationarity reruns.
+
+Scrub Data merge validation on 28 September 2026 (Linux aarch64, Python 3.11.16):
+435 passed, with only the Windows default-path check skipped. This includes all
+25 browser cases and 12 metadata-conversion cases covering saved decisions,
+reports/exports, legacy script execution, concurrent opening, interrupted
+conversion and conflicting histories. A fresh `uv sync --locked --no-dev`
+environment also passed `scripts/check_deployment.py` for CSV and RDS, including
+export/reopen, raw-data preservation, cache rebuild and backup/restore. These
+local checks do not establish Windows/Mac upgrade or university-share readiness.

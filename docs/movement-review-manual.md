@@ -34,7 +34,7 @@ the help marker beside the active variable for its definition.
   selected distance and the absolute turn angle to exceed its configured minimum.
   Its color scale displays the outbound step length.
 - **is_outlier** is the raw boolean result supplied by move2utils in an RDS file.
-  It is source data, not Vibecleaning review state.
+  It is source data, not Scrub Data review state.
 
 ## 3. Filter and inspect possible outliers
 
@@ -54,12 +54,12 @@ while temporarily graying other context.
 
 - **Temporary threshold match:** colored against gray context; not yet reviewed.
 - **Checked fix:** selected locally for inspection or an action.
-- **Suspected fix:** saved in a Vibecleaning annotation step and shown with an
+- **Suspected fix:** saved in a Scrub Data annotation step and shown with an
   amber halo unless suspicious fixes are hidden.
 - **Confirmed exclusion:** confirmed against an originating suspicion and excluded
   analytically; it can be shown with **Confirmed exclusions**.
 - **Raw is_outlier:** remains a source observation even if it has never been
-  flagged in Vibecleaning.
+  flagged in Scrub Data.
 
 **Hide suspicious fixes** is only a map aid. It does not dismiss annotations,
 change counts, alter reports, or change analytical eligibility.

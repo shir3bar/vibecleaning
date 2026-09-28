@@ -105,8 +105,8 @@ def validate_artifact_names(raw_names: object, *, allow_empty: bool = False) -> 
 
 def run_python_script(script_path: Path, spec_path: Path, summary_path: Path):
     env = os.environ.copy()
-    env["VIBECLEANING_SPEC_PATH"] = str(spec_path.resolve())
-    env["VIBECLEANING_SUMMARY_PATH"] = str(summary_path.resolve())
+    env["SCRUBDATA_SPEC_PATH"] = env["VIBECLEANING_SPEC_PATH"] = str(spec_path.resolve())
+    env["SCRUBDATA_SUMMARY_PATH"] = env["VIBECLEANING_SUMMARY_PATH"] = str(summary_path.resolve())
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.run(

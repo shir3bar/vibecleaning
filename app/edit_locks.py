@@ -215,7 +215,7 @@ def project_mutation_lock(project_dir: Path) -> Iterator[None]:
             yield
     except FileLockTimeoutError as exc:
         raise EditConflictError(
-            "Another Vibecleaning process is updating this study; try again shortly"
+            "Another Scrub Data process is updating this study; try again shortly"
         ) from exc
 
 

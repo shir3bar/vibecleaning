@@ -4,7 +4,7 @@ This thin application wrapper reuses the movement review backend and frontend
 with per-individual move2/sf RDS inputs grouped into one project per study.
 It treats `burst_` as authoritative, exposes `is_outlier` for color and ranking,
 and keeps review state in schema-v6 lineage sidecars. The SQLite files under
-`.vibecleaning/cache/movement/` are disposable fix-level indexes and rebuild
+`scrubdata/cache/movement/` are disposable fix-level indexes and rebuild
 automatically when the RDS bundle changes or the cache is deleted.
 
 Import the flat sample folder and build its disposable SQLite indexes:

@@ -21,8 +21,8 @@ def _write_summary(summary_path: Path, summary: dict):
 
 
 def main():
-    spec_path = Path(os.environ["VIBECLEANING_SPEC_PATH"])
-    summary_path = Path(os.environ["VIBECLEANING_SUMMARY_PATH"])
+    spec_path = Path(os.environ["SCRUBDATA_SPEC_PATH"])
+    summary_path = Path(os.environ["SCRUBDATA_SUMMARY_PATH"])
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     params = dict(spec["step"].get("parameters") or {})
     from examples.movement.osm_enrichment import (
