@@ -146,6 +146,13 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study):
         page.locator(f'[data-role="study"] option[value="{study.name}"]').wait_for(state="attached")
         page.locator('[data-role="study"]').select_option(study.name)
         page.locator('[data-individual-checkbox]').first.wait_for(state="attached")
+        page.evaluate("""() => {
+          const original = deck.MapboxOverlay.prototype.setProps;
+          deck.MapboxOverlay.prototype.setProps = function(props) {
+            if (props.layers) window.__testMapLayers = props.layers;
+            return original.call(this, props);
+          };
+        }""")
         page.locator('[data-role="individual-view-queue"]').click()
         active = page.locator(f'[data-queue-individual="{individuals[0]}"].queue-active')
         active.wait_for(state="visible")
@@ -155,9 +162,49 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study):
         highlight.wait_for(state="visible", timeout=30_000)
         assert "5 fixes" in highlight.text_content()
         assert page.locator('[data-queue-issues]').count() == 1
+        bursts = active.locator('[data-queue-bursts]')
+        assert not bursts.evaluate("element => element.open")
+        bursts.locator('summary').click()
+        bursts.locator('[data-queue-burst-visible]').first.wait_for(state="visible")
+        page.wait_for_function("""() => (window.__testMapLayers || []).some(layer =>
+          layer.id.startsWith('movement-binary-points-') && layer.props.visible)
+        """, timeout=30_000)
         highlight.click()
         _wait_for_layer(page, "movement-queue-issue-highlight")
         assert highlight.get_attribute("aria-pressed") == "true"
+        # Re-rendering the card must leave an explicitly opened menu open.
+        assert bursts.evaluate("element => element.open")
+        assert page.evaluate("""() => {
+          const layers = window.__testMapLayers;
+          const highlight = layers.at(-1);
+          if (highlight.id !== 'movement-queue-issue-highlight'
+              || highlight.props.data.length !== 5 || !highlight.props.filled
+              || highlight.props.parameters.depthTest !== false
+              || String(highlight.props.getFillColor) !== '246,92,110,255') return false;
+          return layers.slice(0, -1).every(layer =>
+            ['getColor', 'getFillColor', 'getLineColor'].every(name =>
+                  layer.props[name] === undefined || (
+                !layer.props.data?.attributes?.[name]
+                && String(layer.props[name].slice(0, 3)) === '112,122,133'
+              )
+            )
+          ) && layers.some(layer => layer.id.startsWith('movement-binary-points-')
+            && layer.props.visible && layer.props.data.attributes.getFilterValue);
+        }""")
+        # Switching issue types shows the exact new group, including overlaps.
+        stationary_highlight = active.locator(f'{stationary}[data-queue-issue-action="highlight"]')
+        stationary_highlight.click()
+        assert highlight.get_attribute("aria-pressed") == "false"
+        assert page.evaluate("() => window.__testMapLayers.at(-1).props.data.length") == 3
+        stationary_highlight.click()
+        assert page.evaluate("""() => {
+          const layers = window.__testMapLayers;
+          return !layers.some(layer => layer.id === 'movement-queue-issue-highlight')
+            && layers.some(layer => layer.id.startsWith('movement-binary-points-')
+              && layer.props.visible && layer.props.data.attributes.getFillColor);
+        }""")
+        highlight.click()
+        bursts.locator('summary').click()
         page.screenshot(path=f"/tmp/vibecleaning-queue-groups-active-{study.parent.name}.png")
         # An unsaved individual decision must survive these separate review steps.
         active.locator('[data-review-decision="fix_keep"]').click()

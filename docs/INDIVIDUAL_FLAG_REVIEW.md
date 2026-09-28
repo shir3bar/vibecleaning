@@ -3,8 +3,9 @@
 Open **Individual queue**. The active individual's card lists its unresolved
 flags by issue type, with the number of distinct fixes in each group.
 
-- Click the issue name to highlight that group on the map. Click again to clear
-  the highlight. This does not save a decision.
+- Click the issue name to show that group's fixes in red, above the other map
+  layers. Other tracks and fixes turn grey. Click again to restore the usual
+  colors. This does not save a decision.
 - Click **Confirm** to exclude that group's fixes for this individual.
 - Click **Unflag** to dismiss that group's allegations for this individual.
 - If unsure, leave the group unresolved and add a note or **Needs check**.
@@ -20,7 +21,8 @@ to several issue types: confirming either excludes it; unflagging the other
 does not cancel that exclusion.
 
 For different decisions within a group, use the existing point or track-section
-selection and Confirm/Unflag controls.
+selection and Confirm/Unflag controls. Expand **Bursts** under **Flag target**
+to access burst visibility and flagging controls; this section starts collapsed.
 
 **OK / Fix & Keep / Remove**, notes and **Needs check** remain separate individual
 review decisions. **Save decision** saves those decisions; it does not confirm

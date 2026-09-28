@@ -904,6 +904,9 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         page.locator('button[data-queue-scope="group"]').click()
 
         active_card = page.locator('[data-queue-individual="alpha"]')
+        burst_menu = active_card.locator('[data-queue-bursts]')
+        assert not burst_menu.evaluate("element => element.open")
+        burst_menu.locator('summary').click()
         burst_visibility = active_card.locator(
             "input[data-queue-burst-visible]"
         ).first
@@ -958,6 +961,7 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         beta_bursts = page.locator(
             '[data-queue-individual="beta"] input[data-queue-burst-visible]'
         )
+        page.locator('[data-queue-individual="beta"] [data-queue-bursts] summary').click()
         beta_bursts.first.wait_for(state="visible", timeout=20_000)
         assert beta_bursts.count() > 0
         assert "No bursts are available" not in page.locator(
@@ -1035,6 +1039,7 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
         delta_bursts = page.locator(
             '[data-queue-individual="delta"] input[data-queue-burst-visible]'
         )
+        page.locator('[data-queue-individual="delta"] [data-queue-bursts] summary').click()
         delta_bursts.first.wait_for(state="visible", timeout=20_000)
         assert delta_bursts.count() > 0
         assert "No bursts are available" not in page.locator(

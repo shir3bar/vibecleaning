@@ -715,6 +715,7 @@ class MovementExampleApp {
     };
     this.queueIssueGroups = null;
     this.queueIssueHighlight = null;
+    this.queueIssueContextData = new WeakMap();
     this.queueIssueMutation = false;
     this.trackPlayer = {
       individual: "",
@@ -3114,7 +3115,10 @@ class MovementExampleApp {
         .movement-queue-issue-row .movement-queue-issue-name {
           flex: 1; min-width: 0; text-align: left; overflow-wrap: anywhere;
         }
-        .movement-queue-issue-name[aria-pressed="true"] { outline: 2px solid #e6b800; }
+        .movement-queue-issue-name[aria-pressed="true"] {
+          outline: 2px solid #f65c6e;
+          background: rgba(246, 92, 110, 0.15);
+        }
         .movement-queue-flag-target {
           display: grid;
           gap: 6px;
@@ -3136,6 +3140,11 @@ class MovementExampleApp {
           border-color: rgba(250, 204, 21, 0.58);
           background: rgba(250, 204, 21, 0.2);
           color: #fff0b3;
+        }
+        .movement-queue-bursts > summary {
+          cursor: pointer;
+          padding: 4px 0;
+          font-weight: 600;
         }
         .movement-queue-flag-bursts {
           max-height: 150px;
@@ -9858,8 +9867,10 @@ class MovementExampleApp {
             class="${entireSelected ? "is-active" : ""}"
             ${disabled}
           >Entire individual</button>
-          <span class="movement-subtle">Visible controls ordinary map points. Flag controls the next issue step.</span>
         </div>
+        <details class="movement-queue-bursts" data-queue-bursts>
+          <summary>Bursts${bursts.length ? ` (${formatCount(bursts.length)})` : ""}</summary>
+          <div class="movement-subtle">Visible controls ordinary map points. Flag controls the next issue step.</div>
         ${bursts.length ? `
           <div class="movement-queue-flag-bursts">
             ${bursts.map(burst => {
@@ -9896,6 +9907,7 @@ class MovementExampleApp {
         ` : burstDetailsLoading
           ? '<span class="movement-subtle">Loading bursts for this individual…</span>'
           : '<span class="movement-subtle">No bursts are available under the current burst definition.</span>'}
+        </details>
       </div>
     `;
   }
@@ -10788,7 +10800,7 @@ class MovementExampleApp {
         const attrs = `data-individual="${escapeHtml(individual)}" data-issue-type="${escapeHtml(group.issue_type)}"`;
         const highlighted = this.queueIssueHighlight?.key === key && this.queueIssueHighlight.issueType === group.issue_type;
         return `<div class="movement-queue-issue-row">
-          <button type="button" class="movement-queue-issue-name" data-queue-issue-action="highlight" ${attrs} aria-pressed="${highlighted}" title="Highlight these saved flags on the map">${escapeHtml(label)} · ${formatCount(group.fix_count)} fixes</button>
+          <button type="button" class="movement-queue-issue-name" data-queue-issue-action="highlight" ${attrs} aria-pressed="${highlighted}" title="Show these saved flags in red with other tracks in grey. Click again to restore colors.">${escapeHtml(label)} · ${formatCount(group.fix_count)} fixes</button>
           <button type="button" data-queue-issue-action="confirm" ${attrs} ${disabled ? "disabled" : ""} title="Exclude these ${formatCount(group.fix_count)} fixes for ${escapeHtml(individual)} under ${escapeHtml(label)}">Confirm</button>
           <button type="button" data-queue-issue-action="unflag" ${attrs} ${disabled ? "disabled" : ""} title="Dismiss these flags for ${escapeHtml(individual)}; other issue types are unchanged">Unflag</button>
         </div>`;
@@ -11021,7 +11033,12 @@ class MovementExampleApp {
         ` : ""}
       `;
       if (card.__movementQueueMarkup !== cardMarkup) {
+        const burstsOpen = card.querySelector("[data-queue-bursts]")?.open;
         card.innerHTML = cardMarkup;
+        if (burstsOpen) {
+          const bursts = card.querySelector("[data-queue-bursts]");
+          if (bursts) bursts.open = true;
+        }
         card.__movementQueueMarkup = cardMarkup;
       }
       if (isNewCard) {
@@ -13527,6 +13544,33 @@ class MovementExampleApp {
     return layers;
   }
 
+  greyQueueContextLayer(layer) {
+    let data = layer.props.data;
+    const colors = {
+      getColor: CONTEXT_GRAY_LINE,
+      getFillColor: CONTEXT_GRAY_POINT,
+      getLineColor: CONTEXT_GRAY_POINT,
+    };
+    if (data?.attributes) {
+      // Binary color buffers override layer accessors. Keep positions and
+      // visibility filters, but let the grey accessors supply the colors.
+      // Cache the view without modifying the retained full-color buffers.
+      if (!this.queueIssueContextData.has(data)) {
+        const attributes = { ...data.attributes };
+        for (const name of Object.keys(colors)) delete attributes[name];
+        this.queueIssueContextData.set(data, { ...data, attributes });
+      }
+      data = this.queueIssueContextData.get(data);
+    }
+    const props = { data, updateTriggers: { ...layer.props.updateTriggers } };
+    for (const [name, color] of Object.entries(colors)) {
+      if (layer.props[name] === undefined) continue;
+      props[name] = color;
+      props.updateTriggers[name] = "queue-issue-context";
+    }
+    return layer.clone(props);
+  }
+
   renderLayers({ temporalOnly = false } = {}) {
     const diagnosticStartedAt = performance.now();
     this.movementDiagnostics.renderCalls += 1;
@@ -14171,15 +14215,6 @@ class MovementExampleApp {
         pickable: false,
       }));
     }
-    const queueHighlight = this.queueIssueHighlight;
-    if (queueHighlight?.key && queueHighlight.key === this.queueIssueGroupsKey()) {
-      layers.push(new deck.ScatterplotLayer({
-        id: "movement-queue-issue-highlight", data: queueHighlight.fixes,
-        getPosition: fix => fix.position, getLineColor: [255, 204, 40, 255],
-        filled: false, stroked: true, lineWidthMinPixels: 3,
-        getRadius: 150, radiusMinPixels: 9, radiusMaxPixels: 16, pickable: false,
-      }));
-    }
     const isSuspiciousPointLayer = layer => {
       const layerId = String(layer?.id || "");
       return layerId === "movement-suspected-outline"
@@ -14190,7 +14225,7 @@ class MovementExampleApp {
     const isTrackPlayerLayer = layer => String(layer?.id || "")
       === "movement-track-player-position";
     const isRoiLayer = layer => String(layer?.id || "").startsWith("movement-roi-");
-    const orderedLayers = [
+    let orderedLayers = [
       ...layers.filter(layer => (
         !isSuspiciousPointLayer(layer)
         && !isCheckedThresholdLayer(layer)
@@ -14206,6 +14241,20 @@ class MovementExampleApp {
       ...layers.filter(isRoiLayer),
       ...layers.filter(isTrackPlayerLayer),
     ];
+    const queueHighlight = this.queueIssueHighlight;
+    if (queueHighlight?.key && queueHighlight.key === this.queueIssueGroupsKey()) {
+      orderedLayers = orderedLayers.map(layer => this.greyQueueContextLayer(layer));
+      // Draw last, above selection outlines and the track player, even when
+      // different issue groups contain points at exactly the same location.
+      orderedLayers.push(new deck.ScatterplotLayer({
+        id: "movement-queue-issue-highlight", data: queueHighlight.fixes,
+        getPosition: fix => fix.position,
+        getFillColor: [246, 92, 110, 255], getLineColor: [255, 255, 255, 255],
+        filled: true, stroked: true, lineWidthMinPixels: 1,
+        getRadius: 100, radiusMinPixels: 8, radiusMaxPixels: 12, pickable: false,
+        parameters: { depthTest: false },
+      }));
+    }
 
     try {
       const renderedLayerIds = orderedLayers.map(
