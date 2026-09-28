@@ -1,8 +1,7 @@
 # Vibecleaning: IT deployment reference
 
-**Want to open the app on your Windows VM? Follow
-[Start here: Windows](START_HERE_WINDOWS.md).** It gives the first-time setup,
-login, review, save and restart steps in order.
+**To install and open the app, follow [Windows](START_HERE_WINDOWS.md) or
+[Mac](START_HERE_MAC.md).** Each guide covers Git installation, login and startup.
 
 This longer document is for whoever manages installation, shared storage and
 backups. For the controls inside the app, use the
@@ -105,7 +104,10 @@ browser on the same machine. Keep the terminal open. The Mac/Linux launcher
 keeps its Python environment in the local release directory. The Windows
 launcher uses `%LOCALAPPDATA%\Vibecleaning\venvs\<release-id>`.
 
-## Release handoff and installation
+## Optional ZIP handoff for IT
+
+The normal installation uses Git, as shown in the quick-start guides above.
+The following packaging procedure is an alternative for an IT-managed handoff.
 
 Build a candidate with `python scripts/build_release.py`. This packages the
 current app, including reviewed local changes, as `dist/vibecleaning-p0-*.zip`.

@@ -11,6 +11,8 @@ from docx.shared import Inches, Pt
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
+    ROOT / "docs" / "START_HERE_WINDOWS.md",
+    ROOT / "docs" / "START_HERE_MAC.md",
     ROOT / "docs" / "IT_DEPLOYMENT_REQUIREMENTS.md",
     ROOT / "docs" / "WINDOWS_COMPATIBILITY_TODO.md",
 )

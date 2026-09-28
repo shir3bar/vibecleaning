@@ -1,5 +1,15 @@
 # Vibecleaning
 
+**To install and open the movement review app, start here:**
+
+- [Windows: installation and startup](docs/START_HERE_WINDOWS.md)
+- [Mac: installation and startup](docs/START_HERE_MAC.md)
+
+Each guide covers getting the app through Git, creating a login, and reopening
+it later, using the two included MoveTraits studies.
+
+## Developer reference
+
 Vibecleaning is a small scaffold for local data apps backed by a reproducible dataset DAG.
 
 The default workflow is:
