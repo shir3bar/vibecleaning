@@ -39,12 +39,18 @@
 - [x] Checksummed application and synthetic CSV/RDS data bundles
 - [x] Production-dependency-only automatic save/report/export/restore check
 - [x] Account, shutdown, troubleshooting, backup and rollback instructions
-- [ ] Real Windows VM acceptance: complete `docs/P0_ACCEPTANCE.md`
+- [x] Core Windows RDS workflow accepted by the user on 2026-09-27: loading,
+  review/restart persistence, reports matching decisions, export and reopen.
+  See [the validation record](P0_ACCEPTANCE.md).
+- [ ] Check shutdown, threshold reset and the report summary table on Windows
+  after the updates made during validation reach the tested checkout.
+- [ ] Complete the remaining CSV and recovery checks in `docs/P0_ACCEPTANCE.md`.
 - [ ] Real Mac acceptance: complete `docs/P0_ACCEPTANCE.md`
 - [ ] Optional remote Linux acceptance: complete `docs/P0_ACCEPTANCE.md`
 
-These checkboxes describe implemented code, not completed real-machine testing.
-Keep the completed acceptance records and machine errors with each release ID.
+Implementation checks describe code delivered; machine checks name the reported
+validation scope. Keep acceptance records and machine errors with the tested Git
+commit or release ID.
 
 ## Required university-share pilot
 

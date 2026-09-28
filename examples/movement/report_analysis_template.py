@@ -1458,6 +1458,62 @@ def profile_decision_details(section):
     return details
 
 
+def profile_review_summary(sections):
+    rows = []
+    for section in sections:
+        details = dict(profile_decision_details(section))
+        rows.append([
+            section["individual"], details["Review decision"],
+            details.get("Needs check", "—"), details.get("Reviewer", "—"),
+            details.get("Decision notes", ""),
+        ])
+    totals = " · ".join(
+        f"{label}: {sum(row[1] == label for row in rows)}"
+        for label in ("OK", "Fix & Keep", "Remove", "Not reviewed")
+    )
+    totals += f" · Needs check: {sum(row[2] == 'Yes' for row in rows)}"
+    return rows, totals
+
+
+def markdown_table_cell(value):
+    text = html_escape(value).replace("\\", "\\\\")
+    for character in "|*_`[]":
+        text = text.replace(character, f"&#{ord(character)};")
+    return "<br>".join(text.splitlines())
+
+
+def build_profile_review_summary_markdown(sections):
+    rows, totals = profile_review_summary(sections)
+    lines = [
+        "## Review decision summary", "",
+        f"Summary of the {len(rows)} individuals included in this report.", "",
+        totals, "",
+        "| Individual | Decision | Needs check | Reviewer | Notes |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    lines.extend("| " + " | ".join(markdown_table_cell(value) for value in row) + " |"
+                 for row in rows)
+    return "\n".join(lines) + "\n"
+
+
+def build_profile_review_summary_html(sections):
+    rows, totals = profile_review_summary(sections)
+    parts = [
+        '<section class="review-summary">', "<h2>Review decision summary</h2>",
+        f"<p>Summary of the {len(rows)} individuals included in this report.</p>",
+        f"<p>{html_escape(totals)}</p>",
+        '<div class="review-summary-table"><table>',
+        "<thead><tr><th scope=\"col\">Individual</th><th scope=\"col\">Decision</th>"
+        "<th scope=\"col\">Needs check</th><th scope=\"col\">Reviewer</th>"
+        "<th scope=\"col\">Notes</th></tr></thead>", "<tbody>",
+    ]
+    for row in rows:
+        cells = ["<br>".join(html_escape(value).splitlines()) for value in row]
+        parts.append("<tr>" + "".join(f"<td>{value}</td>" for value in cells) + "</tr>")
+    parts.extend(["</tbody></table></div>", "</section>"])
+    return "\n".join(parts)
+
+
 def profile_snapshot_href(section, snapshot):
     if snapshot:
         artifact_name = str(snapshot.get("artifact_name", "")).strip()
@@ -1531,6 +1587,7 @@ def build_individual_profile_markdown_report(target_artifact, user, sections, sn
         f"- Needs check: {', '.join(needs_check_individuals) if needs_check_individuals else 'none'}",
         f"- Generated at: {now_iso()}",
         "",
+        build_profile_review_summary_markdown(sections),
     ]
     for section in sections:
         lines.append(build_individual_profile_markdown_section(section, snapshots_by_key).rstrip())
@@ -1623,6 +1680,10 @@ def build_individual_profile_html_report(target_artifact, user, sections, snapsh
         "figcaption { color: #52606d; font-size: 0.95rem; margin-top: 0.4rem; }",
         "p.placeholder { font-style: italic; color: #52606d; }",
         "section.issue { background: #ffffff; border: 1px solid #d9e2ec; border-radius: 12px; padding: 20px; margin: 20px 0; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06); }",
+        ".review-summary-table { overflow-x: auto; }",
+        "table { width: 100%; border-collapse: collapse; background: #ffffff; }",
+        "th, td { border: 1px solid #d9e2ec; padding: 0.55rem 0.65rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }",
+        "th { background: #eef2f7; color: #243b53; }",
         "</style>",
         "</head>",
         "<body>",
@@ -1637,6 +1698,7 @@ def build_individual_profile_html_report(target_artifact, user, sections, snapsh
         f"<li><strong>Generated at:</strong> {html_escape(now_iso())}</li>",
         "</ul>",
         "</header>",
+        build_profile_review_summary_html(sections),
     ]
     for section in sections:
         parts.append(build_individual_profile_html_section(section, snapshots_by_key))
@@ -1650,6 +1712,8 @@ def build_individual_profile_index_markdown(sections, artifact_plan):
         "",
         f"- Individuals included: {len(sections)}",
         "",
+        build_profile_review_summary_markdown(sections),
+        "## Individual reports", "",
         "| Individual | Markdown | HTML |",
         "| --- | --- | --- |",
     ]
@@ -1687,11 +1751,15 @@ def build_individual_profile_index_html(sections, artifact_plan):
             "table { width: 100%; border-collapse: collapse; background: #ffffff; }",
             "th, td { border: 1px solid #d9e2ec; padding: 0.55rem 0.65rem; text-align: left; vertical-align: top; }",
             "th { background: #eef2f7; color: #243b53; }",
+            ".review-summary-table { overflow-x: auto; }",
+            "td { overflow-wrap: anywhere; }",
             "</style>",
             "</head>",
             "<body>",
             "<main>",
             "<h1>Movement Individual Profile Report Index</h1>",
+            build_profile_review_summary_html(sections),
+            "<h2>Individual reports</h2>",
             "<table>",
             "<thead><tr><th>Individual</th><th>Markdown</th><th>HTML</th></tr></thead>",
             "<tbody>",

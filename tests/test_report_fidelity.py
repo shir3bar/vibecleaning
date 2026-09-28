@@ -82,6 +82,55 @@ def test_profile_includes_resolved_source_species_decision_and_escaped_notes(tmp
     assert sections[0]["reviewed_fix_count"] == 2
 
 
+@pytest.mark.parametrize("output_mode", ["combined", "separate"])
+def test_profile_summary_uses_latest_decisions_and_includes_unreviewed(tmp_path, output_mode):
+    annotations, fields, columns, records = review_fixture(tmp_path)
+    notes = "José: check 150° | <tag>\nSecond line"
+    annotations[-1]["comment"] = notes
+    for individual, decision, needs_check in [
+        ("animal-B", "remove", True), ("animal-B", "ok", False),
+        ("animal-C", "remove", True), ("outside-report", "ok", False),
+    ]:
+        annotations.append(normalize_annotation({
+            "annotation_kind": "individual_review", "reviewed": True,
+            "review_decision": decision, "needs_check": needs_check, "user": "Reviewer",
+            "scope": {"kind": "individual", "individual": individual},
+        }))
+    decisions = individual_review_decisions(annotations, source_artifact="tracks.csv")
+    base = report.build_individual_profile_sections(
+        records, fields, columns, ["animal-A"], "tracks.csv", decisions,
+    )[0]
+    sections = [dict(base, individual=name, review_decision=decisions.get(name, {}))
+                for name in ("animal-A", "animal-B", "animal-C", "animal-D")]
+    if output_mode == "combined":
+        html = report.build_individual_profile_html_report("tracks.csv", "Reviewer", sections)
+        markdown = report.build_individual_profile_markdown_report("tracks.csv", "Reviewer", sections)
+    else:
+        plan = [{"individual": item["individual"], "markdown_name": f"{index}.md",
+                 "html_name": f"{index}.html"} for index, item in enumerate(sections)]
+        html = report.build_individual_profile_index_html(sections, plan)
+        markdown = report.build_individual_profile_index_markdown(sections, plan)
+        assert 'href="0.html"' in html
+    summary_html = html.split('<section class="review-summary">', 1)[1].split("</section>", 1)[0]
+    summary_markdown = markdown.split("## Review decision summary", 1)[1].split("\n## Individual", 1)[0]
+    for summary in (summary_html, summary_markdown):
+        assert "4 individuals included in this report" in summary
+        for label in ("OK", "Remove", "Not reviewed"):
+            assert f"{label}: 1" in summary
+        assert "Needs check: 2" in summary
+        assert "outside-report" not in summary
+        assert "<tag>" not in summary
+    assert "Fix &amp; Keep: 1" in summary_html
+    assert "Fix & Keep: 1" in summary_markdown
+    assert "<td>animal-B</td><td>OK</td><td>No</td>" in summary_html
+    assert "<td>animal-D</td><td>Not reviewed</td><td>—</td>" in summary_html
+    assert "José: check 150° | &lt;tag&gt;<br>Second line" in summary_html
+    assert "José: check 150° &#124; &lt;tag&gt;<br>Second line" in summary_markdown
+    table_rows = [line for line in summary_markdown.splitlines() if line.startswith("| ")]
+    assert len(table_rows) == 6  # Header, separator, four individuals.
+    assert all(line.count("|") == 6 for line in table_rows)
+
+
 @pytest.mark.parametrize("operation", [create_analysis, create_step])
 def test_generated_scripts_and_outputs_use_utf8_under_legacy_default(tmp_path, monkeypatch, operation):
     project = tmp_path / "données 漢字"

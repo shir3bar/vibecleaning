@@ -1,5 +1,37 @@
 # P0 acceptance record
 
+## Windows validation reported on 2026-09-27
+
+The user has accepted the core Windows RDS workflow after testing on their
+Windows VM with the included MoveTraits studies. This records the user's
+manual results, separately from automated checks run in the development
+environment. The exact Windows version and Git commit were not recorded.
+
+| Check | Result |
+| --- | --- |
+| Install from the Git checkout with uv, start the app and log in | Reported pass |
+| Load the included MoveTraits studies, including the larger study | Reported pass |
+| Reopen after the first cache build | Reported pass; noticeably faster |
+| Flag and review individuals; retain reviews and saved steps after restart | Reported pass |
+| Generate reports and compare them with saved decisions | Reported pass |
+| Export reviewed data and reopen it | Reported pass |
+
+This acceptance applies to the Windows checkout the user tested. The subsequent
+shutdown fix, threshold reset on study changes, and report decision-summary table
+still need a brief Windows check after those updates reach that checkout.
+
+The Windows-to-Linux folder-copy exercise was declined. It is not a shared-storage
+test, and no manual backup restoration is claimed from this session. Mac testing,
+CSV testing on deployment machines, shared-storage collaboration, and manual
+backup/recovery validation remain outstanding under the original P0 scope.
+The specific overlap/dismissal scenario, full source-field/RDS-metadata comparison,
+interruption recovery, and deliberate cache rebuild were not individually reported.
+
+## Full acceptance template
+
+The tables below retain the detailed release checks; their `NOT RUN` entries are
+template placeholders. Use the session record above for the reported Windows results.
+
 Use one copy of this record per candidate. The release identity is in
 `release-manifest.json`. Automated checks on Linux do not certify Windows or
 Mac, and local locking checks do not certify a network share. CI is optional.
