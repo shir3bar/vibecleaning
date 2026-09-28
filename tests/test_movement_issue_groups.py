@@ -136,7 +136,11 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study):
         browser = _open_browser(playwright)
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         errors = []
+        track_requests = []
         page.on("pageerror", lambda error: errors.append(str(error)))
+        page.on("request", lambda request: track_requests.append(request.url)
+                if any(endpoint in request.url for endpoint in
+                       ("/overview?", "/fixes-binary?", "/fixes?")) else None)
         page.goto(url, wait_until="domcontentloaded")
         if page.locator("#login-username").count():
             page.locator("#login-username").fill("rds-reviewer")
@@ -150,6 +154,10 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study):
           const original = deck.MapboxOverlay.prototype.setProps;
           deck.MapboxOverlay.prototype.setProps = function(props) {
             if (props.layers) window.__testMapLayers = props.layers;
+            if (window.__testObserveReview && props.layers && !props.layers.some(layer =>
+                layer.id.startsWith('movement-binary-points-') && layer.props.visible)) {
+              window.__testReviewBlankFrames++;
+            }
             return original.call(this, props);
           };
         }""")
@@ -208,6 +216,46 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study):
         page.screenshot(path=f"/tmp/vibecleaning-queue-groups-active-{study.parent.name}.png")
         # An unsaved individual decision must survive these separate review steps.
         active.locator('[data-review-decision="fix_keep"]').click()
+        is_rds = study.parent.name == "movement_rds"
+        if is_rds:
+            page.locator('[data-role="slider"]').evaluate("""element => {
+              element.value = '3';
+              element.dispatchEvent(new Event('input', {bubbles: true}));
+            }""")
+            page.wait_for_function("() => window.__movementDiagnosticsSnapshot().trackPlayerIndex === 3")
+            before_review = page.evaluate("() => window.__movementDiagnosticsSnapshot()")
+            before_track_requests = len(track_requests)
+            page.evaluate("""() => {
+              window.__testReviewBinary = window.__testMapLayers.find(layer =>
+                layer.id.startsWith('movement-binary-points-') && layer.props.visible
+              ).props.userData.binaryBlock;
+              window.__testReviewCanvas = document.querySelector('[data-role=map] canvas');
+              window.__testReviewBlankFrames = 0;
+              window.__testObserveReview = true;
+            }""")
+
+        def assert_retained_track(suspected_count):
+            if not is_rds:
+                return
+            after = page.evaluate("() => window.__movementDiagnosticsSnapshot()")
+            assert len(track_requests) == before_track_requests, track_requests[before_track_requests:]
+            for key in ("trackPlayerIndex", "trackPlayerTimeMs", "trackPlayerSourceRow",
+                        "trackPlayerFixCount", "activeIndividual", "binaryBlockCount"):
+                assert after[key] == before_review[key], key
+            assert after["mapView"]["center"] == pytest.approx(before_review["mapView"]["center"])
+            assert after["mapView"]["zoom"] == pytest.approx(before_review["mapView"]["zoom"])
+            assert page.evaluate("""suspected => {
+              const layer = window.__testMapLayers.find(layer =>
+                layer.id.startsWith('movement-binary-points-') && layer.props.visible);
+              const binary = layer?.props.userData.binaryBlock;
+              const statuses = Array.from(binary?.arrays.review_status || []);
+              return binary === window.__testReviewBinary
+                && document.querySelector('[data-role=map] canvas') === window.__testReviewCanvas
+                && window.__testReviewBlankFrames === 0
+                && statuses.filter(status => status === 2).length === 5
+                && statuses.filter(status => status === 1).length === suspected;
+            }""", suspected_count)
+
         with page.expect_response(lambda response: response.url.endswith("/actions/confirm-issues")) as saved:
             active.locator(f'{spike}[data-queue-issue-action="confirm"]').click()
         assert saved.value.status == 200, saved.value.text()
@@ -218,10 +266,13 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study):
         assert active.locator('[data-review-decision="fix_keep"]').get_attribute("class") == "is-selected"
         assert "unsaved" in active.locator('.movement-review-state').text_content()
         assert page.locator('[data-role="confirm-modal"]').is_hidden()
+        assert_retained_track(1)
         with page.expect_response(lambda response: response.url.endswith("/actions/dismiss-issues")) as dismissed:
             stationary_button.click()
         assert dismissed.value.status == 200, dismissed.value.text()
         active.get_by_text("No unresolved flags.", exact=True).wait_for(timeout=30_000)
+        assert_retained_track(0)
+        page.evaluate("() => { window.__testObserveReview = false; }")
         page.screenshot(path=f"/tmp/vibecleaning-queue-groups-{study.parent.name}.png")
         # Existing Save decision still saves the individual decision, independently.
         with page.expect_response(lambda response: response.url.endswith("/actions/review-individual")) as decision:
@@ -230,6 +281,17 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study):
         other = page.locator(f'[data-queue-individual="{individuals[1]}"].queue-active')
         other.locator(f'{spike}[data-queue-issue-action="highlight"]').wait_for(state="visible", timeout=30_000)
         assert "3 fixes" in other.locator(f'{spike}[data-queue-issue-action="highlight"]').text_content()
+        if is_rds:
+            # Returning to cached detail must not revive dismissed flags or lose
+            # confirmations in the table while the binary map remains correct.
+            page.locator(f'[data-queue-individual="{individuals[0]}"]').click()
+            active.get_by_text("No unresolved flags.", exact=True).wait_for(timeout=30_000)
+            active.locator('[data-queue-table]').click()
+            rows = page.locator('[data-role="table-wrap"] tr[data-fix-key]')
+            rows.first.wait_for(state="visible")
+            statuses = rows.evaluate_all("rows => rows.map(row => row.cells[3].textContent)")
+            assert statuses.count("confirmed") == 5, statuses
+            assert "suspected" not in statuses
         assert not errors, errors
         browser.close()
 

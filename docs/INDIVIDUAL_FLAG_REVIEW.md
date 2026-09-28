@@ -15,6 +15,9 @@ flag in the group, even if only part of the track is currently displayed.
 They do not rerun the current filter or affect another individual. The usual
 history and Undo controls remain available.
 
+In the RDS app, Confirm and Unflag update the loaded track in place. Your map
+view, active individual and playback position stay where they were.
+
 Groups combine the same issue type across flagging runs, counting each fix once.
 The saved resolutions retain their links to each original flag. A fix can belong
 to several issue types: confirming either excludes it; unflagging the other

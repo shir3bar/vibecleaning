@@ -12881,6 +12881,7 @@ class MovementExampleApp {
       fieldStyle: serializedFieldStyle,
       queueFlagContext: this.individualReviewQueue.mode === "queue",
       hiddenBurstIds: [...this.hiddenBurstIds].sort(),
+      reviewRevision: binary?.reviewRevision || 0,
       threshold: {
         fieldKey: this.thresholdState.fieldKey || "",
         value: finiteOrNull(this.thresholdState.value),
@@ -19604,15 +19605,7 @@ class MovementExampleApp {
     };
   }
 
-  async applyBinaryReviewProjection(projection) {
-    if (!this.data?.binaryBlocks?.size) return;
-    const diagnosticStartedAt = performance.now();
-    const projectedIndividuals = new Set(
-      Array.isArray(projection.projected_individuals)
-        ? projection.projected_individuals.map(String)
-        : [],
-    );
-    if (!projectedIndividuals.size) return;
+  reviewProjectionStatusLookup(projection) {
     const rangesByArtifact = new Map();
     for (const item of projection.review_status_ranges || []) {
       const logicalName = String(item?.logical_name || "");
@@ -19631,7 +19624,8 @@ class MovementExampleApp {
     for (const ranges of rangesByArtifact.values()) {
       ranges.sort((left, right) => left[0] - right[0] || left[1] - right[1]);
     }
-    const statusForRow = (ranges, sourceRow) => {
+    return (logicalName, sourceRow) => {
+      const ranges = rangesByArtifact.get(logicalName) || [];
       let low = 0;
       let high = ranges.length - 1;
       while (low <= high) {
@@ -19643,9 +19637,22 @@ class MovementExampleApp {
       }
       return 0;
     };
+  }
+
+  async applyBinaryReviewProjection(projection) {
+    if (!this.data?.binaryBlocks?.size) return;
+    const diagnosticStartedAt = performance.now();
+    const projectedIndividuals = new Set(
+      Array.isArray(projection.projected_individuals)
+        ? projection.projected_individuals.map(String)
+        : [],
+    );
+    if (!projectedIndividuals.size) return;
+    const statusForRow = this.reviewProjectionStatusLookup(projection);
     const binaries = new Set(this.data.binaryBlocks.values());
     if (this.data.fullBinaryMovement) binaries.add(this.data.fullBinaryMovement);
     const workerUpdates = [];
+    const changedBinaries = [];
     for (const binary of binaries) {
       this.movementDiagnostics.binaryReviewBlocksScanned += 1;
       this.movementDiagnostics.binaryReviewRowsScanned += Number(binary.header.row_count) || 0;
@@ -19660,7 +19667,7 @@ class MovementExampleApp {
           binary.header.artifacts?.[Number(arrays.artifact_codes[index])] || "",
         );
         const status = statusForRow(
-          rangesByArtifact.get(logicalName) || [],
+          logicalName,
           Number(arrays.source_rows[index]),
         );
         if (Number(arrays.review_status[index]) !== status) {
@@ -19670,18 +19677,25 @@ class MovementExampleApp {
       }
       if (!changed) continue;
       this.movementDiagnostics.binaryReviewBlocksChanged += 1;
+      binary.reviewRevision = (binary.reviewRevision || 0) + 1;
       binary.renderCaches?.clear?.();
       binary.deckDataCaches?.clear?.();
       binary.attributePromises?.clear?.();
       binary.attributeRenderKeys?.clear?.();
-      binary.lastRenderAttributes = null;
-      binary.lastRenderCacheKey = "";
+      // Keep the existing drawing until replacement colors/visibility are
+      // ready. Review changes never need to remove the track from the map.
+      changedBinaries.push(binary);
       workerUpdates.push(updateMovementBinaryWorkerReviewStatus(binary));
     }
     if (workerUpdates.length) {
       this.binaryThresholdContextCache?.clear?.();
     }
     await Promise.all(workerUpdates);
+    const visibleBinaries = new Set(
+      this.getSelectedIndividuals().map(individual => this.data.binaryBlocks.get(individual)),
+    );
+    await Promise.all(changedBinaries.filter(binary => visibleBinaries.has(binary))
+      .map(binary => this.prepareRetainedBinaryAttributes(binary)));
     this.movementDiagnostics.binaryReviewLastMs = Math.max(
       0,
       performance.now() - diagnosticStartedAt,
@@ -19710,6 +19724,7 @@ class MovementExampleApp {
     const reviewByFixKey = new Map(
       projectedFixes.map(fix => [fix.fixKey, fix.review]),
     );
+    const statusForRow = this.reviewProjectionStatusLookup(projection);
     const projectedSegments = parseMovementSegments(projection.segments || []);
     const segmentMembershipsByFixKey = new Map();
     for (const segment of projectedSegments) {
@@ -19730,13 +19745,25 @@ class MovementExampleApp {
         segmentMembershipsByFixKey.set(fixKey, memberships);
       }
     }
-    const patchFixes = fixes => (fixes || []).map(fix => ({
-      ...fix,
-      review: reviewByFixKey.get(fix.fixKey)
-        || (projectedIndividuals.has(fix.individual) ? this.emptyFixReview() : fix.review),
-      segments: segmentMembershipsByFixKey.get(fix.fixKey)
-        || (projectedIndividuals.has(fix.individual) ? [] : fix.segments),
-    }));
+    const patchFixes = fixes => (fixes || []).map(fix => {
+      if (!projectedIndividuals.has(fix.individual)) return fix;
+      let review = reviewByFixKey.get(fix.fixKey) || this.emptyFixReview();
+      // RDS sends compact source-row ranges rather than individual fix objects.
+      // Apply those same decisions to cached table/popup fixes as to the map.
+      const source = projection.source_format === "rds"
+        ? fix.fixKey.match(/^file:(.*)#row:(\d+)$/) : null;
+      if (source) {
+        review = this.binaryReviewForSource({
+          artifact: source[1], sourceRow: Number(source[2]),
+          statusCode: statusForRow(source[1], Number(source[2])),
+        });
+      }
+      return {
+        ...fix, review,
+        analyticallyExcluded: review.status === "confirmed",
+        segments: segmentMembershipsByFixKey.get(fix.fixKey) || [],
+      };
+    });
     this.data.overviewFixes = patchFixes(this.data.overviewFixes);
     this.data.candidateFixes = patchFixes(this.data.candidateFixes);
     this.data.detailFixes = patchFixes(this.data.detailFixes);
@@ -19744,6 +19771,9 @@ class MovementExampleApp {
     this.data.confirmedFixes = patchFixes(this.data.confirmedFixes);
     this.data.overviewSegments = projectedSegments;
     this.data.detailSegments = [];
+    for (const entry of this.data.focusedObjectCache?.values() || []) {
+      entry.fixes = patchFixes(entry.fixes);
+    }
     seedFocusedMovementCacheFromCurrentData(this.data);
 
     const merged = new Map();
@@ -19770,6 +19800,10 @@ class MovementExampleApp {
     this.data.confirmedMatchingFixCount = Number(
       projection.review_counts?.confirmed,
     ) || 0;
+    this.data.eligibleFixesByTrack = buildMovementFixTrackIndex(this.data.fixes);
+    this.data.allFixesByTrack = buildMovementFixTrackIndex(this.data.fixes, { includeExcluded: true });
+    this.data.eligibleTrackPositionByFixKey = buildMovementTrackPositionLookup(this.data.eligibleFixesByTrack);
+    this.data.allTrackPositionByFixKey = buildMovementTrackPositionLookup(this.data.allFixesByTrack);
     this.data.flaggedStepOverlays = buildFlaggedStepOverlays(this.data);
     this.data.segments = projectedSegments;
     this.data.segmentById = new Map(projectedSegments.map(segment => [segment.segmentId, segment]));
@@ -19920,7 +19954,7 @@ class MovementExampleApp {
         && (!Array.isArray(resultFilter.individuals) || resultFilter.individuals.length === 0)
       );
       const projection = await this.fetchReviewProjection(datasetId, {
-        includeRetained: reason === "dataset_switch" || wholeStudyFilterMutation,
+        includeRetained: MOVEMENT_APP_CONFIG.rdsSource || reason === "dataset_switch" || wholeStudyFilterMutation,
       });
       if (transitionId !== this.viewTransitionId) {
         finishTransitionDiagnostics();
@@ -19933,7 +19967,11 @@ class MovementExampleApp {
         && this.data.sourceSignature
         && this.data.exclusionSignature
         && this.data.sourceSignature === String(projection.source_signature || "")
-        && this.data.exclusionSignature === String(projection.exclusion_signature || "")
+        // RDS geometry and source movement columns are immutable across review
+        // steps; exclusions only change the projected review masks. CSV derives
+        // new movement columns/topology after exclusions and still needs refresh.
+        && (MOVEMENT_APP_CONFIG.rdsSource
+          || this.data.exclusionSignature === String(projection.exclusion_signature || ""))
       );
       if (!compatible) {
         this.cancelBinaryRequests();

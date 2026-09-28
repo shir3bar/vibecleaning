@@ -67,3 +67,9 @@ apply.
 For a sensitivity comparison, start each alternative from the same dataset
 version: already-confirmed exclusions affect where subsequent stays break.
 An unsaved preview is exploratory and is not part of the recorded protocol.
+
+Confirming GPS spikes later does not rewrite saved stationarity flags. A new
+stationarity calculation can give different results on that changed version.
+In the current algorithm, confirmed exclusions always split periods: increasing
+Maximum gap does not bridge an excluded fix. A rerun also does not automatically
+replace earlier saved flags; their review history remains available.
