@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 import hashlib
 import io
+from itertools import groupby
 import json
 from math import isclose
 import os
@@ -43,6 +44,7 @@ from .movement_features import (
 )
 from .review_annotations import point_in_polygon
 from .summary import DERIVED_FIELDS, quantile, span_to_zoom
+from .stationarity import stationary_fix_keys, validate_stationarity_filter
 
 
 # Report metadata is disposable too; older indexes rebuild without changing lineage.
@@ -1971,6 +1973,8 @@ def resolve_rds_review_scope(
     if kind == "filter":
         spec = dict(raw_scope.get("filter") or {})
         filter_kind = str(spec.get("kind") or "").strip().lower()
+        if filter_kind == "stationarity":
+            return _resolve_rds_stationarity(index_path, spec, annotations)
         scoped_individuals = [
             str(item) for item in spec.get("individuals") or [] if str(item)
         ]
@@ -2052,6 +2056,39 @@ def resolve_rds_review_scope(
             "source_rows": source_rows,
         }, len(fix_keys)
     raise ValueError("Invalid RDS review scope")
+
+
+def _resolve_rds_stationarity(
+    index_path: Path, spec: dict, annotations: list[dict] | None,
+) -> tuple[dict, int]:
+    spec = {**spec, **validate_stationarity_filter(spec)}
+    individuals = list(spec.get("individuals") or [])
+    set_names = set(spec.get("set_names") or [])
+    matches = []
+    if not set_names or RDS_IMPLICIT_SET in set_names:
+        with closing(_connect(index_path)) as connection:
+            statuses = _index_review_status(connection, annotations)
+            where = ""
+            if individuals:
+                where = " WHERE i.identifier IN (" + ",".join("?" for _ in individuals) + ")"
+            rows = connection.execute(
+                FIX_SELECT + where
+                + " ORDER BY f.individual_key, f.artifact_id, f.time_ms, f.source_row",
+                tuple(individuals),
+            )
+            for _, group in groupby(rows, key=lambda row: (row["individual_key"], row["artifact_id"])):
+                records = [{
+                    "fix_key": str(row["fix_key"]), "time_ms": int(row["time_ms"]),
+                    "lon": float(row["lon"]), "lat": float(row["lat"]),
+                    "burst": row["burst_value"],
+                    "segment": row["tag_identifier"],
+                    "excluded": int(statuses[int(row["ordinal"])]) == 2,
+                } for row in group]
+                matches.extend(stationary_fix_keys(records, spec))
+    return {
+        "kind": "filter", "filter": spec,
+        "source_rows": source_rows_from_fix_keys(matches),
+    }, len(matches)
 
 
 def _review_projection(

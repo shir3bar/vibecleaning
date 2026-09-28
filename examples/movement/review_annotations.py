@@ -19,6 +19,7 @@ from .movement_features import (
     compute_track_movement,
     step_movement_metrics,
 )
+from .stationarity import stationary_fix_keys, validate_stationarity_filter
 
 
 REVIEW_SIDECAR_NAME = "movement_review_annotations.json"
@@ -222,6 +223,12 @@ def resolve_filter_row_ranges(
     Compound GPS-spike filters group their selected scope from one CSV pass and
     reuse the canonical track metric calculation.
     """
+    if str(filter_spec.get("kind") or "").strip().lower() == "stationarity":
+        return _resolve_stationarity_row_ranges(
+            path, filter_spec,
+            confirmed_fix_keys=set(confirmed_fix_keys or set()),
+            confirmed_individual_tracks=set(confirmed_individual_tracks or set()),
+        )
     if str(filter_spec.get("kind") or "").strip().lower() == "gps_spike":
         return _resolve_gps_spike_row_ranges(
             path,
@@ -382,6 +389,58 @@ def resolve_filter_row_ranges(
             if _filter_value_matches(value, filter_spec):
                 matched_rows.append(current[0])
     return _compress_row_numbers(matched_rows), len(matched_rows)
+
+
+def _resolve_stationarity_row_ranges(
+    path: Path, filter_spec: dict, *, confirmed_fix_keys: set[str],
+    confirmed_individual_tracks: set[tuple[str, str]],
+) -> tuple[list[list[int]], int]:
+    spec = validate_stationarity_filter(filter_spec)
+    individuals = set(filter_spec.get("individuals") or [])
+    set_names = set(filter_spec.get("set_names") or [])
+    tracks: dict[tuple[str, str], list[dict]] = {}
+    fragments: dict[tuple[str, str], int] = {}
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        columns = detect_columns(list(reader.fieldnames or []))
+        tag_column = next((name for name in (
+            "tag-local-identifier", "tag_local_identifier", "tag_identifier",
+        ) if name in (reader.fieldnames or [])), None)
+        if not all(columns[key] for key in ("individual", "time", "lon", "lat")):
+            raise ValueError("CSV is missing required columns for movement filtering")
+        for row_index, raw in enumerate(reader, start=1):
+            individual = str(raw.get(columns["individual"]) or "").strip()
+            set_name = "test" if str(raw.get(columns["set"]) or "").strip().lower() == "test" else "train"
+            if not individual or (individuals and individual not in individuals) or (set_names and set_name not in set_names):
+                continue
+            track = (individual, set_name)
+            time_ms = parse_time_ms(raw.get(columns["time"]))
+            if time_ms is None:
+                # Unknown time cannot be placed chronologically: break at the
+                # next source row rather than silently connecting across it.
+                fragments[track] = fragments.get(track, 0) + 1
+                continue
+            valid = _valid_movement_row(raw, columns)
+            fix_id = str(raw.get(columns["fix_id"]) or "").strip()
+            fix_key = _make_fix_key(row_index, fix_id, individual, time_ms)
+            excluded = valid is None or _row_is_analytically_excluded(
+                raw, fix_key=fix_key, individual=individual, set_name=set_name,
+                confirmed_fix_keys=confirmed_fix_keys,
+                confirmed_individual_tracks=confirmed_individual_tracks,
+            )
+            tracks.setdefault(track, []).append({
+                "fix_key": f"row:{row_index}", "row_index": row_index,
+                "time_ms": time_ms, "lon": valid["lon"] if valid else 0,
+                "lat": valid["lat"] if valid else 0, "excluded": excluded,
+                "burst": (raw.get("burst_"), fragments.get(track, 0)),
+                "segment": (raw.get(tag_column), fragments.get(track, 0)),
+            })
+    matches = []
+    for records in tracks.values():
+        records.sort(key=lambda item: (item["time_ms"], item["row_index"]))
+        matches.extend(stationary_fix_keys(records, spec))
+    rows = [fix_key_row_number(key) for key in matches]
+    return _compress_row_numbers(rows), len(rows)
 
 
 def _resolve_gps_spike_row_ranges(

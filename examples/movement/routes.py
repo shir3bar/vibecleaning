@@ -207,6 +207,7 @@ def _movement_graph_payload(study_dir: Path, history: dict | None = None) -> dic
             for key in (
                 "kind", "field_key", "field_kind", "operator", "threshold_value",
                 "selected_levels", "step_length_threshold_m", "minimum_abs_turn_angle_deg",
+                "radius_m", "minimum_duration_s", "maximum_gap_s", "minimum_fixes", "position",
             )
             if key in spec
         }
@@ -328,6 +329,7 @@ MOVEMENT_SUMMARY_MODULES = (
 )
 MOVEMENT_REVIEW_MODULES = (
     *MOVEMENT_SUMMARY_MODULES,
+    "examples.movement.stationarity",
     "examples.movement.review_annotations",
 )
 MOVEMENT_ANOMALY_MODULES = (
@@ -632,6 +634,13 @@ def _validate_filter_scope(value: object) -> dict:
     if any(item not in {"train", "test"} for item in set_names):
         raise ValueError("Filter track sets must contain train or test")
     filter_kind = str(value.get("kind") or "").strip().lower()
+    if filter_kind == "stationarity":
+        from .stationarity import validate_stationarity_filter
+
+        return {
+            **validate_stationarity_filter(value),
+            "individuals": individuals, "set_names": set_names,
+        }
     if filter_kind == "gps_spike":
         try:
             step_threshold = float(value.get("step_length_threshold_m"))
@@ -798,6 +807,7 @@ def _validate_issue_workflow_context(value: object) -> dict:
         "map_double_click",
         "table_shift_click",
         "color_threshold",
+        "stationarity_filter",
         "map_polygon",
     }
     methods = list(
@@ -3204,6 +3214,9 @@ def register_movement_routes(
                     resolve_rds_review_scope,
                     index_path,
                     {"kind": "filter", "filter": filter_spec},
+                    annotations=_load_dataset_review_annotations(
+                        study_dir, dataset_id=dataset_id
+                    ),
                 )
                 source_signature = bundle.signature
             else:
@@ -3224,8 +3237,14 @@ def register_movement_routes(
                     confirmed_individual_tracks=confirmed_individual_tracks,
                 )
                 source_signature = artifact_signature(_artifact)
+                _resolved_scope = {
+                    "kind": "filter", "filter": filter_spec,
+                    "row_ranges": _row_ranges,
+                }
             return JSONResponse({
                 "match_count": int(match_count),
+                **({"resolved_scope": _resolved_scope}
+                   if filter_spec.get("kind") == "stationarity" else {}),
                 "scope": (
                     "selected_individuals"
                     if filter_spec.get("individuals")

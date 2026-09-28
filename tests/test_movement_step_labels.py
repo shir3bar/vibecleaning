@@ -10,7 +10,7 @@ from examples.movement import routes
 def test_graph_labels_include_saved_threshold_without_large_scopes(monkeypatch):
     graph = {"steps": [{"step_id": "step_1", "title": "Flag filter"}]}
     history = {"steps": [{"step_id": "step_1", "parameters": {
-        "action": "annotate_scope", "status": "suspected",
+        "action": "annotate_scope", "status": "suspected", "issue_type": "High speed",
         "issue_field": "speed_mps", "issue_threshold": "> 5",
         "scope": {"kind": "filter", "source_rows": [{"row_ranges": [[1, 10000]]}],
                   "filter": {"field_key": "speed_mps", "operator": "gt",
@@ -26,6 +26,7 @@ def test_graph_labels_include_saved_threshold_without_large_scopes(monkeypatch):
     labels = loaded["steps"][0]["label_parameters"]
     assert labels["filter"] == {"field_key": "speed_mps", "operator": "gt", "threshold_value": 5}
     assert labels["action"] == "annotate_scope"
+    assert labels["issue_type"] == "High speed"
     assert "scope" not in labels and "records" not in labels
     assert history == original
 

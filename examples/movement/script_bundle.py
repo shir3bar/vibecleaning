@@ -25,6 +25,9 @@ class _VibecleaningBundledFinder(importlib.abc.MetaPathFinder, importlib.abc.Loa
     def create_module(self, spec):
         return None
 
+    def get_source(self, fullname):
+        return _VIBECLEANING_BUNDLED_SOURCES.get(fullname)
+
     def exec_module(self, module):
         source = _VIBECLEANING_BUNDLED_SOURCES.get(module.__name__)
         if source is None:

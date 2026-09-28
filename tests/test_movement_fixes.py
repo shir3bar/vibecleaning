@@ -1193,8 +1193,7 @@ def test_movement_frontend_uses_one_scope_aware_flag_action():
     assert 'this.flagTargetKind = "fixes";' not in check_source
     assert '["individual", "bursts", "filter"].includes(flagTarget.kind)' in source
     assert "Checking matches only changes the local checked-fix preview." in source
-    assert source.count(">${thresholdPreviewActionLabel}</button>") == 2
-    assert '? "Check fixes"' in source
+    assert source.count(">Select fixes</button>") >= 2
     assert "Check visible sample" not in source
     assert "Add preview matches" not in source
     assert 'selectionMethod: "map_double_click"' in source
@@ -2007,7 +2006,7 @@ def test_gps_spike_color_mode_is_visual_until_explicit_flagging():
     assert '? "step_length_m"' in source
     assert '"Flag GPS-spike fixes"' in source
     assert 'kind: "gps_spike"' in source
-    assert 'selectionMethods: isGpsSpikeTarget ? ["color_threshold"] : null' in source
+    assert 'isGpsSpikeTarget ? ["color_threshold"] : null' in source
     assert "this.openIssueModal(\"suspected\", target);" in source
 
 
@@ -2035,15 +2034,15 @@ def test_gps_spike_checked_preview_matches_binary_highlight_and_reuses_context()
     assert "Select fixes will replace the checked-fix preview" in source
 
 
-def test_threshold_issue_ui_defaults_to_whole_study_with_selected_individuals_option():
+def test_threshold_issue_ui_uses_visible_individuals_without_a_scope_selector():
     source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
     assert 'kind: "filter"' in source
-    assert 'this.thresholdFlagScope = "whole_study"' in source
-    assert 'data-action="set-threshold-flag-scope"' in source
-    assert '>Whole study</option>' in source
+    assert 'this.thresholdFlagScope' not in source
+    assert 'data-action="set-threshold-flag-scope"' not in source
+    assert 'Applies to visible individuals (' in source
     assert 'individuals: thresholdScope.individuals' in source
     assert 'set_names: thresholdScope.setNames' in source
-    assert '"all matching fixes in the whole study"' in source
+    assert 'visible individual(s), across all track sets' in source
     assert 'isFilterTarget ? `Filter ${filterVariable}` : ""' in source
     assert '`Filter applied: ${filterVariable}${issueThreshold ? ` ${issueThreshold}` : ""}.`' in source
     assert "Question for data owner (optional)" in source
@@ -2052,7 +2051,6 @@ def test_threshold_issue_ui_defaults_to_whole_study_with_selected_individuals_op
     assert "reviewProjectionIndividuals({ includeRetained = false } = {})" in source
     assert "includeRetained ? this.data.binaryBlocks?.keys?.() || [] : []" in source
     assert "reason === \"dataset_switch\" || wholeStudyFilterMutation" in source
-    assert "including hidden and not-yet-loaded individuals" in source
 
 
 def test_movement_history_locks_undo_and_resume_across_persistent_routes(tmp_path):

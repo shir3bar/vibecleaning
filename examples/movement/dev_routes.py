@@ -46,6 +46,7 @@ MOVEMENT_REVIEW_MODULES = (
     "examples.movement.bursts",
     "examples.movement.movement_features",
     "examples.movement.summary",
+    "examples.movement.stationarity",
     "examples.movement.review_annotations",
 )
 MOVEMENT_CANDIDATE_QUERY_MODULES = (

@@ -102,6 +102,7 @@ function burstIdAt(movement, index, individual) {
 function colorAt(movement, index, spec) {
   const arrays = movement.arrays;
   const field = spec.field || {};
+  if (field.key === "stationarity" && !spec.stationarityReady) return [120, 136, 153, 120];
   const individual = String(
     movement.header.individuals?.[Number(arrays.individual_codes[index])] || "",
   );
@@ -296,6 +297,19 @@ self.addEventListener("message", event => {
       }
       movement.arrays.review_status.set(reviewStatus);
       self.postMessage({ type: "review_status", requestId });
+      return;
+    }
+    if (event.data?.type === "stationarity") {
+      const movement = movements.get(String(event.data.blockId || ""));
+      if (!movement) throw new Error("Movement block is not initialized.");
+      const values = new Uint8Array(event.data.values || []);
+      if (values.length !== Number(movement.header.row_count)) {
+        throw new Error("Stationarity values do not match the movement block.");
+      }
+      movement.arrays.stationarity = values;
+      movement.header.color_columns ||= {};
+      movement.header.color_columns.stationarity = {array: "stationarity", kind: "boolean"};
+      self.postMessage({type: "stationarity", requestId});
       return;
     }
     if (event.data?.type === "attributes") {

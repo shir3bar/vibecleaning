@@ -239,6 +239,14 @@ const FIX_POPUP_OFFSET_PX = 14;
 const FIX_POPUP_EDGE_PADDING_PX = 12;
 const INDIVIDUAL_COLOR_FIELD_KEY = "individual";
 const GPS_SPIKE_COLOR_FIELD_KEY = "gps_spike_step_turn";
+const STATIONARITY_COLOR_FIELD_KEY = "stationarity";
+const DEFAULT_STATIONARITY_SETTINGS = Object.freeze({
+  radius_m: 50, minimum_duration_s: 21600, maximum_gap_s: 3600,
+  minimum_fixes: 3, position: "ends",
+});
+const STATIONARITY_COLOR_FIELD = Object.freeze({
+  key: STATIONARITY_COLOR_FIELD_KEY, label: "Stationarity", kind: "boolean", source: "derived",
+});
 const DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG = 150;
 const INDIVIDUAL_LEGEND_MAX_ITEMS = 24;
 const INDIVIDUAL_COLOR_FIELD = Object.freeze({
@@ -470,6 +478,15 @@ function updateMovementBinaryWorkerReviewStatus(binary) {
   }).then(() => undefined);
 }
 
+function updateMovementBinaryStationarity(binary) {
+  const client = movementBinaryWorkerClient;
+  if (!client || !binary?.workerBlockId) return Promise.resolve();
+  return client.request("stationarity", {
+    blockId: binary.workerBlockId,
+    values: binary.arrays[STATIONARITY_COLOR_FIELD_KEY],
+  });
+}
+
 function releaseMovementBinaryBlock(binary) {
   const blockId = binary?.workerBlockId;
   binary?.attributeRenderKeys?.clear?.();
@@ -614,7 +631,6 @@ class MovementExampleApp {
     };
     this.binaryThresholdContextCache = new Map();
     this.checkedThresholdSignature = "";
-    this.thresholdFlagScope = "whole_study";
     this.candidateQueryPreview = this.makeEmptyCandidateQueryPreview();
     this.anomalyRanking = this.makeEmptyAnomalyRanking();
     this.anomalyRankings = new Map();
@@ -629,6 +645,7 @@ class MovementExampleApp {
     };
     this.thresholdInputPendingBlur = false;
     this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
+    this.stationaritySettings = {...DEFAULT_STATIONARITY_SETTINGS};
     this.activeFixPopup = null;
     this.pendingIssueContext = null;
     this.pendingConfirmationGroups = [];
@@ -4742,6 +4759,7 @@ class MovementExampleApp {
         }
         this.currentStudy = nextStudy;
         this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
+        this.stationaritySettings = {...DEFAULT_STATIONARITY_SETTINGS};
         this.closeStudyEvents();
         this.currentDatasetId = "";
         this.currentArtifact = "";
@@ -4761,6 +4779,7 @@ class MovementExampleApp {
         return;
       }
       this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
+      this.stationaritySettings = {...DEFAULT_STATIONARITY_SETTINGS};
       try {
         let result = null;
         if (this.isForwardGraphTip(nextDatasetId)) {
@@ -4784,6 +4803,7 @@ class MovementExampleApp {
       }
       const viewContext = this.captureDatasetViewContext();
       this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
+      this.stationaritySettings = {...DEFAULT_STATIONARITY_SETTINGS};
       this.currentArtifact = nextArtifact;
       this.saveUiState();
       if (!this.currentArtifact) {
@@ -4800,6 +4820,7 @@ class MovementExampleApp {
       await this.rebuildMap(true);
     });
     this.refs.colorBy.addEventListener("change", () => {
+      this.clearStationarityPreview();
       this.clearThresholdState();
       this.saveUiState();
       this.refreshCurrentColorStyle();
@@ -5065,6 +5086,21 @@ class MovementExampleApp {
     });
     this.refs.thresholdPane.addEventListener("click", event => this.handleThresholdPaneClick(event));
     this.refs.thresholdPane.addEventListener("change", event => this.handleThresholdPaneChange(event));
+    this.refs.thresholdPane.addEventListener("input", event => {
+      if (event.target?.matches?.("[data-stationarity-setting]")) {
+        this.stationarityInputEditing = true;
+        this.clearStationarityPreview();
+        this.renderSelectedFixes();
+        this.renderLayers();
+        this.updateActionButtons();
+      }
+    });
+    this.refs.thresholdPane.addEventListener("focusout", event => {
+      if (event.target?.matches?.("[data-stationarity-setting]") && this.stationarityInputEditing) {
+        this.stationarityInputEditing = false;
+        this.renderThresholdPane();
+      }
+    });
     this.refs.thresholdPane.addEventListener("focusin", event => this.handleThresholdPaneFocusIn(event));
     this.refs.tableMode.addEventListener("change", () => {
       this.saveUiState();
@@ -5420,6 +5456,12 @@ class MovementExampleApp {
     if (data === this.data) {
       if (data.reviewProjection) {
         await this.applyBinaryReviewProjection(data.reviewProjection);
+      }
+      // A larger map block can arrive while the preview is still updating
+      // earlier blocks. Attach the resolved column now, even in that interval.
+      const stationarity = this.stationarityPreview;
+      if (stationarity?.scope && stationarity.signature === this.stationaritySignature()) {
+        await this.applyStationarityColumn([binary]);
       }
       this.beginPreviewHandoff(loadedIndividuals);
       if (
@@ -8734,6 +8776,8 @@ class MovementExampleApp {
   }
 
   clearLoadedStudyState() {
+    this.stationarityInputEditing = false;
+    this.clearStationarityPreview();
     this.clearTrackPlayer();
     this.clearRoiSelection();
     this.cancelBinaryRequests();
@@ -8742,6 +8786,7 @@ class MovementExampleApp {
     } catch {}
     this.clearThresholdState();
     this.gpsSpikeTurnAngleDeg = DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG;
+    this.stationaritySettings = {...DEFAULT_STATIONARITY_SETTINGS};
     this.clearOsmContext({ render: false });
     this.clearCandidateQueryPreview({ render: false });
     this.clearAnomalyRanking({ render: false, preserveQueueOrder: true });
@@ -8957,6 +9002,11 @@ class MovementExampleApp {
     const familyName = this.currentFamily;
     const studyName = this.currentStudy;
     const studyLoadId = ++this.studyLoadId;
+    // Fresh study navigation must discard the previous study's selections,
+    // including when the load response delegates its overview to loadDataset.
+    if (!viewContext) {
+      this.clearLoadedStudyState();
+    }
     this.currentDataset = null;
     this.currentArtifactEntry = null;
     this.resetSelect(this.refs.dataset, "Loading versions...");
@@ -9086,13 +9136,14 @@ class MovementExampleApp {
     this.refs.dataset.innerHTML = "";
     for (const dataset of this.datasets) {
       const option = document.createElement("option");
+      const step = this.stepByOutputDatasetId.get(dataset.dataset_id);
       option.value = dataset.dataset_id;
       option.textContent = formatDatasetLabel(
         dataset,
         this.graph?.current_dataset_id || "",
-        this.stepByOutputDatasetId.get(dataset.dataset_id),
+        step,
       );
-      option.title = option.textContent;
+      option.title = formatStepDetails(step, dataset);
       this.refs.dataset.appendChild(option);
     }
     if (!this.datasets.length) {
@@ -12607,6 +12658,9 @@ class MovementExampleApp {
   }
 
   binaryColorForIndex(binary, index, field) {
+    if (field?.key === STATIONARITY_COLOR_FIELD_KEY && !this.stationarityReady()) {
+      return [120, 136, 153, 120];
+    }
     const arrays = binary.arrays;
     const individual = String(binary.header.individuals?.[Number(arrays.individual_codes[index])] || "");
     if (!field || field.key === INDIVIDUAL_COLOR_FIELD_KEY) {
@@ -12645,7 +12699,7 @@ class MovementExampleApp {
     return [120, 136, 153, 150];
   }
 
-  binaryRenderSpecification() {
+  binaryRenderSpecification(binary = null) {
     const field = this.getCurrentColorField();
     const fieldStyle = field ? this.data.colorStyles.get(field.key) : null;
     // Individual colors come from the immutable study palette. Focused object
@@ -12669,6 +12723,9 @@ class MovementExampleApp {
         selectedLevels: [...(this.thresholdState.selectedLevels || [])].sort(),
       },
       gpsSpikeTurnAngleDeg: this.gpsSpikeTurnAngleDeg,
+      stationarity: field?.key === STATIONARITY_COLOR_FIELD_KEY
+        ? [this.stationaritySignature(), this.stationarityPreview?.status,
+          binary?.stationarityRevision || 0] : null,
     });
     const categoryColors = fieldStyle?.categories instanceof Map
       ? Object.fromEntries(fieldStyle.categories)
@@ -12689,12 +12746,13 @@ class MovementExampleApp {
           selectedLevels: [...(this.thresholdState.selectedLevels || [])],
         },
         gpsSpikeTurnAngleDeg: this.gpsSpikeTurnAngleDeg,
+        stationarityReady: this.stationarityReady(),
       },
     };
   }
 
   async prepareRetainedBinaryAttributes(binary) {
-    const { cacheKey, spec } = this.binaryRenderSpecification();
+    const { cacheKey, spec } = this.binaryRenderSpecification(binary);
     if (binary.renderCaches?.has(cacheKey)) {
       const cached = binary.renderCaches.get(cacheKey);
       this.recordQueueContextAttributeCounts(cached);
@@ -12757,7 +12815,7 @@ class MovementExampleApp {
   }
 
   buildRetainedBinaryAttributes(binary) {
-    const { cacheKey } = this.binaryRenderSpecification();
+    const { cacheKey } = this.binaryRenderSpecification(binary);
     if (binary.renderCaches?.has(cacheKey)) {
       const cached = binary.renderCaches.get(cacheKey);
       this.recordQueueContextAttributeCounts(cached);
@@ -13134,7 +13192,7 @@ class MovementExampleApp {
     const checkedThresholdSelection = this.isCheckedThresholdSelectionActive();
     const useFullLayer = allSelected && !queueIndividual && !manualFlagIndividual;
     const appendLayers = ({ binary, individual = "", fullLayer = false, visible = false }) => {
-      const { cacheKey } = this.binaryRenderSpecification();
+      const { cacheKey } = this.binaryRenderSpecification(binary);
       let attributes = binary.renderCaches?.get(cacheKey) || null;
       let attributeCacheKey = cacheKey;
       if (!attributes) {
@@ -14018,6 +14076,7 @@ class MovementExampleApp {
 
   baseColorForFix(fix) {
     const field = this.data.colorFieldByKey.get(this.refs.colorBy.value) || this.data.colorFields[0];
+    if (field?.key === STATIONARITY_COLOR_FIELD_KEY && !this.stationarityReady()) return [120, 136, 153, 120];
     if (!field) {
       return [124, 210, 255, POINT_ALPHA];
     }
@@ -14806,10 +14865,9 @@ class MovementExampleApp {
   }
 
   getThresholdFlagScope() {
-    const wholeStudy = this.thresholdFlagScope === "whole_study";
     return {
-      kind: wholeStudy ? "whole_study" : "selected_individuals",
-      individuals: wholeStudy ? [] : this.getSelectedIndividuals(),
+      kind: "selected_individuals",
+      individuals: this.getSelectedIndividuals(),
       // Flagging a filter applies across every track set for the chosen individuals.
       setNames: [],
     };
@@ -14818,7 +14876,11 @@ class MovementExampleApp {
   currentThresholdFilterDefinition() {
     const field = this.getCurrentColorField();
     const thresholdScope = this.getThresholdFlagScope();
-    if (!field || !this.hasActiveThreshold(field)) return null;
+    if (!field || !this.hasActiveThreshold(field) || !thresholdScope.individuals.length) return null;
+    if (field.key === STATIONARITY_COLOR_FIELD_KEY) {
+      return {kind: "stationarity", ...this.stationaritySettings,
+        individuals: thresholdScope.individuals, set_names: thresholdScope.setNames};
+    }
     if (field.key === GPS_SPIKE_COLOR_FIELD_KEY) {
       return {
         kind: "gps_spike",
@@ -14851,6 +14913,7 @@ class MovementExampleApp {
   }
 
   hasActiveThreshold(field = this.getCurrentColorField()) {
+    if (field?.key === STATIONARITY_COLOR_FIELD_KEY && !this.stationarityReady()) return false;
     if (!field || this.thresholdState.fieldKey !== field.key) return false;
     if (field.kind === "numeric") return Number.isFinite(this.thresholdState.value);
     return Array.isArray(this.thresholdState.selectedLevels)
@@ -14954,6 +15017,7 @@ class MovementExampleApp {
         String(binary.workerBlockId || binary.header.source_bundle_signature || binary.header.source_signature || "binary"),
         Number(range[0]) || 0,
         Number(range[1]) || 0,
+        Number(binary.stationarityRevision) || 0,
       ];
     });
     const contextCacheKey = JSON.stringify({
@@ -15175,6 +15239,7 @@ class MovementExampleApp {
       reverse: this.thresholdState.reverse === true,
       selectedLevels: [...(this.thresholdState.selectedLevels || [])].sort(),
       gpsSpikeTurnAngleDeg: this.gpsSpikeTurnAngleDeg,
+      stationarity: field?.key === STATIONARITY_COLOR_FIELD_KEY ? this.stationaritySignature() : null,
       individuals: this.getSelectedIndividuals(),
       setNames: [...this.getVisibleSetNames()].sort(),
     });
@@ -15193,6 +15258,10 @@ class MovementExampleApp {
       return null;
     }
     const field = this.getCurrentColorField();
+    if (field?.key === STATIONARITY_COLOR_FIELD_KEY && !this.stationarityReady()) {
+      return {field, visibleFixes: [], numericFixes: [], selectedLevels: [], levelOptions: [],
+        matchKeys: new Set(), uncheckedMatchKeys: new Set(), matchCount: 0};
+    }
     if (this.data.binaryBlocks?.size) {
       return this.getBinaryThresholdContext(field);
     }
@@ -15405,12 +15474,22 @@ class MovementExampleApp {
     if (!pane) {
       return;
     }
+    // Background track loads must not replace a setting before its change
+    // event commits the user's input.
+    if (this.stationarityInputEditing && pane.contains(document.activeElement)) return;
+    if (this.data && this.getCurrentColorField()?.key === STATIONARITY_COLOR_FIELD_KEY) {
+      this.scheduleStationarityPreview();
+    }
     if (!this.data || this.individualReviewQueue.mode === "queue") {
       pane.innerHTML = "";
       pane.classList.add("hidden");
       return;
     }
 
+    if (this.getCurrentColorField()?.key === STATIONARITY_COLOR_FIELD_KEY) {
+      this.renderStationarityThresholdPane();
+      return;
+    }
     const context = this.getThresholdContext();
     const field = context?.field;
     const visibleCount = context?.visibleFixes.length || 0;
@@ -15428,23 +15507,8 @@ class MovementExampleApp {
     const histogramInputMin = finiteOrNull(context?.histogramInputMin);
     const histogramInputMax = finiteOrNull(context?.histogramInputMax);
     const gpsSpikeMode = context?.gpsSpikeMode === true;
-    const thresholdFlagScope = this.getThresholdFlagScope();
     const selectedIndividualCount = this.getSelectedIndividuals().length;
-    const thresholdScopeControl = `
-      <label class="movement-threshold-range-label">
-        <span>Apply filter to</span>
-        <select data-action="set-threshold-flag-scope">
-          <option value="selected_individuals" ${thresholdFlagScope.kind === "selected_individuals" ? "selected" : ""}>Selected individuals (${escapeHtml(formatCount(selectedIndividualCount))})</option>
-          <option value="whole_study" ${thresholdFlagScope.kind === "whole_study" ? "selected" : ""}>Whole study</option>
-        </select>
-      </label>
-    `;
-    const thresholdScopeNote = thresholdFlagScope.kind === "whole_study"
-      ? `<div class="movement-threshold-note">The map can outline matches only on currently visible tracks. Flag thresholded fixes resolves the filter across every individual in the study, including hidden and not-yet-loaded individuals.</div>`
-      : "";
-    const thresholdPreviewActionLabel = thresholdFlagScope.kind === "whole_study"
-      ? "Check fixes"
-      : "Select fixes";
+    const thresholdScopeNote = `<div class="movement-threshold-note">Applies to visible individuals (${escapeHtml(formatCount(selectedIndividualCount))}).</div>`;
     const gpsSpikeControl = gpsSpikeMode
       ? `
         <label class="movement-threshold-range-label">
@@ -15518,15 +15582,14 @@ class MovementExampleApp {
             </label>
           `).join("")}
         </div>
-        <div class="movement-threshold-note">${escapeHtml(selectionNote)} Checking matches only changes the local checked-fix preview. Flagging resolves the selected-level filter across the scope below.</div>
-        ${thresholdScopeControl}
+        <div class="movement-threshold-note">${escapeHtml(selectionNote)} Checking matches only changes the local checked-fix preview. Flagging applies the selected-level filter to the visible individuals.</div>
         ${thresholdScopeNote}
         <div class="movement-threshold-actions">
           <button
             type="button"
             data-action="check-above-threshold"
             ${matchCount === 0 || checkedThresholdSelection ? "disabled" : ""}
-          >${thresholdPreviewActionLabel}</button>
+          >Select fixes</button>
           <button
             type="button"
             data-action="clear-threshold"
@@ -15657,15 +15720,14 @@ class MovementExampleApp {
           >
           Reverse threshold: highlight values below the line
         </label>`}
-        <div class="movement-threshold-note">${escapeHtml(selectionNote)} Checking matches only changes the local checked-fix preview. Flagging resolves the full threshold filter across the scope below.</div>
-        ${thresholdScopeControl}
+        <div class="movement-threshold-note">${escapeHtml(selectionNote)} Checking matches only changes the local checked-fix preview. Flagging applies the full threshold filter to the visible individuals.</div>
         ${thresholdScopeNote}
         <div class="movement-threshold-actions">
           <button
             type="button"
             data-action="check-above-threshold"
             ${matchCount === 0 || checkedThresholdSelection ? "disabled" : ""}
-          >${thresholdPreviewActionLabel}</button>
+          >Select fixes</button>
           <button
             type="button"
             data-action="clear-threshold"
@@ -15800,12 +15862,22 @@ class MovementExampleApp {
     if (!target) {
       return;
     }
-    const flagScopeInput = target.closest('select[data-action="set-threshold-flag-scope"]');
-    if (flagScopeInput) {
-      this.thresholdFlagScope = flagScopeInput.value === "whole_study"
-        ? "whole_study"
-        : "selected_individuals";
+    const stationarityInput = target.closest('[data-stationarity-setting]');
+    if (stationarityInput) {
+      this.stationarityInputEditing = false;
+      const key = stationarityInput.dataset.stationaritySetting;
+      const value = key === "position" ? stationarityInput.value : Number(stationarityInput.value);
+      if ((key !== "position" && (!Number.isFinite(value) || value <= 0))
+          || (key === "position" && !["ends", "anywhere"].includes(value))) {
+        this.setStatus("Stationarity radius, duration and gap must be positive numbers.", true);
+        this.renderThresholdPane();
+        return;
+      }
+      this.stationaritySettings[key] = key.endsWith("_s") ? value * 3600 : value;
+      this.clearStationarityPreview();
       this.renderThresholdPane();
+      this.renderLayers();
+      this.renderSelectedFixes();
       this.updateActionButtons();
       return;
     }
@@ -17281,9 +17353,9 @@ class MovementExampleApp {
       if (fixes.length || matchKeys.size) {
         return {
           kind: "filter",
-          filterKind: this.getCurrentColorField()?.key === GPS_SPIKE_COLOR_FIELD_KEY
-            ? "gps_spike"
-            : "threshold",
+          filterKind: this.getCurrentColorField()?.key === STATIONARITY_COLOR_FIELD_KEY
+            ? "stationarity"
+            : this.getCurrentColorField()?.key === GPS_SPIKE_COLOR_FIELD_KEY ? "gps_spike" : "threshold",
           fixes,
           matchCount: Number(thresholdContext?.matchCount) || matchKeys.size,
           thresholdScope: this.getThresholdFlagScope().kind,
@@ -17394,6 +17466,8 @@ class MovementExampleApp {
       : flagTarget.kind === "filter"
         ? flagTarget.filterKind === "gps_spike"
           ? "Flag GPS-spike fixes"
+          : flagTarget.filterKind === "stationarity"
+          ? "Flag stationarity candidates"
           : "Flag thresholded fixes"
         : flagTarget.kind === "fixes"
           ? `Flag checked fixes (${formatCount(flagFixes.length)})`
@@ -18328,6 +18402,165 @@ class MovementExampleApp {
     }
   }
 
+  stationaritySignature() {
+    return JSON.stringify([
+      this.currentFamily, this.currentStudy, this.currentDatasetId, this.currentArtifact,
+      this.data?.sourceSignature, this.refs.colorBy.value,
+      this.getSelectedIndividuals(), this.stationaritySettings,
+    ]);
+  }
+
+  stationarityReady() {
+    return this.stationarityPreview?.status === "ready"
+      && this.stationarityPreview.signature === this.stationaritySignature();
+  }
+
+  clearStationarityPreview() {
+    window.clearTimeout(this.stationarityTimer);
+    this.cancelRequest("stationarity");
+    if (this.data) this.data.stationarityValueForFix = null;
+    if (this.thresholdState.fieldKey === STATIONARITY_COLOR_FIELD_KEY) {
+      if (this.checkedThresholdSignature && this.data) this.data.selectedFixKeys = new Set();
+      this.checkedThresholdSignature = "";
+      if (this.flagTargetKind === "filter") this.flagTargetKind = "none";
+    }
+    this.stationarityPreview = null;
+  }
+
+  scheduleStationarityPreview() {
+    const signature = this.stationaritySignature();
+    if (this.stationarityPreview?.signature !== signature) {
+      this.clearStationarityPreview();
+      this.stationarityPreview = {signature, status: "waiting"};
+      if (this.getSelectedIndividuals().length) {
+        this.stationarityTimer = window.setTimeout(() => void this.previewStationarity(), 250);
+      }
+    }
+  }
+
+  renderStationarityThresholdPane() {
+    if (this.thresholdState.fieldKey !== STATIONARITY_COLOR_FIELD_KEY) {
+      this.thresholdState = {...this.thresholdState, fieldKey: STATIONARITY_COLOR_FIELD_KEY,
+        value: null, selectedLevels: ["True"], reverse: false};
+    }
+    const ready = this.stationarityReady();
+    const context = this.getThresholdContext();
+    const count = Number(context?.matchCount) || context?.matchKeys?.size || 0;
+    const candidateCount = context?.levelOptions?.find(option => option.level === "True")?.count || 0;
+    const settings = this.stationaritySettings;
+    const highlighted = this.thresholdState.selectedLevels.includes("True");
+    const checked = this.isCheckedThresholdSelectionActive();
+    const status = !this.getSelectedIndividuals().length ? "Select individuals to colour their fixes."
+      : this.stationarityPreview?.status === "error" ? this.stationarityPreview.error
+      : ready ? `${formatCount(candidateCount)} stationary candidate fixes on visible tracks.`
+      : "Calculating stationarity colours…";
+    this.refs.thresholdPane.innerHTML = `
+      <div class="movement-threshold-head"><div class="movement-threshold-title">Stationarity${movementColorFieldHelp(STATIONARITY_COLOR_FIELD)}</div></div>
+        <label class="movement-threshold-range-label"><span>Radius from first fix (m)</span><input class="movement-threshold-range-input" type="number" min="0.01" step="any" data-role="stationarity-radius" data-stationarity-setting="radius_m" value="${settings.radius_m}"></label>
+        <label class="movement-threshold-range-label"><span>Minimum duration (hours)</span><input class="movement-threshold-range-input" type="number" min="0.001" step="any" data-role="stationarity-duration" data-stationarity-setting="minimum_duration_s" value="${settings.minimum_duration_s / 3600}"></label>
+        <label class="movement-threshold-range-label"><span>Maximum gap (hours)</span><input class="movement-threshold-range-input" type="number" min="0.001" step="any" data-role="stationarity-gap" data-stationarity-setting="maximum_gap_s" value="${settings.maximum_gap_s / 3600}"></label>
+        <label class="movement-threshold-range-label"><span>Where</span><select data-role="stationarity-position" data-stationarity-setting="position"><option value="ends" ${settings.position === "ends" ? "selected" : ""}>Start/end of track</option><option value="anywhere" ${settings.position === "anywhere" ? "selected" : ""}>Anywhere</option></select></label>
+      <div class="movement-threshold-meta" data-role="stationarity-status" aria-live="polite">${escapeHtml(status)}</div>
+      <label class="movement-threshold-toggle"><input type="checkbox" data-action="toggle-threshold-level" data-level="True" ${highlighted ? "checked" : ""}>Highlight stationary fixes</label>
+      <div class="movement-threshold-note">At least 3 fixes are required. The maximum gap controls joining across source bursts. Tag changes and confirmed exclusions still split periods. A match is a review candidate, not a confirmed error.</div>
+      <div class="movement-threshold-note">Applies to visible individuals (${escapeHtml(formatCount(this.getSelectedIndividuals().length))}).</div>
+      <div class="movement-threshold-actions"><button type="button" data-action="check-above-threshold" ${!ready || !count || checked ? "disabled" : ""}>Select fixes</button><button type="button" data-action="clear-threshold" ${highlighted ? "" : "disabled"}>Clear selection</button></div>
+    `;
+    this.refs.thresholdPane.classList.remove("hidden");
+  }
+
+  async applyStationarityColumn(blocks = [...new Set([
+    this.data?.fullBinaryMovement, ...(this.data?.binaryBlocks?.values() || []),
+  ].filter(Boolean))]) {
+    const preview = this.stationarityPreview;
+    if (!preview?.scope) return;
+    const scope = preview.scope;
+    const sourceRanges = new Map((scope.source_rows || []).map(source => [source.logical_name, source.row_ranges || []]));
+    const inRanges = (row, ranges) => {
+      let low = 0, high = ranges.length - 1;
+      while (low <= high) {
+        const middle = (low + high) >>> 1;
+        const [first, last] = ranges[middle];
+        if (row < first) high = middle - 1;
+        else if (row > last) low = middle + 1;
+        else return true;
+      }
+      return false;
+    };
+    const selected = new Set(preview.individuals);
+    const jobs = [];
+    for (const binary of blocks) {
+      const values = new Uint8Array(Number(binary.header.row_count) || 0).fill(255);
+      for (let index = 0; index < values.length; index += 1) {
+        const individual = binary.header.individuals?.[Number(binary.arrays.individual_codes[index])];
+        if (!selected.has(individual)) continue;
+        const artifact = binary.header.artifacts?.[Number(binary.arrays.artifact_codes[index])];
+        values[index] = inRanges(Number(binary.arrays.source_rows[index]), scope.row_ranges || sourceRanges.get(artifact) || []) ? 1 : 0;
+      }
+      binary.arrays[STATIONARITY_COLOR_FIELD_KEY] = values;
+      binary.header.color_columns ||= {};
+      binary.header.color_columns[STATIONARITY_COLOR_FIELD_KEY] = {array: STATIONARITY_COLOR_FIELD_KEY, kind: "boolean"};
+      // A newly loaded block may already have grey render buffers for the
+      // current settings. Version the column so those buffers (including
+      // in-flight worker results) cannot stand in for its calculated colours.
+      binary.stationarityRevision = (binary.stationarityRevision || 0) + 1;
+      binary.renderCaches?.clear();
+      binary.deckDataCaches?.clear();
+      jobs.push(updateMovementBinaryStationarity(binary));
+    }
+    // Detail/table loads can materialize new fix objects after the column is ready.
+    this.data.stationarityValueForFix = fix => {
+      const row = Number(fix.sourceRow || String(fix.fixKey).match(/(?:#row:|^row:)(\d+)/)?.[1]);
+      const artifact = fix.sourceArtifact || String(fix.fixKey).split("#row:")[0].replace(/^file:/, "");
+      return selected.has(fix.individual)
+        ? inRanges(row, scope.row_ranges || sourceRanges.get(artifact) || []) : null;
+    };
+    for (const fix of this.data.fixByKey.values()) {
+      fix.attributes[STATIONARITY_COLOR_FIELD_KEY] = this.data.stationarityValueForFix(fix);
+    }
+    this.binaryThresholdContextCache.clear();
+    await Promise.all(jobs);
+  }
+
+  async previewStationarity() {
+    if (!this.data || this.getCurrentColorField()?.key !== STATIONARITY_COLOR_FIELD_KEY || !this.getSelectedIndividuals().length) return;
+    const signature = this.stationaritySignature();
+    const controller = this.beginRequest("stationarity");
+    this.stationarityPreview = {signature, status: "loading"};
+    try {
+      const individuals = this.getSelectedIndividuals();
+      const payload = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/preview-filter`,
+        {method: "POST", signal: controller.signal, body: JSON.stringify({
+          dataset_id: this.currentDatasetId, logical_name: this.currentArtifact,
+          source_bundle_signature: this.data.sourceSignature || "",
+          filter: {kind: "stationarity", ...this.stationaritySettings, individuals, set_names: []},
+        })},
+      );
+      if (this.requestControllers.stationarity !== controller || signature !== this.stationaritySignature()) return;
+      this.stationarityPreview = {signature, status: "loading", individuals, scope: payload.resolved_scope};
+      await this.applyStationarityColumn();
+      if (this.requestControllers.stationarity !== controller || signature !== this.stationaritySignature()) return;
+      this.stationarityPreview.status = "ready";
+      this.refreshCurrentColorStyle();
+      this.syncFlagTargetToThreshold();
+      this.renderLegend();
+      this.renderLayers();
+      this.renderSelectedFixes();
+    } catch (error) {
+      if (!this.isAbortError(error) && this.requestControllers.stationarity === controller
+          && signature === this.stationaritySignature()) {
+        this.stationarityPreview = {signature, status: "error", error: `Stationarity could not be calculated: ${error.message}`};
+      }
+    } finally {
+      if (this.requestControllers.stationarity === controller) {
+        this.requestControllers.stationarity = null;
+        this.renderThresholdPane();
+        this.updateActionButtons();
+      }
+    }
+  }
+
   async previewThresholdFilterCount(filter) {
     const datasetId = this.currentDatasetId;
     const signature = this.thresholdSelectionSignature();
@@ -18407,15 +18640,18 @@ class MovementExampleApp {
       return;
     }
     const selectedFixes = Array.isArray(target?.fixes) ? target.fixes : this.getSelectedFixes();
-    if (!selectedFixes.length || !this.currentArtifact) {
+    if ((!selectedFixes.length && !target?.resolvedMatchCount) || !this.currentArtifact) {
       return;
     }
     this.resetIssueScopeControls();
     const field = this.getCurrentColorField();
     const isFilterTarget = target?.kind === "filter";
-    const isGpsSpikeTarget = isFilterTarget && field?.key === GPS_SPIKE_COLOR_FIELD_KEY;
-    const issueThreshold = isFilterTarget ? this.getCurrentIssueThreshold() : "";
-    const filterVariable = isGpsSpikeTarget
+    const stationary = target?.thresholdFilter?.kind === "stationarity" ? target.thresholdFilter : null;
+    const isGpsSpikeTarget = isFilterTarget && !stationary && field?.key === GPS_SPIKE_COLOR_FIELD_KEY;
+    const issueThreshold = stationary
+      ? `radius ≤ ${stationary.radius_m} m; duration ≥ ${stationary.minimum_duration_s / 3600} h; gaps ≤ ${stationary.maximum_gap_s / 3600} h; ≥ 3 fixes; ${stationary.position === "ends" ? "track start/end" : "anywhere"}`
+      : isFilterTarget ? this.getCurrentIssueThreshold() : "";
+    const filterVariable = stationary ? "Stationarity" : isGpsSpikeTarget
       ? GPS_SPIKE_COLOR_FIELD.label
       : String(field?.label || field?.key || "threshold");
     const filterDescription = isFilterTarget
@@ -18426,7 +18662,6 @@ class MovementExampleApp {
       && Boolean(this.candidateQueryPreview?.analysisId)
       && selectedFixes.every(fix => candidateKeys.has(fix.fixKey));
     const origin = isFilterTarget ? "threshold" : (candidateGenerated ? "algorithm" : "manual");
-    const thresholdScope = this.getThresholdFlagScope();
     const queueReviewIndividual = (
       !isFilterTarget
       && this.individualReviewQueue.mode === "queue"
@@ -18444,7 +18679,8 @@ class MovementExampleApp {
       fixes: selectedFixes,
       origin,
       sourceAnalysisId: candidateGenerated ? this.candidateQueryPreview.analysisId : "",
-      issueField: isGpsSpikeTarget
+      stationaritySignature: stationary ? this.stationaritySignature() : "",
+      issueField: stationary ? "stationarity" : isGpsSpikeTarget
         ? "inbound_step_length_m + outbound_step_length_m + abs(turn_angle_deg)"
         : field?.key || "",
       issueThreshold,
@@ -18452,7 +18688,7 @@ class MovementExampleApp {
       queueReviewIndividual,
       workflowContext: this.buildIssueWorkflowContext(
         isFilterTarget ? "filter" : "fix",
-        { selectionMethods: isGpsSpikeTarget ? ["color_threshold"] : null },
+        { selectionMethods: stationary ? ["stationarity_filter"] : isGpsSpikeTarget ? ["color_threshold"] : null },
       ),
     };
     this.refs.issueTitle.textContent = `Mark fixes as ${status}`;
@@ -18463,8 +18699,8 @@ class MovementExampleApp {
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
       <div><strong>${isFilterTarget ? "Visible preview matches" : "Checked fixes"}:</strong> ${escapeHtml(formatCount(isFilterTarget ? target?.matchCount || selectedFixes.length : selectedFixes.length))}</div>
       ${isFilterTarget ? `<div><strong>Exact fixes to flag:</strong> ${escapeHtml(formatCount(target?.resolvedMatchCount || 0))}</div>` : ""}
-      <div><strong>Flag scope:</strong> ${isFilterTarget ? (thresholdScope.kind === "whole_study" ? "all matching fixes in the whole study" : `all matching fixes for ${formatCount(thresholdScope.individuals.length)} selected individual(s), across all track sets`) : "checked fixes"}</div>
-      <div><strong>Issue variable:</strong> ${escapeHtml(isGpsSpikeTarget ? "Step length + absolute turn angle" : field?.label || "Not set")}</div>
+      <div><strong>Flag scope:</strong> ${isFilterTarget ? `all matching fixes for ${formatCount(thresholdFilter.individuals.length)} visible individual(s), across all track sets` : "checked fixes"}</div>
+      <div><strong>Issue variable:</strong> ${escapeHtml(stationary ? "Stationarity" : isGpsSpikeTarget ? "Step length + absolute turn angle" : field?.label || "Not set")}</div>
       <div><strong>Issue threshold:</strong> ${escapeHtml(issueThreshold || "Not set")}</div>
       <div><strong>Origin:</strong> ${escapeHtml(origin)}</div>
     `;
@@ -18717,7 +18953,11 @@ class MovementExampleApp {
     const issueNote = this.refs.issueNote.value.trim();
     const ownerQuestion = this.refs.issueQuestion.value.trim();
     const groupScope = context.mode === "individual" || context.mode === "bursts";
-    if (!selectedFixes.length && !groupScope) {
+    if (!selectedFixes.length && !groupScope && !context.thresholdFilter) {
+      return;
+    }
+    if (context.stationaritySignature && context.stationaritySignature !== this.stationaritySignature()) {
+      this.refs.issueStatus.textContent = "Selection or version changed. Close this dialog and check the updated stationarity colours.";
       return;
     }
     if (context.mode === "bursts" && !(context.burstIds || []).length) {
@@ -20432,6 +20672,11 @@ function refreshMovementFixCollections(data, { colorFieldKeys = null, recomputeC
   }
   data.fixes = Array.from(merged.values())
     .sort((left, right) => left.timeMs - right.timeMs || left.fixKey.localeCompare(right.fixKey));
+  if (data.stationarityValueForFix) {
+    for (const fix of data.fixes) {
+      fix.attributes[STATIONARITY_COLOR_FIELD_KEY] = data.stationarityValueForFix(fix);
+    }
+  }
   data.fixByKey = new Map(data.fixes.map(fix => [fix.fixKey, fix]));
   data.confirmedPointFixes = data.fixes.filter(fix => fix.review?.status === "confirmed");
   data.eligibleFixesByTrack = buildMovementFixTrackIndex(data.fixes);
@@ -20571,6 +20816,7 @@ function buildMovementColorFields(fields) {
   const merged = [
     INDIVIDUAL_COLOR_FIELD,
     GPS_SPIKE_COLOR_FIELD,
+    STATIONARITY_COLOR_FIELD,
     ...(Array.isArray(fields) ? fields : []),
   ];
   const seen = new Set();
@@ -20593,6 +20839,7 @@ function movementColorFieldDescription(field) {
     time_delta_s: "Elapsed seconds from this fix to the following fix, attached to the segment's starting fix.",
     turn_angle_deg: "Signed change in WGS84 geodesic bearing at this fix, using the preceding and following fixes.",
     [GPS_SPIKE_COLOR_FIELD_KEY]: `Colors outbound step length. A filter match requires both adjacent steps above the distance threshold and |turn angle| at least ${DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG}° unless changed.`,
+    [STATIONARITY_COLOR_FIELD_KEY]: "Highlights fixes in stationary periods using the radius, minimum duration and maximum gap below. Matches are review candidates, not confirmed errors.",
     is_outlier: "Raw boolean outlier result supplied by move2utils. It is source data, not Vibecleaning review state.",
   };
   if (descriptions[key]) return descriptions[key];
@@ -20956,6 +21203,28 @@ function formatTimestamp(timeMs) {
 }
 
 function formatStepLabel(step, dataset) {
+  const params = step?.label_parameters || step?.parameters || {};
+  if (params.action === "annotate_scope") {
+    const issueType = String(params.issue_type || "").trim();
+    if (issueType) return issueType;
+    // Older steps may lack an issue type; keep their filter labels concise too.
+    const filter = params.filter || params.scope?.filter || {};
+    if (filter.kind === "stationarity") return "Stationarity";
+    if (filter.kind === "gps_spike") return "GPS spike";
+    const field = filter.field_key || params.issue_field;
+    const fields = {
+      speed_mps: "Speed",
+      step_length_m: "Step length",
+      time_delta_s: "Time gap",
+      turn_angle_deg: "Turn angle",
+      is_outlier: "Outlier flag",
+    };
+    if (field) return fields[field] || field;
+  }
+  return step?.title || dataset.note || (dataset.parent_dataset_id ? "Review step" : "Original input");
+}
+
+function formatStepDetails(step, dataset) {
   // Graph responses carry a compact projection; newly created steps carry
   // their full parameters. Both describe the saved action, not current UI state.
   const params = step?.label_parameters || step?.parameters || {};
@@ -20969,7 +21238,9 @@ function formatStepLabel(step, dataset) {
   };
   let criterion = "";
   if (params.action === "annotate_scope") {
-    if (filter.kind === "gps_spike") {
+    if (filter.kind === "stationarity") {
+      criterion = `Stationarity: radius ≤ ${filter.radius_m} m, duration ≥ ${filter.minimum_duration_s / 3600} h, gaps ≤ ${filter.maximum_gap_s / 3600} h (${filter.position})`;
+    } else if (filter.kind === "gps_spike") {
       criterion = `GPS spike: both steps > ${filter.step_length_threshold_m} m, |turn| ≥ ${filter.minimum_abs_turn_angle_deg}°`;
     } else if (filter.field_key) {
       const [name, unit] = fields[filter.field_key] || [filter.field_key, ""];

@@ -25,6 +25,7 @@ from app.web import create_app
 from examples.movement.analysis_history import BURST_FEATURE_SIGNATURE
 from examples.movement.routes import register_movement_routes
 from examples.rds_movement.app import create_rds_movement_app
+from examples.slim_movement.app import create_slim_movement_app
 
 
 STATIC_ROOT = REPO_ROOT / "examples" / "movement" / "static"
@@ -228,6 +229,74 @@ def _record_preview_latency(page, record_property):
     budget = os.environ.get("VIBECLEANING_PREVIEW_BUDGET_MS")
     if budget:
         assert latency < float(budget), f"Preview activation took {latency:.1f} ms"
+
+
+@pytest.mark.parametrize("source_format", ["csv", "rds"])
+def test_study_switch_resets_threshold_but_retains_color_field(tmp_path, source_format):
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    data_root = tmp_path / "data"
+    if source_format == "rds":
+        study_sources = [
+            ("first_study", "268904527_269302895.rds"),
+            ("second_study", "268904527_269302904.rds"),
+        ]
+        for study_name, filename in study_sources:
+            sample = RDS_SAMPLE_ROOT / filename
+            if not sample.exists():
+                pytest.skip("RDS movement browser fixtures are unavailable")
+            study_dir = data_root / "movement_rds" / study_name
+            study_dir.mkdir(parents=True)
+            shutil.copy2(sample, study_dir / filename)
+        app = create_rds_movement_app(
+            data_root=data_root, cache_root=tmp_path / "cache",
+            static_root=STATIC_ROOT, index_path=INDEX_PATH,
+            auth_manager=_auth_manager(),
+        )
+        first_individual, second_individual = "MF006", "MF011"
+    else:
+        for study_name, prefix in [("first_study", ""), ("second_study", "new-")]:
+            study_dir = data_root / "movement_raw" / study_name
+            study_dir.mkdir(parents=True)
+            content = CSV_BROWSER_FIXTURE
+            for individual in ["alpha", "beta", "gamma"]:
+                content = content.replace(individual, prefix + individual)
+            (study_dir / "movement.csv").write_text(content, encoding="utf-8")
+        app = create_slim_movement_app(
+            data_root=data_root, static_root=STATIC_ROOT, index_path=INDEX_PATH,
+            auth_manager=_auth_manager(),
+        )
+        first_individual, second_individual = "alpha", "new-alpha"
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page_errors = []
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        _login_and_wait(page, base_url, "first_study")
+        first = page.locator(f'[data-individual-checkbox="{first_individual}"]')
+        first.wait_for(state="visible", timeout=30_000)
+        page.wait_for_function("() => window.__movementDiagnosticsSnapshot().mapReady")
+        first.check()
+        _wait_for_layer(page, "movement-binary-paths-")
+        page.locator('[data-role="color-by"]').select_option("speed_mps")
+        cutoff = page.locator('input[data-action="set-threshold-value"]')
+        cutoff.fill("12.5")
+        cutoff.press("Tab")
+        page.locator('input[data-action="toggle-threshold-reverse"]').check()
+
+        page.locator('[data-role="study"]').select_option("second_study")
+        second = page.locator(f'[data-individual-checkbox="{second_individual}"]')
+        second.wait_for(state="visible", timeout=30_000)
+        page.wait_for_function("() => window.__movementDiagnosticsSnapshot().mapReady")
+        second.check()
+        _wait_for_layer(page, "movement-binary-paths-")
+        cutoff.wait_for(state="visible", timeout=30_000)
+        assert page.locator('[data-role="color-by"]').input_value() == "speed_mps"
+        assert cutoff.input_value() == ""
+        assert not page.locator('input[data-action="toggle-threshold-reverse"]').is_checked()
+        assert page.locator('button[data-action="check-above-threshold"]').is_disabled()
+        assert not page_errors
+        browser.close()
 
 
 def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path, record_property):
@@ -1545,14 +1614,14 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_prop
         browser.close()
 
 
-def test_rds_whole_study_filter_updates_hidden_retained_individuals(tmp_path):
+def test_rds_filter_only_updates_visible_individuals(tmp_path):
     playwright_api = pytest.importorskip("playwright.sync_api")
     samples = [
         RDS_SAMPLE_ROOT / "268904527_269302895.rds",  # MF006: 3 source outliers
         RDS_SAMPLE_ROOT / "268904527_269302904.rds",  # MF011: 23 source outliers
     ]
     if not all(sample.exists() for sample in samples):
-        pytest.skip("RDS whole-study browser fixtures are unavailable")
+        pytest.skip("RDS filter browser fixtures are unavailable")
     study_dir = tmp_path / "data" / "movement_rds" / "268904527"
     study_dir.mkdir(parents=True)
     for sample in samples:
@@ -1568,12 +1637,6 @@ def test_rds_whole_study_filter_updates_hidden_retained_individuals(tmp_path):
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
         page = browser.new_page(viewport={"width": 1440, "height": 900})
-        projection_requests = []
-        page.on(
-            "request",
-            lambda request: projection_requests.append(request.url)
-            if "/review-projection?" in request.url else None,
-        )
         _login_and_wait(page, base_url, "268904527")
         page.locator('[data-individual-checkbox="MF006"]').wait_for(state="visible", timeout=30_000)
         page.locator('[data-individual-checkbox="MF011"]').wait_for(state="visible", timeout=30_000)
@@ -1587,8 +1650,8 @@ def test_rds_whole_study_filter_updates_hidden_retained_individuals(tmp_path):
         mf006 = page.locator('[data-individual-checkbox="MF006"]')
         mf011 = page.locator('[data-individual-checkbox="MF011"]')
 
-        # Retain MF011's exact block in browser memory, then hide it before the
-        # whole-study mutation. This is the stale-cache case reported by users.
+        # Previously viewed individuals remain cached but must not be flagged
+        # after they are hidden from the map.
         mf011.check()
         _wait_for_layer(page, f"movement-binary-paths-individual-{mf011_index}")
         mf011.uncheck()
@@ -1600,32 +1663,37 @@ def test_rds_whole_study_filter_updates_hidden_retained_individuals(tmp_path):
         )
         true_level.wait_for(state="visible", timeout=20_000)
         true_level.check()
+        assert page.locator('[data-action="set-threshold-flag-scope"]').count() == 0
         page.locator('button[data-action="check-above-threshold"]').click()
         page.locator('[data-role="mark-suspected"]').click()
         page.locator('[data-role="issue-modal"]').wait_for(state="visible")
         issue_meta = page.locator('[data-role="issue-meta"]').text_content()
-        assert "Exact fixes to flag: 26" in issue_meta
-        assert "all matching fixes in the whole study" in issue_meta
-        page.locator('[data-role="issue-submit"]').click()
+        assert "Exact fixes to flag: 3" in issue_meta
+        assert "all matching fixes for 1 visible individual(s)" in issue_meta
+        with page.expect_response(lambda response: response.url.endswith("/actions/annotate-scope")) as saved:
+            page.locator('[data-role="issue-submit"]').click()
+        assert saved.value.status == 200
+        step = saved.value.json()["step"]
+        assert step["summary"]["resolved_fix_count"] == 3
+        assert step["parameters"]["scope"]["filter"]["individuals"] == ["MF006"]
         page.locator('[data-role="issue-modal"]').wait_for(
             state="hidden", timeout=20_000
         )
         page.wait_for_function(
-            "() => document.querySelector('[data-role=status]').textContent.includes('Flagged 26 fixes')",
+            "() => document.querySelector('[data-role=status]').textContent.includes('Flagged 3 fixes')",
             timeout=20_000,
         )
 
         assert not mf011.is_checked()
-        assert "MF011" in projection_requests[-1], projection_requests
+        _wait_for_layer(page, f"movement-binary-suspected-individual-{mf006_index}")
         mf006.uncheck()
         mf011.check()
+        _wait_for_layer(page, f"movement-binary-paths-individual-{mf011_index}")
+        # MF006's layer is retained with visible=false. MF011 must have no
+        # suspected layer of its own when shown again.
+        assert f"movement-binary-suspected-individual-{mf011_index}" not in _layer_ids(page)
         page.wait_for_function(
-            "layerId => window.__movementDiagnostics.renderedLayerIds.includes(layerId)",
-            arg=f"movement-binary-suspected-individual-{mf011_index}",
-            timeout=20_000,
-        )
-        page.wait_for_function(
-            "() => document.querySelector('[data-role=select-suspicious]').textContent.includes('(26)')",
+            "() => document.querySelector('[data-role=select-suspicious]').textContent.includes('(3)')",
             timeout=20_000,
         )
         browser.close()

@@ -5,9 +5,9 @@ const source = fs.readFileSync(process.argv[2] === '--stdin' ? 0 : process.argv[
 const profile = process.argv[3] || 'rds_movement';
 const start = source.indexOf('class MovementExampleApp {');
 const end = source.indexOf('\n}\n', start) + 2;
-const App = new Function('MOVEMENT_APP_CONFIG', 'GPS_SPIKE_COLOR_FIELD_KEY', 'formatCount',
+const App = new Function('MOVEMENT_APP_CONFIG', 'GPS_SPIKE_COLOR_FIELD_KEY', 'STATIONARITY_COLOR_FIELD_KEY', 'formatCount',
   `${source.slice(start, end)}; return MovementExampleApp;`
-)({rdsSource: profile === 'rds_movement'}, 'gps_spike_step_turn', String);
+)({rdsSource: profile === 'rds_movement'}, 'gps_spike_step_turn', 'stationarity', String);
 
 function handler(name, next) {
   const marker = `this.refs.${name}.addEventListener("click", () => {`;
@@ -39,7 +39,6 @@ function fixture(field, state) {
   app.thresholdState = structuredClone(state);
   app.flagTargetKind = 'filter';
   app.checkedThresholdSignature = '';
-  app.thresholdFlagScope = 'selected_individuals';
   app.movementDiagnostics = {binaryCacheHits: 0};
   app.paneScopes = [];
   app.renderThresholdPane = () => app.paneScopes.push(app.getSelectedIndividuals());
@@ -63,7 +62,9 @@ async function main() {
     const app = fixture(field, state);
     const assertRetained = individuals => {
       assert.deepEqual(app.thresholdState, state);
-      assert.deepEqual(app.currentThresholdFilterDefinition().individuals, individuals);
+      const filter = app.currentThresholdFilterDefinition();
+      if (individuals.length) assert.deepEqual(filter.individuals, individuals);
+      else assert.equal(filter, null); // Empty scope must never mean the whole study.
       assert.equal(app.flagTargetKind, 'filter');
       assert.deepEqual(app.paneScopes.at(-1), individuals);
     };
