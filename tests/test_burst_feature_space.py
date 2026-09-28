@@ -20,7 +20,6 @@ from examples.movement.routes import (
     register_movement_routes,
 )
 
-MOVEMENT_APP_JS = REPO_ROOT / "examples" / "movement" / "static" / "app.js"
 
 
 FEATURE_SPACE_CSV = """eventid,individual,timestamp,longitude,latitude,set,gps:hdop,height-above-msl,osm:nearest_road_distance_m,osm:nearest_road_class,osm:road_match_status,osm:nearest_railway_distance_m,osm:nearest_railway_class,osm:railway_match_status
@@ -303,87 +302,3 @@ def test_burst_feature_space_route_rejects_unknown_feature_set(tmp_path):
 
     assert response.status_code == 400
     assert response.json()["error"] == "Invalid feature_set"
-
-
-def test_frontend_exposes_read_only_burst_feature_space_with_bidirectional_focus():
-    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
-    runner = source[
-        source.index("  async runBurstFeatureSpace()"):
-        source.index("  getBurstFeatureSpacePoint(")
-    ]
-    renderer = source[
-        source.index("  getBurstFeatureSpaceNeighbors("):
-        source.index("  normalizeRankingBurstRefs(")
-    ]
-    feature_space_handler = source[
-        source.index("  async inspectBurstFeatureSpacePoint("):
-        source.index("  normalizeRankingBurstRefs(")
-    ]
-    shared_focus_handler = source[
-        source.index("  async inspectBurstRef("):
-        source.index("  async handleAnomalyRankingClick(")
-    ]
-
-    assert 'data-role="run-burst-feature-space">Feature space</button>' in source
-    assert 'data-role="side-tab-feature-space">Burst feature space</button>' in source
-    assert 'data-role="side-sheet-feature-space"' in source
-    assert 'data-role="burst-feature-space"' in source
-    assert 'this.refs.sideTabFeatureSpace.addEventListener("click", () => this.setSideSheet("feature_space"))' in source
-    assert "run-burst-feature-space" in runner
-    assert "dataset_id: this.currentDatasetId" in runner
-    assert "logical_name: this.currentArtifact" in runner
-    assert "burst_gap_mode: this.getBurstGapMode()" in runner
-    assert "burst_gap_seconds: this.getBurstGapSeconds()" in runner
-    assert "burst_gap_quantile: this.getBurstGapQuantile()" in runner
-    assert "feature_set: featureSet" in runner
-    assert "/artifact/burst_feature_space.json" in runner
-    assert 'this.setSideSheet("feature_space")' in runner
-    assert '<svg viewBox="0 0 ${width} ${height}"' in renderer
-    assert 'data-action="focus-feature-space-burst"' in renderer
-    assert "point?.pc1" in renderer
-    assert "point?.pc2" in renderer
-    assert "movement-feature-space-point is-neighbor" not in source
-    assert '"is-neighbor"' in renderer
-    assert '"is-selected"' in renderer
-    assert 'data-role="feature-space-selection"' in renderer
-    assert 'data-role="feature-space-neighbors"' in renderer
-    assert 'data-action="focus-feature-space-neighbor"' in renderer
-    assert "nearest_neighbors" in renderer
-    assert "await this.inspectBurstRef(point, {" in feature_space_handler
-    assert "isolateIndividual: true" in feature_space_handler
-    assert "inspectBurstFeatureSpaceNeighbor" in feature_space_handler
-    assert "const point = this.getBurstFeatureSpacePoint(burstId)" in feature_space_handler
-    assert "preserveFeatureSpaceSelection: true" in feature_space_handler
-    assert "const fixKeys = Array.isArray(ref.fix_keys) ? ref.fix_keys : []" in shared_focus_handler
-    assert "isolateIndividual = false" in shared_focus_handler
-    assert "preserveFeatureSpaceSelection = false" in shared_focus_handler
-    assert "const preservedFeatureSpaceBurstId = preserveFeatureSpaceSelection" in shared_focus_handler
-    assert "this.burstFeatureSpace.selectedBurstId = preservedFeatureSpaceBurstId" in shared_focus_handler
-    assert "this.data.selectedIndividuals = new Set([ref.individual])" in shared_focus_handler
-    assert "this.setFocusedRankingBurst(ref)" in shared_focus_handler
-    assert "this.zoomToPath(path)" in shared_focus_handler
-    assert "this.burstFeatureSpace.selectedBurstId = this.focusedRankingBurst.burstId" in source
-    assert "this.renderBurstFeatureSpace()" in source
-    assert "getMapPickedFeatureSpaceBurst(event)" in source
-    assert "this.overlay.pickMultipleObjects" in source
-    assert 'this.refs?.sideSheetTabs?.dataset.activeSheet !== "feature_space"' in source
-    assert "selectMapBurstInFeatureSpace(burst)" in source
-    assert "this.setFocusedRankingBurst({" in source
-    assert "fix_keys: burst.fixKeys" in source
-    # Map-to-feature-space selection no longer depends on layer pickability;
-    # bursts are always pickable and the handler keeps its own guards, running
-    # ahead of both the burst-focus and fix-selection branches.
-    assert "pickable: Boolean(this.burstFeatureSpace?.points?.length)" not in source
-    assert "!(this.burstFeatureSpace?.points || []).length" in source
-    click_handler = source[
-        source.index("  handleMapClick(event) {"):
-        source.index("  handleMapContextMenu(event) {")
-    ]
-    assert click_handler.index("getMapPickedFeatureSpaceBurst") < click_handler.index("pickObject")
-    assert click_handler.index("selectMapBurstInFeatureSpace") < click_handler.index("getMapPickedObject")
-    assert "focusMapBurst" not in click_handler
-    assert "openIssueModal" not in feature_space_handler
-    assert "openSegmentModal" not in feature_space_handler
-    assert "run-candidate-query" not in feature_space_handler
-    assert "enrich-osm-context" not in feature_space_handler
-    assert "run-burst-anomaly-ranking" not in feature_space_handler

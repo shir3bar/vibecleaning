@@ -13,7 +13,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-MOVEMENT_APP_JS = REPO_ROOT / "examples" / "movement" / "static" / "app.js"
 
 from app.osm import normalize_osm_request
 from app.state import get_dataset_artifact, list_history, load_dataset, load_project_state
@@ -464,15 +463,6 @@ def test_osm_enrichment_rejects_historical_dataset_before_fetching(tmp_path):
 
     assert response.status_code == 423
     assert response.json()["edit_profile"]["blockers"][0]["code"] == "historical_version"
-
-
-def test_frontend_does_not_expose_temporary_preprocessing_osm_enrichment_control():
-    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
-
-    assert 'data-role="osm-enrichment-radius"' not in source
-    assert 'data-role="test-osm-enrichment"' not in source
-    assert "Test OSM context enrichment" not in source
-    assert "testOsmContextEnrichment" not in source
 
 
 def test_osm_enrichment_route_creates_derived_artifact_and_exposes_attributes(monkeypatch, tmp_path):

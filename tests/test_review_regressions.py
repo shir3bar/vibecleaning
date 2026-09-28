@@ -92,7 +92,7 @@ def test_reviewed_rds_can_be_reimported_and_updated(tmp_path):
     from examples.movement.rds_export import write_reviewed_rds_python, _compare_original_columns
     sources = sorted((Path(__file__).resolve().parents[1] / "data/movement_rds").glob("*.rds"), key=lambda p: p.stat().st_size)
     if not sources:
-        pytest.skip("No sample RDS")
+        pytest.fail("No sample RDS")
     source = sources[0]
     n = len(rds_index.read_movement_rds(source))
     columns = {key: [None] * n for key in rds_index.RDS_REVIEW_COLUMNS}
@@ -136,7 +136,7 @@ def test_history_rejects_old_feature_recipe_not_suspected_annotations():
 def test_csv_and_rds_use_identical_within_burst_features(tmp_path):
     sources = sorted((Path(__file__).resolve().parents[1] / "data/movement_rds").glob("*.rds"), key=lambda p: p.stat().st_size)
     if not sources:
-        pytest.skip("No sample RDS")
+        pytest.fail("No sample RDS")
     source = sources[0]
     bundle = rds_index.RdsBundle(study_dir=tmp_path, dataset_id="test",
         artifacts=({"logical_name": source.name},), paths=(source,), signature="test")

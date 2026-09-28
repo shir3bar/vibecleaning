@@ -120,11 +120,12 @@ def test_queue_group_resolves_exact_individual_and_preserves_overlap(reviewed_st
                           for path in study.iterdir() if path.is_file()}
 
 
-def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study):
-    from test_movement_browser import _serve, _open_browser, _wait_for_layer, STATIC_ROOT, INDEX_PATH
+@pytest.mark.browser
+def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tmp_path):
+    from test_movement_browser import _serve, _open_browser, _new_page, _wait_for_layer, STATIC_ROOT, INDEX_PATH
     from app.auth import AuthManager
     from app.web import create_app
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     client, study, base, dataset, logical, individuals, *_ = reviewed_study
     browser_app = client.app
     if study.parent.name == "movement_clean":
@@ -134,7 +135,7 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study):
         routes.register_movement_routes(browser_app, data_root=study.parents[1])
     with _serve(browser_app) as url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        page = _new_page(browser, viewport={"width": 1440, "height": 1000})
         errors = []
         track_requests = []
         page.on("pageerror", lambda error: errors.append(str(error)))
@@ -213,7 +214,7 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study):
         }""")
         highlight.click()
         bursts.locator('summary').click()
-        page.screenshot(path=f"/tmp/vibecleaning-queue-groups-active-{study.parent.name}.png")
+        page.screenshot(path=tmp_path / "queue-groups-active.png")
         # An unsaved individual decision must survive these separate review steps.
         active.locator('[data-review-decision="fix_keep"]').click()
         is_rds = study.parent.name == "movement_rds"
@@ -273,7 +274,7 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study):
         active.get_by_text("No unresolved flags.", exact=True).wait_for(timeout=30_000)
         assert_retained_track(0)
         page.evaluate("() => { window.__testObserveReview = false; }")
-        page.screenshot(path=f"/tmp/vibecleaning-queue-groups-{study.parent.name}.png")
+        page.screenshot(path=tmp_path / "queue-groups.png")
         # Existing Save decision still saves the individual decision, independently.
         with page.expect_response(lambda response: response.url.endswith("/actions/review-individual")) as decision:
             page.locator('[data-role="individual-queue-save"]').click()

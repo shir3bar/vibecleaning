@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+from contextlib import closing
 import sys
 
 from fastapi.testclient import TestClient
@@ -22,7 +23,7 @@ from app.state import get_dataset_artifact, load_dataset
 
 
 def create_test_database(path: Path) -> None:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
             'CREATE TABLE movement ('
             '"event-id" TEXT, "timestamp" TEXT, "location-long" REAL, '
@@ -43,7 +44,7 @@ def create_test_database(path: Path) -> None:
 
 
 def create_large_test_database(path: Path, row_count: int = 30_000) -> None:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
             'CREATE TABLE movement ('
             '"event-id" TEXT, "timestamp" INTEGER, "location-long" REAL, '
@@ -473,44 +474,10 @@ def test_move_viz_frontend_references_every_declared_role_consistently():
     assert "roleReferenceKey(element.dataset.role)" in source
 
 
-def test_move_viz_rebuilds_overlays_after_atomic_basemap_change():
-    source = (MOVE_VIZ_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-
-    listener_position = source.index('this.map.once("style.load", resolve)')
-    set_style_position = source.index('this.map.setStyle(style, { diff: false })')
-    render_position = source.index("this.renderData();", set_style_position)
-
-    assert listener_position < set_style_position < render_position
-    assert "const changeId = ++this.styleChangeId" in source
-    assert "if (changeId !== this.styleChangeId) return" in source
-    assert 'this.map.getSource("move-viz-tracks")' in source
-    assert 'this.map.getSource("move-viz-points")' in source
-
-
-def test_move_viz_supports_borderless_fixes_and_compact_scope_selection():
-    source = (MOVE_VIZ_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-
-    assert '<option value="fix">Single fixes</option>' in source
-    assert '<option value="segment">Track segment (2 clicks)</option>' in source
-    assert '<option value="individual">Entire individual</option>' in source
-    assert "selectSegmentEndpoint(row)" in source
-    assert "this.rowsByIndividual.get(row.individual)" in source
-    assert "track.slice(start, end + 1)" in source
-    assert '"circle-stroke-color": "#7dd3fc"' in source
-    assert 'sourceFlagged ? "#fbbf24" : "rgba(0,0,0,0)"' in source
-    assert '"circle-stroke-width": ["get", "borderWidth"]' in source
-    assert 'scope: this.selectionMode' in source
-    click_handler = source[source.index("handleMapClick(event)") : source.index("\n  selectSegmentEndpoint(row)")]
-    assert "this.rowByKey.get(key)" in click_handler
-    assert "this.renderReviewSelection()" in click_handler
-    assert "this.renderData()" not in click_handler
-    assert 'id: "move-viz-selected-track"' in source
-
-
 def test_committed_sample_database_matches_raw_demo_shape():
     assert SAMPLE_DATABASE.exists()
     assert SAMPLE_DATABASE.read_bytes().startswith(b"SQLite format 3\x00")
-    with sqlite3.connect(SAMPLE_DATABASE) as connection:
+    with closing(sqlite3.connect(SAMPLE_DATABASE)) as connection:
         row_count = connection.execute("SELECT COUNT(*) FROM movement").fetchone()[0]
         columns = [row[1] for row in connection.execute("PRAGMA table_info(movement)")]
 

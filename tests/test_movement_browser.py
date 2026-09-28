@@ -3,8 +3,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 import asyncio
+import base64
 import json
+import logging
 import os
+import re
 import shutil
 import socket
 import sys
@@ -12,7 +15,6 @@ import threading
 import time
 
 import pytest
-import uvicorn
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -20,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.auth import AuthManager
 from app.execution import create_analysis, create_step
+from app.server import create_server
 from app.state import ensure_project_state
 from app.web import create_app
 from examples.movement.analysis_history import BURST_FEATURE_SIGNATURE
@@ -31,6 +34,17 @@ from examples.slim_movement.app import create_slim_movement_app
 STATIC_ROOT = REPO_ROOT / "examples" / "movement" / "static"
 INDEX_PATH = STATIC_ROOT / "index.html"
 RDS_SAMPLE_ROOT = REPO_ROOT / "data" / "movement_rds"
+
+pytestmark = pytest.mark.browser
+LOGGER = logging.getLogger(__name__)
+BASEMAP_REQUEST = re.compile(
+    r"https://(?:tile\.openstreetmap\.org|basemaps\.cartocdn\.com|"
+    r"services\.arcgisonline\.com|tile\.opentopomap\.org)/"
+)
+TRANSPARENT_TILE = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 CSV_BROWSER_FIXTURE = """eventid,individual,timestamp,longitude,latitude,set
 a1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
@@ -157,31 +171,65 @@ def _serve(app):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(
+    server = create_server(
         app,
         host="127.0.0.1",
         port=port,
         log_level="warning",
-    ))
+    )
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started and time.monotonic() < deadline:
-        time.sleep(0.01)
-    if not server.started:
-        raise RuntimeError("Browser test server did not start")
     try:
+        deadline = time.monotonic() + 10
+        while not server.started and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not server.started:
+            raise RuntimeError("Browser test server did not start")
         yield f"http://127.0.0.1:{port}"
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+        assert not thread.is_alive(), "Browser test server did not shut down"
 
 
 def _open_browser(playwright):
     try:
-        return playwright.chromium.launch(headless=True)
+        return playwright.chromium.launch(
+            headless=True,
+            # CI and VMs need a working WebGL context without a physical GPU.
+            args=["--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
+        )
     except Exception as exc:  # pragma: no cover - depends on local browser install
-        pytest.skip(f"Playwright Chromium is unavailable: {exc}")
+        pytest.fail(
+            "Chromium could not start. Run `uv run playwright install chromium` "
+            "(Linux also needs `uv run playwright install-deps chromium`). "
+            f"Browser error: {exc}",
+            pytrace=False,
+        )
+
+
+def _new_page(browser, **kwargs):
+    page = browser.new_page(**kwargs)
+    # Keep real MapLibre/Deck rendering and local app requests. These tests do
+    # not check third-party map imagery or depend on a provider being online.
+    def basemap_response(route):
+        if route.request.url.endswith(".json"):
+            route.fulfill(json={"version": 8, "sources": {}, "layers": []})
+        else:
+            route.fulfill(content_type="image/png", body=TRANSPARENT_TILE)
+
+    page.route(BASEMAP_REQUEST, basemap_response)
+    # Pytest includes these logs with failures, including startup timeouts.
+    page.on("pageerror", lambda error: LOGGER.error("Browser JavaScript: %s", error))
+    page.on("console", lambda message: LOGGER.error("Browser console: %s", message.text)
+            if message.type == "error" else None)
+    page.on("requestfailed", lambda request: LOGGER.error(
+        "Browser request failed: %s %s (%s)", request.method, request.url, request.failure
+    ))
+    page.on("response", lambda response: LOGGER.error(
+        "Browser HTTP %s: %s", response.status, response.url
+    ) if response.status >= 400 else None)
+    return page
 
 
 def _login_and_wait(page, base_url: str, study_name: str) -> None:
@@ -189,11 +237,12 @@ def _login_and_wait(page, base_url: str, study_name: str) -> None:
     page.locator("#login-username").fill("browser-reviewer")
     page.locator("#login-password").fill("test-password-long")
     page.locator("#login-submit").click()
-    page.locator(".movement-root").wait_for(state="visible", timeout=20_000)
-    page.locator('[data-role="map"] canvas').first.wait_for(state="attached", timeout=20_000)
-    page.wait_for_function("window.__movementDiagnostics !== undefined")
+    # Readiness is a functional condition, not a startup performance budget.
+    page.locator(".movement-root").wait_for(state="visible", timeout=60_000)
+    page.locator('[data-role="map"] canvas').first.wait_for(state="attached", timeout=60_000)
+    page.wait_for_function("window.__movementDiagnostics !== undefined", timeout=60_000)
     page.locator(f'[data-role="study"] option[value="{study_name}"]').wait_for(
-        state="attached", timeout=20_000
+        state="attached", timeout=60_000
     )
     page.locator('[data-role="study"]').select_option(study_name)
 
@@ -233,7 +282,7 @@ def _record_preview_latency(page, record_property):
 
 @pytest.mark.parametrize("source_format", ["csv", "rds"])
 def test_study_switch_resets_threshold_but_retains_color_field(tmp_path, source_format):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     data_root = tmp_path / "data"
     if source_format == "rds":
         study_sources = [
@@ -243,7 +292,7 @@ def test_study_switch_resets_threshold_but_retains_color_field(tmp_path, source_
         for study_name, filename in study_sources:
             sample = RDS_SAMPLE_ROOT / filename
             if not sample.exists():
-                pytest.skip("RDS movement browser fixtures are unavailable")
+                pytest.fail("RDS movement browser fixtures are unavailable")
             study_dir = data_root / "movement_rds" / study_name
             study_dir.mkdir(parents=True)
             shutil.copy2(sample, study_dir / filename)
@@ -269,7 +318,7 @@ def test_study_switch_resets_threshold_but_retains_color_field(tmp_path, source_
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         page_errors = []
         page.on("pageerror", lambda error: page_errors.append(str(error)))
         _login_and_wait(page, base_url, "first_study")
@@ -300,7 +349,7 @@ def test_study_switch_resets_threshold_but_retains_color_field(tmp_path, source_
 
 
 def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path, record_property):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "browser_study"
     study_dir.mkdir(parents=True)
     (study_dir / "movement.csv").write_text(CSV_BROWSER_FIXTURE, encoding="utf-8")
@@ -321,7 +370,7 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path, record_
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         page_errors = []
         page.on("pageerror", lambda error: page_errors.append(str(error)))
         binary_requests = []
@@ -488,7 +537,7 @@ def test_csv_progressive_loading_preserves_dom_and_warm_blocks(tmp_path, record_
 
 
 def test_queue_track_player_uses_fix_index_timeline_and_ignores_sets(tmp_path):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "track_player"
     study_dir.mkdir(parents=True)
     (study_dir / "movement.csv").write_text(
@@ -505,7 +554,7 @@ def test_queue_track_player_uses_fix_index_timeline_and_ignores_sets(tmp_path):
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         binary_requests = []
         page.on(
             "request",
@@ -673,7 +722,7 @@ def test_queue_track_player_uses_fix_index_timeline_and_ignores_sets(tmp_path):
 
 
 def test_roi_drawing_uses_queue_and_browse_scopes(tmp_path):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "roi_ui"
     study_dir.mkdir(parents=True)
     (study_dir / "movement.csv").write_text(
@@ -690,7 +739,7 @@ def test_roi_drawing_uses_queue_and_browse_scopes(tmp_path):
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         _login_and_wait(page, base_url, "roi_ui")
         page.locator("[data-individual-checkbox]").first.wait_for(
             state="attached", timeout=20_000
@@ -742,7 +791,7 @@ def test_roi_drawing_uses_queue_and_browse_scopes(tmp_path):
 
 
 def test_queue_decision_retains_exact_blocks_across_review_step(tmp_path):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "queue_transition"
     study_dir.mkdir(parents=True)
     (study_dir / "movement.csv").write_text(
@@ -765,7 +814,7 @@ def test_queue_decision_retains_exact_blocks_across_review_step(tmp_path):
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         binary_requests = []
         page.on(
             "request",
@@ -825,7 +874,7 @@ def test_queue_decision_retains_exact_blocks_across_review_step(tmp_path):
 
 
 def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "queue_auto_save"
     study_dir.mkdir(parents=True)
     (study_dir / "movement.csv").write_text(
@@ -847,7 +896,7 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         review_requests = []
         page.on(
             "request",
@@ -1075,7 +1124,7 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
 
 
 def test_second_round_prior_ok_order_toggle_does_not_touch_map(tmp_path):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "second_round_queue"
     study_dir.mkdir(parents=True)
     (study_dir / "movement.csv").write_text(
@@ -1167,7 +1216,7 @@ def test_second_round_prior_ok_order_toggle_does_not_touch_map(tmp_path):
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         _login_and_wait(page, base_url, "second_round_queue")
         page.locator('[data-individual-checkbox="alpha"]').wait_for(
             state="attached", timeout=20_000
@@ -1218,7 +1267,7 @@ def test_second_round_prior_ok_order_toggle_does_not_touch_map(tmp_path):
 
 
 def test_admin_dashboard_refreshes_active_review_without_rebuilding_rows(tmp_path):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "dashboard_live"
     study_dir.mkdir(parents=True)
     (study_dir / "movement.csv").write_text(CSV_BROWSER_FIXTURE, encoding="utf-8")
@@ -1279,7 +1328,7 @@ def test_admin_dashboard_refreshes_active_review_without_rebuilding_rows(tmp_pat
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         page.route("**/api/apps/movement/admin/review-summary", dashboard_route)
         _login_and_wait(page, base_url, "dashboard_live")
         page.locator('[data-role="admin-dashboard"]').click()
@@ -1306,7 +1355,7 @@ def test_admin_dashboard_refreshes_active_review_without_rebuilding_rows(tmp_pat
 
 
 def test_dataset_dropdown_restores_rewound_forward_tip(tmp_path):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "forward_tip"
     study_dir.mkdir(parents=True)
     (study_dir / "movement.csv").write_text(CSV_BROWSER_FIXTURE, encoding="utf-8")
@@ -1340,7 +1389,7 @@ def test_dataset_dropdown_restores_rewound_forward_tip(tmp_path):
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         head_requests = []
         page.on(
             "request",
@@ -1378,10 +1427,10 @@ def test_dataset_dropdown_restores_rewound_forward_tip(tmp_path):
 
 
 def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_property):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     samples = sorted(RDS_SAMPLE_ROOT.glob("268904527_*.rds"), key=lambda path: path.stat().st_size)
     if len(samples) < 2:
-        pytest.skip("RDS movement browser fixtures are unavailable")
+        pytest.fail("RDS movement browser fixtures are unavailable")
     study_dir = tmp_path / "data" / "movement_rds" / "268904527"
     study_dir.mkdir(parents=True)
     outlier_sample = RDS_SAMPLE_ROOT / "268904527_269302895.rds"
@@ -1401,7 +1450,7 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_prop
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         page_errors = []
         page.on("pageerror", lambda error: page_errors.append(str(error)))
         binary_requests = []
@@ -1620,13 +1669,13 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_prop
 
 
 def test_rds_filter_only_updates_visible_individuals(tmp_path):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     samples = [
         RDS_SAMPLE_ROOT / "268904527_269302895.rds",  # MF006: 3 source outliers
         RDS_SAMPLE_ROOT / "268904527_269302904.rds",  # MF011: 23 source outliers
     ]
     if not all(sample.exists() for sample in samples):
-        pytest.skip("RDS filter browser fixtures are unavailable")
+        pytest.fail("RDS filter browser fixtures are unavailable")
     study_dir = tmp_path / "data" / "movement_rds" / "268904527"
     study_dir.mkdir(parents=True)
     for sample in samples:
@@ -1641,7 +1690,7 @@ def test_rds_filter_only_updates_visible_individuals(tmp_path):
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         _login_and_wait(page, base_url, "268904527")
         page.locator('[data-individual-checkbox="MF006"]').wait_for(state="visible", timeout=30_000)
         page.locator('[data-individual-checkbox="MF011"]').wait_for(state="visible", timeout=30_000)
@@ -1705,13 +1754,13 @@ def test_rds_filter_only_updates_visible_individuals(tmp_path):
 
 
 def test_rds_queue_navigation_does_not_fan_out_attribute_renders(tmp_path):
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     samples = sorted(
         RDS_SAMPLE_ROOT.glob("268904527_*.rds"),
         key=lambda path: path.stat().st_size,
     )[:15]
     if len(samples) < 15:
-        pytest.skip("Fifteen RDS movement browser fixtures are unavailable")
+        pytest.fail("Fifteen RDS movement browser fixtures are unavailable")
     study_dir = tmp_path / "data" / "movement_rds" / "268904527"
     study_dir.mkdir(parents=True)
     for sample in samples:
@@ -1726,7 +1775,7 @@ def test_rds_queue_navigation_does_not_fan_out_attribute_renders(tmp_path):
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
         _login_and_wait(page, base_url, "268904527")
         page.locator("[data-individual-checkbox]").first.wait_for(
             state="attached", timeout=30_000
@@ -1756,7 +1805,10 @@ def test_rds_queue_navigation_does_not_fan_out_attribute_renders(tmp_path):
                 timeout=30_000,
             )
 
-        page.wait_for_timeout(100)
+        page.wait_for_function(
+            "() => window.__movementDiagnosticsSnapshot().binaryBlockCount === 15",
+            timeout=30_000,
+        )
         snapshot = page.evaluate("window.__movementDiagnosticsSnapshot()")
         assert snapshot["focusedObjectEntries"] == 15
         assert snapshot["binaryBlockCount"] == 15

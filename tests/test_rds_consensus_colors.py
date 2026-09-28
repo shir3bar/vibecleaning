@@ -1,6 +1,7 @@
 """Small synthetic display tests: no detector runs or research-data writes."""
 import json
 import sqlite3
+from contextlib import closing
 import struct
 
 import numpy as np
@@ -60,7 +61,7 @@ def test_consensus_values_survive_index_and_missing_scores_are_hidden(tmp_path, 
     for method in ("bridge", "prob", "speed", "detour"):
         assert columns[f"loglr_{method}_weighted_evidence"]["kind"] == "numeric"
     assert "combined_evidence_weighted_evidence" in header["color_stats"]
-    with sqlite3.connect(output) as connection:
+    with closing(sqlite3.connect(output)) as connection, connection:
         fields = {f["key"] for f in index._available_rds_color_fields(connection)}
         assert "combined_evidence_weighted_evidence" in fields
         assert "combined_evidence_class_aware" not in fields

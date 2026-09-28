@@ -269,9 +269,8 @@ def test_rerun_apply_rejects_stale_head_and_keeps_current_history(study):
     assert load_project_state(s.study)["current_dataset_id"] == current
 
 
+@pytest.mark.parametrize("study", ["rds"], indirect=True)
 def test_rds_stationarity_uses_scoped_records_instead_of_whole_study_review_array(study, monkeypatch):
-    if study.study.parent.name != "movement_rds":
-        pytest.skip("RDS index-specific check")
     from examples.movement import rds_index
 
     def unexpected(*args, **kwargs):
@@ -281,12 +280,13 @@ def test_rds_stationarity_uses_scoped_records_instead_of_whole_study_review_arra
     study.save_run(individuals=[study.individuals[0]])
 
 
+@pytest.mark.browser
 def test_rerun_notice_preview_cancel_and_update_in_browser(study):
-    from test_movement_browser import _serve, _open_browser, STATIC_ROOT, INDEX_PATH
+    from test_movement_browser import _serve, _open_browser, _new_page, STATIC_ROOT, INDEX_PATH
     from app.auth import AuthManager
     from app.web import create_app
     from examples.movement import routes
-    playwright_api = pytest.importorskip("playwright.sync_api")
+    import playwright.sync_api as playwright_api
     s = study
     s.save_run()
     s.flag(s.keys[0][3:4])
@@ -298,7 +298,7 @@ def test_rerun_notice_preview_cancel_and_update_in_browser(study):
         routes.register_movement_routes(browser_app, data_root=s.study.parents[1])
     with _serve(browser_app) as url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        page = _new_page(browser, viewport={"width": 1440, "height": 1000})
         errors, requests = [], []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.on("request", lambda request: requests.append(request.url)

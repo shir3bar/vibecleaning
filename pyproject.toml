@@ -27,3 +27,9 @@ dev = [
 
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+junit_family = "xunit1"
+markers = ["browser: runs Chromium against a local app server"]

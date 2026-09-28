@@ -20,7 +20,6 @@ from examples.movement.candidate_queries import run_candidate_query, run_fix_num
 from examples.movement.routes import register_movement_routes
 
 
-MOVEMENT_APP_JS = REPO_ROOT / "examples" / "movement" / "static" / "app.js"
 
 FAST_MOVEMENT_CSV = """eventid,individual,timestamp,longitude,latitude,set
 fix_1,alpha,2024-01-01T00:00:00Z,-70.0,40.0,train
@@ -1321,51 +1320,3 @@ def test_run_candidate_query_unresolved_fields_still_create_analysis(tmp_path):
     )
     assert output_path.exists()
     assert json.loads(output_path.read_text())["run_status"] == "unresolved"
-
-
-def test_frontend_filter_run_flags_matches_and_reloads_created_dataset():
-    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
-
-    assert "candidateQueryPreview" in source
-    assert "candidateQueryLibrary" in source
-    assert 'fetchJSON("/api/query-library/queries?app=movement"' in source
-    assert 'data-role="candidate-query-select"' in source
-    assert 'data-role="candidate-query-scope"' in source
-    assert "selectCandidateQueryExecutionScope(value)" in source
-    assert "getCandidateQueryExecutionScope()" in source
-    assert "defaultCandidateQueryExecutionScope(query)" in source
-    assert 'String(field || "").startsWith("osm:")' in source
-    assert 'query?.evaluator?.type === "fix_osm_proximity" ? "current_individual" : "whole_study"' in source
-    assert "OSM scope: select one individual, or choose all individuals separately" in source
-    assert "return selectedIndividuals.length === 1 ? selectedIndividuals[0] : \"\";" in source
-    assert "detailIndividuals.length === 1" not in source
-    assert "selectCandidateQuery(key)" in source
-    assert "candidateQueryParameterDescriptors(query)" in source
-    assert 'data-param-name="${escapeHtml(descriptor.name)}"' in source
-    assert "getCandidateQueryParameterValues(selectedQuery)" in source
-    assert "runSelectedCandidateQuery" in source
-    assert 'data-role="run-candidate-query">Run filter and flag</button>' in source
-    assert "query_id: selectedQuery.query_id" in source
-    assert "query_version: selectedQuery.version" in source
-    assert "query_parameters:" in source
-    assert "execution_scope:" in source
-    assert "expected_current_dataset_id: this.expectedCurrentDatasetId()" in source
-    assert "expected_review_revision: this.expectedReviewRevision()" in source
-    assert "const createdDatasetId = String(result?.dataset?.dataset_id" in source
-    assert "await this.loadStudyAtDataset(createdDatasetId" in source
-    assert "run-candidate-query" in source
-    assert "movement-candidate-query-points" in source
-    assert "movement-selected-candidate-query-points" in source
-    assert "getCandidateQueryReturnedMatchKeys" in source
-    assert "parseMovementFixes(this.candidateQueryPreview.candidates || [])" in source
-    assert "this.data.candidateFixes = candidateFixes" in source
-    assert "void this.checkCandidateQueryPreview()" in source
-    assert "previewMatchKeys" not in source
-    assert "Preview speed" not in source
-    assert "Speed greater than 120" not in source
-    assert "checkCandidateQueryPreview" in source
-    assert "const fixKey = String(candidate?.fix_key || \"\")" in source
-    assert "this.data.selectedFixKeys = nextSelected" in source
-    assert 'this.refs.markSuspected.addEventListener("click", () => void this.openActiveFlagModal())' in source
-    assert 'target?.kind === "filter"' in source
-    assert "apply-candidate-query" not in source

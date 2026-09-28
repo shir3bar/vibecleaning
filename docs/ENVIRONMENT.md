@@ -128,20 +128,9 @@ python -m compileall -q examples/move_viz tests/test_move_viz.py
 pytest -q tests/test_move_viz.py
 ```
 
-For the broader movement regression set:
-
-```bash
-pytest -q \
-  tests/test_move_viz.py \
-  tests/test_slim_movement.py \
-  tests/test_movement_fixes.py \
-  tests/test_burst_features.py \
-  tests/test_candidate_queries.py
-```
-
-Run the complete suite with `pytest -q`. Import errors for `numpy`, `pandas`,
-`sklearn`, `shapely`, or `osmium` mean the full `requirements.txt` installation
-was skipped or failed.
+For the full movement app suite, browser installation, and optional GitHub runs,
+see [Running the tests](TESTING.md). Start with `uv sync --locked`; app-only
+environments may not include the test tools.
 
 ## Configuration
 

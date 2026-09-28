@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import sqlite3
+from contextlib import closing
 import struct
 import sys
 import zipfile
@@ -45,7 +46,7 @@ MOVEMENT_INDEX = MOVEMENT_STATIC_ROOT / "index.html"
 def _sample_files() -> list[Path]:
     paths = sorted(SAMPLE_ROOT.glob("268904527_*.rds"), key=lambda path: path.stat().st_size)
     if len(paths) < 2:
-        pytest.skip("RDS movement sample files are unavailable")
+        pytest.fail("RDS movement sample files are unavailable")
     return paths[:2]
 
 
@@ -77,7 +78,7 @@ def _client(tmp_path: Path) -> tuple[TestClient, Path]:
 def _detector_client(tmp_path: Path) -> tuple[TestClient, Path]:
     sources = sorted(KAMI_SAMPLE_ROOT.glob("*_KAMI.rds"))[:2]
     if len(sources) < 2:
-        pytest.skip("KAMI detector-score RDS samples are unavailable")
+        pytest.fail("KAMI detector-score RDS samples are unavailable")
     study_dir = tmp_path / "data" / "movement_rds" / "268904527"
     study_dir.mkdir(parents=True)
     for source in sources:
@@ -174,42 +175,13 @@ Path(os.environ["VIBECLEANING_SUMMARY_PATH"]).write_text(
 def test_sample_rds_preserves_lossless_identifiers_and_source_schema():
     source = SAMPLE_ROOT / "481458_6898572515.rds"
     if not source.exists():
-        pytest.skip("large-identifier RDS sample is unavailable")
+        pytest.fail("large-identifier RDS sample is unavailable")
     frame = read_movement_rds(source)
     info = validate_movement_rds(source, frame)
 
     assert info["study_id"] == "481458"
     assert info["individual_id"] == "6898572515"
     assert {"x_", "y_", "t_", "burst_", "is_outlier", "geometry"}.issubset(frame.columns)
-
-
-def test_shared_frontend_selects_rds_artifacts_in_rds_mode():
-    source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-    assert 'MOVEMENT_APP_CONFIG.rdsSource ? ".rds" : ".csv"' in source
-    ranking_sheet = source[
-        source.index('<div class="movement-side-sheet ranking hidden"'):
-        source.index('<div class="movement-side-sheet feature-space hidden"')
-    ]
-    assert '<label data-role="ranking-method-control">View ranking' in ranking_sheet
-    assert '<option value="isolation_forest">Isolation forest — worst burst</option>' in source
-    assert '<option value="isolation_forest_decision_margin">Isolation forest — total decision margin</option>' in source
-    assert '<option value="source_is_outlier">Source is_outlier — total flagged fixes</option>' in source
-    assert 'this.refs.rankingMethod.addEventListener("change"' in source
-    ranking_handler_start = source.index("  handleRankingMethodChange() {")
-    ranking_handler_end = source.index("\n  hasOsmContextFeatures() {", ranking_handler_start)
-    assert "this.anomalyRankings.get(method)" in source[ranking_handler_start:ranking_handler_end]
-    assert "rankingMethod: this.getRankingMethod()" in source
-    assert "retainedBinaryDeckLayers(" in source
-    assert "movement-overview-preview-" in source
-    assert "requestMovementBinaryAttributes(" in source
-
-
-def test_rds_frontend_loads_full_binary_only_after_selecting_all():
-    source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-    assert "cancelBinaryRequests(" in source
-    assert "wholeStudySelected" in source
-    assert "if (data.overviewTruncated) {\n    return [];" in source
-    assert source.count("await this.loadBinaryMovement({") == 1
 
 
 def test_rds_filter_preview_returns_exact_scope_count_without_creating_step(tmp_path):
@@ -424,58 +396,6 @@ def test_rds_second_round_carries_only_effective_ok_without_needs_check(tmp_path
     assert carried[0]["scope"]["source_rows"]
 
 
-def test_rds_binary_renderer_reuses_attributes_and_omits_empty_overlays():
-    source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-    worker_source = (MOVEMENT_STATIC_ROOT / "movement_binary_worker.js").read_text(
-        encoding="utf-8"
-    )
-    binary_layers = source[
-        source.index("  retainedBinaryDeckLayers(") : source.index(
-            "\n  renderLayers(", source.index("  retainedBinaryDeckLayers(")
-        )
-    ]
-    assert "binary.renderCaches?.has(cacheKey)" in source
-    assert "binary.lastRenderCacheKey = cacheKey" in source
-    assert "binary.attributeRenderKeys.has(cacheKey)" in source
-    assert "this.scheduleBinaryAttributeRender();" in source
-    assert "if (this.binaryAttributeRenderFrame !== null) return;" in source
-    assert "if (visible) {\n          this.prepareRetainedBinaryAttributesAndRender" in binary_layers
-    assert "field?.key === INDIVIDUAL_COLOR_FIELD_KEY\n      ? null" in source
-    assert source.count("recomputeColorStyles: false") >= 2
-    assert "attributeCacheKey = binary.lastRenderCacheKey" in binary_layers
-    assert "this.binaryFilterExtension = new deck.DataFilterExtension" in binary_layers
-    assert "if (checkedThresholdSelection && attributes.thresholdCount)" in binary_layers
-    assert "movement-binary-checked-threshold-${suffix}" in binary_layers
-    assert "CONTEXT_GRAY_POINT" in binary_layers
-    assert "attributes.suspectedCount" in binary_layers
-    assert "attributes.confirmedCount" in binary_layers
-    assert 'const GPS_SPIKE_FIELD_KEY = "gps_spike_step_turn"' in worker_source
-    assert '"gps_spike_candidate"' not in worker_source
-    assert "Number.isFinite(requestedMax)" in worker_source
-
-
-def test_binary_color_changes_do_not_cache_stale_attributes_under_the_new_state():
-    source = (MOVEMENT_STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-    renderer = source[
-        source.index("  retainedBinaryDeckLayers(") : source.index(
-            "\n  renderLayers(", source.index("  retainedBinaryDeckLayers(")
-        )
-    ]
-    loader = source[
-        source.index("  async loadBinaryMovement(") : source.index(
-            "\n  binaryFixAt(", source.index("  async loadBinaryMovement(")
-        )
-    ]
-
-    assert "let attributeCacheKey = cacheKey" in renderer
-    assert 'attributeCacheKey = binary.lastRenderCacheKey || "pending"' in renderer
-    assert "attributes,\n        attributeCacheKey," in renderer
-    assert "field.key === GPS_SPIKE_COLOR_FIELD_KEY" in loader
-    assert '? "step_length_m"' in loader
-    assert "Select fixes replaces the checked-fix preview with its first" in source
-    assert "Flagging applies the full threshold filter to the visible individuals." in source
-
-
 def test_rds_adapter_matches_existing_csv_movement_model(tmp_path):
     source = _sample_files()[0]
     frame = read_movement_rds(source)
@@ -609,7 +529,7 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
         f"/api/apps/movement/family/movement_rds/study/268904527/dataset/{dataset_id}/fixes-binary"
     )
     assert recovered.status_code == 200
-    with sqlite3.connect(cache_path) as connection:
+    with closing(sqlite3.connect(cache_path)) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
     feature_rows = rds_burst_feature_rows(cache_path)

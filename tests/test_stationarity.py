@@ -211,14 +211,15 @@ def test_rds_preview_matches_csv_and_saved_source_scopes(tmp_path):
     assert excluded_scope["source_rows"] == []
 
 
+@pytest.mark.browser
 @pytest.mark.parametrize("source_format,select_all", [
     ("csv", False), ("rds", False),
     ("csv", True),
     ("car_talk", False),
 ])
 def test_stationarity_color_column_settings_scope_and_save(tmp_path, source_format, select_all):
-    playwright_api = pytest.importorskip("playwright.sync_api")
-    from test_movement_browser import _serve, _open_browser, _login_and_wait, _auth_manager, STATIC_ROOT, INDEX_PATH
+    import playwright.sync_api as playwright_api
+    from test_movement_browser import _serve, _open_browser, _new_page, _login_and_wait, _auth_manager, STATIC_ROOT, INDEX_PATH
     from examples.slim_movement.app import create_slim_movement_app
     from examples.rds_movement.app import create_rds_movement_app
 
@@ -230,7 +231,7 @@ def test_stationarity_color_column_settings_scope_and_save(tmp_path, source_form
         filename = "481458_20761565.rds" if source_format == "car_talk" else "268904527_269302973.rds"
         source = STATIC_ROOT.parents[2] / "data" / "movement_rds" / filename
         if not source.exists():
-            pytest.skip("RDS sample unavailable")
+            pytest.fail("RDS sample unavailable")
         shutil.copy2(source, study / source.name)
         app = create_rds_movement_app(data_root=tmp_path / "data", cache_root=tmp_path / "cache", static_root=STATIC_ROOT, index_path=INDEX_PATH, auth_manager=_auth_manager())
         individual, radius, gap, expected = "MF043", "500000", "2", 9
@@ -243,7 +244,7 @@ def test_stationarity_color_column_settings_scope_and_save(tmp_path, source_form
         individual, radius, gap, expected = "alpha", "10", "0.0166666667", 6
     with _serve(app) as url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        page = _new_page(browser, viewport={"width": 1440, "height": 1000})
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         _login_and_wait(page, url, "stationary")
@@ -311,7 +312,7 @@ def test_stationarity_color_column_settings_scope_and_save(tmp_path, source_form
             wait_for_matches(expected_flag_count)
         page.locator('[data-action="check-above-threshold"]').click()
         assert page.locator('.movement-threshold').evaluate("pane => pane.scrollWidth <= pane.clientWidth")
-        page.screenshot(path=f"/tmp/vibecleaning-stationarity-{source_format}.png")
+        page.screenshot(path=tmp_path / "stationarity.png")
         page.locator('[data-role="mark-suspected"]').click()
         page.locator('[data-role="issue-modal"]').wait_for(state="visible", timeout=30_000)
         assert page.locator('[data-role="issue-type"]').input_value() == "Filter Stationarity"
@@ -333,12 +334,13 @@ def test_stationarity_color_column_settings_scope_and_save(tmp_path, source_form
         browser.close()
 
 
+@pytest.mark.browser
 @pytest.mark.parametrize("source_format", ["csv", "rds"])
 @pytest.mark.parametrize("overlap_column_update", [False, True])
 def test_stationarity_highlights_survive_all_individuals_view(tmp_path, source_format, overlap_column_update):
     import asyncio
-    playwright_api = pytest.importorskip("playwright.sync_api")
-    from test_movement_browser import _serve, _open_browser, _login_and_wait, _auth_manager, STATIC_ROOT, INDEX_PATH
+    import playwright.sync_api as playwright_api
+    from test_movement_browser import _serve, _open_browser, _new_page, _login_and_wait, _auth_manager, STATIC_ROOT, INDEX_PATH
     from examples.slim_movement.app import create_slim_movement_app
     from examples.rds_movement.app import create_rds_movement_app
 
@@ -348,7 +350,7 @@ def test_stationarity_highlights_survive_all_individuals_view(tmp_path, source_f
         for filename in ["268904527_269302973.rds", "268904527_269302895.rds"]:
             source = STATIC_ROOT.parents[2] / "data" / "movement_rds" / filename
             if not source.exists():
-                pytest.skip("RDS samples unavailable")
+                pytest.fail("RDS samples unavailable")
             shutil.copy2(source, study / filename)
         app = create_rds_movement_app(data_root=tmp_path / "data", cache_root=tmp_path / "cache", static_root=STATIC_ROOT, index_path=INDEX_PATH, auth_manager=_auth_manager())
         individual, radius, gap, single_count = "MF043", "500000", "2", 9
@@ -367,7 +369,7 @@ def test_stationarity_highlights_survive_all_individuals_view(tmp_path, source_f
 
     with _serve(app) as url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
-        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        page = _new_page(browser, viewport={"width": 1440, "height": 1000})
         page.add_init_script("""(() => {
           const original = Worker.prototype.addEventListener;
           Worker.prototype.addEventListener = function(type, listener, options) {

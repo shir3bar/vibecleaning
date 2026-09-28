@@ -1,10 +1,21 @@
 from copy import deepcopy
 from pathlib import Path
+import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from examples.movement import routes
+
+
+def test_frontend_step_labels_and_dropdown(node_runtime):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [node_runtime, str(root / "tests/frontend/step_labels.cjs"),
+         str(root / "examples/movement/static/app.js")],
+        capture_output=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_graph_labels_include_saved_threshold_without_large_scopes(monkeypatch):

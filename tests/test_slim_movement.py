@@ -10,7 +10,6 @@ if str(REPO_ROOT) not in sys.path:
 
 MOVEMENT_STATIC_ROOT = REPO_ROOT / "examples" / "movement" / "static"
 SLIM_INDEX = MOVEMENT_STATIC_ROOT / "index.html"
-MOVEMENT_APP_JS = MOVEMENT_STATIC_ROOT / "app.js"
 
 from examples.slim_movement.app import create_slim_movement_app
 from app.auth import AuthManager
@@ -159,21 +158,6 @@ def test_slim_auth_keeps_login_assets_public_and_protects_data_routes(tmp_path):
         ).status_code
         == 200
     )
-
-
-def test_slim_login_uses_shared_http_only_cookie_session():
-    source = (
-        REPO_ROOT / "examples" / "movement" / "static" / "login.js"
-    ).read_text(encoding="utf-8")
-
-    for forbidden in ("localStorage", "sessionStorage", "document.cookie"):
-        assert forbidden not in source
-    assert 'credentials: "same-origin"' in source
-    assert 'fetch("/api/auth/login"' in source
-    assert 'window.location.reload()' in source
-    assert 'logoutButton.addEventListener("click"' in source
-    assert 'fetch("/api/runtime"' in source
-    assert "COOPERATIVE MODE:" in source
 
 
 def test_slim_movement_catalog_exposes_only_movement_raw(tmp_path):
@@ -404,80 +388,3 @@ def test_slim_anomaly_ranking_runs_as_background_job(tmp_path):
         "completed",
         "unresolved",
     }
-
-
-def test_slim_profile_does_not_load_osm_interaction_module():
-    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
-
-    assert 'mode: MOVEMENT_APP_MODE' in source
-    assert 'defaultFamily: MOVEMENT_APP_MODE === "slim_movement" ? "movement_raw"' in source
-    assert 'MOVEMENT_APP_MODE === "movement"' in source
-    assert '? await import("/static/osm_layer.js")' in source
-    assert 'from "/static/osm_layer.js"' not in source
-    assert 'this.refs.removeConfirmed' not in source
-    assert '!lowerName.endsWith("_osm_context.csv")' in source
-    assert '!String(field?.key || "").toLowerCase().startsWith("osm:")' in source
-    assert 'this.refs.sideTabRanking.textContent = "Ranking"' in source
-    assert 'element.classList.add("movement-profile-hidden")' in source
-    assert 'MOVEMENT_APP_CONFIG.mode === "slim_movement" || this.uiState.showTrain !== false' in source
-    assert 'MOVEMENT_APP_CONFIG.mode === "slim_movement" || this.uiState.showTest !== false' in source
-    assert 'this.refs.generateReport' in source
-    assert 'this.refs.exportReviewedCsv' in source
-    assert 'BASEMAP_PRESETS' in source
-
-
-def test_shared_individual_tab_has_persisted_vertical_resize_control():
-    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
-
-    assert 'data-role="individual-resize"' in source
-    assert 'aria-orientation="horizontal"' in source
-    assert "beginIndividualPaneResize" in source
-    assert "applyIndividualListHeight" in source
-    assert "individualListHeightPx: this.individualListHeightPx" in source
-    assert "individualQueueListHeightPx: this.individualQueueListHeightPx" in source
-
-
-def test_slim_ranking_layout_keeps_map_full_height_and_resizes_canvas():
-    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
-
-    assert 'if (MOVEMENT_APP_CONFIG.mode === "slim_movement") {\n      return false;' in source
-    assert "SLIM_STACKED_SIDE_LAYOUT_BREAKPOINT_PX" not in source
-    assert ".movement-root:not(.is-slim) .movement-main" in source
-    assert ".movement-root.is-slim .movement-main" not in source
-    movement_main_css = source[
-        source.index("        .movement-main {"):source.index(
-            "        .movement-map-wrap,",
-            source.index("        .movement-main {"),
-        )
-    ]
-    assert "height: 100%;" in movement_main_css
-    assert "min-height: 0;" in movement_main_css
-    assert "overflow: hidden;" in movement_main_css
-    ranking_css = source[
-        source.index("        .movement-anomaly-ranking {"):source.index(
-            "        .movement-anomaly-meta,",
-            source.index("        .movement-anomaly-ranking {"),
-        )
-    ]
-    assert "min-height: 0;" in ranking_css
-    assert "overflow-x: auto;" in ranking_css
-    assert "this.map.resize();" in source[
-        source.index("  setSideSheet("):source.index("  applyAppProfile(")
-    ]
-
-
-def test_large_movement_views_reuse_geometry_without_capping_color_by_points():
-    source = MOVEMENT_APP_JS.read_text(encoding="utf-8")
-    worker_source = MOVEMENT_APP_JS.with_name("movement_binary_worker.js").read_text(
-        encoding="utf-8"
-    )
-
-    assert "MAX_ORDINARY_MAP_POINTS" not in source
-    assert "MAX_SOURCE_FLAGGED_MAP_POINTS" not in source
-    assert 'id: "movement-source-flagged-points"' not in source
-    assert "Number(arrays.source_flags?.[sourceIndex])" in worker_source
-    assert ") ? 52 : 185" in worker_source
-    assert 'id: "movement-suspected-outline"' in source
-    assert "useDevicePixels:" in source
-    assert "dataComparator: sameArrayItems" in source
-    assert "buildMovementFixTrackIndex" in source
