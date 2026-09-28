@@ -54,19 +54,23 @@ def main():
         resolved_scopes.append((scope, resolved_fix_count))
     elif kind == "filter":
         filter_spec = dict(raw_scope.get("filter") or {})
-        confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
-            annotations,
-            source_artifact=target_artifact,
-        )
+        stationarity_details = {}
+        confirmed_fix_keys, confirmed_individual_tracks = set(), set()
+        if filter_spec.get("kind") != "stationarity":
+            confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
+                annotations, source_artifact=target_artifact,
+            )
         row_ranges, resolved_fix_count = resolve_filter_row_ranges(
             Path(source["path"]),
             filter_spec,
             confirmed_fix_keys=confirmed_fix_keys,
             confirmed_individual_tracks=confirmed_individual_tracks,
+            annotations=annotations, source_artifact=target_artifact,
+            stationarity_details=stationarity_details,
         )
         resolved_scopes.append(
             (
-                {"kind": "filter", "filter": filter_spec, "row_ranges": row_ranges},
+                {"kind": "filter", "filter": filter_spec, "row_ranges": row_ranges, **stationarity_details},
                 resolved_fix_count,
             )
         )
@@ -176,7 +180,8 @@ def main():
             )
     else:
         raise SystemExit("Invalid review scope")
-    if not resolved_scopes or any(not fix_count for _, fix_count in resolved_scopes):
+    if not resolved_scopes or any(not fix_count and (scope.get("filter") or {}).get("kind") != "stationarity"
+                                  for scope, fix_count in resolved_scopes):
         raise SystemExit("Review scope did not resolve to any fixes")
 
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -190,6 +195,7 @@ def main():
             ),
             "step_id": step_id,
             "source_artifact": target_artifact,
+            "source_id": str(params.get("source_bundle_signature") or ""),
             "source_dataset_id": str(params.get("dataset_id") or "").strip(),
             "status": str(params.get("status") or "").strip(),
             "origin": str(params.get("origin") or "manual").strip(),

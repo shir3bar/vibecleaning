@@ -18,6 +18,14 @@ history and Undo controls remain available.
 In the RDS app, Confirm and Unflag update the loaded track in place. Your map
 view, active individual and playback position stay where they were.
 
+If GPS flags or exclusions change the inputs to a saved stationarity run, the
+affected card offers **Rerun filter**. It previews that individual's new and
+obsolete candidates. Click **Update flags** to save the change or **Cancel** to
+leave the saved flags as they are. Your previous confirmations and unflagging
+decisions are preserved. Confirming a GPS flag already skipped by stationarity
+does not trigger this notice. See [stationarity](STATIONARITY_FILTER.md) for the
+gap rule and rerun details.
+
 Groups combine the same issue type across flagging runs, counting each fix once.
 The saved resolutions retain their links to each original flag. A fix can belong
 to several issue types: confirming either excludes it; unflagging the other

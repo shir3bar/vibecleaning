@@ -2023,6 +2023,24 @@ def register_movement_routes(
         }
         return group["resolutions"]
 
+    async def stationarity_contexts(study_dir, dataset_id, logical_name, individual):
+        from .stationarity_runs import run_contexts
+        annotations = display_annotations(study_dir, dataset_id,
+            _load_dataset_review_annotations(study_dir, dataset_id=dataset_id))
+        if not any(((item.get("scope") or {}).get("filter") or {}).get("kind") == "stationarity"
+                   for item in annotations):
+            return [], annotations, ""
+        if configured_source.bundle_scoped:
+            bundle, path = await run_in_threadpool(ensure_configured_rds_index, study_dir, dataset_id)
+            signature = bundle.signature
+        else:
+            artifact, path = get_dataset_artifact(study_dir, dataset_id, logical_name)
+            signature = artifact_signature(artifact)
+        contexts = await run_in_threadpool(run_contexts, study_dir, annotations, path=path,
+            rds=configured_source.bundle_scoped, logical_name=logical_name,
+            individual=individual, source_signature=signature)
+        return contexts, annotations, signature
+
     @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}/issue-groups")
     async def get_individual_issue_groups(
         family_name: str, study_name: str, dataset_id: str,
@@ -2045,9 +2063,78 @@ def register_movement_routes(
                 {key: fix[key] for key in ("fix_key", "individual", "time_ms", "lon", "lat")}
                 for fix in payload["fixes"]
             ]
+            from .stationarity_runs import public_run
+            contexts, _, _ = await stationarity_contexts(study_dir, dataset_id, logical_name, individual)
+            payload["stationarity_runs"] = [public_run(context) for context in contexts]
             return JSONResponse(payload)
         except ReviewForbiddenError as exc:
             return json_error(str(exc), 404)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/rerun-stationarity")
+    async def post_rerun_stationarity(family_name: str, study_name: str, request: Request):
+        from .stationarity_runs import preview_rerun
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            applying = body.get("apply") is True
+            if applying:
+                body = await ensure_editor_self_review(request, study_dir, body, logical_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            dataset = load_dataset(study_dir, dataset_id)
+            individual = _normalize_individual_name(body.get("individual"))
+            contexts, annotations, signature = await stationarity_contexts(
+                study_dir, dataset_id, logical_name, individual)
+            if body.get("source_bundle_signature") != signature:
+                raise ValueError("Source data changed; reload before rerunning the filter")
+            context = next((item for item in contexts if item["run_id"] == body.get("run_id")), None)
+            if context is None:
+                raise ValueError("Saved stationarity run was not found for this individual")
+            preview = await run_in_threadpool(preview_rerun, context, annotations,
+                rds=configured_source.bundle_scoped, logical_name=logical_name,
+                dataset_id=dataset_id, source_signature=signature)
+            if not applying:
+                return JSONResponse({key: value for key, value in preview.items() if key != "records"})
+            if not body.get("preview_token") or body["preview_token"] != preview["preview_token"]:
+                raise ValueError("The rerun preview changed; rerun the filter before saving")
+            user = effective_user(request, body)
+            input_artifacts = ([str(item["logical_name"]) for item in dataset.get("artifacts", [])
+                                if configured_source.accepts(item)] if configured_source.bundle_scoped else [logical_name])
+            if any(item.get("logical_name") == "movement_review_annotations.json" for item in dataset.get("artifacts", [])):
+                input_artifacts.append("movement_review_annotations.json")
+            payload = {
+                "user": user, "title": f"Rerun stationarity for {individual}", "kind": "python",
+                "script": RDS_REVIEW_STEP_SCRIPT, "parent_dataset_id": dataset_id,
+                "input_artifacts": input_artifacts, "output_artifacts": ["movement_review_annotations.json"],
+                "set_as_head": True,
+                "parameters": {
+                    "app": "movement", "action": "rerun_stationarity", "target_artifact": logical_name,
+                    "dataset_id": dataset_id, "source_bundle_signature": signature, "user": user,
+                    "scope": {"kind": "filter", "filter": context["filter"]},
+                    "issue_type": context["issue_type"], "records": preview["records"],
+                    "stationarity_rerun_summary": {key: preview[key] for key in
+                        ("run_id", "individual", "match_count", "added_count", "removed_count", "reviewed_difference_count")},
+                },
+            }
+            payload, preflight, actor = prepare_step_payload(request, study_dir, body, payload,
+                                                             review_effect="annotation_only")
+            result = create_guarded_step(study_dir, payload, selected_dataset_id=dataset_id,
+                expected_current_dataset_id=str(body.get("expected_current_dataset_id")
+                                               or load_project_state(study_dir)["current_dataset_id"]),
+                preflight=preflight)
+            publish_state_event(family_name, study_name, study_dir, reason="dataset_head_changed", actor=actor)
+            return JSONResponse(result)
+        except EditLockedError as exc:
+            return _edit_locked_response(exc)
+        except EditConflictError as exc:
+            return _edit_conflict_response(exc)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
@@ -3300,23 +3387,26 @@ def register_movement_routes(
                 annotations = _load_dataset_review_annotations(
                     study_dir, dataset_id=dataset_id
                 )
-                confirmed_fix_keys, confirmed_individual_tracks = (
-                    confirmed_exclusion_scopes(
-                        annotations,
-                        source_artifact=logical_name,
+                confirmed_fix_keys, confirmed_individual_tracks = set(), set()
+                if filter_spec.get("kind") != "stationarity":
+                    confirmed_fix_keys, confirmed_individual_tracks = confirmed_exclusion_scopes(
+                        annotations, source_artifact=logical_name,
                     )
-                )
+                stationarity_details = {}
                 _row_ranges, match_count = await run_in_threadpool(
                     resolve_filter_row_ranges,
                     artifact_path,
                     filter_spec,
                     confirmed_fix_keys=confirmed_fix_keys,
                     confirmed_individual_tracks=confirmed_individual_tracks,
+                    annotations=annotations, source_artifact=logical_name,
+                    stationarity_details=stationarity_details,
                 )
                 source_signature = artifact_signature(_artifact)
                 _resolved_scope = {
                     "kind": "filter", "filter": filter_spec,
                     "row_ranges": _row_ranges,
+                    **stationarity_details,
                 }
             return JSONResponse({
                 "match_count": int(match_count),
@@ -3575,7 +3665,7 @@ def register_movement_routes(
             step_script = ANNOTATE_SCOPE_SCRIPT
             input_artifacts = [logical_name]
             rds_records = None
-            source_bundle_signature = ""
+            source_bundle_signature = artifact_signature(get_dataset_artifact(study_dir, dataset_id, logical_name)[0])
             if configured_source.bundle_scoped:
                 bundle, index_path = await run_in_threadpool(
                     ensure_configured_rds_index, study_dir, dataset_id
@@ -3589,7 +3679,7 @@ def register_movement_routes(
                         study_dir, dataset_id=dataset_id
                     ),
                 )
-                if resolved_fix_count <= 0:
+                if resolved_fix_count <= 0 and (scope.get("filter") or {}).get("kind") != "stationarity":
                     raise ValueError("Review scope did not resolve to any fixes")
                 scope = resolved_scope
                 source_bundle_signature = bundle.signature

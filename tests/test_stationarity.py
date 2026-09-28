@@ -73,7 +73,7 @@ def test_stationarity_gap_setting_crosses_short_source_bursts_but_preserves_v1()
     assert stationary_fix_keys(points, spec) == [str(i) for i in range(1, 8)]
     assert stationary_fix_keys(points, {**spec, "maximum_gap_s": 23 * 3600}) == []
     assert stationary_fix_keys(points, {**spec, "algorithm": "anchor-radius-v1"}) == []
-    assert validate_stationarity_filter(spec)["algorithm"] == "anchor-radius-v2"
+    assert validate_stationarity_filter(spec)["algorithm"] == "anchor-radius-v3"
     assert validate_stationarity_filter({**spec, "algorithm": "anchor-radius-v1"})["algorithm"] == "anchor-radius-v1"
 
 
@@ -146,7 +146,7 @@ def test_csv_preview_and_saved_decision_agree_and_preserve_raw_data(tmp_path):
     _, sidecar = get_dataset_artifact(study, saved["dataset"]["dataset_id"], "movement_review_annotations.json")
     annotation = json.loads(sidecar.read_text(encoding="utf-8"))["annotations"][0]
     assert annotation["scope"]["row_ranges"] == scope["row_ranges"]
-    assert annotation["scope"]["filter"]["algorithm"] == "anchor-radius-v2"
+    assert annotation["scope"]["filter"]["algorithm"] == "anchor-radius-v3"
     assert len(annotation["scope"]["filter"]["implementation_sha256"]) == 64
     assert annotation["status"] == "suspected"
     assert (study / "movement.csv").read_text(encoding="utf-8") == content
@@ -323,7 +323,7 @@ def test_stationarity_color_column_settings_scope_and_save(tmp_path, source_form
         assert payload["step"]["summary"]["resolved_fix_count"] == expected_flag_count
         saved_filter = payload["step"]["parameters"]["scope"]["filter"]
         assert saved_filter["kind"] == "stationarity"
-        assert saved_filter["algorithm"] == "anchor-radius-v2"
+        assert saved_filter["algorithm"] == "anchor-radius-v3"
         assert saved_filter["individuals"] == (["alpha", "beta"] if select_all else [individual])
         assert saved_filter["radius_m"] == float(radius)
         assert saved_filter["minimum_duration_s"] == pytest.approx(float(duration) * 3600)
@@ -411,7 +411,34 @@ def test_stationarity_highlights_survive_all_individuals_view(tmp_path, source_f
             control = page.locator(f'[data-role="stationarity-{name}"]')
             control.fill(value)
             control.press("Tab")
-        page.wait_for_function("n => window.__testRedFixCount() === n", arg=single_count, timeout=30_000)
+        try:
+            page.wait_for_function("n => window.__testRedFixCount() === n", arg=single_count, timeout=30_000)
+        except Exception:
+            print(page.evaluate("""() => ({
+              status: document.querySelector('[data-role=stationarity-status]')?.textContent,
+              settings: [...document.querySelectorAll('[data-stationarity-setting]')].map(e => [e.dataset.stationaritySetting, e.value]),
+              redCount: window.__testRedFixCount(), diagnostics: window.__movementDiagnosticsSnapshot(),
+            })"""))
+            print(errors)
+            raise
+        if source_format == "csv" and overlap_column_update:
+            # Finish a background preview while an unchanged field is focused.
+            # It must not replace that input between focus and the first key.
+            held = []
+            page.route("**/actions/preview-filter", lambda route: held.append(route))
+            with page.expect_request(lambda request: request.url.endswith("/actions/preview-filter")):
+                control = page.locator('[data-role="stationarity-radius"]')
+                control.fill(str(float(radius) + 1))
+                control.press("Tab")
+            duration_control = page.locator('[data-role="stationarity-duration"]')
+            duration_control.focus()
+            duration_control.evaluate("element => window.__focusedStationarityInput = element")
+            assert held
+            held.pop().continue_()
+            page.wait_for_function("n => window.__testRedFixCount() === n", arg=single_count, timeout=30_000)
+            assert duration_control.evaluate("element => element === window.__focusedStationarityInput && element === document.activeElement")
+            duration_control.press("Tab")
+            page.unroute("**/actions/preview-filter")
         page.evaluate("value => window.__delayStationarityAck = value", overlap_column_update)
         with page.expect_response(lambda response: response.url.endswith("/actions/preview-filter")) as preview:
             page.locator('[data-role="select-all"]').click()

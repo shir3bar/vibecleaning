@@ -4690,6 +4690,12 @@ class MovementExampleApp {
       }
     });
     this.refs.individuals.addEventListener("click", event => {
+      const rerunButton = event.target.closest("button[data-stationarity-run-action]");
+      if (rerunButton) {
+        void this.rerunStationarity(rerunButton.dataset.stationarityRun,
+          rerunButton.dataset.stationarityRunAction);
+        return;
+      }
       const issueButton = event.target.closest("button[data-queue-issue-action]");
       if (issueButton) {
         const {queueIssueAction: action, issueType, individual} = issueButton.dataset;
@@ -5130,7 +5136,7 @@ class MovementExampleApp {
       }
     });
     this.refs.thresholdPane.addEventListener("focusout", event => {
-      if (event.target?.matches?.("[data-stationarity-setting]") && this.stationarityInputEditing) {
+      if (event.target?.matches?.("[data-stationarity-setting]")) {
         this.stationarityInputEditing = false;
         this.renderThresholdPane();
       }
@@ -10767,6 +10773,7 @@ class MovementExampleApp {
         return;
       }
       state.groups = payload.groups || [];
+      state.stationarityRuns = payload.stationarity_runs || [];
       state.fixes = parseMovementFixes(payload.fixes || []);
       state.sourceSignature = payload.source_signature || "";
       state.status = "ready";
@@ -10791,9 +10798,10 @@ class MovementExampleApp {
     const state = this.queueIssueGroups;
     if (state.status === "loading") return '<div class="movement-queue-issues" aria-live="polite">Loading saved flags…</div>';
     if (state.status === "error") return `<div class="movement-queue-issues">Could not load saved flags: ${escapeHtml(state.error)} <button type="button" data-queue-issue-action="retry">Retry</button></div>`;
-    if (!state.groups.length) return '<div class="movement-queue-issues movement-subtle">No unresolved flags.</div>';
+    const reruns = this.stationarityRerunsHtml(state);
+    if (!state.groups.length) return `${reruns}<div class="movement-queue-issues movement-subtle">No unresolved flags.</div>`;
     const disabled = this.individualReviewQueue.saving || !this.canPersistEdits();
-    return `<div class="movement-queue-issues" data-queue-issues>
+    return `${reruns}<div class="movement-queue-issues" data-queue-issues>
       <strong>Unresolved flags for ${escapeHtml(individual)}</strong>
       ${state.groups.map(group => {
         const label = group.issue_type || "Unspecified issue";
@@ -10807,6 +10815,76 @@ class MovementExampleApp {
       }).join("")}
       <span class="movement-subtle">Confirm excludes; Unflag dismisses that issue. Leave uncertain flags unresolved.</span>
     </div>`;
+  }
+
+  stationarityRerunsHtml(state) {
+    return (state.stationarityRuns || []).filter(run => run.stale).map(run => {
+      const disabled = this.individualReviewQueue.saving || !this.canPersistEdits();
+      const button = (action, label) => `<button type="button" data-stationarity-run="${escapeHtml(run.run_id)}" data-stationarity-run-action="${action}" ${disabled ? "disabled" : ""}>${label}</button>`;
+      const pending = state.rerun?.runId === run.run_id ? state.rerun : null;
+      const spec = run.filter;
+      return `<div class="movement-queue-issues" data-stationarity-rerun>
+        <strong>${escapeHtml(run.issue_type)}: inputs changed</strong>
+        <span class="movement-subtle">GPS flags or exclusions changed within this individual's examined track. ${spec.radius_m} m · ${formatMaybeNumber(spec.minimum_duration_s / 3600, "h")} · maximum gap ${formatMaybeNumber(spec.maximum_gap_s / 3600, "h")}.</span>
+        ${pending?.status === "ready" ? `
+          <span>${formatCount(pending.result.match_count)} candidate fixes: ${formatCount(pending.result.added_count)} new flags, ${formatCount(pending.result.removed_count)} obsolete flags.</span>
+          ${pending.result.reviewed_difference_count ? `<span>${formatCount(pending.result.reviewed_difference_count)} previously reviewed fixes differ. Your decisions will be kept.</span>` : ""}
+          ${run.previous_algorithm !== "anchor-radius-v3" ? '<span class="movement-subtle">Uses the updated rule: skip GPS flags and measure gaps between retained fixes.</span>' : ""}
+          <div class="movement-queue-card-actions">${button("apply", "Update flags")}${button("cancel", "Cancel")}</div>
+        ` : `${pending?.status === "loading" ? '<span>Rerunning filter…</span>' : ""}
+          ${pending?.error ? `<span>${escapeHtml(pending.error)}</span>` : ""}
+          <div class="movement-queue-card-actions">${button("preview", "Rerun filter")}</div>`}
+      </div>`;
+    }).join("");
+  }
+
+  async rerunStationarity(runId, action) {
+    const state = this.queueIssueGroups;
+    const queue = this.individualReviewQueue;
+    const key = this.queueIssueGroupsKey();
+    if (!state || state.key !== key || queue.saving || this.queueIssueMutation) return;
+    const run = (state.stationarityRuns || []).find(item => item.run_id === runId && item.stale);
+    if (!run) return;
+    if (action === "cancel") {
+      state.rerun = null;
+      this.renderIndividuals();
+      return;
+    }
+    if (!["preview", "apply"].includes(action) || this.rejectLockedEdit()) return;
+    const previewToken = state.rerun?.runId === runId ? state.rerun?.result?.preview_token : "";
+    if (action === "apply" && !previewToken) return;
+    const family = this.currentFamily, study = this.currentStudy, artifact = this.currentArtifact;
+    const datasetId = this.currentDatasetId;
+    queue.saving = true;
+    this.queueIssueMutation = true;
+    state.rerun = {runId, status: "loading"};
+    this.renderIndividuals();
+    try {
+      const result = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(family)}/study/${encodeURIComponent(study)}/actions/rerun-stationarity`,
+        {method: "POST", body: JSON.stringify({
+          dataset_id: datasetId, logical_name: artifact, individual: run.individual, run_id: runId,
+          source_bundle_signature: state.sourceSignature, apply: action === "apply", preview_token: previewToken,
+          expected_current_dataset_id: this.expectedCurrentDatasetId(),
+          expected_review_revision: this.expectedReviewRevision(), user: this.getUser() || "reviewer",
+        })},
+      );
+      if (key !== this.queueIssueGroupsKey()) return;
+      if (action === "apply") {
+        this.queueIssueHighlight = null;
+        await this.loadStudyAtDataset(result.dataset.dataset_id, {preserveAnnotationContext: true, result});
+        this.setStatus(`Updated stationarity flags for ${run.individual}; previous flags and review decisions remain in history.`);
+      } else {
+        state.rerun = {runId, status: "ready", result};
+      }
+    } catch (error) {
+      await this.handleEditRequestError(error);
+      if (key === this.queueIssueGroupsKey()) state.rerun = {runId, status: "error", error: error.message};
+    } finally {
+      queue.saving = false;
+      this.queueIssueMutation = false;
+      this.renderIndividuals();
+    }
   }
 
   highlightQueueIssueGroup(individual, issueType) {
@@ -15676,14 +15754,15 @@ class MovementExampleApp {
     return this.getThresholdContext()?.matchKeys || new Set();
   }
 
-  renderThresholdPane() {
+  renderThresholdPane({ commitStationarityInput = false } = {}) {
     const pane = this.refs.thresholdPane;
     if (!pane) {
       return;
     }
-    // Background track loads must not replace a setting before its change
-    // event commits the user's input.
-    if (this.stationarityInputEditing && pane.contains(document.activeElement)) return;
+    // Protect a focused setting even before its first input event: background
+    // previews/track loads can finish between focus and the user's first key.
+    if (!commitStationarityInput && pane.contains(document.activeElement)
+        && document.activeElement?.matches?.('[data-stationarity-setting]')) return;
     if (this.data && this.getCurrentColorField()?.key === STATIONARITY_COLOR_FIELD_KEY) {
       this.scheduleStationarityPreview();
     }
@@ -16077,12 +16156,12 @@ class MovementExampleApp {
       if ((key !== "position" && (!Number.isFinite(value) || value <= 0))
           || (key === "position" && !["ends", "anywhere"].includes(value))) {
         this.setStatus("Stationarity radius, duration and gap must be positive numbers.", true);
-        this.renderThresholdPane();
+        this.renderThresholdPane({ commitStationarityInput: true });
         return;
       }
       this.stationaritySettings[key] = key.endsWith("_s") ? value * 3600 : value;
       this.clearStationarityPreview();
-      this.renderThresholdPane();
+      this.renderThresholdPane({ commitStationarityInput: true });
       this.renderLayers();
       this.renderSelectedFixes();
       this.updateActionButtons();
@@ -18669,7 +18748,7 @@ class MovementExampleApp {
         <label class="movement-threshold-range-label"><span>Where</span><select data-role="stationarity-position" data-stationarity-setting="position"><option value="ends" ${settings.position === "ends" ? "selected" : ""}>Start/end of track</option><option value="anywhere" ${settings.position === "anywhere" ? "selected" : ""}>Anywhere</option></select></label>
       <div class="movement-threshold-meta" data-role="stationarity-status" aria-live="polite">${escapeHtml(status)}</div>
       <label class="movement-threshold-toggle"><input type="checkbox" data-action="toggle-threshold-level" data-level="True" ${highlighted ? "checked" : ""}>Highlight stationary fixes</label>
-      <div class="movement-threshold-note">At least 3 fixes are required. The maximum gap controls joining across source bursts. Tag changes and confirmed exclusions still split periods. A match is a review candidate, not a confirmed error.</div>
+      <div class="movement-threshold-note">At least 3 retained fixes are required. Saved GPS-spike flags and confirmed exclusions are skipped. Maximum gap is measured between the remaining fixes. Tag changes and invalid records still split periods. Stationarity is a review candidate.</div>
       <div class="movement-threshold-note">Applies to visible individuals (${escapeHtml(formatCount(this.getSelectedIndividuals().length))}).</div>
       <div class="movement-threshold-actions"><button type="button" data-action="check-above-threshold" ${!ready || !count || checked ? "disabled" : ""}>Select fixes</button><button type="button" data-action="clear-threshold" ${highlighted ? "" : "disabled"}>Clear selection</button></div>
     `;

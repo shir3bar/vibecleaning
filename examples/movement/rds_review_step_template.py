@@ -66,6 +66,7 @@ def main():
         summary["resolved_fix_count"] = len({
             token for item in appended for token in row_tokens_for_scope(item.get("scope") or {})
         })
+    summary.update(params.get("stationarity_rerun_summary") or {})
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
