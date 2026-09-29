@@ -2185,6 +2185,20 @@ class MovementExampleApp {
           display: grid;
           gap: 7px;
         }
+        .movement-fix-popup-jump {
+          margin-top: 12px;
+          padding: 6px 10px;
+          border: 1px solid rgba(116, 212, 255, 0.3);
+          border-radius: 8px;
+          background: rgba(76, 196, 255, 0.12);
+          color: #e8eef7;
+          font: inherit;
+          cursor: pointer;
+        }
+        .movement-fix-popup-jump:disabled {
+          opacity: 0.5;
+          cursor: default;
+        }
         .movement-fix-popup-row {
           display: grid;
           grid-template-columns: minmax(78px, auto) minmax(0, 1fr);
@@ -4908,6 +4922,8 @@ class MovementExampleApp {
       const closeButton = event.target.closest('[data-role="fix-popup-close"]');
       if (closeButton) {
         this.closeFixPopup();
+      } else if (event.target.closest('[data-role="fix-popup-jump"]')) {
+        void this.jumpTrackPlayerToFix(this.getPopupFix());
       }
     });
     this.refs.selectAll.addEventListener("click", () => {
@@ -10657,7 +10673,7 @@ class MovementExampleApp {
       statsRow.append(
         statChip(`median step ${formatMaybeNumber(stats.medianStepM, "m")}`),
         statChip(`median speed ${formatMaybeNumber(stats.medianSpeedMps, "m/s")}`),
-        statChip(`unresolved ${formatCount(unresolvedCount)}`),
+        statChip(`flagged ${formatCount(stats.suspectedCount)}`),
         statChip(`confirmed ${formatCount(stats.confirmedCount)}`),
       );
       card.appendChild(statsRow);
@@ -10808,12 +10824,11 @@ class MovementExampleApp {
         const attrs = `data-individual="${escapeHtml(individual)}" data-issue-type="${escapeHtml(group.issue_type)}"`;
         const highlighted = this.queueIssueHighlight?.key === key && this.queueIssueHighlight.issueType === group.issue_type;
         return `<div class="movement-queue-issue-row">
-          <button type="button" class="movement-queue-issue-name" data-queue-issue-action="highlight" ${attrs} aria-pressed="${highlighted}" title="Show these saved flags in red with other tracks in grey. Click again to restore colors.">${escapeHtml(label)} · ${formatCount(group.fix_count)} fixes</button>
-          <button type="button" data-queue-issue-action="confirm" ${attrs} ${disabled ? "disabled" : ""} title="Exclude these ${formatCount(group.fix_count)} fixes for ${escapeHtml(individual)} under ${escapeHtml(label)}">Confirm</button>
-          <button type="button" data-queue-issue-action="unflag" ${attrs} ${disabled ? "disabled" : ""} title="Dismiss these flags for ${escapeHtml(individual)}; other issue types are unchanged">Unflag</button>
+          <button type="button" class="movement-queue-issue-name" data-queue-issue-action="highlight" ${attrs} aria-pressed="${highlighted}" title="Highlight all these flags and jump the player to the first flagged fix. Click again to restore colors.">${escapeHtml(label)} · ${formatCount(group.fix_count)} fixes</button>
+          <button type="button" data-queue-issue-action="confirm" ${attrs} ${disabled ? "disabled" : ""} title="Confirm excludes these ${formatCount(group.fix_count)} fixes for ${escapeHtml(individual)} under ${escapeHtml(label)}. Leave uncertain flags unresolved.">Confirm</button>
+          <button type="button" data-queue-issue-action="unflag" ${attrs} ${disabled ? "disabled" : ""} title="Unflag dismisses this issue for ${escapeHtml(individual)}; other issue types are unchanged. Leave uncertain flags unresolved.">Unflag</button>
         </div>`;
       }).join("")}
-      <span class="movement-subtle">Confirm excludes; Unflag dismisses that issue. Leave uncertain flags unresolved.</span>
     </div>`;
   }
 
@@ -10901,6 +10916,12 @@ class MovementExampleApp {
     }
     this.renderIndividuals();
     this.renderLayers();
+    if (this.queueIssueHighlight) {
+      const firstFix = this.queueIssueHighlight.fixes.reduce((first, fix) => (
+        !first || fix.timeMs < first.timeMs ? fix : first
+      ), null);
+      void this.jumpTrackPlayerToFix(firstFix);
+    }
   }
 
   async resolveQueueIssueGroup(individual, issueType, action) {
@@ -11070,7 +11091,7 @@ class MovementExampleApp {
           ${escapeHtml(this.data.speciesByIndividual[individual] || "")}
           ${this.data.speciesByIndividual[individual] ? " • " : ""}
           ${escapeHtml(formatCount(stats.rowCount))} fixes
-          • ${escapeHtml(formatCount(unresolvedCount))} unresolved
+          • ${escapeHtml(formatCount(stats.suspectedCount))} flagged
           • ${escapeHtml(formatCount(stats.confirmedCount))} confirmed
         </div>
         ${unresolvedCount ? `<div class="movement-fix-note"><strong>Unresolved issues:</strong> ${escapeHtml(formatCount(unresolvedCount))}${origins.length ? ` • ${escapeHtml(origins.join(", "))}` : ""}</div>` : ""}
@@ -12510,6 +12531,51 @@ class MovementExampleApp {
     this.renderTrackPlayer();
     this.updateTimeLabel();
     this.scheduleTemporalFocusRender();
+  }
+
+  async jumpTrackPlayerToFix(fix) {
+    if (!fix || !this.data || this.trackPlayerJumpPending
+        || this.individualReviewQueue.saving || this.queueIssueMutation) return;
+    const data = this.data;
+    const sourceRow = Number(fix.sourceRow)
+      || Number(fix.fixKey.match(/(?:#row:|^row:)(\d+)$/)?.[1]);
+    const artifact = fix.sourceArtifact || (fix.fixKey.startsWith("file:")
+      ? fix.fixKey.slice(5, fix.fixKey.lastIndexOf("#row:")) : this.currentArtifact);
+    const mapView = this.captureCurrentMapView();
+    this.trackPlayerJumpPending = true;
+    this.pauseTrackPlayer();
+    this.renderFixPopup();
+    try {
+      if (this.individualReviewQueue.mode !== "queue") {
+        await this.setIndividualViewMode("queue");
+      }
+      if (this.data !== data) return;
+      if (this.individualReviewQueue.activeIndividual !== fix.individual
+          || !this.trackPlayer.binary) {
+        if (!(await this.focusIndividualQueueItem(fix.individual))) return;
+      }
+      if (this.data !== data || this.individualReviewQueue.mode !== "queue"
+          || this.trackPlayer.individual !== fix.individual) return;
+      const {binary, sequence} = this.trackPlayer;
+      // Time alone is ambiguous: repeated timestamps and overlapping source
+      // files must seek to the exact fix that the reviewer clicked.
+      const index = sequence?.findIndex(binaryIndex => (
+        Number(binary.arrays.source_rows[binaryIndex]) === sourceRow
+        && binary.header.artifacts[Number(binary.arrays.artifact_codes[binaryIndex])] === artifact
+      )) ?? -1;
+      if (index < 0) throw new Error("This fix is not available in the track player.");
+      this.trackPlayer.hidden = false;
+      this.setTrackPlayerIndex(index, {pause: true});
+      this.saveUiState();
+      if (mapView && this.map) this.map.jumpTo(mapView);
+      this.closeFixPopup();
+      this.refs.trackPlayer.focus({preventScroll: true});
+    } catch (error) {
+      this.setStatus(`Could not jump to fix: ${error.message}`, true);
+    } finally {
+      this.trackPlayerJumpPending = false;
+      this.renderFixPopup();
+    }
   }
 
   playTrackPlayer() {
@@ -14292,6 +14358,7 @@ class MovementExampleApp {
         radiusMinPixels: 9,
         radiusMaxPixels: 18,
         pickable: false,
+        parameters: { depthTest: false },
       }));
     }
     const isSuspiciousPointLayer = layer => {
@@ -14318,13 +14385,12 @@ class MovementExampleApp {
         layer => String(layer?.id || "") === "movement-checked-suspicious-indicator",
       ),
       ...layers.filter(isRoiLayer),
-      ...layers.filter(isTrackPlayerLayer),
     ];
     const queueHighlight = this.queueIssueHighlight;
     if (queueHighlight?.key && queueHighlight.key === this.queueIssueGroupsKey()) {
       orderedLayers = orderedLayers.map(layer => this.greyQueueContextLayer(layer));
-      // Draw last, above selection outlines and the track player, even when
-      // different issue groups contain points at exactly the same location.
+      // Keep flags above tracks and selection outlines, including coincident
+      // fixes. The playback marker stays black and is drawn above these flags.
       orderedLayers.push(new deck.ScatterplotLayer({
         id: "movement-queue-issue-highlight", data: queueHighlight.fixes,
         getPosition: fix => fix.position,
@@ -14334,6 +14400,7 @@ class MovementExampleApp {
         parameters: { depthTest: false },
       }));
     }
+    orderedLayers.push(...layers.filter(isTrackPlayerLayer));
 
     try {
       const renderedLayerIds = orderedLayers.map(
@@ -14985,6 +15052,9 @@ class MovementExampleApp {
           </div>
         `).join("")}
       </div>
+      <button type="button" class="movement-fix-popup-jump" data-role="fix-popup-jump"
+        title="Open the track player and pause at this fix."
+        ${this.trackPlayerJumpPending || this.individualReviewQueue.saving || this.queueIssueMutation ? "disabled" : ""}>Jump to fix</button>
     `;
     popupEl.classList.remove("hidden");
 
@@ -21527,6 +21597,7 @@ function formatTimestamp(timeMs) {
 
 function formatStepLabel(step, dataset) {
   const params = step?.label_parameters || step?.parameters || {};
+  if (params.queue_label) return params.queue_label;
   if (params.action === "annotate_scope") {
     const issueType = String(params.issue_type || "").trim();
     if (issueType) return issueType;

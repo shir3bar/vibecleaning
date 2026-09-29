@@ -67,7 +67,16 @@ def test_queue_group_resolves_exact_individual_and_preserves_overlap(reviewed_st
         assert response.status_code == 200, response.text
         return response.json()
 
+    def overview_counts(dataset_id, individual):
+        response = client.get(f"{base}/dataset/{dataset_id}/overview",
+                              params={"logical_name": logical})
+        assert response.status_code == 200, response.text
+        stats = response.json()["stats"][individual]
+        return stats["suspected_count"], stats["confirmed_count"]
+
     initial = groups(dataset, individuals[0])
+    assert overview_counts(dataset, individuals[0]) == (6, 0)
+    assert overview_counts(dataset, individuals[1]) == (3, 0)
     assert {g["issue_type"]: g["fix_count"] for g in initial["groups"]} == {"GPS spikes": 5, "Stationarity": 3}
     spikes = initial["groups"][0]
     assert set(spikes["fix_keys"]) == set(alpha[:5])
@@ -87,7 +96,8 @@ def test_queue_group_resolves_exact_individual_and_preserves_overlap(reviewed_st
     assert response.status_code == 200, response.text
     result = response.json()
     confirmed = result["dataset"]["dataset_id"]
-    assert result["step"]["title"].startswith("Confirm 5 suspected")
+    assert overview_counts(confirmed, individuals[0]) == (1, 5)
+    assert result["step"]["title"] == f"{individuals[0]} · Confirmed GPS spikes"
     summary = result["step"]["summary"]
     assert summary.get("confirmed_fix_count", summary.get("resolved_fix_count")) == 5
     assert groups(confirmed, individuals[1])["groups"] == before_beta
@@ -99,7 +109,9 @@ def test_queue_group_resolves_exact_individual_and_preserves_overlap(reviewed_st
         "issue_group": {"individual": individuals[0], "issue_type": "Stationarity", "expected_fix_count": 3},
     })
     assert response.status_code == 200, response.text
+    assert response.json()["step"]["title"] == f"{individuals[0]} · Unflagged Stationarity"
     dismissed = response.json()["dataset"]["dataset_id"]
+    assert overview_counts(dismissed, individuals[0]) == (0, 5)
     assert not groups(dismissed, individuals[0])["groups"]
     assert groups(dismissed, individuals[1])["groups"] == before_beta
     # Earlier versions retain their unresolved candidates.
@@ -122,11 +134,11 @@ def test_queue_group_resolves_exact_individual_and_preserves_overlap(reviewed_st
 
 @pytest.mark.browser
 def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tmp_path):
-    from test_movement_browser import _serve, _open_browser, _new_page, _wait_for_layer, STATIC_ROOT, INDEX_PATH
+    from test_movement_browser import _serve, _open_browser, _new_page, _wait_for_layer, _open_binary_fix_popup, STATIC_ROOT, INDEX_PATH
     from app.auth import AuthManager
     from app.web import create_app
     import playwright.sync_api as playwright_api
-    client, study, base, dataset, logical, individuals, *_ = reviewed_study
+    client, study, base, dataset, logical, individuals, alpha, *_ = reviewed_study
     browser_app = client.app
     if study.parent.name == "movement_clean":
         browser_app = create_app(data_root=study.parents[1], static_root=STATIC_ROOT,
@@ -170,7 +182,13 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         highlight = active.locator(f'{spike}[data-queue-issue-action="highlight"]')
         highlight.wait_for(state="visible", timeout=30_000)
         assert "5 fixes" in highlight.text_content()
+        assert "6 flagged" in active.locator('.movement-queue-card-meta').inner_text()
+        assert "unresolved" not in active.locator('.movement-queue-card-meta').inner_text()
         assert page.locator('[data-queue-issues]').count() == 1
+        assert "Leave uncertain flags unresolved" not in active.inner_text()
+        assert "Confirm excludes" in active.locator(f'{spike}[data-queue-issue-action="confirm"]').get_attribute("title")
+        assert "Leave uncertain flags unresolved" in active.locator(f'{spike}[data-queue-issue-action="confirm"]').get_attribute("title")
+        assert "Unflag dismisses this issue" in active.locator(f'{spike}[data-queue-issue-action="unflag"]').get_attribute("title")
         bursts = active.locator('[data-queue-bursts]')
         assert not bursts.evaluate("element => element.open")
         bursts.locator('summary').click()
@@ -185,12 +203,16 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         assert bursts.evaluate("element => element.open")
         assert page.evaluate("""() => {
           const layers = window.__testMapLayers;
-          const highlight = layers.at(-1);
+          const marker = layers.at(-1);
+          if (marker.id !== 'movement-track-player-position'
+              || String(marker.props.getFillColor) !== '3,5,8,255'
+              || marker.props.parameters.depthTest !== false) return false;
+          const highlight = layers.at(-2);
           if (highlight.id !== 'movement-queue-issue-highlight'
               || highlight.props.data.length !== 5 || !highlight.props.filled
               || highlight.props.parameters.depthTest !== false
               || String(highlight.props.getFillColor) !== '246,92,110,255') return false;
-          return layers.slice(0, -1).every(layer =>
+          return layers.slice(0, -2).every(layer =>
             ['getColor', 'getFillColor', 'getLineColor'].every(name =>
                   layer.props[name] === undefined || (
                 !layer.props.data?.attributes?.[name]
@@ -204,8 +226,17 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         stationary_highlight = active.locator(f'{stationary}[data-queue-issue-action="highlight"]')
         stationary_highlight.click()
         assert highlight.get_attribute("aria-pressed") == "false"
-        assert page.evaluate("() => window.__testMapLayers.at(-1).props.data.length") == 3
+        assert page.evaluate("() => window.__testMapLayers.at(-2).props.data.length") == 3
+        first_stationary_row = int(alpha[3].rsplit(":", 1)[1])
+        page.wait_for_function("""row => {
+          const state = window.__movementDiagnosticsSnapshot();
+          const marker = window.__testMapLayers.at(-1);
+          return !state.trackPlayerPlaying && state.trackPlayerSourceRow === row
+            && marker.props.data[0].sourceRow === row
+            && marker.props.data[0].timeMs === state.trackPlayerTimeMs;
+        }""", arg=first_stationary_row)
         stationary_highlight.click()
+        assert page.evaluate("window.__movementDiagnosticsSnapshot().trackPlayerSourceRow") == first_stationary_row
         assert page.evaluate("""() => {
           const layers = window.__testMapLayers;
           return !layers.some(layer => layer.id === 'movement-queue-issue-highlight')
@@ -214,6 +245,28 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         }""")
         highlight.click()
         bursts.locator('summary').click()
+        # Jumping changes playback only; it keeps issue highlights and map data.
+        page.locator('[data-role="track-player-play"]').click()
+        target = _open_binary_fix_popup(page, individuals[0], int(alpha[5].rsplit(":", 1)[1]))
+        before_jump = page.evaluate("window.__movementDiagnosticsSnapshot()")
+        before_jump_requests = len(track_requests)
+        page.locator('[data-role="fix-popup-jump"]').click()
+        page.wait_for_function("""target => {
+          const state = window.__movementDiagnosticsSnapshot();
+          return !state.trackPlayerPlaying && state.trackPlayerSourceRow === target.sourceRow
+            && state.trackPlayerTimeMs === target.timeMs;
+        }""", arg=target)
+        assert len(track_requests) == before_jump_requests
+        assert page.evaluate("window.__movementDiagnosticsSnapshot().mapView") == before_jump["mapView"]
+        assert highlight.get_attribute("aria-pressed") == "true"
+        page.wait_for_function("""target => {
+          const marker = window.__testMapLayers.at(-1);
+          return marker.id === 'movement-track-player-position'
+            && String(marker.props.getFillColor) === '3,5,8,255'
+            && marker.props.parameters.depthTest === false
+            && marker.props.data[0].sourceRow === target.sourceRow
+            && marker.props.data[0].timeMs === target.timeMs;
+        }""", arg=target)
         page.screenshot(path=tmp_path / "queue-groups-active.png")
         # An unsaved individual decision must survive these separate review steps.
         active.locator('[data-review-decision="fix_keep"]').click()
@@ -261,6 +314,8 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
             active.locator(f'{spike}[data-queue-issue-action="confirm"]').click()
         assert saved.value.status == 200, saved.value.text()
         assert saved.value.json()["step"]["parameters"]["issue_group"]["individual"] == individuals[0]
+        assert page.locator('[data-role="dataset"] option:checked').text_content().find(
+            f"{individuals[0]} · Confirmed GPS spikes") >= 0
         active.locator(f'{spike}[data-queue-issue-action="confirm"]').wait_for(state="detached", timeout=30_000)
         stationary_button = active.locator(f'{stationary}[data-queue-issue-action="unflag"]')
         stationary_button.wait_for(state="visible", timeout=30_000)
@@ -268,17 +323,21 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         assert "unsaved" in active.locator('.movement-review-state').text_content()
         assert page.locator('[data-role="confirm-modal"]').is_hidden()
         assert_retained_track(1)
+        assert "1 flagged" in active.locator('.movement-queue-card-meta').inner_text()
+        assert "5 confirmed" in active.locator('.movement-queue-card-meta').inner_text()
         with page.expect_response(lambda response: response.url.endswith("/actions/dismiss-issues")) as dismissed:
             stationary_button.click()
         assert dismissed.value.status == 200, dismissed.value.text()
         active.get_by_text("No unresolved flags.", exact=True).wait_for(timeout=30_000)
         assert_retained_track(0)
+        assert "0 flagged" in active.locator('.movement-queue-card-meta').inner_text()
         page.evaluate("() => { window.__testObserveReview = false; }")
         page.screenshot(path=tmp_path / "queue-groups.png")
         # Existing Save decision still saves the individual decision, independently.
         with page.expect_response(lambda response: response.url.endswith("/actions/review-individual")) as decision:
             page.locator('[data-role="individual-queue-save"]').click()
         assert decision.value.status == 200, decision.value.text()
+        assert decision.value.json()["step"]["title"] == f"{individuals[0]} · Fix & Keep"
         other = page.locator(f'[data-queue-individual="{individuals[1]}"].queue-active')
         other.locator(f'{spike}[data-queue-issue-action="highlight"]').wait_for(state="visible", timeout=30_000)
         assert "3 fixes" in other.locator(f'{spike}[data-queue-issue-action="highlight"]').text_content()

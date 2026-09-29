@@ -186,6 +186,22 @@ def _review_error_response(exc: Exception) -> JSONResponse:
     return json_error(str(exc), 400)
 
 
+def _queue_review_step_label(action: str, parameters: dict) -> str | None:
+    group = parameters.get("issue_group") or {}
+    if action in {"confirm_issues", "dismiss_issues"} and group.get("individual"):
+        issue = str(group.get("issue_type") or "Unspecified issue").removeprefix("Filter ")
+        verb = "Confirmed" if action == "confirm_issues" else "Unflagged"
+        return f"{group['individual']} · {verb} {issue}"
+    decision = parameters.get("decision") or {}
+    if action == "review_individual" and decision.get("individual"):
+        label = {"ok": "OK", "fix_keep": "Fix & Keep", "remove": "Remove"}.get(
+            decision.get("review_decision"), "Review")
+        if decision.get("needs_check"):
+            label += " · Needs check"
+        return f"{decision['individual']} · {label}"
+    return None
+
+
 def _movement_graph_payload(study_dir: Path, history: dict | None = None) -> dict:
     """Attach compact display metadata, without sending scopes' resolved fix lists."""
     graph = graph_payload(study_dir)
@@ -202,6 +218,10 @@ def _movement_graph_payload(study_dir: Path, history: dict | None = None) -> dic
             for key in ("action", "status", "issue_field", "issue_threshold", "issue_type")
             if key in params
         }
+        # Also shorten existing saved steps without rewriting review history.
+        queue_label = _queue_review_step_label(params.get("action"), params)
+        if queue_label:
+            step["label_parameters"]["queue_label"] = queue_label
         step["label_parameters"]["filter"] = {
             key: spec[key]
             for key in (
@@ -1886,12 +1906,27 @@ def register_movement_routes(
                 visible_annotations,
                 source_artifact=logical_name,
             )
-            result = payload if configured_source.bundle_scoped else apply_review_annotation_counts(
-                payload,
-                artifact_path,
-                visible_annotations,
-                source_artifact=logical_name,
-            )
+            if configured_source.bundle_scoped:
+                # The overview contains sampled (normally no) fixes. Count saved
+                # review state across the index, rather than only source flags
+                # or loaded map points. Overlapping flags count each fix once.
+                _bundle, index_path = await run_in_threadpool(
+                    ensure_configured_rds_index, study_dir, dataset_id
+                )
+                projection = await run_in_threadpool(
+                    build_rds_review_projection, index_path, annotations=visible_annotations
+                )
+                result = payload
+                for individual, counts in projection["stats"].items():
+                    result["stats"].setdefault(individual, {}).update(counts)
+                result["review_counts"] = projection["review_counts"]
+            else:
+                result = apply_review_annotation_counts(
+                    payload,
+                    artifact_path,
+                    visible_annotations,
+                    source_artifact=logical_name,
+                )
             result["source_signature"] = current_source_signature
             result["exclusion_signature"] = review_exclusion_signature(
                 study_dir, dataset_id, logical_name
@@ -3859,7 +3894,8 @@ def register_movement_routes(
             user = effective_user(request, body)
             payload = {
                 "user": user,
-                "title": f"Confirm {len({key for item in raw_confirmations for key in item['fix_keys']})} suspected fix(es) in {logical_name}",
+                "title": _queue_review_step_label("confirm_issues", body)
+                    or f"Confirm {len({key for item in raw_confirmations for key in item['fix_keys']})} suspected fix(es) in {logical_name}",
                 "kind": "python",
                 "script": step_script,
                 "parameters": {
@@ -3982,7 +4018,8 @@ def register_movement_routes(
             dismissed_fix_count = len({key for item in raw_dismissals for key in item["fix_keys"]})
             payload = {
                 "user": user,
-                "title": f"Dismiss suspicion for {dismissed_fix_count} fix(es) in {logical_name}",
+                "title": _queue_review_step_label("dismiss_issues", body)
+                    or f"Dismiss suspicion for {dismissed_fix_count} fix(es) in {logical_name}",
                 "kind": "python",
                 "script": step_script,
                 "parameters": {
@@ -4096,7 +4133,7 @@ def register_movement_routes(
                 input_artifacts.append("movement_review_annotations.json")
             payload = {
                 "user": user,
-                "title": f"Record review decision for {decision['individual']} in {logical_name}",
+                "title": _queue_review_step_label("review_individual", {"decision": decision}),
                 "kind": "python",
                 "script": step_script,
                 "parameters": {

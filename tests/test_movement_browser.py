@@ -267,6 +267,31 @@ def _wait_for_layer(page, fragment: str) -> None:
     )
 
 
+def _open_binary_fix_popup(page, individual, source_row):
+    # Coincident fixes cannot be reliably distinguished by screen coordinates.
+    # Choose a real binary fix, then exercise the actual map context-menu event.
+    target = page.evaluate("""({individual, sourceRow}) => {
+      for (const layer of window.__testMapLayers || []) {
+        if (!layer.id.startsWith('movement-binary-points-') || !layer.props.visible) continue;
+        const binary = layer.props.userData.binaryBlock;
+        const arrays = binary.arrays;
+        const index = arrays.source_rows.findIndex((row, i) => row === sourceRow
+          && binary.header.individuals[arrays.individual_codes[i]] === individual);
+        if (index < 0) continue;
+        const original = deck.MapboxOverlay.prototype.pickObject;
+        deck.MapboxOverlay.prototype.pickObject = function() {
+          deck.MapboxOverlay.prototype.pickObject = original;
+          return {layer, index: index - (layer.props.userData.binaryPointOffset || 0)};
+        };
+        return {timeMs: arrays.time_ms[index], sourceRow};
+      }
+      throw new Error('Requested fix was not loaded');
+    }""", {"individual": individual, "sourceRow": source_row})
+    page.locator('[data-role="map"] canvas').first.click(button="right", position={"x": 250, "y": 150})
+    page.locator('[data-role="fix-popup-jump"]').wait_for(state="visible")
+    return target
+
+
 def _record_preview_latency(page, record_property):
     latency = page.evaluate(
         "window.__movementDiagnostics.lastPreviewActivationMs - window.__movementSelectionStart"
@@ -565,6 +590,13 @@ def test_queue_track_player_uses_fix_index_timeline_and_ignores_sets(tmp_path):
         page.locator('[data-individual-checkbox="alpha"]').wait_for(
             state="attached", timeout=20_000
         )
+        page.evaluate("""() => {
+          const original = deck.MapboxOverlay.prototype.setProps;
+          deck.MapboxOverlay.prototype.setProps = function(props) {
+            if (props.layers) window.__testMapLayers = props.layers;
+            return original.call(this, props);
+          };
+        }""")
         page.locator('[data-role="individual-view-queue"]').click()
         player = page.locator('[data-role="track-player"]')
         player.wait_for(state="visible", timeout=20_000)
@@ -640,7 +672,25 @@ def test_queue_track_player_uses_fix_index_timeline_and_ignores_sets(tmp_path):
         assert map_view_after["center"] == pytest.approx(map_view_before["center"])
         assert map_view_after["zoom"] == pytest.approx(map_view_before["zoom"])
 
-        page.locator('[data-queue-individual="beta"]').click()
+        # Jump to the second of two coincident, equal-time fixes by source row.
+        slider.evaluate("element => { element.value = '0'; element.dispatchEvent(new Event('input', {bubbles: true})); }")
+        page.locator('[data-role="track-player-hide"]').click()
+        target = _open_binary_fix_popup(page, "alpha", 5)
+        requests_before_jump = len(binary_requests)
+        page.locator('[data-role="fix-popup-jump"]').click()
+        player.wait_for(state="visible")
+        assert canvas.get_attribute("data-index") == "2"
+        assert int(canvas.get_attribute("data-source-row")) == 5
+        assert int(canvas.get_attribute("data-time-ms")) == target["timeMs"]
+        assert len(binary_requests) == requests_before_jump
+        assert page.locator('[data-role="fix-popup"]').is_hidden()
+        assert page.evaluate("window.__movementDiagnosticsSnapshot().mapView") == map_view_after
+
+        # From Browse all, jump opens the correct individual's review player.
+        page.locator('[data-role="individual-view-browse"]').click()
+        page.locator('[data-role="select-all"]').click()
+        _open_binary_fix_popup(page, "beta", 26)
+        page.locator('[data-role="fix-popup-jump"]').click()
         page.wait_for_function(
             "() => document.querySelector('[data-role=track-player-canvas]')?.dataset.individual === 'beta' && document.querySelector('[data-role=track-player-canvas]')?.dataset.count === '1'",
             timeout=20_000,
