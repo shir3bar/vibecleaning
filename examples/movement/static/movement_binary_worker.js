@@ -42,6 +42,10 @@ function parseMovementBinary(buffer) {
       Number(metadata.length || 0),
     );
   }
+  for (const field of ["step_length_m", "speed_mps", "time_delta_s", "turn_angle_deg"]) {
+    const arrayName = header.color_columns?.[field]?.array;
+    if (arrayName && arrays[arrayName]) arrays[field] = arrays[arrayName];
+  }
   return { header, arrays };
 }
 

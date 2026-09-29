@@ -111,8 +111,10 @@ async function main() {
     app.getThresholdContext = () => ({matchCount: 0});
     const emptyTarget = app.getActiveFlagTarget();
     assert.equal(emptyTarget.kind, 'filter');
-    assert.equal(emptyTarget.ready, false);
+    assert.equal(emptyTarget.ready, true); // A valid zero-result filter is auditable.
     assert.deepEqual(emptyTarget.fixes, []);
+    app.data.selectedIndividuals.clear();
+    assert.equal(app.getActiveFlagTarget().ready, false);
 
     // Switching color field/study still uses the existing explicit reset.
     app.clearThresholdState();
@@ -131,6 +133,18 @@ async function main() {
   assert.deepEqual([...manual.data.selectedFixKeys], ['a1']);
   manual.toggleIndividual('alpha', false);
   assert.equal(manual.data.selectedFixKeys.size, 0);
+
+  // Flagged ordering uses saved unique counts, with stable dataset-order ties.
+  const queue = Object.create(App.prototype);
+  queue.data = {individuals: ['a', 'b', 'c'], stats: {
+    a: {suspectedCount: 2}, b: {suspectedCount: 9}, c: {suspectedCount: 9},
+  }};
+  queue.individualReviewQueue = {orderMode: 'flagged', filterMode: 'all'};
+  queue.getIndividualReviewState = () => ({});
+  queue.getIndividualQueueRanking = () => null;
+  assert.deepEqual(queue.getIndividualQueueOrder(), ['b', 'c', 'a']);
+  queue.data.stats.a.suspectedCount = 10;
+  assert.deepEqual(queue.getIndividualQueueOrder(), ['a', 'b', 'c']);
   console.log(`${profile}: threshold selection regression checks passed`);
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

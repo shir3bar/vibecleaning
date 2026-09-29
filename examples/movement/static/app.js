@@ -361,6 +361,12 @@ function parseMovementBinary(buffer) {
     }
     arrays[name] = new ArrayType(buffer, byteOffset, length);
   }
+  // CSV numeric columns use generated storage names; RDS uses field names.
+  // Share the same typed views so GPS matching reads either format correctly.
+  for (const field of ["step_length_m", "speed_mps", "time_delta_s", "turn_angle_deg"]) {
+    const arrayName = header.color_columns?.[field]?.array;
+    if (arrayName && arrays[arrayName]) arrays[field] = arrays[arrayName];
+  }
   return { buffer, header, arrays };
 }
 
@@ -693,7 +699,7 @@ class MovementExampleApp {
     };
     this.individualReviewQueue = {
       mode: "browse",
-      orderMode: "dataset",
+      orderMode: this.uiState.individualQueueOrder === "flagged" ? "flagged" : "dataset",
       filterMode: "all",
       pageIndex: Math.max(0, Number(this.uiState.individualQueuePage) || 0),
       groupIndex: 0,
@@ -927,9 +933,10 @@ class MovementExampleApp {
     }
     const selectedValue = this.individualReviewQueue?.orderMode === "ranking"
       ? String(this.individualReviewQueue.rankingMethod || this.getRankingMethod())
-      : "dataset";
+      : this.individualReviewQueue?.orderMode === "flagged" ? "flagged" : "dataset";
     this.refs.individualQueueOrder.innerHTML = [
       ["dataset", "Dataset source"],
+      ["flagged", "Flagged fixes — most first"],
       ...this.rankingMethodOptions(),
     ].map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
     this.refs.individualQueueOrder.value = selectedValue;
@@ -1736,7 +1743,8 @@ class MovementExampleApp {
           font-size: 12px;
           color: #b6c9dc;
         }
-        .movement-export-progress progress {
+        .movement-export-progress progress,
+        [data-role="fixes-progress"] progress {
           display: block;
           width: min(420px, 100%);
           height: 8px;
@@ -3906,7 +3914,13 @@ class MovementExampleApp {
           The editor has finished making changes.
           <button type="button" data-role="load-editor-release">Load latest</button>
         </div>
-        <div class="movement-status" data-role="status"></div>
+        <div class="movement-status">
+          <div data-role="status"></div>
+          <div data-role="fixes-progress" hidden>
+            <span data-role="fixes-progress-text" role="status" aria-live="polite"></span>
+            <progress data-role="fixes-progress-bar" aria-label="Loading fixes"></progress>
+          </div>
+        </div>
         <div class="movement-export-progress" data-role="export-progress" hidden>
           <span data-role="export-progress-text" role="status" aria-live="polite"></span>
           <progress data-role="export-progress-bar" aria-label="RDS export progress"></progress>
@@ -4414,6 +4428,9 @@ class MovementExampleApp {
       generateReport: this.mountEl.querySelector('[data-role="generate-report"]'),
       exportReviewedCsv: this.mountEl.querySelector('[data-role="export-reviewed-csv"]'),
       exportProgress: this.mountEl.querySelector('[data-role="export-progress"]'),
+      fixesProgress: this.mountEl.querySelector('[data-role="fixes-progress"]'),
+      fixesProgressText: this.mountEl.querySelector('[data-role="fixes-progress-text"]'),
+      fixesProgressBar: this.mountEl.querySelector('[data-role="fixes-progress-bar"]'),
       exportProgressText: this.mountEl.querySelector('[data-role="export-progress-text"]'),
       exportProgressBar: this.mountEl.querySelector('[data-role="export-progress-bar"]'),
       undo: this.mountEl.querySelector('[data-role="undo"]'),
@@ -5388,12 +5405,90 @@ class MovementExampleApp {
     };
   }
 
-  async loadBinaryMovement({
+  renderFixesProgress() {
+    if (!this.refs.fixesProgress) return;
+    const jobs = [...(this.fixesLoadingJobs?.values() || [])].filter(job => job.preparing
+      ? job.study === this.currentStudy && job.family === this.currentFamily
+      : job.data === this.data);
+    const job = jobs.at(-1);
+    this.refs.fixesProgress.hidden = !job;
+    if (!job) return;
+    const bar = this.refs.fixesProgressBar;
+    this.refs.fixesProgressText.textContent = job.label;
+    if (Number.isFinite(job.percent)) {
+      bar.max = 100;
+      bar.value = job.percent;
+    } else {
+      bar.removeAttribute("value");
+    }
+  }
+
+  async loadBinaryMovement(options = {}) {
+    const token = {};
+    const data = options.data || this.data;
+    const individuals = options.individuals?.length ? options.individuals : data?.individuals || [];
+    const count = individuals.reduce((sum, individual) => sum + (Number(data?.stats?.[individual]?.rowCount) || 0), 0);
+    const description = `${formatCount(count)} fixes for ${formatCount(individuals.length)} individual(s)`;
+    this.fixesLoadingJobs ||= new Map();
+    const report = (label, percent = null) => {
+      this.fixesLoadingJobs.set(token, {data, label: `${label} · ${description}`, percent});
+      this.renderFixesProgress();
+    };
+    report("Preparing fixes");
+    try {
+      return await this.loadBinaryMovementData({...options, report});
+    } finally {
+      this.fixesLoadingJobs.delete(token);
+      this.renderFixesProgress();
+    }
+  }
+
+  beginFixesPreparation(label) {
+    const token = {};
+    this.fixesLoadingJobs ||= new Map();
+    this.fixesLoadingJobs.set(token, {preparing: true, study: this.currentStudy,
+      family: this.currentFamily, label, percent: null});
+    this.renderFixesProgress();
+    return () => {
+      this.fixesLoadingJobs.delete(token);
+      this.renderFixesProgress();
+    };
+  }
+
+  async readFixesBuffer(response, report) {
+    if (!response.body?.getReader) return response.arrayBuffer();
+    const total = Number(response.headers.get("content-length")) || 0;
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    try {
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.byteLength;
+        const percent = total ? Math.min(100, Math.round(100 * received / total)) : null;
+        report(`Receiving fixes${percent === null ? "" : ` (${percent}%)`}`, percent);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const combined = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return combined.buffer;
+  }
+
+  async loadBinaryMovementData({
     familyName,
     studyName,
     datasetId,
     individuals = [],
     data = this.data,
+    report = () => {},
   } = {}) {
     if (!data) {
       return;
@@ -5425,7 +5520,10 @@ class MovementExampleApp {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error || `${response.status} ${response.statusText}`);
     }
-    const binary = await prepareMovementBinary(await response.arrayBuffer());
+    const buffer = await this.readFixesBuffer(response, report);
+    if (controller.signal.aborted || data !== this.data) return;
+    report("Preparing map and colours");
+    const binary = await prepareMovementBinary(buffer);
     if (
       this.requestControllers[requestName] !== controller
       || familyName !== this.currentFamily
@@ -8121,6 +8219,15 @@ class MovementExampleApp {
     const review = profile.review || null;
     const coverage = profile.coverage || null;
     const control = profile.editor_control || null;
+    // The study list was loaded before this edit. Update its assignment label
+    // immediately when the first saved action creates a self-assigned review.
+    const option = [...(this.refs.study?.options || [])].find(item => item.value === this.currentStudy);
+    if (option) {
+      const reviewerName = review?.reviewer?.display_name || "";
+      option.textContent = reviewerName
+        ? `${this.currentStudy} · active review: ${reviewerName}`
+        : `${this.currentStudy} · unassigned/history`;
+    }
     if (this.refs.authIdentity) {
       this.refs.authIdentity.textContent = actor.display_name
         ? `${actor.display_name} · ${actor.role || "user"}`
@@ -8798,7 +8905,7 @@ class MovementExampleApp {
     }
     const queueState = preserved.queue || {};
     const queue = this.individualReviewQueue;
-    queue.orderMode = queueState.orderMode === "ranking" ? "ranking" : "dataset";
+    queue.orderMode = ["ranking", "flagged"].includes(queueState.orderMode) ? queueState.orderMode : "dataset";
     queue.pageIndex = Math.max(0, Number(queueState.pageIndex) || 0);
     queue.groupIndex = Math.max(0, Number(queueState.groupIndex) || 0);
     queue.activeIndividual = String(queueState.activeIndividual || "");
@@ -8814,6 +8921,7 @@ class MovementExampleApp {
     queue.rankingMethod = String(
       queueState.rankingMethod || this.getRankingMethod(),
     );
+    if (queue.orderMode === "flagged") this.repositionIndividualQueueAroundActive();
   }
 
   initializeDatasetView(viewContext = null) {
@@ -9103,6 +9211,7 @@ class MovementExampleApp {
       return;
     }
     this.setStatus(`Loading ${studyName} in ${familyName}...`);
+    const finishProgress = this.beginFixesPreparation(`Preparing ${studyName} and its local data cache…`);
     try {
       const controller = this.beginRequest("study");
       this.setStatus(`Loading study data for ${studyName}...`);
@@ -9212,6 +9321,8 @@ class MovementExampleApp {
       console.error("Failed to load movement study", error);
       this.setStatus(error.message, true);
       this.showOverlay(`Could not load ${studyName}.`);
+    } finally {
+      finishProgress();
     }
   }
 
@@ -9334,6 +9445,7 @@ class MovementExampleApp {
     this.saveUiState();
     this.setStatus(`Loading overview for ${this.currentArtifact} from ${this.currentDatasetId}...`);
     this.renderBurstCountIndicator("Loading bursts...");
+    const finishProgress = this.beginFixesPreparation("Preparing the study overview…");
     try {
       const controller = this.beginRequest("overview");
       const overviewParams = new URLSearchParams({
@@ -9402,6 +9514,8 @@ class MovementExampleApp {
       if (!this.data) {
         this.showOverlay(`Could not render ${this.currentArtifact}.`);
       }
+    } finally {
+      finishProgress();
     }
   }
 
@@ -9623,6 +9737,11 @@ class MovementExampleApp {
       && this.individualReviewQueue.appliedRankingAnalysisId === queueRanking.analysisId
     );
     return [...visibleIndividuals].sort((left, right) => {
+      if (this.individualReviewQueue.orderMode === "flagged") {
+        const difference = (Number(this.data.stats[right]?.suspectedCount) || 0)
+          - (Number(this.data.stats[left]?.suspectedCount) || 0);
+        return difference || datasetIndex.get(left) - datasetIndex.get(right);
+      }
       const partitionDifference = this.priorReviewOkPartition(left)
         - this.priorReviewOkPartition(right);
       if (partitionDifference) {
@@ -9979,13 +10098,16 @@ class MovementExampleApp {
     }
     this.clearRoiSelection();
     if (nextMode === "queue") {
+      this.cancelRequest("detail");
+      this.cancelBinaryRequests();
+      this.clearStationarityPreview();
       this.clearTrackPlayer();
       queue.browseContext = this.captureDatasetViewContext();
       queue.browseSideSheet = this.refs.sideSheetTabs?.dataset.activeSheet || "individuals";
       queue.mode = "queue";
+      queue.activeIndividual = "";
       this.renderLegend();
       this.renderThresholdPane();
-      queue.activeIndividual = "";
       this.hiddenBurstIds.clear();
       this.resetManualFlagTarget();
       this.flagTargetKind = "none";
@@ -10460,7 +10582,7 @@ class MovementExampleApp {
     const rankingMethods = new Set(this.rankingMethodOptions().map(([value]) => value));
     const requestedMethod = rankingMethods.has(orderValue) ? orderValue : "";
     if (!requestedMethod) {
-      this.individualReviewQueue.orderMode = "dataset";
+      this.individualReviewQueue.orderMode = orderValue === "flagged" ? "flagged" : "dataset";
       this.individualReviewQueue.appliedRankingAnalysisId = "";
       this.individualReviewQueue.pendingRankingAnalysisId = "";
     } else {
@@ -10530,6 +10652,10 @@ class MovementExampleApp {
       return;
     }
     target.classList.remove("error");
+    if (this.individualReviewQueue.orderMode === "flagged") {
+      target.textContent = "Most flagged fixes first. Counts update after saved review decisions.";
+      return;
+    }
     const rankingMethod = String(
       this.individualReviewQueue.rankingMethod || this.getRankingMethod(),
     );
@@ -15271,6 +15397,8 @@ class MovementExampleApp {
         minimum_abs_turn_angle_deg: this.gpsSpikeTurnAngleDeg,
         individuals: thresholdScope.individuals,
         set_names: thresholdScope.setNames,
+        ...(this.gpsSpikePreset?.cutoff === this.thresholdState.value
+          ? {percentile: this.gpsSpikePreset.provenance} : {}),
       };
     }
     return {
@@ -15360,6 +15488,8 @@ class MovementExampleApp {
   }
 
   clearThresholdState() {
+    this.gpsSpikePreset = null;
+    this.gpsDefaultScope = "";
     this.thresholdState = {
       fieldKey: "",
       value: null,
@@ -15377,7 +15507,7 @@ class MovementExampleApp {
 
   syncFlagTargetToThreshold() {
     this.checkedThresholdSignature = "";
-    if (this.getActiveThresholdMatchKeys().size) {
+    if (this.hasActiveThreshold(this.getCurrentColorField())) {
       this.resetManualFlagTarget({ resetKind: false });
       this.flagTargetKind = "filter";
     } else if (this.flagTargetKind === "filter") {
@@ -15461,7 +15591,7 @@ class MovementExampleApp {
     const matchRefs = [];
     let matchCount = 0;
     if (field.kind !== "numeric") {
-      const levelCounts = new Map();
+      const levelCounts = new Map(field.kind === "boolean" ? [["True", 0], ["False", 0], ["Missing", 0]] : []);
       const levelForRef = ({ binary, index }) => {
         const column = binary.header.color_columns?.[field.key];
         const value = binary.arrays[column?.array || field.key]?.[index];
@@ -15543,8 +15673,7 @@ class MovementExampleApp {
       : null;
     const rawThreshold = this.thresholdState.fieldKey === field.key
       ? finiteOrNull(this.thresholdState.value) : null;
-    const thresholdValue = rawThreshold === null || !histogram
-      ? null : clampThresholdValue(rawThreshold, histogram.min, histogram.max);
+    const thresholdValue = rawThreshold;
     if (thresholdValue !== null) {
       eligibleRefs.forEach((ref, position) => {
         const matches = reverse
@@ -15697,7 +15826,7 @@ class MovementExampleApp {
       ? uniqueNonEmpty(this.thresholdState.selectedLevels)
       : [];
     if (field.kind !== "numeric") {
-      const levelCounts = new Map();
+      const levelCounts = new Map(field.kind === "boolean" ? [["True", 0], ["False", 0], ["Missing", 0]] : []);
       for (const fix of visibleFixes) {
         const level = discreteFieldLevelLabel(field, movementColorFieldValue(fix, field));
         levelCounts.set(level, (levelCounts.get(level) || 0) + 1);
@@ -15785,9 +15914,7 @@ class MovementExampleApp {
       clippedMin,
       clippedMax,
     });
-    const activeThresholdValue = thresholdValue === null
-      ? null
-      : clampThresholdValue(thresholdValue, histogram.min, histogram.max);
+    const activeThresholdValue = thresholdValue;
     const matchItems = activeThresholdValue === null
       ? []
       : numericFixes.filter(item => (
@@ -15852,6 +15979,87 @@ class MovementExampleApp {
     return this.getThresholdContext()?.matchKeys || new Set();
   }
 
+  gpsSpikeQuantiles() {
+    const individuals = this.getSelectedIndividuals();
+    if (!individuals.length || individuals.some(id => !this.data?.binaryBlocks?.has(id))) return null;
+    const signature = JSON.stringify([this.currentDatasetId, individuals.map(id => {
+      const binary = this.data.binaryBlocks.get(id);
+      return [id, binary.workerBlockId, binary.reviewRevision || 0];
+    })]);
+    if (this.gpsQuantileCache?.signature === signature) return this.gpsQuantileCache;
+    const values = [];
+    for (const id of individuals) {
+      const binary = this.data.binaryBlocks.get(id);
+      const code = binary.header.individuals.indexOf(id);
+      const [start, end] = binary.individualRanges.get(code) || [0, 0];
+      const column = binary.header.color_columns?.step_length_m;
+      const steps = binary.arrays[column?.array || "step_length_m"];
+      for (let index = start; index < end; index += 1) {
+        if (Number(binary.arrays.review_status[index]) === 2) continue;
+        const value = steps?.[index];
+        if (Number.isFinite(value) && value >= 0) values.push(value);
+      }
+    }
+    values.sort((left, right) => left - right);
+    this.gpsQuantileCache = {signature, count: values.length,
+      p95: values.length ? quantile(values, 0.95) : null,
+      p99: values.length ? quantile(values, 0.99) : null};
+    return this.gpsQuantileCache;
+  }
+
+  setGpsPercentile(probability, quantiles = this.gpsSpikeQuantiles()) {
+    if (!quantiles?.count) return false;
+    const cutoff = probability === 0.99 ? quantiles.p99 : quantiles.p95;
+    this.thresholdState = {...this.thresholdState, fieldKey: GPS_SPIKE_COLOR_FIELD_KEY,
+      value: cutoff, reverse: false, selectedLevels: []};
+    this.gpsDefaultScope = quantiles.signature;
+    this.gpsSpikePreset = {cutoff, provenance: {
+      probability, sample_count: quantiles.count, method: "linear",
+      population: "finite-nonnegative-outbound-steps-at-unconfirmed-fixes",
+      scope: "selected-individuals-all-track-sets",
+    }};
+    this.flagTargetKind = "filter";
+    return true;
+  }
+
+  async openGpsPercentileModal(probabilities) {
+    if (this.rejectLockedEdit() || this.gpsPercentileBusy) return;
+    const quantiles = this.gpsSpikeQuantiles();
+    if (!quantiles?.count) return;
+    this.gpsPercentileBusy = true;
+    const datasetId = this.currentDatasetId;
+    const individuals = this.getSelectedIndividuals().join("|");
+    try {
+      const filters = [];
+      for (const probability of probabilities) {
+        this.setGpsPercentile(probability, quantiles);
+        const filter = this.currentThresholdFilterDefinition();
+        const count = await this.previewThresholdFilterCount(filter);
+        filters.push({filter, count});
+      }
+      if (datasetId !== this.currentDatasetId || individuals !== this.getSelectedIndividuals().join("|")
+          || this.getCurrentColorField()?.key !== GPS_SPIKE_COLOR_FIELD_KEY) return;
+      this.setGpsPercentile(probabilities[0], quantiles);
+      this.openIssueModal("suspected", {kind: "filter", fixes: [], thresholdFilter: filters[0].filter,
+        matchCount: filters[0].count, resolvedMatchCount: filters[0].count});
+      if (!this.pendingIssueContext) return;
+      this.pendingIssueContext.percentileFilters = filters;
+      this.pendingIssueContext.completedFilters = 0;
+      this.refs.issueTitle.textContent = filters.length > 1 ? "Save both GPS filters" : "Save GPS filter";
+      this.refs.issueMeta.innerHTML += filters.map(({filter, count}) =>
+        `<div><strong>${Math.round(filter.percentile.probability * 100)}th percentile:</strong> ${escapeHtml(formatColorValue(filter.step_length_threshold_m, "numeric"))} m · ${formatCount(count)} flags</div>`
+      ).join("") + (filters.length > 1 ? "<div>Two separate steps; overlapping fixes count once in the queue.</div>" : "");
+      this.refs.issueNote.value = `GPS spike filter: ${probabilities.map(p => Math.round(p * 100) + "th").join(" and ")} percentile of step lengths across the selected individuals; |turn| ≥ ${this.gpsSpikeTurnAngleDeg}°.`;
+    } catch (error) {
+      if (!this.isAbortError(error)) this.setStatus(`Could not prepare GPS filters: ${error.message}`, true);
+    } finally {
+      this.gpsPercentileBusy = false;
+      this.renderThresholdPane();
+      this.renderLayers();
+      this.updateActionButtons();
+    }
+  }
+
   renderThresholdPane({ commitStationarityInput = false } = {}) {
     const pane = this.refs.thresholdPane;
     if (!pane) {
@@ -15861,7 +16069,11 @@ class MovementExampleApp {
     // previews/track loads can finish between focus and the user's first key.
     if (!commitStationarityInput && pane.contains(document.activeElement)
         && document.activeElement?.matches?.('[data-stationarity-setting]')) return;
-    if (this.data && this.getCurrentColorField()?.key === STATIONARITY_COLOR_FIELD_KEY) {
+    // During queue entry the selected set briefly still belongs to Browse all.
+    // Only calculate after the queue's individual/group scope has taken effect.
+    if (this.data && this.getCurrentColorField()?.key === STATIONARITY_COLOR_FIELD_KEY
+        && (this.individualReviewQueue.mode !== "queue"
+          || arraysEqual(this.getSelectedIndividuals(), [...this.getIndividualQueueMapIndividuals()].sort((a, b) => a.localeCompare(b))))) {
       this.scheduleStationarityPreview();
     }
     if (!this.data || this.individualReviewQueue.mode === "queue") {
@@ -15873,6 +16085,11 @@ class MovementExampleApp {
     if (this.getCurrentColorField()?.key === STATIONARITY_COLOR_FIELD_KEY) {
       this.renderStationarityThresholdPane();
       return;
+    }
+    const gpsQuantiles = this.getCurrentColorField()?.key === GPS_SPIKE_COLOR_FIELD_KEY ? this.gpsSpikeQuantiles() : null;
+    if (gpsQuantiles?.count && (!this.gpsDefaultScope
+        || (this.gpsSpikePreset && this.gpsDefaultScope !== gpsQuantiles.signature))) {
+      this.setGpsPercentile(this.gpsSpikePreset?.provenance.probability || 0.95, gpsQuantiles);
     }
     const context = this.getThresholdContext();
     const field = context?.field;
@@ -15908,6 +16125,12 @@ class MovementExampleApp {
           >
         </label>
         <div class="movement-threshold-note">All fixes remain colored by outbound step length. A match requires both inbound and outbound steps above the selected threshold and |turn angle| ≥ ${escapeHtml(formatColorValue(this.gpsSpikeTurnAngleDeg, "numeric"))}°.</div>
+        <div class="movement-threshold-actions">
+          <button type="button" data-action="flag-gps-percentile" data-percentile="95" ${!gpsQuantiles?.count || this.gpsPercentileBusy || !this.canPersistEdits() ? "disabled" : ""}>Flag 95th</button>
+          <button type="button" data-action="flag-gps-percentile" data-percentile="99" ${!gpsQuantiles?.count || this.gpsPercentileBusy || !this.canPersistEdits() ? "disabled" : ""}>Flag 99th</button>
+          <button type="button" data-action="flag-gps-percentile" data-percentile="both" ${!gpsQuantiles?.count || this.gpsPercentileBusy || !this.canPersistEdits() ? "disabled" : ""}>Flag both</button>
+        </div>
+        <div class="movement-threshold-note">${gpsQuantiles ? `Percentiles use all ${formatCount(gpsQuantiles.count)} eligible step lengths across the selected individuals and all track sets, before filtering by turn angle.` : "Loading all selected tracks to calculate exact percentiles…"}</div>
       `
       : "";
 
@@ -15918,7 +16141,8 @@ class MovementExampleApp {
           Thresholding is unavailable until a color variable is loaded.
         </div>
       `;
-    } else if (!visibleCount) {
+    } else if (!visibleCount && (!selectedIndividualCount
+        || this.getSelectedIndividuals().some(id => !this.data.binaryBlocks?.has(id)))) {
       body = `
         <div class="movement-threshold-empty">
           No visible fixes are in scope right now. Adjust the visible individuals or train/test toggles to build a threshold.
@@ -15984,6 +16208,10 @@ class MovementExampleApp {
     } else if (!numericCount || !histogram) {
       body = `
         ${gpsSpikeControl}
+        <label class="movement-threshold-range-label"><span>Threshold &gt;</span>
+          <input class="movement-threshold-inline-input" type="number" step="any" data-action="set-threshold-value"
+            value="${Number.isFinite(this.thresholdState.value) ? escapeHtml(String(this.thresholdState.value)) : ""}" placeholder="value">
+        </label>
         <div class="movement-threshold-empty">
           ${gpsSpikeMode
             ? "No visible fixes meet the current turn-angle requirement."
@@ -16151,6 +16379,11 @@ class MovementExampleApp {
     const actionButton = target.closest("button[data-action]");
     if (actionButton) {
       const action = actionButton.dataset.action || "";
+      if (action === "flag-gps-percentile") {
+        void this.openGpsPercentileModal(actionButton.dataset.percentile === "both" ? [0.95, 0.99]
+          : [Number(actionButton.dataset.percentile) / 100]);
+        return;
+      }
       if (action === "set-histogram-mode") {
         const field = this.getCurrentColorField();
         const mode = actionButton.dataset.mode === "clipped" ? "clipped" : "full";
@@ -16167,6 +16400,7 @@ class MovementExampleApp {
         this.renderThresholdPane();
         this.renderLayers();
       } else if (action === "clear-threshold") {
+        this.gpsSpikePreset = null;
         const field = this.getCurrentColorField();
         this.thresholdState = {
           fieldKey: field?.key || "",
@@ -16224,6 +16458,7 @@ class MovementExampleApp {
     const thresholdValue = histogram
       ? histogramRatioToValue(histogram, ratio)
       : (min === max ? min : min + ((max - min) * ratio));
+    this.gpsSpikePreset = null;
     this.thresholdState = {
       fieldKey,
       value: thresholdValue,
@@ -16306,6 +16541,7 @@ class MovementExampleApp {
       } else if (action === "set-histogram-max") {
         nextHistogramMax = parsedValue;
       } else if (action === "set-threshold-value") {
+        this.gpsSpikePreset = null;
         nextThresholdValue = parsedValue;
       }
       const effectiveMin = nextHistogramMin ?? fallbackMin;
@@ -16318,9 +16554,6 @@ class MovementExampleApp {
         this.setStatus("Histogram min must be smaller than histogram max.", true);
         this.renderThresholdPane();
         return;
-      }
-      if (action === "set-threshold-value" && parsedValue !== null && Number.isFinite(effectiveMin) && Number.isFinite(effectiveMax)) {
-        nextThresholdValue = clampThresholdValue(parsedValue, effectiveMin, effectiveMax);
       }
       const hasCustomBounds = nextHistogramMin !== null || nextHistogramMax !== null;
       this.thresholdState = {
@@ -17734,7 +17967,7 @@ class MovementExampleApp {
       const fixes = [...matchKeys]
         .map(fixKey => this.data.fixByKey.get(fixKey))
         .filter(Boolean);
-      if (fixes.length || matchKeys.size) {
+      if (this.currentThresholdFilterDefinition()) {
         return {
           kind: "filter",
           filterKind: this.getCurrentColorField()?.key === STATIONARITY_COLOR_FIELD_KEY
@@ -17743,11 +17976,10 @@ class MovementExampleApp {
           fixes,
           matchCount: Number(thresholdContext?.matchCount) || matchKeys.size,
           thresholdScope: this.getThresholdFlagScope().kind,
-          ready: fixes.length > 0,
+          ready: this.getCurrentColorField()?.key !== STATIONARITY_COLOR_FIELD_KEY || this.stationarityReady(),
         };
       }
-      // A retained threshold may have no matches in the new individual scope.
-      // Never fall through and flag unrelated manually checked fixes instead.
+      // An invalid filter must never fall through to unrelated checked fixes.
       return { kind: "filter", fixes: [], matchCount: 0, ready: false };
     }
     if (this.flagTargetKind === "none") {
@@ -17848,7 +18080,8 @@ class MovementExampleApp {
         ? `Flag selected segment (${formatCount(flagFixes.length)} fixes)`
         : "Select segment end"
       : flagTarget.kind === "filter"
-        ? flagTarget.filterKind === "gps_spike"
+        ? flagTarget.ready && !flagTarget.matchCount ? "Save filter (0 flags)"
+          : flagTarget.filterKind === "gps_spike"
           ? "Flag GPS-spike fixes"
           : flagTarget.filterKind === "stationarity"
           ? "Flag stationarity candidates"
@@ -19002,10 +19235,6 @@ class MovementExampleApp {
       try {
         target.resolvedMatchCount = await this.previewThresholdFilterCount(filter);
         target.thresholdFilter = filter;
-        if (!target.resolvedMatchCount) {
-          this.setStatus("The saved filter does not match any eligible fixes in that scope.", true);
-          return;
-        }
       } catch (error) {
         if (!this.isAbortError(error)) {
           this.setStatus(`Could not count filter matches: ${error.message}`, true);
@@ -19024,7 +19253,7 @@ class MovementExampleApp {
       return;
     }
     const selectedFixes = Array.isArray(target?.fixes) ? target.fixes : this.getSelectedFixes();
-    if ((!selectedFixes.length && !target?.resolvedMatchCount) || !this.currentArtifact) {
+    if ((!selectedFixes.length && target?.kind !== "filter") || !this.currentArtifact) {
       return;
     }
     this.resetIssueScopeControls();
@@ -19061,6 +19290,7 @@ class MovementExampleApp {
     this.pendingIssueContext = {
       mode: "fixes",
       fixes: selectedFixes,
+      filterDatasetId: isFilterTarget ? this.currentDatasetId : "",
       origin,
       sourceAnalysisId: candidateGenerated ? this.candidateQueryPreview.analysisId : "",
       stationaritySignature: stationary ? this.stationaritySignature() : "",
@@ -19075,14 +19305,15 @@ class MovementExampleApp {
         { selectionMethods: stationary ? ["stationarity_filter"] : isGpsSpikeTarget ? ["color_threshold"] : null },
       ),
     };
-    this.refs.issueTitle.textContent = `Mark fixes as ${status}`;
+    this.refs.issueTitle.textContent = isFilterTarget && !target.resolvedMatchCount
+      ? "Save filter (0 flags)" : `Mark fixes as ${status}`;
     this.refs.issueMeta.innerHTML = `
       <div><strong>Family:</strong> ${escapeHtml(this.currentFamily)}</div>
       <div><strong>Study:</strong> ${escapeHtml(this.currentStudy)}</div>
       <div><strong>Dataset:</strong> ${escapeHtml(this.currentDatasetId)}</div>
       <div><strong>Artifact:</strong> ${escapeHtml(this.currentArtifact)}</div>
       <div><strong>${isFilterTarget ? "Visible preview matches" : "Checked fixes"}:</strong> ${escapeHtml(formatCount(isFilterTarget ? target?.matchCount || selectedFixes.length : selectedFixes.length))}</div>
-      ${isFilterTarget ? `<div><strong>Exact fixes to flag:</strong> ${escapeHtml(formatCount(target?.resolvedMatchCount || 0))}</div>` : ""}
+      ${isFilterTarget ? `<div><strong>Exact fixes to flag:</strong> ${escapeHtml(formatCount(target?.resolvedMatchCount || 0))}</div>${!target.resolvedMatchCount ? "<div>The filter settings and a result of 0 flags will be saved as a step.</div>" : ""}` : ""}
       <div><strong>Flag scope:</strong> ${isFilterTarget ? `all matching fixes for ${formatCount(thresholdFilter.individuals.length)} visible individual(s), across all track sets` : "checked fixes"}</div>
       <div><strong>Issue variable:</strong> ${escapeHtml(stationary ? "Stationarity" : isGpsSpikeTarget ? "Step length + absolute turn angle" : field?.label || "Not set")}</div>
       <div><strong>Issue threshold:</strong> ${escapeHtml(issueThreshold || "Not set")}</div>
@@ -19340,6 +19571,11 @@ class MovementExampleApp {
     if (!selectedFixes.length && !groupScope && !context.thresholdFilter) {
       return;
     }
+    if (context.filterDatasetId && this.currentDatasetId !== context.filterDatasetId
+        && this.currentDatasetId !== context.lastSavedFilterResult?.dataset?.dataset_id) {
+      this.refs.issueStatus.textContent = "The dataset changed. Close this dialog and preview the filter again before saving.";
+      return;
+    }
     if (context.stationaritySignature && context.stationaritySignature !== this.stationaritySignature()) {
       this.refs.issueStatus.textContent = "Selection or version changed. Close this dialog and check the updated stationarity colours.";
       return;
@@ -19424,13 +19660,28 @@ class MovementExampleApp {
         burst_gap_quantile: this.getBurstGapQuantile(),
         user,
       };
-      const result = await this.requestJSON(
-        endpoint,
-        {
-          method: "POST",
-          body: JSON.stringify(body),
-        },
-      );
+      const variants = context.percentileFilters || [{filter: context.thresholdFilter}];
+      let result = context.lastSavedFilterResult;
+      for (let index = context.completedFilters || 0; index < variants.length; index += 1) {
+        const filter = variants[index].filter;
+        const probability = filter?.percentile?.probability;
+        const variantBody = {...body,
+          dataset_id: this.currentDatasetId,
+          expected_current_dataset_id: this.expectedCurrentDatasetId(),
+          expected_review_revision: this.expectedReviewRevision(),
+          ...(filter ? {scope: {kind: "filter", filter}} : {}),
+          ...(probability ? {
+            issue_threshold: `both steps > ${filter.step_length_threshold_m} m and |turn| >= ${filter.minimum_abs_turn_angle_deg}°; ${Math.round(probability * 100)}th percentile`,
+          } : {}),
+        };
+        result = await this.requestJSON(endpoint, {method: "POST", body: JSON.stringify(variantBody)});
+        context.completedFilters = index + 1;
+        context.lastSavedFilterResult = result;
+        if (index < variants.length - 1) {
+          this.refs.issueStatus.textContent = `Saved ${index + 1} of ${variants.length} filters…`;
+          await this.loadStudyAtDataset(result.dataset.dataset_id, {preserveAnnotationContext: true, result});
+        }
+      }
       const queueReviewIndividual = String(context.queueReviewIndividual || "");
       this.setUser(user);
       this.pendingIssueContext = null;
@@ -19456,9 +19707,11 @@ class MovementExampleApp {
       }
       const resolvedFixCount = Number(result?.step?.summary?.resolved_fix_count) || 0;
       this.setStatus(
-        resolvedFixCount
+        variants.length > 1 ? "Saved the 95th and 99th percentile GPS filters as two steps."
+          : resolvedFixCount
           ? `Flagged ${formatCount(resolvedFixCount)} fixes as suspicious in ${result.dataset.dataset_id}.`
-          : `Created ${result.step.title} in ${result.dataset.dataset_id}.`,
+          : context.thresholdFilter ? "Filter saved as a step: 0 flags."
+            : `Created ${result.step.title} in ${result.dataset.dataset_id}.`,
       );
     } catch (error) {
       await this.handleEditRequestError(error);
@@ -21703,7 +21956,9 @@ function formatStepLabel(step, dataset) {
   if (params.queue_label) return params.queue_label;
   if (params.action === "annotate_scope") {
     const issueType = String(params.issue_type || "").trim();
-    if (issueType) return issueType;
+    const count = step?.summary?.resolved_fix_count ?? params.resolved_fix_count;
+    const percentile = (params.filter || params.scope?.filter)?.percentile?.probability;
+    if (issueType) return `${issueType}${percentile ? ` · P${Math.round(percentile * 100)}` : ""}${count === 0 ? " · 0 flags" : ""}`;
     // Older steps may lack an issue type; keep their filter labels concise too.
     const filter = params.filter || params.scope?.filter || {};
     if (filter.kind === "stationarity") return "Stationarity";

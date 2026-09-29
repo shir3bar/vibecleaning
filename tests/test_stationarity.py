@@ -281,7 +281,8 @@ def test_stationarity_color_column_settings_scope_and_save(tmp_path, source_form
         # Changing a setting invalidates previously checked matches immediately.
         set_setting("duration", "100000")
         wait_for_matches(0)
-        assert page.locator('[data-role="mark-suspected"]').is_disabled()
+        assert page.locator('[data-role="mark-suspected"]').is_enabled()
+        assert page.locator('[data-role="mark-suspected"]').text_content() == "Save filter (0 flags)"
         assert page.locator('[data-action="check-above-threshold"]').is_disabled()
         set_setting("duration", duration)
         wait_for_matches()
