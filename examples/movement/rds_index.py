@@ -407,9 +407,9 @@ def validate_movement_rds(path: Path, frame: pd.DataFrame) -> dict[str, str | in
         filename=filename,
     )
     expected_stem = f"{study_id}_{individual_id}"
-    if path.stem != expected_stem:
+    if path.stem not in {expected_stem, f"{expected_stem}_cleaned"}:
         raise ValueError(
-            f"{filename} does not match embedded identifiers; expected {expected_stem}.rds"
+            f"{filename} does not match embedded identifiers; expected {expected_stem}.rds or {expected_stem}_cleaned.rds"
         )
 
     x_values = pd.to_numeric(frame["x_"], errors="coerce").to_numpy(dtype=np.float64)

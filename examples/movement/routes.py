@@ -74,6 +74,7 @@ from .analysis_history import (
 )
 from .binary_columns import build_csv_binary_columns
 from .catalog import family_names, get_study_dir, list_families, list_studies
+from .rds_export import cleaned_rds_name
 from .review_annotations import (
     annotation_applies,
     apply_review_annotation_counts,
@@ -4440,7 +4441,9 @@ def register_movement_routes(
                 "script": EXPORT_REVIEWED_RDS_SCRIPT,
                 "dataset_id": dataset_id,
                 "input_artifacts": input_artifacts,
-                "output_artifacts": ["movement_reviewed_rds.zip"],
+                "output_artifacts": [
+                    cleaned_rds_name(name) for name in input_artifacts if name.lower().endswith(".rds")
+                ] + ["writer_manifest.json"],
                 "parameters": {
                     "app": "movement",
                     "action": "export_reviewed_rds",

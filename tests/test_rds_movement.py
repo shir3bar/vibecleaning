@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import json
 from pathlib import Path
 import shutil
@@ -8,7 +7,6 @@ import sqlite3
 from contextlib import closing
 import struct
 import sys
-import zipfile
 
 from fastapi.testclient import TestClient
 import pandas as pd
@@ -22,7 +20,7 @@ from app.auth import AuthManager
 from app.execution import create_analysis
 from app.state import ensure_project_state, get_dataset_artifact, load_dataset
 from examples.movement.analysis_history import review_exclusion_signature
-from examples.movement.rds_export import export_reviewed_rds_bundle
+from examples.movement.rds_export import cleaned_rds_name, export_reviewed_rds_bundle
 from examples.movement.routes import _ranking_definition_matches
 from examples.movement.rds_index import (
     build_rds_fixes,
@@ -725,13 +723,16 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
     )
     assert exported.status_code == 200, exported.text
     export_id = exported.json()["analysis"]["analysis_id"]
-    archive = client.get(
-        f"/api/apps/movement/family/movement_rds/study/268904527/analysis/{export_id}/artifact/movement_reviewed_rds.zip"
+    manifest_response = client.get(
+        f"/api/apps/movement/family/movement_rds/study/268904527/analysis/{export_id}/artifact/writer_manifest.json"
     )
-    assert archive.status_code == 200
-    with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle_zip:
-        assert "writer_manifest.json" in bundle_zip.namelist()
-        assert set(header["artifacts"]).issubset(bundle_zip.namelist())
+    assert manifest_response.status_code == 200
+    cleaned_dir = study_dir / "scrubdata" / "cleaned_files"
+    assert {item.name for item in cleaned_dir.iterdir()} == {
+        *(cleaned_rds_name(name) for name in header["artifacts"]), "writer_manifest.json",
+    }
+    assert manifest_response.json()["dataset_id"] == reviewed_dataset_id
+    assert manifest_response.json()["analysis_id"] == export_id
 
 
 def test_rds_detector_scores_are_available_as_color_fields(tmp_path):
@@ -853,7 +854,8 @@ def test_python_reviewed_rds_export_adds_only_permitted_columns(tmp_path):
             "source_rows": [{"logical_name": logical_name, "row_ranges": [[1, 1]]}],
         },
     }]
-    output = tmp_path / "reviewed.zip"
+    output = tmp_path / "analysis_outputs"
+    cleaned_dir = tmp_path / "scrubdata" / "cleaned_files"
     progress = []
     summary = export_reviewed_rds_bundle(
         sources=[(logical_name, source)],
@@ -870,7 +872,8 @@ def test_python_reviewed_rds_export_adds_only_permitted_columns(tmp_path):
             ],
         },
         annotations=annotations,
-        output_zip=output,
+        output_dir=output,
+        cleaned_dir=cleaned_dir,
         writer="python",
         progress=lambda *update: progress.append(update),
     )
@@ -880,15 +883,15 @@ def test_python_reviewed_rds_export_adds_only_permitted_columns(tmp_path):
         ("reviewing", 0, 1, logical_name),
         ("writing", 0, 1, logical_name),
         ("checking", 0, 1, logical_name),
-        ("packaging", 0, 2, logical_name),
-        ("packaging", 1, 2, "writer_manifest.json"),
+        ("saving", 0, 1, cleaned_rds_name(logical_name)),
         ("finishing", 1, 1, ""),
     ]
     assert summary["file_count"] == 1
     assert summary["writer_engine"] == "python"
-    with zipfile.ZipFile(output) as archive:
-        reviewed_path = archive.extract(logical_name, tmp_path / "reviewed")
-    reviewed = read_movement_rds(Path(reviewed_path))
+    reviewed_path = cleaned_dir / cleaned_rds_name(logical_name)
+    assert reviewed_path.read_bytes() == (output / reviewed_path.name).read_bytes()
+    reviewed = read_movement_rds(reviewed_path)
+    assert validate_movement_rds(reviewed_path, reviewed)["row_count"] == len(frame)
     assert list(reviewed.columns[: len(frame.columns)]) == list(frame.columns)
     assert list(reviewed.columns[len(frame.columns) :]) == [
         "outlier_status",
@@ -923,6 +926,7 @@ def test_rds_background_export_reports_completion_or_failure(tmp_path, writer):
         assert job["status"] == "failed"
         assert "must be auto, r, or python" in job["error"]
         assert "result" not in job
+        assert not (study_dir / "scrubdata" / "cleaned_files").exists()
     else:
         assert job["status"] == "completed"
         assert job["progress"] == {
@@ -931,11 +935,24 @@ def test_rds_background_export_reports_completion_or_failure(tmp_path, writer):
         result = job["result"]
         assert result["summary"]["file_count"] == 2
         analysis_id = result["analysis"]["analysis_id"]
-        download = client.get(f"{base}/analysis/{analysis_id}/artifact/movement_reviewed_rds.zip")
-        assert download.status_code == 200
-        with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
-            assert archive.testzip() is None
-            assert len(archive.namelist()) == 3
+        cleaned_dir = study_dir / "scrubdata" / "cleaned_files"
+        assert Path(result["summary"]["output_directory"]) == cleaned_dir
+        assert len(list(cleaned_dir.glob("*_cleaned.rds"))) == 2
+        manifest = json.loads((cleaned_dir / "writer_manifest.json").read_text())
+        assert manifest["dataset_id"] == loaded["dataset_id"]
+        assert manifest["analysis_id"] == analysis_id
+        for item in manifest["files"]:
+            download = client.get(f"{base}/analysis/{analysis_id}/artifact/{item['output_name']}")
+            assert download.status_code == 200
+            assert download.content == (cleaned_dir / item["output_name"]).read_bytes()
+        # Reopen the saved files as a new study without renaming them.
+        from examples.movement.rds_index import import_flat_rds_studies
+        imported = tmp_path / "reopened"
+        import_flat_rds_studies(cleaned_dir, imported)
+        reopened = imported / "268904527"
+        reopened_dataset = ensure_project_state(reopened)["current_dataset_id"]
+        _, index_path = ensure_rds_index(reopened, reopened_dataset, cache_root=tmp_path / "reopened-cache")
+        assert index_path.exists()
     assert ensure_project_state(study_dir)["current_dataset_id"] == loaded["dataset_id"]
     client.post("/api/auth/logout")
     assert client.get(f"{base}/analysis-jobs/{job_id}").status_code == 401

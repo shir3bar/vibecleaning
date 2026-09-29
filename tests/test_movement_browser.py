@@ -1531,7 +1531,7 @@ def test_rds_export_shows_live_progress_and_completion(tmp_path, monkeypatch, fa
             playwright_api.expect(text).to_contain_text("Preparing — file 1 of 2")
             playwright_api.expect(button).to_be_disabled()
             assert progress_paths
-            for stage, label in (("writing", "Writing"), ("checking", "Checking original data in"), ("packaging", "Packaging ZIP")):
+            for stage, label in (("writing", "Writing"), ("checking", "Checking original data in"), ("saving", "Saving cleaned files")):
                 atomic_write_json(progress_paths[0], {
                     "stage": stage, "completed_files": 1, "total_files": 2,
                     "logical_name": samples[1].name,
@@ -1552,14 +1552,14 @@ def test_rds_export_shows_live_progress_and_completion(tmp_path, monkeypatch, fa
                 playwright_api.expect(bar).to_be_hidden()
                 assert page.locator('[data-role="output-links"] a').count() == 0
             else:
-                playwright_api.expect(text).to_contain_text("Export ready — 2 RDS files", timeout=30_000)
+                playwright_api.expect(text).to_contain_text("Saved 2 RDS files to scrubdata/cleaned_files/", timeout=30_000)
                 playwright_api.expect(bar).to_have_attribute("value", "1")
                 playwright_api.expect(bar).to_have_attribute("max", "1")
-                href = page.locator('[data-role="output-links"] a').get_attribute("href")
-                assert "/study/268904527/analysis/" in href
-                download = page.request.get(f"{base_url}{href}")
-                assert download.ok
-                assert download.body().startswith(b"PK")
+                cleaned_dir = study_dir / "scrubdata" / "cleaned_files"
+                playwright_api.expect(page.locator('[data-role="output-links"]')).to_contain_text(str(cleaned_dir))
+                assert page.locator('[data-role="output-links"] a').count() == 0
+                assert sorted(path.name for path in cleaned_dir.glob("*.rds")) == sorted(
+                    f"{path.stem}_cleaned.rds" for path in samples)
             playwright_api.expect(button).to_be_enabled()
         finally:
             release.set()

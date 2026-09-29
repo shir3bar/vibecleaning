@@ -11,7 +11,6 @@ import shutil
 import subprocess
 import tempfile
 from typing import Iterable
-import zipfile
 from collections.abc import Callable
 
 import numpy as np
@@ -19,6 +18,7 @@ import pandas as pd
 import rdata
 from rdata.parser import RObject, RObjectType
 
+from app.filesystem import atomic_replace, atomic_write_json, exclusive_file_lock
 from .rds_index import RDS_REVIEW_COLUMNS, read_movement_rds
 from .review_annotations import (
     effective_issues_for_fix,
@@ -281,12 +281,64 @@ def _compare_original_columns(source_path: Path, output_path: Path, expected_rev
                 raise ValueError(f"Reviewed RDS has incorrect generated {name} in {source_path.name}")
 
 
+def cleaned_rds_name(logical_name: str) -> str:
+    path = Path(logical_name)
+    if path.name != logical_name or path.suffix.lower() != ".rds":
+        raise ValueError("Expected an RDS filename")
+    stem = path.stem.removesuffix("_cleaned")
+    return f"{stem}_cleaned.rds"
+
+
+def _publish_cleaned_files(output_dir: Path, destination: Path, manifest: dict, report) -> None:
+    """Publish a complete validated export, retaining the previous one on failure."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    backup = destination.with_name(".cleaned_files_previous")
+    with tempfile.TemporaryDirectory(prefix=".cleaned-files-", dir=destination.parent) as temporary:
+        staged = Path(temporary) / "ready"
+        staged.mkdir()
+        for index, item in enumerate(manifest["files"]):
+            report("saving", index, len(manifest["files"]), item["output_name"])
+            shutil.copy2(output_dir / item["output_name"], staged / item["output_name"])
+        shutil.copy2(output_dir / "writer_manifest.json", staged / "writer_manifest.json")
+        with exclusive_file_lock(destination.with_suffix(".lock")):
+            # Recover an interrupted directory replacement before the next save.
+            if backup.exists():
+                if not destination.exists():
+                    atomic_replace(backup, destination)
+                else:
+                    shutil.rmtree(backup)
+            if destination.exists():
+                # Only replace files belonging to an earlier export, never a
+                # pre-existing folder containing unrelated user files.
+                try:
+                    previous = json.loads((destination / "writer_manifest.json").read_text(encoding="utf-8"))
+                    expected = {item["output_name"] for item in previous["files"]} | {"writer_manifest.json"}
+                    actual = {item.name for item in destination.iterdir() if item.name != ".DS_Store"}
+                    if destination.is_symlink() or actual != expected:
+                        raise ValueError("Folder contains files outside the previous export")
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    raise ValueError(f"Cannot replace {destination}: it contains files not recognised as a previous RDS export") from exc
+                atomic_replace(destination, backup)
+            try:
+                atomic_replace(staged, destination)
+            except OSError:
+                if backup.exists():
+                    atomic_replace(backup, destination)
+                raise
+            if backup.exists():
+                # Publishing has succeeded. A leftover backup can be cleaned
+                # on the next export if Windows still has a file open in it.
+                shutil.rmtree(backup, ignore_errors=True)
+
+
 def export_reviewed_rds_bundle(
     *,
     sources: list[tuple[str, Path]],
     rows_by_artifact: dict[str, list[dict]],
     annotations: list[dict],
-    output_zip: Path,
+    output_dir: Path,
+    cleaned_dir: Path,
+    provenance: dict | None = None,
     writer: str = "auto",
     progress: Callable[[str, int, int, str], None] | None = None,
 ) -> dict:
@@ -300,47 +352,45 @@ def export_reviewed_rds_bundle(
     engine = "r" if requested == "r" or (requested == "auto" and _r_writer_available()) else "python"
     if engine == "r" and not _r_writer_available():
         raise RuntimeError("R writer requested but Rscript with sf and move2 is unavailable")
-    output_zip.parent.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_names = [cleaned_rds_name(name) for name, _ in sources]
+    if not sources or len(set(name.casefold() for name in output_names)) != len(sources):
+        raise ValueError("RDS export requires sources with distinct cleaned filenames")
     manifest_files = []
-    with tempfile.TemporaryDirectory(prefix="vibecleaning-reviewed-rds-") as raw_dir:
-        temporary_dir = Path(raw_dir)
-        for index, (logical_name, source_path) in enumerate(sources):
-            report("reviewing", index, len(sources), logical_name)
-            rows = rows_by_artifact.get(logical_name) or []
-            columns = build_review_export_columns(rows, annotations)
-            output_path = temporary_dir / logical_name
-            report("writing", index, len(sources), logical_name)
-            if engine == "r":
-                write_reviewed_rds_r(source_path, output_path, columns)
-            else:
-                write_reviewed_rds_python(source_path, output_path, columns)
-            report("checking", index, len(sources), logical_name)
-            _compare_original_columns(source_path, output_path, columns)
-            manifest_files.append({
-                "logical_name": logical_name,
-                "row_count": len(rows),
-                "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-                "output_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
-            })
-        manifest = {
-            "schema_version": 1,
-            "writer_engine": engine,
-            "review_columns": list(RDS_REVIEW_COLUMNS),
-            "files": manifest_files,
-        }
-        (temporary_dir / "writer_manifest.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            items = sorted(temporary_dir.iterdir())
-            for index, item in enumerate(items):
-                report("packaging", index, len(items), item.name)
-                archive.write(item, item.name)
-        report("finishing", len(sources), len(sources))
+    for index, (logical_name, source_path) in enumerate(sources):
+        report("reviewing", index, len(sources), logical_name)
+        rows = rows_by_artifact.get(logical_name) or []
+        columns = build_review_export_columns(rows, annotations)
+        output_path = output_dir / output_names[index]
+        report("writing", index, len(sources), logical_name)
+        if engine == "r":
+            write_reviewed_rds_r(source_path, output_path, columns)
+        else:
+            write_reviewed_rds_python(source_path, output_path, columns)
+        report("checking", index, len(sources), logical_name)
+        _compare_original_columns(source_path, output_path, columns)
+        manifest_files.append({
+            "logical_name": logical_name,
+            "output_name": output_path.name,
+            "row_count": len(rows),
+            "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+            "output_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+        })
+    manifest = {
+        "schema_version": 2,
+        **(provenance or {}),
+        "writer_engine": engine,
+        "review_columns": list(RDS_REVIEW_COLUMNS),
+        "files": manifest_files,
+    }
+    atomic_write_json(output_dir / "writer_manifest.json", manifest)
+    _publish_cleaned_files(output_dir, cleaned_dir, manifest, report)
+    report("finishing", len(sources), len(sources))
     return {
         "run_status": "completed",
         "writer_engine": engine,
         "file_count": len(manifest_files),
         "row_count": sum(item["row_count"] for item in manifest_files),
-        "output_artifact": output_zip.name,
+        "output_directory": str(cleaned_dir.resolve()),
+        "output_artifact": "writer_manifest.json",
     }

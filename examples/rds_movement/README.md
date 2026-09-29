@@ -27,6 +27,14 @@ The included import currently contains:
 | `481458` | 71 | 1,239,130 |
 
 The original flat files remain in `data/movement_rds/`; the launchable projects
-are the two study subdirectories. Reviewed export produces
-`movement_reviewed_rds.zip`, with one RDS per source individual and
-`writer_manifest.json`.
+are the two study subdirectories. **Export RDS** saves one `<source>_cleaned.rds`
+per source individual directly in `<study>/scrubdata/cleaned_files/`, alongside
+`writer_manifest.json` with the source dataset, export ID and file checksums.
+The app shows progress and the saved folder path. This is a folder on the machine
+running the app; there is no browser download.
+
+Each successful export replaces the previous completed export in `cleaned_files`.
+Files are validated before replacement, and a failed write preserves the previous
+export. Original rows and RDS metadata are preserved, with the existing review
+columns attached. `_cleaned` filenames can be imported back into the app.
+Each export also retains its files in its analysis outputs for reproducibility.

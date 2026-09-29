@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 
-OUTPUT_ARTIFACT_NAME = "movement_reviewed_rds.zip"
+OUTPUT_ARTIFACT_NAME = "writer_manifest.json"
 
 
 def main():
@@ -15,6 +15,7 @@ def main():
     from examples.movement.rds_index import read_movement_rds, validate_movement_rds
     from examples.movement.review_annotations import load_review_annotations
     from app.filesystem import atomic_write_json
+    from app.state import now_iso
 
     def progress(stage, completed_files, total_files, logical_name=""):
         atomic_write_json(spec_path.with_name("progress.json"), {
@@ -28,7 +29,7 @@ def main():
     outputs = {item["logical_name"]: item for item in spec.get("output_artifacts", [])}
     output = outputs.get(OUTPUT_ARTIFACT_NAME)
     if output is None:
-        raise SystemExit("Reviewed RDS ZIP output was not declared")
+        raise SystemExit("Reviewed RDS export manifest was not declared")
     sidecar = inputs.get("movement_review_annotations.json")
     annotations = load_review_annotations(Path(sidecar["path"]) if sidecar else None)
     sources = []
@@ -71,7 +72,16 @@ def main():
         sources=sources,
         rows_by_artifact=rows_by_artifact,
         annotations=annotations,
-        output_zip=Path(output["path"]),
+        output_dir=Path(output["path"]).parent,
+        # Use the directory containing this analysis; do not initiate metadata
+        # migration from a worker while an export is already in progress.
+        cleaned_dir=spec_path.parents[2] / "cleaned_files",
+        provenance={
+            "dataset_id": params["dataset_id"],
+            "analysis_id": spec["analysis"]["analysis_id"],
+            "user": spec["analysis"]["user"],
+            "exported_at": now_iso(),
+        },
         writer=os.environ.get("VIBECLEANING_RDS_WRITER", params.get("writer", "auto")),
         progress=progress,
     )

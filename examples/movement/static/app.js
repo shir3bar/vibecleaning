@@ -19703,7 +19703,7 @@ class MovementExampleApp {
       reviewing: "Adding review decisions to",
       writing: "Writing",
       checking: "Checking original data in",
-      packaging: "Packaging ZIP",
+      saving: "Saving cleaned files",
       finishing: "Finishing export",
     };
     const label = labels[stage] || "Starting export";
@@ -19759,7 +19759,7 @@ class MovementExampleApp {
     this.refs.exportProgress.classList.remove("error");
     this.refs.outputLinks.innerHTML = "";
     if (exportRds) this.renderRdsExportProgress({}, study, startedAt);
-    this.setStatus(exportRds ? "Exporting the reviewed RDS study bundle..." : `Exporting reviewed CSV for ${this.currentArtifact}...`);
+    this.setStatus(exportRds ? "Saving reviewed RDS files to scrubdata/cleaned_files…" : `Exporting reviewed CSV for ${this.currentArtifact}...`);
     try {
       let result = await this.requestJSON(
         `${baseUrl}/actions/${exportRds ? "export-reviewed-rds" : "export-reviewed-csv"}`,
@@ -19780,13 +19780,23 @@ class MovementExampleApp {
       if (!analysisId) {
         throw new Error("Export did not return an analysis id.");
       }
+      if (exportRds) {
+        const directory = String(result?.summary?.output_directory || "");
+        if (!directory) throw new Error("Export did not return a saved folder.");
+        this.refs.exportProgressText.textContent = `${study}: Saved ${formatCount(result?.summary?.file_count || 0)} RDS files to scrubdata/cleaned_files/.`;
+        this.refs.exportProgressText.title = directory;
+        this.refs.exportProgressBar.max = 1;
+        this.refs.exportProgressBar.value = 1;
+        this.refs.exportProgressBar.setAttribute("aria-label", "RDS export complete");
+        this.refs.outputLinks.textContent = `Saved folder: ${directory}`;
+        this.setStatus("Saved the reviewed RDS files with _cleaned filenames. Export details are in writer_manifest.json in the same folder.");
+        return;
+      }
       const output = (result?.analysis?.realized_output_artifacts || [])
-        .find(item => exportRds
-          ? String(item?.logical_name || "").endsWith(".zip")
-          : String(item?.logical_name || "").endsWith("_reviewed.csv"));
+        .find(item => String(item?.logical_name || "").endsWith("_reviewed.csv"));
       const outputName = String(
         output?.logical_name
-        || (exportRds ? "movement_reviewed_rds.zip" : result?.analysis?.parameters?.output_artifact)
+        || result?.analysis?.parameters?.output_artifact
         || "",
       ).trim();
       if (!outputName) {
@@ -19794,18 +19804,9 @@ class MovementExampleApp {
       }
       const href = `${baseUrl}/analysis/${encodeURIComponent(analysisId)}/artifact/${encodeURIComponent(outputName)}`;
       this.refs.outputLinks.innerHTML = `<a href="${href}" download="${escapeHtml(outputName)}" data-authenticated-artifact="download" data-artifact-name="${escapeHtml(outputName)}">Download ${escapeHtml(outputName)}</a>`;
-      if (exportRds) {
-        this.refs.exportProgressText.textContent = `${study}: Export ready — ${formatCount(result?.summary?.file_count || 0)} RDS files.`;
-        this.refs.exportProgressText.title = "";
-        this.refs.exportProgressBar.max = 1;
-        this.refs.exportProgressBar.value = 1;
-        this.refs.exportProgressBar.setAttribute("aria-label", "RDS export complete");
-        this.setStatus("Exported one reviewed RDS per source individual plus a writer manifest. The source dataset was not changed.");
-      } else {
-        const flaggedCount = formatCount(result?.summary?.flagged_row_count || 0);
-        const rowCount = formatCount(result?.summary?.exported_row_count || 0);
-        this.setStatus(`Exported ${rowCount} rows with ${flaggedCount} flagged rows. The source dataset was not changed.`);
-      }
+      const flaggedCount = formatCount(result?.summary?.flagged_row_count || 0);
+      const rowCount = formatCount(result?.summary?.exported_row_count || 0);
+      this.setStatus(`Exported ${rowCount} rows with ${flaggedCount} flagged rows. The source dataset was not changed.`);
     } catch (error) {
       const message = `Reviewed ${exportRds ? "RDS" : "CSV"} export: ${error.message}`;
       if (exportRds) {

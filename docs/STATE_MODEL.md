@@ -20,6 +20,9 @@ data/<project>/
       spec.json
       summary.json
     outputs/<dataset_id>/<artifact files>
+    cleaned_files/                    # latest completed movement RDS export
+      <source>_cleaned.rds
+      writer_manifest.json
 ```
 
 Core objects:
@@ -30,6 +33,10 @@ Core objects:
   A dataset is a bundle of artifacts. Each artifact has a `logical_name`, storage path, content type, size, and `metadata`.
 - analysis record
   Records exploratory execution against a dataset. Does not create a new dataset.
+- `cleaned_files/`
+  Convenient copies of the latest completed RDS export. Its manifest identifies
+  the source dataset and analysis. Immutable copies remain in that analysis's
+  `outputs/` directory; the next successful export refreshes this folder.
 - step record
   Records a persistent transform from `parent_dataset_id` to `output_dataset_id`.
 

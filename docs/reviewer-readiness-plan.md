@@ -19,6 +19,21 @@ The GPS cutoff is **one shared cutoff across selected individuals**, as requeste
 
 Also fixed during validation: CSV GPS previews were reading the wrong binary column names, and RDS filter counts could include already-confirmed fixes.
 
+## Completed locally: save RDS exports into the study folder
+
+Requested: replace the RDS ZIP download with individual `<source>_cleaned.rds` files in `<study>/scrubdata/cleaned_files/`.
+
+- [x] Save reviewed RDS files with the requested names and retain the export's dataset/version provenance.
+- [x] Refresh the folder after all files pass validation; preserve the previous completed files on validation or replacement failure.
+- [x] Show the saved folder and completion in the existing progress UI; keep CSV export behaviour.
+- [x] Check metadata/row preservation, repeated export and failures, update documentation, and commit locally.
+
+This changes the destination and filenames. Existing RDS review columns and row-preservation behaviour stay the same.
+The folder is on the machine running the app. Each export retains immutable files in its analysis outputs;
+`cleaned_files` is the latest completed export. `_cleaned.rds` names are accepted on reimport.
+Validation: **37 backend/export/migration checks and 2 browser export checks passed**.
+Changes remain local; restart the updated app and reload the browser before trying the new export.
+
 ## What to do next
 
 1. [ ] Make the local commits available on GitHub. No release tag is needed.
@@ -28,7 +43,7 @@ Also fixed during validation: CSV GPS previews were reading the wrong binary col
    - In a disposable unassigned study, save a first action and check the reviewer name.
    - Select individuals, check the automatic GPS cutoff, then test “Flag 95th” and “Flag 99th” in separate runs from the same baseline.
    - Enter the review queue while Browse all is loading; sort by flagged fixes.
-   - Run Bildstein stationarity at 50 m / 48 h / 72 h; repeat unchanged; export RDS and watch progress.
+   - Run Bildstein stationarity at 50 m / 48 h / 72 h; repeat unchanged; export RDS, watch progress, and open `scrubdata/cleaned_files/` in the study folder.
 4. [ ] Return to protocol validation and threshold sensitivity. Keep owner-marked outlier handling as an explicit first protocol step and run GPS before stationarity.
 
 Do not compare the 9,260 benchmark count below with a study that has different saved exclusions or GPS flags.

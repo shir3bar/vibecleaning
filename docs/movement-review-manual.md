@@ -101,8 +101,16 @@ shows the effective decision for the active round.
   ordering can display saved rankings without rerunning them.
 - Reports are analyses: they capture the selected review context but do not change
   the dataset.
-- CSV export writes the reviewed CSV representation. RDS export writes a ZIP with
-  one reviewed RDS per source individual and the writer manifest.
+- CSV export writes the reviewed CSV representation. **Export RDS** saves one
+  `<source>_cleaned.rds` per source individual in the study's
+  `scrubdata/cleaned_files/` folder, together with `writer_manifest.json` recording
+  the exported dataset version and file checksums. The progress bar shows when
+  the folder is ready; no browser download is needed. The folder is on the
+  machine running the app.
+- A successful RDS export refreshes `cleaned_files` after all files are validated.
+  Previous exports remain recorded, with their files, under `analyses/`.
+  Exported files retain the original rows and metadata plus the review columns;
+  the `_cleaned` suffix does not mean confirmed rows are physically removed.
 
 ## 8. Versions, undo, and provenance
 

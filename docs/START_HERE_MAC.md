@@ -61,6 +61,9 @@ Choose **268904527** for the smaller study or **481458** for Bildstein, then sel
 an individual. The first load of the larger study can take several minutes;
 later loads are faster.
 
+**Export RDS:** files appear in the selected study's `scrubdata/cleaned_files/`
+folder with `_cleaned.rds` names. The app shows the full folder path when ready.
+
 **Stop:** save your work, then press **Ctrl+C** in Terminal. **Reopen:** repeat
 step 4. Reviews are saved in `data`; back up that whole folder, including hidden
 folders.
