@@ -12,10 +12,10 @@ All six requested improvements are implemented and tested locally. **They have n
 | Order the queue by flagged fixes | Done: “Flagged fixes — most first,” using unique active flagged fixes. Confirmed/dismissed fixes are not active flags. Saves preserve the active individual. |
 | Loading/export progress | Done. Study/cache preparation and map preparation show an indeterminate bar; transfer shows a percentage when its size is known. The existing RDS export bar shows stages/files and completion or failure. |
 | Stationarity and slow queue entry | Done locally. Obsolete whole-study downloads are cancelled on queue entry; stationarity waits for the queue’s individual/group scope. Repeated unchanged stationarity previews reuse bounded, compact results. |
-| GPS 95th/99th shortcuts | Done. Default: 95th percentile. Buttons: “Flag 95th,” “Flag 99th,” “Flag both.” Both saves two labelled steps; overlapping flags count once. |
+| GPS 95th/99th shortcuts | Done. Default: 95th percentile. Alternative buttons: “Flag 95th” and “Flag 99th.” Each saves one labelled step. |
 | Editor assignment on first action | Confirmed working for saved CSV and RDS actions. Fixed the dropdown that could keep saying “unassigned” afterward. Previews remain read-only; existing assignments are respected. |
 
-The GPS cutoff is **one shared cutoff across selected individuals**, as requested. It uses all finite, nonnegative outbound step lengths at unconfirmed fixes, across all track sets, before applying the turn-angle condition. Exact linear percentiles, population size and numeric cutoffs are saved. Histogram zoom does not change the cutoff. The two percentile runs retain the same GPS issue type for review.
+The GPS cutoff is **one shared cutoff across selected individuals**, as requested. It uses all finite, nonnegative outbound step lengths at unconfirmed fixes, across all track sets, before applying the turn-angle condition. Exact linear percentiles, population size and numeric cutoffs are saved. Histogram zoom does not change the cutoff. Both alternatives retain the same GPS issue type for review. For sensitivity analysis, compare separate runs starting from the same data and review state; do not apply the alternatives sequentially as a comparison. The redundant “Flag both” action has been removed.
 
 Also fixed during validation: CSV GPS previews were reading the wrong binary column names, and RDS filter counts could include already-confirmed fixes.
 
@@ -26,7 +26,7 @@ Also fixed during validation: CSV GPS previews were reading the wrong binary col
 3. [ ] Run this short check on the Mac and collaborators’ Windows installation:
    - Save a filter with zero matches; restart and find its “0 flags” step.
    - In a disposable unassigned study, save a first action and check the reviewer name.
-   - Select individuals, check the automatic GPS cutoff, then save 95th/99th/both.
+   - Select individuals, check the automatic GPS cutoff, then test “Flag 95th” and “Flag 99th” in separate runs from the same baseline.
    - Enter the review queue while Browse all is loading; sort by flagged fixes.
    - Run Bildstein stationarity at 50 m / 48 h / 72 h; repeat unchanged; export RDS and watch progress.
 4. [ ] Return to protocol validation and threshold sensitivity. Keep owner-marked outlier handling as an explicit first protocol step and run GPS before stationarity.
@@ -37,6 +37,7 @@ Do not compare the 9,260 benchmark count below with a study that has different s
 
 - **173 targeted non-browser tests passed**, covering filter history, assignment, stationarity/reruns, RDS, exports and review groups.
 - **13 browser scenarios passed**, covering CSV/RDS zero-filter and percentile actions, queue behaviour, stationarity controls and RDS export success/failure. Subsequent focused reruns passed after final fixes (5 browser checks; then 3 browser + 4 frontend checks).
+- After removing “Flag both,” **11 focused checks passed**: each percentile saves one step independently in CSV and RDS, plus queue loading, threshold controls and zero-result filter history.
 - Bildstein benchmark: 71 individuals, 1,239,130 fixes, existing local index, no saved annotations, 50 m / 48 h / 72 h. Identical source-row ranges and input history: **9,260 candidates**. Local uncached scans were approximately 6–8 seconds before and 5.8 seconds after; an unchanged repeated preview took approximately 0.001 seconds. These are container measurements, not a Windows/Mac guarantee or a cold RDS-cache-build measurement.
 - Cache tests verify invalidation for settings, source changes and annotations, plus bounded memory and independent returned results.
 - The stationarity algorithm and exclusion policy are unchanged. Raw tracking data and user review histories were not modified. No dependency, installer or CI changes.

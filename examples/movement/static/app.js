@@ -16022,7 +16022,7 @@ class MovementExampleApp {
     return true;
   }
 
-  async openGpsPercentileModal(probabilities) {
+  async openGpsPercentileModal(probability) {
     if (this.rejectLockedEdit() || this.gpsPercentileBusy) return;
     const quantiles = this.gpsSpikeQuantiles();
     if (!quantiles?.count) return;
@@ -16030,28 +16030,19 @@ class MovementExampleApp {
     const datasetId = this.currentDatasetId;
     const individuals = this.getSelectedIndividuals().join("|");
     try {
-      const filters = [];
-      for (const probability of probabilities) {
-        this.setGpsPercentile(probability, quantiles);
-        const filter = this.currentThresholdFilterDefinition();
-        const count = await this.previewThresholdFilterCount(filter);
-        filters.push({filter, count});
-      }
+      this.setGpsPercentile(probability, quantiles);
+      const filter = this.currentThresholdFilterDefinition();
+      const count = await this.previewThresholdFilterCount(filter);
       if (datasetId !== this.currentDatasetId || individuals !== this.getSelectedIndividuals().join("|")
           || this.getCurrentColorField()?.key !== GPS_SPIKE_COLOR_FIELD_KEY) return;
-      this.setGpsPercentile(probabilities[0], quantiles);
-      this.openIssueModal("suspected", {kind: "filter", fixes: [], thresholdFilter: filters[0].filter,
-        matchCount: filters[0].count, resolvedMatchCount: filters[0].count});
+      this.openIssueModal("suspected", {kind: "filter", fixes: [], thresholdFilter: filter,
+        matchCount: count, resolvedMatchCount: count});
       if (!this.pendingIssueContext) return;
-      this.pendingIssueContext.percentileFilters = filters;
-      this.pendingIssueContext.completedFilters = 0;
-      this.refs.issueTitle.textContent = filters.length > 1 ? "Save both GPS filters" : "Save GPS filter";
-      this.refs.issueMeta.innerHTML += filters.map(({filter, count}) =>
-        `<div><strong>${Math.round(filter.percentile.probability * 100)}th percentile:</strong> ${escapeHtml(formatColorValue(filter.step_length_threshold_m, "numeric"))} m · ${formatCount(count)} flags</div>`
-      ).join("") + (filters.length > 1 ? "<div>Two separate steps; overlapping fixes count once in the queue.</div>" : "");
-      this.refs.issueNote.value = `GPS spike filter: ${probabilities.map(p => Math.round(p * 100) + "th").join(" and ")} percentile of step lengths across the selected individuals; |turn| ≥ ${this.gpsSpikeTurnAngleDeg}°.`;
+      this.refs.issueTitle.textContent = "Save GPS filter";
+      this.refs.issueMeta.innerHTML += `<div><strong>${Math.round(probability * 100)}th percentile:</strong> ${escapeHtml(formatColorValue(filter.step_length_threshold_m, "numeric"))} m · ${formatCount(count)} flags</div>`;
+      this.refs.issueNote.value = `GPS spike filter: ${Math.round(probability * 100)}th percentile of step lengths across the selected individuals; |turn| ≥ ${this.gpsSpikeTurnAngleDeg}°.`;
     } catch (error) {
-      if (!this.isAbortError(error)) this.setStatus(`Could not prepare GPS filters: ${error.message}`, true);
+      if (!this.isAbortError(error)) this.setStatus(`Could not prepare GPS filter: ${error.message}`, true);
     } finally {
       this.gpsPercentileBusy = false;
       this.renderThresholdPane();
@@ -16128,7 +16119,6 @@ class MovementExampleApp {
         <div class="movement-threshold-actions">
           <button type="button" data-action="flag-gps-percentile" data-percentile="95" ${!gpsQuantiles?.count || this.gpsPercentileBusy || !this.canPersistEdits() ? "disabled" : ""}>Flag 95th</button>
           <button type="button" data-action="flag-gps-percentile" data-percentile="99" ${!gpsQuantiles?.count || this.gpsPercentileBusy || !this.canPersistEdits() ? "disabled" : ""}>Flag 99th</button>
-          <button type="button" data-action="flag-gps-percentile" data-percentile="both" ${!gpsQuantiles?.count || this.gpsPercentileBusy || !this.canPersistEdits() ? "disabled" : ""}>Flag both</button>
         </div>
         <div class="movement-threshold-note">${gpsQuantiles ? `Percentiles use all ${formatCount(gpsQuantiles.count)} eligible step lengths across the selected individuals and all track sets, before filtering by turn angle.` : "Loading all selected tracks to calculate exact percentiles…"}</div>
       `
@@ -16380,8 +16370,7 @@ class MovementExampleApp {
     if (actionButton) {
       const action = actionButton.dataset.action || "";
       if (action === "flag-gps-percentile") {
-        void this.openGpsPercentileModal(actionButton.dataset.percentile === "both" ? [0.95, 0.99]
-          : [Number(actionButton.dataset.percentile) / 100]);
+        void this.openGpsPercentileModal(Number(actionButton.dataset.percentile) / 100);
         return;
       }
       if (action === "set-histogram-mode") {
@@ -19571,8 +19560,7 @@ class MovementExampleApp {
     if (!selectedFixes.length && !groupScope && !context.thresholdFilter) {
       return;
     }
-    if (context.filterDatasetId && this.currentDatasetId !== context.filterDatasetId
-        && this.currentDatasetId !== context.lastSavedFilterResult?.dataset?.dataset_id) {
+    if (context.filterDatasetId && this.currentDatasetId !== context.filterDatasetId) {
       this.refs.issueStatus.textContent = "The dataset changed. Close this dialog and preview the filter again before saving.";
       return;
     }
@@ -19660,28 +19648,11 @@ class MovementExampleApp {
         burst_gap_quantile: this.getBurstGapQuantile(),
         user,
       };
-      const variants = context.percentileFilters || [{filter: context.thresholdFilter}];
-      let result = context.lastSavedFilterResult;
-      for (let index = context.completedFilters || 0; index < variants.length; index += 1) {
-        const filter = variants[index].filter;
-        const probability = filter?.percentile?.probability;
-        const variantBody = {...body,
-          dataset_id: this.currentDatasetId,
-          expected_current_dataset_id: this.expectedCurrentDatasetId(),
-          expected_review_revision: this.expectedReviewRevision(),
-          ...(filter ? {scope: {kind: "filter", filter}} : {}),
-          ...(probability ? {
-            issue_threshold: `both steps > ${filter.step_length_threshold_m} m and |turn| >= ${filter.minimum_abs_turn_angle_deg}°; ${Math.round(probability * 100)}th percentile`,
-          } : {}),
-        };
-        result = await this.requestJSON(endpoint, {method: "POST", body: JSON.stringify(variantBody)});
-        context.completedFilters = index + 1;
-        context.lastSavedFilterResult = result;
-        if (index < variants.length - 1) {
-          this.refs.issueStatus.textContent = `Saved ${index + 1} of ${variants.length} filters…`;
-          await this.loadStudyAtDataset(result.dataset.dataset_id, {preserveAnnotationContext: true, result});
-        }
+      const filter = context.thresholdFilter;
+      if (filter?.percentile?.probability) {
+        body.issue_threshold = `both steps > ${filter.step_length_threshold_m} m and |turn| >= ${filter.minimum_abs_turn_angle_deg}°; ${Math.round(filter.percentile.probability * 100)}th percentile`;
       }
+      const result = await this.requestJSON(endpoint, {method: "POST", body: JSON.stringify(body)});
       const queueReviewIndividual = String(context.queueReviewIndividual || "");
       this.setUser(user);
       this.pendingIssueContext = null;
@@ -19707,8 +19678,7 @@ class MovementExampleApp {
       }
       const resolvedFixCount = Number(result?.step?.summary?.resolved_fix_count) || 0;
       this.setStatus(
-        variants.length > 1 ? "Saved the 95th and 99th percentile GPS filters as two steps."
-          : resolvedFixCount
+        resolvedFixCount
           ? `Flagged ${formatCount(resolvedFixCount)} fixes as suspicious in ${result.dataset.dataset_id}.`
           : context.thresholdFilter ? "Filter saved as a step: 0 flags."
             : `Created ${result.step.title} in ${result.dataset.dataset_id}.`,

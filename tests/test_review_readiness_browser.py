@@ -38,7 +38,8 @@ def make_app(tmp_path, source_format):
 
 
 @pytest.mark.parametrize("source_format", ["csv", "rds"])
-def test_zero_filter_assignment_and_shared_percentile_steps(tmp_path, source_format):
+@pytest.mark.parametrize("percentile", [95, 99])
+def test_zero_filter_assignment_and_shared_percentile_steps(tmp_path, source_format, percentile):
     import playwright.sync_api as pw
     app, study = make_app(tmp_path, source_format)
     with _serve(app) as base_url, pw.sync_playwright() as playwright:
@@ -90,22 +91,27 @@ def test_zero_filter_assignment_and_shared_percentile_steps(tmp_path, source_for
         # Histogram zoom must not change the population or the numerical cutoff.
         page.locator('[data-action="set-histogram-mode"][data-mode="clipped"]').click()
         assert float(page.locator('[data-action="set-threshold-value"]').input_value()) == pytest.approx(expected[0])
-        page.locator('[data-action="flag-gps-percentile"][data-percentile="both"]').click()
+        assert page.locator('[data-action="flag-gps-percentile"]').evaluate_all(
+            "buttons => buttons.map(button => button.dataset.percentile)") == ["95", "99"]
+        page.locator(f'[data-action="flag-gps-percentile"][data-percentile="{percentile}"]').click()
         page.locator('[data-role="issue-modal"]').wait_for(state="visible")
-        assert "Two separate steps" in page.locator('[data-role="issue-meta"]').text_content()
-        page.locator('[data-role="issue-submit"]').click()
-        page.wait_for_function("document.querySelector('[data-role=status]').textContent.includes('two steps')", timeout=30_000)
-        assert len(saved) == 4
-        for index, response in enumerate(saved[2:]):
-            assert response.status == 200, response.text()
-            step = response.json()["step"]
-            spec = step["parameters"]["scope"]["filter"]
-            assert spec["step_length_threshold_m"] == pytest.approx(expected[index])
-            assert spec["percentile"]["probability"] == [0.95, 0.99][index]
-            assert spec["percentile"]["sample_count"] == len(steps)
-            assert len(spec["individuals"]) == 2
-            assert f"{[95, 99][index]}th" in step["parameters"]["issue_threshold"]
-            assert step["parameters"]["issue_type"] == "Filter GPS spike (step + turn)"
+        assert f"{percentile}th percentile:" in page.locator('[data-role="issue-meta"]').text_content()
+        with page.expect_response(lambda response: response.url.endswith("/actions/annotate-scope")) as percentile_response:
+            page.locator('[data-role="issue-submit"]').click()
+        response = percentile_response.value
+        assert response.status == 200, response.text()
+        page.locator('[data-role="issue-modal"]').wait_for(state="hidden")
+        step = response.json()["step"]
+        page.wait_for_function("document.querySelector('[data-role=dataset]').value === "
+                               + json.dumps(response.json()["dataset"]["dataset_id"]))
+        assert len(saved) == 3
+        spec = step["parameters"]["scope"]["filter"]
+        assert spec["step_length_threshold_m"] == pytest.approx(expected[0 if percentile == 95 else 1])
+        assert spec["percentile"]["probability"] == percentile / 100
+        assert spec["percentile"]["sample_count"] == len(steps)
+        assert len(spec["individuals"]) == 2
+        assert f"{percentile}th" in step["parameters"]["issue_threshold"]
+        assert step["parameters"]["issue_type"] == "Filter GPS spike (step + turn)"
         page.locator('[data-role="individual-view-queue"]').click()
         page.locator('[data-role="individual-queue-order"]').select_option("flagged")
         assert page.locator('[data-role="individual-queue-order"]').input_value() == "flagged"
