@@ -7,14 +7,13 @@ one-based source row so review scopes never depend on SQLite ordinals.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from contextlib import closing
 import copy
 import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
-from itertools import groupby
 import hashlib
 import io
 import json
@@ -55,6 +54,7 @@ RDS_IMPLICIT_SET = "train"
 # Browser requests can overlap when a reviewer changes filter settings. Keep
 # their working memory bounded even if an older request is still finishing.
 _STATIONARITY_LOCK = Lock()
+_STATIONARITY_RESULTS = OrderedDict()
 RDS_REQUIRED_COLUMNS = {
     "x_",
     "y_",
@@ -1869,11 +1869,15 @@ def _source_rows_from_query(
     index_path: Path,
     where: str,
     values: Sequence[object] = (),
+    *,
+    exclude_confirmed: bool = False,
+    annotations: list[dict] | None = None,
 ) -> tuple[list[dict], list[str]]:
     with closing(_connect(index_path)) as connection:
+        status = _index_review_status(connection, annotations) if exclude_confirmed else None
         rows = connection.execute(
             """
-            SELECT f.fix_key FROM fixes f
+            SELECT f.fix_key, f.ordinal FROM fixes f
             JOIN artifacts a ON a.artifact_id=f.artifact_id
             JOIN individuals i ON i.individual_key=f.individual_key
             """
@@ -1881,7 +1885,8 @@ def _source_rows_from_query(
             + " ORDER BY a.logical_name, f.source_row",
             tuple(values),
         ).fetchall()
-    fix_keys = [str(row["fix_key"]) for row in rows]
+    fix_keys = [str(row["fix_key"]) for row in rows
+                if status is None or int(status[int(row["ordinal"])]) != 2]
     return source_rows_from_fix_keys(fix_keys), fix_keys
 
 
@@ -2078,7 +2083,9 @@ def resolve_rds_review_scope(
                     + ")"
                 )
                 values.extend(scoped_individuals)
-        source_rows, fix_keys = _source_rows_from_query(index_path, where, values)
+        source_rows, fix_keys = _source_rows_from_query(
+            index_path, where, values, exclude_confirmed=True, annotations=annotations,
+        )
         return {
             "kind": "filter",
             "filter": spec,
@@ -2091,10 +2098,20 @@ def _resolve_rds_stationarity(
     index_path: Path, spec: dict, annotations: list[dict] | None,
 ) -> tuple[dict, int]:
     spec = {**spec, **validate_stationarity_filter(spec)}
+    stat = index_path.stat()
+    signature = hashlib.sha256(json.dumps([
+        str(index_path.resolve()), stat.st_ino, stat.st_size, stat.st_mtime_ns,
+        spec, annotations or [],
+    ], sort_keys=True, separators=(",", ":")).encode()).digest()
     inputs = []
     ranges_by_source = defaultdict(list)
     match_count = 0
     with _STATIONARITY_LOCK:
+        cached = _STATIONARITY_RESULTS.get(signature)
+        if cached is not None:
+            _STATIONARITY_RESULTS.move_to_end(signature)
+            scope, count = json.loads(cached)
+            return scope, count
         # Do not materialize the whole study, including copies for review masks
         # and scanning. Keep only one individual/source track and compact ranges.
         with closing(_rds_stationarity_tracks(index_path, spec)) as tracks:
@@ -2115,12 +2132,20 @@ def _resolve_rds_stationarity(
             else:
                 merged.append([start, end])
         source_rows.append({"logical_name": logical_name, "row_ranges": merged})
-    return {
+    scope = {
         "kind": "filter", "filter": spec,
         "source_rows": source_rows,
         "stationarity_inputs": sorted(inputs, key=lambda item: (
             item["source_artifact"], item["individual"], item["set_name"])),
-    }, match_count
+    }
+    # Retain compact ranges and provenance, never a second copy of raw tracks.
+    encoded = json.dumps([scope, match_count], separators=(",", ":")).encode()
+    if len(encoded) <= 4_000_000:
+        with _STATIONARITY_LOCK:
+            _STATIONARITY_RESULTS[signature] = encoded
+            while len(_STATIONARITY_RESULTS) > 16 or sum(map(len, _STATIONARITY_RESULTS.values())) > 4_000_000:
+                _STATIONARITY_RESULTS.popitem(last=False)
+    return scope, match_count
 
 
 def rds_stationarity_records(index_path: Path, spec: dict) -> list[dict]:
@@ -2138,20 +2163,25 @@ def _rds_stationarity_tracks(index_path: Path, spec: dict) -> Iterator[list[dict
             where = ""
             if individuals:
                 where = " WHERE i.identifier IN (" + ",".join("?" for _ in individuals) + ")"
-            rows = connection.execute(
-                """
-                SELECT f.fix_key, f.time_ms, f.source_row, a.logical_name,
-                       i.identifier, f.lon, f.lat, f.burst_value, f.tag_identifier,
-                       f.source_outlier_status, f.source_outlier_issue_type
-                FROM fixes f
-                JOIN artifacts a ON a.artifact_id=f.artifact_id
-                JOIN individuals i ON i.individual_key=f.individual_key
-                """ + where
-                + " ORDER BY a.logical_name, i.identifier, f.time_ms, f.source_row",
-                tuple(individuals),
+            tracks = connection.execute(
+                "SELECT DISTINCT f.individual_key, f.artifact_id FROM fixes f "
+                "JOIN individuals i ON i.individual_key=f.individual_key" + where
+                + " ORDER BY f.individual_key, f.artifact_id", tuple(individuals),
             )
-            for _, track_rows in groupby(rows, key=lambda row: (row["logical_name"], row["identifier"])):
-                yield [_stationarity_record(row) for row in track_rows]
+            for track in tracks:
+                rows = connection.execute(
+                    """
+                    SELECT f.fix_key, f.time_ms, f.source_row, a.logical_name,
+                           i.identifier, f.lon, f.lat, f.burst_value, f.tag_identifier,
+                           f.source_outlier_status, f.source_outlier_issue_type
+                    FROM fixes f
+                    JOIN artifacts a ON a.artifact_id=f.artifact_id
+                    JOIN individuals i ON i.individual_key=f.individual_key
+                    WHERE f.individual_key=? AND f.artifact_id=?
+                    ORDER BY f.time_ms, f.source_row
+                    """, (track["individual_key"], track["artifact_id"]),
+                )
+                yield [_stationarity_record(row) for row in rows]
 
 
 def _stationarity_record(row: sqlite3.Row) -> dict:

@@ -1477,7 +1477,7 @@ def test_gps_spike_filter_validation_rejects_invalid_thresholds(tmp_path):
             "kind": "filter",
             "filter": {
                 "kind": "gps_spike",
-                "step_length_threshold_m": 0,
+                "step_length_threshold_m": -1,
                 "minimum_abs_turn_angle_deg": 181,
                 "individuals": ["alpha"],
                 "set_names": ["train"],
@@ -1496,7 +1496,7 @@ def test_gps_spike_filter_validation_rejects_invalid_thresholds(tmp_path):
     )
 
     assert response.status_code == 400
-    assert "step threshold must be positive" in response.json()["error"]
+    assert "step threshold must be nonnegative" in response.json()["error"]
 
 
 def test_movement_history_locks_undo_and_resume_across_persistent_routes(tmp_path):

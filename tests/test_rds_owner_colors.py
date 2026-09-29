@@ -90,3 +90,19 @@ def test_owner_columns_work_without_inventing_kami_predictions(owner_index):
     assert arrays["algorithm-marked-outlier"] == [255]*4
     assert arrays["is_outlier"] == [255]*4
     assert index.source_outlier_ranking(path)["scored_bursts"] == []
+
+
+def test_filter_count_excludes_already_confirmed_fixes(owner_index):
+    path = owner_index()
+    scope = {"kind": "filter", "filter": {
+        "field_key": "algorithm-marked-outlier", "field_kind": "boolean",
+        "selected_levels": ["True"], "individuals": ["example"],
+    }}
+    assert index.resolve_rds_review_scope(path, scope)[1] == 1
+    confirmation = {"annotation_id": "confirmed-owner-fix", "status": "confirmed",
+                    "scope": {"kind": "fix", "source_rows": [{
+                        "logical_name": "1_2.rds", "row_ranges": [[1, 1]],
+                    }]}}
+    resolved, count = index.resolve_rds_review_scope(path, scope, annotations=[confirmation])
+    assert count == 0
+    assert resolved["source_rows"] == []

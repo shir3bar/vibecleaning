@@ -180,7 +180,7 @@ def main():
             )
     else:
         raise SystemExit("Invalid review scope")
-    if not resolved_scopes or any(not fix_count and (scope.get("filter") or {}).get("kind") != "stationarity"
+    if not resolved_scopes or any(not fix_count and scope.get("kind") != "filter"
                                   for scope, fix_count in resolved_scopes):
         raise SystemExit("Review scope did not resolve to any fixes")
 

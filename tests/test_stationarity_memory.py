@@ -104,3 +104,35 @@ def test_failed_scan_releases_connection_and_next_preview_can_run(tmp_path, monk
         db.rollback()
     monkeypatch.setattr(rds_index, "evaluate_stationarity", evaluate)
     assert rds_index.resolve_rds_review_scope(index, {"kind": "filter", "filter": SPEC})[1] > 0
+
+
+def test_cached_result_is_independent_and_invalidates_for_settings_reviews_and_source(tmp_path, monkeypatch):
+    index = make_index(tmp_path / "tracks.sqlite")
+    original = rds_index.evaluate_stationarity
+    calls = []
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(rds_index, "evaluate_stationarity", counted)
+    scope = {"kind": "filter", "filter": SPEC}
+    first, count = rds_index.resolve_rds_review_scope(index, scope)
+    expected = first["source_rows"].copy()
+    calls.clear()
+    first["source_rows"].clear()
+    cached, cached_count = rds_index.resolve_rds_review_scope(index, scope)
+    assert not calls
+    assert cached_count == count and cached["source_rows"] == expected
+    rds_index.resolve_rds_review_scope(index, {"kind": "filter", "filter": {**SPEC, "radius_m": 51}})
+    assert calls
+    calls.clear()
+    rds_index.resolve_rds_review_scope(index, scope, annotations=[{
+        "annotation_id": "gps", "status": "suspected", "issue_type": "GPS spikes",
+        "scope": {"kind": "fix", "source_rows": [{"logical_name": "source-0.rds", "row_ranges": [[4, 7]]}]},
+    }])
+    assert calls
+    calls.clear()
+    with closing(sqlite3.connect(index)) as db:
+        db.execute("UPDATE fixes SET lon=lon+1 WHERE source_row=1")
+        db.commit()
+    rds_index.resolve_rds_review_scope(index, scope)
+    assert calls

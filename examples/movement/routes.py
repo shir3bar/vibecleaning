@@ -210,6 +210,7 @@ def _movement_graph_payload(study_dir: Path, history: dict | None = None) -> dic
         step["step_id"]: step.get("parameters") or {}
         for step in history.get("steps", [])
     }
+    summaries = {step["step_id"]: step.get("summary") or {} for step in history.get("steps", [])}
     for step in graph["steps"]:
         params = parameters.get(step["step_id"], {})
         spec = (params.get("scope") or {}).get("filter") or {}
@@ -218,6 +219,8 @@ def _movement_graph_payload(study_dir: Path, history: dict | None = None) -> dic
             for key in ("action", "status", "issue_field", "issue_threshold", "issue_type")
             if key in params
         }
+        if "resolved_fix_count" in summaries.get(step["step_id"], {}):
+            step["label_parameters"]["resolved_fix_count"] = summaries[step["step_id"]]["resolved_fix_count"]
         # Also shorten existing saved steps without rewriting review history.
         queue_label = _queue_review_step_label(params.get("action"), params)
         if queue_label:
@@ -226,7 +229,7 @@ def _movement_graph_payload(study_dir: Path, history: dict | None = None) -> dic
             key: spec[key]
             for key in (
                 "kind", "field_key", "field_kind", "operator", "threshold_value",
-                "selected_levels", "step_length_threshold_m", "minimum_abs_turn_angle_deg",
+                "selected_levels", "step_length_threshold_m", "minimum_abs_turn_angle_deg", "percentile",
                 "radius_m", "minimum_duration_s", "maximum_gap_s", "minimum_fixes", "position",
             )
             if key in spec
@@ -668,17 +671,30 @@ def _validate_filter_scope(value: object) -> dict:
             turn_threshold = float(value.get("minimum_abs_turn_angle_deg"))
         except (TypeError, ValueError) as exc:
             raise ValueError("GPS spike thresholds must be numeric") from exc
-        if not isfinite(step_threshold) or step_threshold <= 0.0:
-            raise ValueError("GPS spike step threshold must be positive")
+        if not isfinite(step_threshold) or step_threshold < 0.0:
+            raise ValueError("GPS spike step threshold must be nonnegative")
         if not isfinite(turn_threshold) or not 0.0 <= turn_threshold <= 180.0:
             raise ValueError("GPS spike turn threshold must be between 0 and 180 degrees")
-        return {
+        result = {
             "kind": "gps_spike",
             "step_length_threshold_m": step_threshold,
             "minimum_abs_turn_angle_deg": turn_threshold,
             "individuals": individuals,
             "set_names": set_names,
         }
+        percentile = value.get("percentile")
+        if percentile is not None:
+            if not isinstance(percentile, dict) or percentile.get("probability") not in (0.95, 0.99):
+                raise ValueError("GPS spike percentile must be 95th or 99th")
+            count = percentile.get("sample_count")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ValueError("GPS spike percentile requires a positive sample count")
+            result["percentile"] = {
+                "probability": percentile["probability"], "sample_count": count,
+                "method": "linear", "population": "finite-nonnegative-outbound-steps-at-unconfirmed-fixes",
+                "scope": "selected-individuals-all-track-sets",
+            }
+        return result
     field_key = _validate_required_text(
         value.get("field_key"),
         label="Filter field",
@@ -3730,7 +3746,7 @@ def register_movement_routes(
                         study_dir, dataset_id=dataset_id
                     ),
                 )
-                if resolved_fix_count <= 0 and (scope.get("filter") or {}).get("kind") != "stationarity":
+                if resolved_fix_count <= 0 and scope_kind != "filter":
                     raise ValueError("Review scope did not resolve to any fixes")
                 scope = resolved_scope
                 source_bundle_signature = bundle.signature
