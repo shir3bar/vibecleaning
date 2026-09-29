@@ -29,9 +29,9 @@ cd "$env:USERPROFILE\Vibecleaning"
 and `git pull --ff-only`, then continue below. Use that folder's path in the
 `cd` command in step 4 too.
 
-## 3. Install dependencies and create your login — once
+## 3. Install dependencies and create your local login — once per data folder
 
-Run from the app folder:
+Run from the app folder (go to the folder in the File Explorer and type `powershell` in the address, it should open a console in that folder):
 
 ```powershell
 $env:UV_PROJECT_ENVIRONMENT = "$env:LOCALAPPDATA\Vibecleaning\venvs\development"
@@ -41,8 +41,10 @@ uv run --no-sync python -m app.auth_cli --data-root ".\data" bootstrap editor --
 
 The first line chooses the Python environment used by the Windows launcher.
 `uv` installs Python and the app's dependencies. Enter your chosen password twice;
-typing is invisible. Your username is **editor**. If it says the user registry is
-already initialized, use your existing login and continue to step 4.
+typing is invisible. In this example username is **editor**, you can change this to your own name. If it says the user registry is already initialized, use your existing login and continue to step 4.
+
+Note that this is just a local username for testing, when we set up the shared data folder we will need to re-configure these user names.
+
 
 ## 4. Start the app — every time
 
