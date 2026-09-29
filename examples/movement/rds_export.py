@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 from typing import Iterable
 import zipfile
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -287,7 +288,12 @@ def export_reviewed_rds_bundle(
     annotations: list[dict],
     output_zip: Path,
     writer: str = "auto",
+    progress: Callable[[str, int, int, str], None] | None = None,
 ) -> dict:
+    def report(stage: str, completed: int, total: int, name: str = "") -> None:
+        if progress is not None:
+            progress(stage, completed, total, name)
+
     requested = str(writer or "auto").strip().lower()
     if requested not in {"auto", "r", "python"}:
         raise ValueError("VIBECLEANING_RDS_WRITER must be auto, r, or python")
@@ -298,14 +304,17 @@ def export_reviewed_rds_bundle(
     manifest_files = []
     with tempfile.TemporaryDirectory(prefix="vibecleaning-reviewed-rds-") as raw_dir:
         temporary_dir = Path(raw_dir)
-        for logical_name, source_path in sources:
+        for index, (logical_name, source_path) in enumerate(sources):
+            report("reviewing", index, len(sources), logical_name)
             rows = rows_by_artifact.get(logical_name) or []
             columns = build_review_export_columns(rows, annotations)
             output_path = temporary_dir / logical_name
+            report("writing", index, len(sources), logical_name)
             if engine == "r":
                 write_reviewed_rds_r(source_path, output_path, columns)
             else:
                 write_reviewed_rds_python(source_path, output_path, columns)
+            report("checking", index, len(sources), logical_name)
             _compare_original_columns(source_path, output_path, columns)
             manifest_files.append({
                 "logical_name": logical_name,
@@ -323,8 +332,11 @@ def export_reviewed_rds_bundle(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for item in sorted(temporary_dir.iterdir()):
+            items = sorted(temporary_dir.iterdir())
+            for index, item in enumerate(items):
+                report("packaging", index, len(items), item.name)
                 archive.write(item, item.name)
+        report("finishing", len(sources), len(sources))
     return {
         "run_status": "completed",
         "writer_engine": engine,

@@ -1476,6 +1476,96 @@ def test_dataset_dropdown_restores_rewound_forward_tip(tmp_path):
         browser.close()
 
 
+@pytest.mark.parametrize("fail_export", [False, True])
+def test_rds_export_shows_live_progress_and_completion(tmp_path, monkeypatch, fail_export):
+    import playwright.sync_api as playwright_api
+    import app.execution as execution
+    from app.filesystem import atomic_write_json
+
+    samples = sorted(RDS_SAMPLE_ROOT.glob("268904527_*.rds"), key=lambda path: path.stat().st_size)[:2]
+    assert len(samples) == 2
+    study_dir = tmp_path / "data" / "movement_rds" / "268904527"
+    study_dir.mkdir(parents=True)
+    for sample in samples:
+        shutil.copy2(sample, study_dir / sample.name)
+
+    # Hold the real export subprocess at its start so each progress state is
+    # observable, without timing assertions that depend on machine speed.
+    release = threading.Event()
+    progress_paths = []
+    original_run = execution.run_python_script
+
+    def held_export(script_path, spec_path, summary_path):
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        if spec.get("analysis", {}).get("parameters", {}).get("action") == "export_reviewed_rds":
+            progress_path = spec_path.with_name("progress.json")
+            atomic_write_json(progress_path, {
+                "stage": "preparing", "completed_files": 0, "total_files": 2,
+                "logical_name": samples[0].name,
+            })
+            progress_paths.append(progress_path)
+            if not release.wait(30):
+                raise RuntimeError("Test did not release export")
+            if fail_export:
+                raise RuntimeError("Original data check failed")
+        return original_run(script_path, spec_path, summary_path)
+
+    monkeypatch.setattr(execution, "run_python_script", held_export)
+    monkeypatch.setenv("VIBECLEANING_RDS_WRITER", "python")
+    app = create_rds_movement_app(
+        data_root=tmp_path / "data", cache_root=tmp_path / "cache",
+        static_root=STATIC_ROOT, index_path=INDEX_PATH, auth_manager=_auth_manager(),
+    )
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
+        try:
+            _login_and_wait(page, base_url, "268904527")
+            button = page.locator('[data-role="export-reviewed-csv"]')
+            playwright_api.expect(button).to_be_enabled(timeout=30_000)
+            with page.expect_response(lambda response: response.url.endswith("/actions/export-reviewed-rds")) as started:
+                button.click()
+            assert started.value.status == 202
+            text = page.locator('[data-role="export-progress-text"]')
+            bar = page.locator('[data-role="export-progress-bar"]')
+            playwright_api.expect(text).to_contain_text("Preparing — file 1 of 2")
+            playwright_api.expect(button).to_be_disabled()
+            assert progress_paths
+            for stage, label in (("writing", "Writing"), ("checking", "Checking original data in"), ("packaging", "Packaging ZIP")):
+                atomic_write_json(progress_paths[0], {
+                    "stage": stage, "completed_files": 1, "total_files": 2,
+                    "logical_name": samples[1].name,
+                })
+                playwright_api.expect(text).to_contain_text(f"{label} — file 2 of 2")
+                playwright_api.expect(bar).to_have_attribute("value", "1")
+                playwright_api.expect(bar).to_have_attribute("max", "2")
+            # Map interaction still works and cannot re-enable a second export.
+            first = page.locator("[data-individual-checkbox]").first
+            first.check()
+            _wait_for_layer(page, "movement-binary-paths-individual-")
+            playwright_api.expect(button).to_be_disabled()
+            assert page.locator('[data-role="map"]').bounding_box()["height"] > 300
+            page.screenshot(path=str(tmp_path / "rds-export-progress.png"))
+            release.set()
+            if fail_export:
+                playwright_api.expect(text).to_contain_text("Original data check failed", timeout=30_000)
+                playwright_api.expect(bar).to_be_hidden()
+                assert page.locator('[data-role="output-links"] a').count() == 0
+            else:
+                playwright_api.expect(text).to_contain_text("Export ready — 2 RDS files", timeout=30_000)
+                playwright_api.expect(bar).to_have_attribute("value", "1")
+                playwright_api.expect(bar).to_have_attribute("max", "1")
+                href = page.locator('[data-role="output-links"] a').get_attribute("href")
+                assert "/study/268904527/analysis/" in href
+                download = page.request.get(f"{base_url}{href}")
+                assert download.ok
+                assert download.body().startswith(b"PK")
+            playwright_api.expect(button).to_be_enabled()
+        finally:
+            release.set()
+            browser.close()
+
+
 def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_property):
     import playwright.sync_api as playwright_api
     samples = sorted(RDS_SAMPLE_ROOT.glob("268904527_*.rds"), key=lambda path: path.stat().st_size)

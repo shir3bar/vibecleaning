@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from .state import (
@@ -188,7 +189,12 @@ def _analysis_input_attachment_entries(analysis_dir: Path, raw_attachments: obje
     return entries
 
 
-def create_analysis(project_dir: Path, payload: dict) -> dict:
+def create_analysis(
+    project_dir: Path,
+    payload: dict,
+    *,
+    on_prepared: Callable[[Path], None] | None = None,
+) -> dict:
     project_dir = project_dir.resolve()
     user = normalize_user(payload.get("user"))
     title = validate_name(payload.get("title"), "title")
@@ -242,6 +248,8 @@ def create_analysis(project_dir: Path, payload: dict) -> dict:
         },
     }
     save_json(spec_path, spec)
+    if on_prepared is not None:
+        on_prepared(analysis_dir)
     summary = run_python_script(script_path, spec_path, summary_path)
 
     realized_outputs = []

@@ -854,6 +854,7 @@ def test_python_reviewed_rds_export_adds_only_permitted_columns(tmp_path):
         },
     }]
     output = tmp_path / "reviewed.zip"
+    progress = []
     summary = export_reviewed_rds_bundle(
         sources=[(logical_name, source)],
         rows_by_artifact={
@@ -871,9 +872,18 @@ def test_python_reviewed_rds_export_adds_only_permitted_columns(tmp_path):
         annotations=annotations,
         output_zip=output,
         writer="python",
+        progress=lambda *update: progress.append(update),
     )
 
     assert output.exists()
+    assert progress == [
+        ("reviewing", 0, 1, logical_name),
+        ("writing", 0, 1, logical_name),
+        ("checking", 0, 1, logical_name),
+        ("packaging", 0, 2, logical_name),
+        ("packaging", 1, 2, "writer_manifest.json"),
+        ("finishing", 1, 1, ""),
+    ]
     assert summary["file_count"] == 1
     assert summary["writer_engine"] == "python"
     with zipfile.ZipFile(output) as archive:
@@ -889,3 +899,43 @@ def test_python_reviewed_rds_export_adds_only_permitted_columns(tmp_path):
     assert not {
         "visible", "manually-marked-outlier", "algorithm-marked-outlier",
     }.intersection(reviewed.columns)
+
+
+@pytest.mark.parametrize("writer", ["python", "invalid-writer"])
+def test_rds_background_export_reports_completion_or_failure(tmp_path, writer):
+    client, study_dir = _client(tmp_path)
+    loaded = client.get(
+        "/api/apps/movement/family/movement_rds/study/268904527/load"
+    ).json()
+    base = "/api/apps/movement/family/movement_rds/study/268904527"
+    response = client.post(
+        f"{base}/actions/export-reviewed-rds",
+        json={"dataset_id": loaded["dataset_id"], "writer": writer, "background": True},
+    )
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+    # TestClient waits for background tasks; the browser test checks live updates.
+    response = client.get(f"{base}/analysis-jobs/{job_id}")
+    assert response.status_code == 200
+    job = response.json()
+    assert not any(key.startswith("_") for key in job)
+    if writer == "invalid-writer":
+        assert job["status"] == "failed"
+        assert "must be auto, r, or python" in job["error"]
+        assert "result" not in job
+    else:
+        assert job["status"] == "completed"
+        assert job["progress"] == {
+            "stage": "finishing", "completed_files": 2, "total_files": 2, "logical_name": "",
+        }
+        result = job["result"]
+        assert result["summary"]["file_count"] == 2
+        analysis_id = result["analysis"]["analysis_id"]
+        download = client.get(f"{base}/analysis/{analysis_id}/artifact/movement_reviewed_rds.zip")
+        assert download.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+            assert archive.testzip() is None
+            assert len(archive.namelist()) == 3
+    assert ensure_project_state(study_dir)["current_dataset_id"] == loaded["dataset_id"]
+    client.post("/api/auth/logout")
+    assert client.get(f"{base}/analysis-jobs/{job_id}").status_code == 401

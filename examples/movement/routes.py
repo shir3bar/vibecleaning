@@ -1109,7 +1109,14 @@ def register_movement_routes(
             job["started_at"] = now_iso()
             job["_updated_monotonic"] = monotonic()
         try:
-            result = create_analysis(study_dir, payload)
+            if (payload.get("parameters") or {}).get("action") == "export_reviewed_rds":
+                def on_prepared(analysis_dir: Path) -> None:
+                    with analysis_jobs_lock:
+                        analysis_jobs[job_id]["_progress_path"] = analysis_dir / "progress.json"
+
+                result = create_analysis(study_dir, payload, on_prepared=on_prepared)
+            else:
+                result = create_analysis(study_dir, payload)
         except Exception as exc:
             with analysis_jobs_lock:
                 job = analysis_jobs.get(job_id)
@@ -1126,6 +1133,33 @@ def register_movement_routes(
                 job["result"] = result
                 job["finished_at"] = now_iso()
                 job["_updated_monotonic"] = monotonic()
+
+    def enqueue_analysis(
+        background_tasks: BackgroundTasks,
+        family_name: str,
+        study_name: str,
+        study_dir: Path,
+        payload: dict,
+    ) -> JSONResponse:
+        prune_analysis_jobs()
+        job_id = make_id("analysis_job")
+        job = {
+            "job_id": job_id,
+            "family_name": family_name,
+            "study_name": study_name,
+            "status": "queued",
+            "created_at": now_iso(),
+            "actor": dict(payload.get("actor") or {}),
+            "review_id": str((payload.get("parameters") or {}).get("review_id") or ""),
+            "_updated_monotonic": monotonic(),
+        }
+        with analysis_jobs_lock:
+            analysis_jobs[job_id] = job
+        background_tasks.add_task(run_analysis_job, job_id, study_dir, payload)
+        return JSONResponse(
+            {key: value for key, value in job.items() if not key.startswith("_")},
+            status_code=202,
+        )
 
     def require_configured_family(family_name: str) -> str:
         family = validate_path_part(family_name, label="family")
@@ -2643,33 +2677,8 @@ def register_movement_routes(
             }
             payload = prepare_analysis_payload(request, study_dir, payload)
             if background_anomaly_ranking:
-                prune_analysis_jobs()
-                job_id = make_id("analysis_job")
-                job = {
-                    "job_id": job_id,
-                    "family_name": family_name,
-                    "study_name": study_name,
-                    "status": "queued",
-                    "created_at": now_iso(),
-                    "actor": dict(payload.get("actor") or {}),
-                    "review_id": str((payload.get("parameters") or {}).get("review_id") or ""),
-                    "_updated_monotonic": monotonic(),
-                }
-                with analysis_jobs_lock:
-                    analysis_jobs[job_id] = job
-                background_tasks.add_task(
-                    run_analysis_job,
-                    job_id,
-                    study_dir,
-                    payload,
-                )
-                return JSONResponse(
-                    {
-                        key: value
-                        for key, value in job.items()
-                        if not key.startswith("_")
-                    },
-                    status_code=202,
+                return enqueue_analysis(
+                    background_tasks, family_name, study_name, study_dir, payload
                 )
             return JSONResponse(create_analysis(study_dir, payload))
         except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
@@ -2698,6 +2707,12 @@ def register_movement_routes(
                 or job.get("study_name") != study_name
             ):
                 raise ProjectStateError("Unknown analysis job")
+            progress_path = job.get("_progress_path")
+            if progress_path is not None:
+                try:
+                    job["progress"] = json.loads(progress_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    pass  # The subprocess may not have written its first update yet.
             return JSONResponse(
                 {
                     key: value
@@ -4378,7 +4393,7 @@ def register_movement_routes(
 
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/export-reviewed-rds")
     async def post_movement_export_reviewed_rds(
-        family_name: str, study_name: str, request: Request
+        family_name: str, study_name: str, request: Request, background_tasks: BackgroundTasks
     ):
         body = await parse_json_body(request)
         if body is None:
@@ -4419,7 +4434,11 @@ def register_movement_routes(
                 },
             }
             payload = prepare_analysis_payload(request, study_dir, payload)
-            return JSONResponse(create_analysis(study_dir, payload))
+            if body.get("background") is True:
+                return enqueue_analysis(
+                    background_tasks, family_name, study_name, study_dir, payload
+                )
+            return JSONResponse(await run_in_threadpool(create_analysis, study_dir, payload))
         except (
             ReviewForbiddenError,
             ReviewConflictError,

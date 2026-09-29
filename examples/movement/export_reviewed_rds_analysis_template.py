@@ -14,6 +14,15 @@ def main():
     from examples.movement.rds_export import export_reviewed_rds_bundle
     from examples.movement.rds_index import read_movement_rds, validate_movement_rds
     from examples.movement.review_annotations import load_review_annotations
+    from app.filesystem import atomic_write_json
+
+    def progress(stage, completed_files, total_files, logical_name=""):
+        atomic_write_json(spec_path.with_name("progress.json"), {
+            "stage": stage,
+            "completed_files": completed_files,
+            "total_files": total_files,
+            "logical_name": logical_name,
+        })
 
     inputs = {item["logical_name"]: item for item in spec.get("input_artifacts", [])}
     outputs = {item["logical_name"]: item for item in spec.get("output_artifacts", [])}
@@ -24,10 +33,12 @@ def main():
     annotations = load_review_annotations(Path(sidecar["path"]) if sidecar else None)
     sources = []
     rows_by_artifact = {}
+    total_files = sum(name.lower().endswith(".rds") for name in inputs)
     for logical_name, item in sorted(inputs.items()):
         if not logical_name.lower().endswith(".rds"):
             continue
         source_path = Path(item["path"])
+        progress("preparing", len(sources), total_files, logical_name)
         frame = read_movement_rds(source_path)
         info = validate_movement_rds(Path(logical_name), frame)
         rows = []
@@ -62,6 +73,7 @@ def main():
         annotations=annotations,
         output_zip=Path(output["path"]),
         writer=os.environ.get("VIBECLEANING_RDS_WRITER", params.get("writer", "auto")),
+        progress=progress,
     )
     summary_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 

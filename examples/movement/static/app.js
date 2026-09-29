@@ -1530,7 +1530,7 @@ class MovementExampleApp {
       <style>
         .movement-root {
           display: grid;
-          grid-template-rows: auto auto auto auto minmax(0, 1fr);
+          grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
           min-height: 100%;
           height: 100%;
           color: #e8eef7;
@@ -1561,11 +1561,14 @@ class MovementExampleApp {
           margin-left: 8px;
           padding: 4px 7px;
         }
-        .movement-output-links {
+        .movement-export-progress {
           grid-row: 4;
         }
-        .movement-main {
+        .movement-output-links {
           grid-row: 5;
+        }
+        .movement-main {
+          grid-row: 6;
         }
         .movement-root .movement-profile-hidden,
         .movement-root [hidden] {
@@ -1727,6 +1730,24 @@ class MovementExampleApp {
         }
         .movement-output-links a {
           color: #9df6dc;
+        }
+        .movement-export-progress {
+          padding: 0 16px 10px;
+          font-size: 12px;
+          color: #b6c9dc;
+        }
+        .movement-export-progress progress {
+          display: block;
+          width: min(420px, 100%);
+          height: 8px;
+          margin-top: 6px;
+          accent-color: #48c9a5;
+        }
+        .movement-export-progress progress[hidden] {
+          display: none;
+        }
+        .movement-export-progress.error {
+          color: #ffb3c2;
         }
         .movement-edit-lock {
           display: inline-flex;
@@ -3886,6 +3907,10 @@ class MovementExampleApp {
           <button type="button" data-role="load-editor-release">Load latest</button>
         </div>
         <div class="movement-status" data-role="status"></div>
+        <div class="movement-export-progress" data-role="export-progress" hidden>
+          <span data-role="export-progress-text" role="status" aria-live="polite"></span>
+          <progress data-role="export-progress-bar" aria-label="RDS export progress"></progress>
+        </div>
         <div class="movement-output-links" data-role="output-links"></div>
         <div class="movement-main">
           <div class="movement-map-wrap">
@@ -4388,6 +4413,9 @@ class MovementExampleApp {
       runBurstFeatureSpace: this.mountEl.querySelector('[data-role="run-burst-feature-space"]'),
       generateReport: this.mountEl.querySelector('[data-role="generate-report"]'),
       exportReviewedCsv: this.mountEl.querySelector('[data-role="export-reviewed-csv"]'),
+      exportProgress: this.mountEl.querySelector('[data-role="export-progress"]'),
+      exportProgressText: this.mountEl.querySelector('[data-role="export-progress-text"]'),
+      exportProgressBar: this.mountEl.querySelector('[data-role="export-progress-bar"]'),
       undo: this.mountEl.querySelector('[data-role="undo"]'),
       editLockProfile: document.querySelector('[data-role="edit-lock-profile"]'),
       editLockMessage: document.querySelector('[data-role="edit-lock-message"]'),
@@ -17849,7 +17877,7 @@ class MovementExampleApp {
       || unflagFixCount === 0
     );
     this.refs.generateReport.disabled = !hasData || !(this.data?.individuals || []).length;
-    this.refs.exportReviewedCsv.disabled = !hasData;
+    this.refs.exportReviewedCsv.disabled = !hasData || Boolean(this.exportInProgress);
     this.refs.selectSuspicious.disabled = !hasData || !this.currentArtifact || suspiciousLoading;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
     this.refs.runCandidateQuery.disabled = !canPersistEdits || !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
@@ -19442,7 +19470,55 @@ class MovementExampleApp {
     }
   }
 
+  renderRdsExportProgress(job, study, startedAt) {
+    const progress = job?.progress || {};
+    const stage = String(progress.stage || "");
+    const total = Math.max(0, Number(progress.total_files) || 0);
+    const completed = Math.min(total, Math.max(0, Number(progress.completed_files) || 0));
+    const labels = {
+      preparing: "Preparing",
+      reviewing: "Adding review decisions to",
+      writing: "Writing",
+      checking: "Checking original data in",
+      packaging: "Packaging ZIP",
+      finishing: "Finishing export",
+    };
+    const label = labels[stage] || "Starting export";
+    const count = total && stage !== "finishing"
+      ? ` — file ${formatCount(Math.min(total, completed + 1))} of ${formatCount(total)}`
+      : "";
+    const seconds = Math.floor((Date.now() - startedAt) / 1000);
+    const elapsed = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    this.refs.exportProgressText.textContent = `${study}: ${label}${count} · ${elapsed} elapsed`;
+    this.refs.exportProgressText.title = String(progress.logical_name || "");
+    const bar = this.refs.exportProgressBar;
+    bar.hidden = false;
+    bar.setAttribute("aria-label", `${label}: ${completed} of ${total} files completed`);
+    if (total && stage !== "finishing") {
+      bar.max = total;
+      bar.value = completed;
+    } else {
+      bar.removeAttribute("value");
+    }
+  }
+
+  async waitForRdsExportJob(jobId, baseUrl, study, startedAt) {
+    while (true) {
+      let job;
+      try {
+        job = await this.fetchJSON(`${baseUrl}/analysis-jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+      } catch (error) {
+        throw new Error(`Could not read export progress: ${error.message}. The export may still be running.`);
+      }
+      if (job.status === "completed") return job.result || {};
+      if (job.status === "failed") throw new Error(job.error || "RDS export failed");
+      this.renderRdsExportProgress(job, study, startedAt);
+      await new Promise(resolve => window.setTimeout(resolve, ANALYSIS_JOB_POLL_INTERVAL_MS));
+    }
+  }
+
   async exportReviewedCsv() {
+    if (this.exportInProgress) return;
     if (!this.data || !this.currentFamily || !this.currentStudy || !this.currentDatasetId || !this.currentArtifact) {
       return;
     }
@@ -19450,24 +19526,36 @@ class MovementExampleApp {
       this.setStatus("Save or discard the unsaved individual decision before exporting.", true);
       return;
     }
+    this.exportInProgress = true;
     this.refs.exportReviewedCsv.disabled = true;
     const exportRds = MOVEMENT_APP_CONFIG.rdsSource;
+    const study = this.currentStudy;
+    const baseUrl = `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(study)}`;
+    const startedAt = Date.now();
+    this.refs.exportProgress.hidden = !exportRds;
+    this.refs.exportProgress.classList.remove("error");
+    this.refs.outputLinks.innerHTML = "";
+    if (exportRds) this.renderRdsExportProgress({}, study, startedAt);
     this.setStatus(exportRds ? "Exporting the reviewed RDS study bundle..." : `Exporting reviewed CSV for ${this.currentArtifact}...`);
     try {
-      const result = await this.requestJSON(
-        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/${exportRds ? "export-reviewed-rds" : "export-reviewed-csv"}`,
+      let result = await this.requestJSON(
+        `${baseUrl}/actions/${exportRds ? "export-reviewed-rds" : "export-reviewed-csv"}`,
         {
           method: "POST",
           body: JSON.stringify({
             dataset_id: this.currentDatasetId,
             logical_name: this.currentArtifact,
             user: this.getUser() || "reviewer",
+            ...(exportRds ? { background: true } : {}),
           }),
         },
       );
+      if (exportRds && result?.job_id) {
+        result = await this.waitForRdsExportJob(result.job_id, baseUrl, study, startedAt);
+      }
       const analysisId = String(result?.analysis?.analysis_id || "");
       if (!analysisId) {
-        throw new Error("Reviewed CSV export did not return an analysis id.");
+        throw new Error("Export did not return an analysis id.");
       }
       const output = (result?.analysis?.realized_output_artifacts || [])
         .find(item => exportRds
@@ -19479,11 +19567,16 @@ class MovementExampleApp {
         || "",
       ).trim();
       if (!outputName) {
-        throw new Error("Reviewed CSV export did not return an output artifact.");
+        throw new Error("Export did not return an output artifact.");
       }
-      const href = `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/analysis/${encodeURIComponent(analysisId)}/artifact/${encodeURIComponent(outputName)}`;
+      const href = `${baseUrl}/analysis/${encodeURIComponent(analysisId)}/artifact/${encodeURIComponent(outputName)}`;
       this.refs.outputLinks.innerHTML = `<a href="${href}" download="${escapeHtml(outputName)}" data-authenticated-artifact="download" data-artifact-name="${escapeHtml(outputName)}">Download ${escapeHtml(outputName)}</a>`;
       if (exportRds) {
+        this.refs.exportProgressText.textContent = `${study}: Export ready — ${formatCount(result?.summary?.file_count || 0)} RDS files.`;
+        this.refs.exportProgressText.title = "";
+        this.refs.exportProgressBar.max = 1;
+        this.refs.exportProgressBar.value = 1;
+        this.refs.exportProgressBar.setAttribute("aria-label", "RDS export complete");
         this.setStatus("Exported one reviewed RDS per source individual plus a writer manifest. The source dataset was not changed.");
       } else {
         const flaggedCount = formatCount(result?.summary?.flagged_row_count || 0);
@@ -19491,8 +19584,16 @@ class MovementExampleApp {
         this.setStatus(`Exported ${rowCount} rows with ${flaggedCount} flagged rows. The source dataset was not changed.`);
       }
     } catch (error) {
-      this.setStatus(`Reviewed ${exportRds ? "RDS" : "CSV"} export failed: ${error.message}`, true);
+      const message = `Reviewed ${exportRds ? "RDS" : "CSV"} export: ${error.message}`;
+      if (exportRds) {
+        this.refs.exportProgressText.textContent = `${study}: ${message}`;
+        this.refs.exportProgressText.title = "";
+        this.refs.exportProgress.classList.add("error");
+        this.refs.exportProgressBar.hidden = true;
+      }
+      this.setStatus(message, true);
     } finally {
+      this.exportInProgress = false;
       this.updateActionButtons();
     }
   }
