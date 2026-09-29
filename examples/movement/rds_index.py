@@ -14,6 +14,7 @@ import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
+from itertools import groupby
 import hashlib
 import io
 import json
@@ -24,6 +25,7 @@ import shutil
 import sqlite3
 import struct
 import tempfile
+from threading import Lock
 from typing import Iterable, Iterator, Sequence
 import warnings
 
@@ -50,6 +52,9 @@ from .stationarity import evaluate_stationarity, validate_stationarity_filter
 RDS_INDEX_SCHEMA_VERSION = 7
 RDS_SOURCE_FORMAT = "rds"
 RDS_IMPLICIT_SET = "train"
+# Browser requests can overlap when a reviewer changes filter settings. Keep
+# their working memory bounded even if an older request is still finishing.
+_STATIONARITY_LOCK = Lock()
 RDS_REQUIRED_COLUMNS = {
     "x_",
     "y_",
@@ -2067,49 +2072,90 @@ def _resolve_rds_stationarity(
     index_path: Path, spec: dict, annotations: list[dict] | None,
 ) -> tuple[dict, int]:
     spec = {**spec, **validate_stationarity_filter(spec)}
-    records = rds_stationarity_records(index_path, spec)
-    matches, inputs = evaluate_stationarity(records, spec, annotations or [])
+    inputs = []
+    ranges_by_source = defaultdict(list)
+    match_count = 0
+    with _STATIONARITY_LOCK:
+        # Do not materialize the whole study, including copies for review masks
+        # and scanning. Keep only one individual/source track and compact ranges.
+        with closing(_rds_stationarity_tracks(index_path, spec)) as tracks:
+            for records in tracks:
+                matches, track_inputs = evaluate_stationarity(records, spec, annotations or [])
+                inputs.extend(track_inputs)
+                match_count += len(matches)
+                for source in source_rows_from_fix_keys(matches):
+                    ranges_by_source[source["logical_name"]].extend(source["row_ranges"])
+                del records, matches
+    source_rows = []
+    for logical_name, ranges in sorted(ranges_by_source.items()):
+        # A source file may contain multiple individuals with interleaved rows.
+        merged = []
+        for start, end in sorted(ranges):
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        source_rows.append({"logical_name": logical_name, "row_ranges": merged})
     return {
         "kind": "filter", "filter": spec,
-        "source_rows": source_rows_from_fix_keys(matches),
-        "stationarity_inputs": inputs,
-    }, len(matches)
+        "source_rows": source_rows,
+        "stationarity_inputs": sorted(inputs, key=lambda item: (
+            item["source_artifact"], item["individual"], item["set_name"])),
+    }, match_count
 
 
 def rds_stationarity_records(index_path: Path, spec: dict) -> list[dict]:
+    # Individual rerun checks need their records after the connection closes.
+    with closing(_rds_stationarity_tracks(index_path, spec)) as tracks:
+        return [record for track in tracks for record in track]
+
+
+def _rds_stationarity_tracks(index_path: Path, spec: dict) -> Iterator[list[dict]]:
+    """Read one source/individual at a time, using only stationarity columns."""
     individuals = list(spec.get("individuals") or [])
     set_names = set(spec.get("set_names") or [])
-    records = []
     if not set_names or RDS_IMPLICIT_SET in set_names:
         with closing(_connect(index_path)) as connection:
             where = ""
             if individuals:
                 where = " WHERE i.identifier IN (" + ",".join("?" for _ in individuals) + ")"
             rows = connection.execute(
-                FIX_SELECT + where
-                + " ORDER BY f.individual_key, f.artifact_id, f.time_ms, f.source_row",
+                """
+                SELECT f.fix_key, f.time_ms, f.source_row, a.logical_name,
+                       i.identifier, f.lon, f.lat, f.burst_value, f.tag_identifier,
+                       f.source_outlier_status, f.source_outlier_issue_type
+                FROM fixes f
+                JOIN artifacts a ON a.artifact_id=f.artifact_id
+                JOIN individuals i ON i.individual_key=f.individual_key
+                """ + where
+                + " ORDER BY a.logical_name, i.identifier, f.time_ms, f.source_row",
                 tuple(individuals),
             )
-            for row in rows:
-                source_annotation = {
-                    "annotation_id": f"source:{row['fix_key']}",
-                    "status": str(row["source_outlier_status"] or ""),
-                    "issue_type": str(row["source_outlier_issue_type"] or ""),
-                    "scope": {"kind": "fix", "source_rows": [{
-                        "logical_name": row["logical_name"],
-                        "row_ranges": [[int(row["source_row"]), int(row["source_row"])]],
-                    }]},
-                }
-                records.append({
-                    "fix_key": str(row["fix_key"]), "time_ms": int(row["time_ms"]),
-                    "row_index": int(row["source_row"]), "source_artifact": str(row["logical_name"]),
-                    "individual": str(row["identifier"]), "set_name": RDS_IMPLICIT_SET,
-                    "lon": float(row["lon"]), "lat": float(row["lat"]),
-                    "burst": row["burst_value"],
-                    "segment": row["tag_identifier"],
-                    "source_annotation": source_annotation if source_annotation["status"] else None,
-                })
-    return records
+            for _, track_rows in groupby(rows, key=lambda row: (row["logical_name"], row["identifier"])):
+                yield [_stationarity_record(row) for row in track_rows]
+
+
+def _stationarity_record(row: sqlite3.Row) -> dict:
+    source_annotation = None
+    if row["source_outlier_status"]:
+        source_annotation = {
+            "annotation_id": f"source:{row['fix_key']}",
+            "status": str(row["source_outlier_status"] or ""),
+            "issue_type": str(row["source_outlier_issue_type"] or ""),
+            "scope": {"kind": "fix", "source_rows": [{
+                "logical_name": row["logical_name"],
+                "row_ranges": [[int(row["source_row"]), int(row["source_row"])]],
+            }]},
+        }
+    return {
+        "fix_key": str(row["fix_key"]), "time_ms": int(row["time_ms"]),
+        "row_index": int(row["source_row"]), "source_artifact": str(row["logical_name"]),
+        "individual": str(row["identifier"]), "set_name": RDS_IMPLICIT_SET,
+        "lon": float(row["lon"]), "lat": float(row["lat"]),
+        "burst": row["burst_value"],
+        "segment": row["tag_identifier"],
+        "source_annotation": source_annotation,
+    }
 
 
 def _review_projection(
