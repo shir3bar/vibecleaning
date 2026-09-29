@@ -48,8 +48,8 @@ from .summary import DERIVED_FIELDS, quantile, span_to_zoom
 from .stationarity import evaluate_stationarity, validate_stationarity_filter
 
 
-# Report metadata is disposable too; older indexes rebuild without changing lineage.
-RDS_INDEX_SCHEMA_VERSION = 7
+# Include source-owner columns and preserve absent detector results as missing.
+RDS_INDEX_SCHEMA_VERSION = 8
 RDS_SOURCE_FORMAT = "rds"
 RDS_IMPLICIT_SET = "train"
 # Browser requests can overlap when a reviewer changes filter settings. Keep
@@ -65,7 +65,6 @@ RDS_REQUIRED_COLUMNS = {
     "timestamp",
     "burst_",
     "geometry",
-    "is_outlier",
 }
 RDS_REVIEW_COLUMNS = (
     "outlier_status",
@@ -168,7 +167,11 @@ def _detector_color_fields() -> list[dict]:
     return fields
 
 
-RDS_OPTIONAL_COLOR_FIELDS = _detector_color_fields()
+RDS_OWNER_COLOR_FIELDS = [
+    {"key": name, "label": name, "kind": "boolean", "source": "raw", "column_name": name}
+    for name in ("algorithm-marked-outlier", "manually-marked-outlier")
+]
+RDS_OPTIONAL_COLOR_FIELDS = [*RDS_OWNER_COLOR_FIELDS, *_detector_color_fields()]
 RDS_COLOR_FIELDS = [*RDS_BASE_COLOR_FIELDS, *RDS_OPTIONAL_COLOR_FIELDS]
 RDS_OPTIONAL_COLOR_BY_KEY = {
     str(item["key"]): item for item in RDS_OPTIONAL_COLOR_FIELDS
@@ -365,6 +368,8 @@ def _parse_rds_boolean(value, *, allow_missing=False):
             return None
         raise ValueError("Missing required boolean value")
     normalized = _scalar_text(value).lower()
+    if not normalized and allow_missing:
+        return None
     if normalized in {"true", "1"}:
         return True
     if normalized in {"false", "0"}:
@@ -437,11 +442,9 @@ def validate_movement_rds(path: Path, frame: pd.DataFrame) -> dict[str, str | in
     burst_values = pd.to_numeric(frame["burst_"], errors="coerce").to_numpy(dtype=np.float64)
     if not np.isfinite(burst_values).all() or not np.equal(burst_values, np.floor(burst_values)).all():
         raise ValueError(f"{filename} contains invalid burst_ values")
-    outliers = frame["is_outlier"]
-    if outliers.isna().any():
-        raise ValueError(f"{filename} contains missing is_outlier values")
-    for value in outliers:
-        _parse_rds_boolean(value)
+    if "is_outlier" in frame.columns:
+        for value in frame["is_outlier"]:
+            _parse_rds_boolean(value, allow_missing=True)
 
     return {
         "study_id": study_id,
@@ -491,7 +494,7 @@ def _schema(connection: sqlite3.Connection) -> None:
             lon REAL NOT NULL,
             lat REAL NOT NULL,
             burst_value INTEGER NOT NULL,
-            is_outlier INTEGER NOT NULL CHECK (is_outlier IN (0, 1)),
+            is_outlier INTEGER CHECK (is_outlier IN (0, 1)),
             tag_identifier TEXT NOT NULL,
             step_length_m REAL,
             speed_mps REAL,
@@ -605,7 +608,10 @@ def _insert_frame(
     t_values = pd.to_numeric(frame["t_"], errors="raise").to_numpy(dtype=np.float64)
     time_ms_values = np.rint(t_values * 1000.0).astype(np.int64)
     burst_values = pd.to_numeric(frame["burst_"], errors="raise").to_numpy(dtype=np.int64)
-    outlier_values = np.array([_parse_rds_boolean(value) for value in frame["is_outlier"]], dtype=np.bool_)
+    outlier_values = (
+        [_parse_rds_boolean(value, allow_missing=True) for value in frame["is_outlier"]]
+        if "is_outlier" in frame.columns else [None] * row_count
+    )
     tags = (
         frame["tag_local_identifier"].tolist()
         if "tag_local_identifier" in frame.columns
@@ -653,7 +659,7 @@ def _insert_frame(
                 float(x_values[zero_index]),
                 float(y_values[zero_index]),
                 int(burst_values[zero_index]),
-                int(bool(outlier_values[zero_index])),
+                None if outlier_values[zero_index] is None else int(outlier_values[zero_index]),
                 _scalar_text(tags[zero_index]),
                 _source_review_value(frame, "outlier_status", zero_index),
                 _source_review_value(frame, "outlier_issue_type", zero_index),
@@ -747,9 +753,13 @@ def build_rds_index(bundle: RdsBundle, output_path: Path) -> None:
                 logical_name = str(artifact.get("logical_name") or "")
                 frame = read_movement_rds(path)
                 info = validate_movement_rds(path, frame)
+                if "is_outlier" in frame.columns:
+                    available_color_keys.add("is_outlier")
                 for field in RDS_OPTIONAL_COLOR_FIELDS:
                     column = str(field["column_name"])
-                    if column in frame.columns and frame[column].notna().any():
+                    if column in frame.columns and (
+                        field in RDS_OWNER_COLOR_FIELDS or frame[column].notna().any()
+                    ):
                         available_color_keys.add(str(field["key"]))
                 study_ids.add(str(info["study_id"]))
                 if str(info["individual_id"]) in individual_ids:
@@ -851,7 +861,7 @@ def _fix_from_row(row: sqlite3.Row) -> dict:
         "speed_mps": row["speed_mps"],
         "time_delta_s": row["time_delta_s"],
         "turn_angle_deg": row["turn_angle_deg"],
-        "is_outlier": bool(row["is_outlier"]),
+        "is_outlier": None if row["is_outlier"] is None else bool(row["is_outlier"]),
     }
     for field in RDS_OPTIONAL_COLOR_FIELDS:
         key = str(field["key"])
@@ -920,7 +930,7 @@ def _source_bursts(rows: Sequence[sqlite3.Row]) -> list[dict]:
                 "path": path,
                 "path_length_m": float(sum(step_lengths)),
                 "median_step_m": float(np.median(step_lengths)) if step_lengths else None,
-                "is_outlier_count": sum(int(row["is_outlier"]) for row in ordered),
+                "is_outlier_count": sum(int(row["is_outlier"] or 0) for row in ordered),
             }
         )
     return sorted(
@@ -943,7 +953,8 @@ def _available_rds_color_fields(connection: sqlite3.Connection) -> list[dict]:
     ).fetchone()
     optional_keys = set(json.loads(str(row[0]))) if row is not None else set()
     return [
-        *[dict(item) for item in RDS_BASE_COLOR_FIELDS],
+        *[dict(item) for item in RDS_BASE_COLOR_FIELDS
+          if item["key"] != "is_outlier" or "is_outlier" in optional_keys],
         *[
             dict(item)
             for item in RDS_OPTIONAL_COLOR_FIELDS
@@ -1161,7 +1172,7 @@ def build_rds_overview(
                 "confirmed_count": sum(
                     str(row["source_outlier_status"]).lower() == "confirmed" for row in rows
                 ),
-                "source_outlier_count": sum(int(row["is_outlier"]) for row in rows),
+                "source_outlier_count": sum(int(row["is_outlier"] or 0) for row in rows),
             }
         truncated = len(preview_rows) < total_rows
         all_rows = connection.execute(
@@ -1514,7 +1525,7 @@ def source_outlier_ranking(
         )
         grouped: dict[tuple[str, int], dict] = {}
         for row in cursor:
-            if review_status[int(row["ordinal"])] == 2:
+            if review_status[int(row["ordinal"])] == 2 or row["is_outlier"] is None:
                 continue
             key = (str(row["individual"]), int(row["burst_value"]))
             item = grouped.setdefault(key, {
@@ -1793,7 +1804,7 @@ def build_rds_report_inputs(
                     format(float(row["lon"]), ".17g"),
                     format(float(row["lat"]), ".17g"),
                     int(row["burst_value"]),
-                    "true" if int(row["is_outlier"]) else "false",
+                    "" if row["is_outlier"] is None else "true" if int(row["is_outlier"]) else "false",
                     row["logical_name"],
                     metadata_by_artifact[row["logical_name"]].get("species", ""),
                     metadata_by_artifact[row["logical_name"]].get("study_name", ""),
@@ -1994,6 +2005,7 @@ def resolve_rds_review_scope(
             "time_delta_s": "f.time_delta_s",
             "turn_angle_deg": "f.turn_angle_deg",
             "is_outlier": "f.is_outlier",
+            **{field["key"]: f'f."{field["column_name"]}"' for field in RDS_OWNER_COLOR_FIELDS},
         }
         values: list[object] = []
         if filter_kind == "gps_spike":
@@ -2039,17 +2051,24 @@ def resolve_rds_review_scope(
                 operator = "<" if spec.get("operator") == "lt" else ">"
                 where = f"{column} {operator} ?"
                 values.append(float(spec["threshold_value"]))
-            elif field_kind == "boolean" and field_key == "is_outlier":
+            elif field_kind == "boolean" and field_key in {
+                "is_outlier", *(field["key"] for field in RDS_OWNER_COLOR_FIELDS)
+            }:
                 selected = {str(item) for item in spec.get("selected_levels") or []}
                 accepted = []
                 if "True" in selected:
                     accepted.append(1)
                 if "False" in selected:
                     accepted.append(0)
-                if not accepted:
+                terms = []
+                if accepted:
+                    terms.append(column + " IN (" + ",".join("?" for _ in accepted) + ")")
+                    values.extend(accepted)
+                if "Missing" in selected:
+                    terms.append(column + " IS NULL")
+                if not terms:
                     return {"kind": "filter", "filter": spec, "source_rows": []}, 0
-                where = "f.is_outlier IN (" + ",".join("?" for _ in accepted) + ")"
-                values.extend(accepted)
+                where = "(" + " OR ".join(terms) + ")"
             else:
                 raise ValueError(f"Unsupported RDS filter field: {field_key}")
             if scoped_individuals:
@@ -2337,7 +2356,7 @@ def build_rds_binary_columns(
                 artifact_codes[index] = int(row["artifact_id"]) - 1
                 source_rows[index] = int(row["source_row"])
                 burst_values[index] = int(row["burst_value"])
-                is_outlier[index] = int(row["is_outlier"])
+                is_outlier[index] = 255 if row["is_outlier"] is None else int(row["is_outlier"])
                 status = str(row["source_outlier_status"] or "").lower()
                 source_status[index] = 2 if status == "confirmed" else 1 if status == "suspected" else 0
                 for name, target in derived.items():
@@ -2511,7 +2530,8 @@ def build_rds_binary_columns(
                 "speed_mps": {"array": "speed_mps", "kind": "numeric"},
                 "time_delta_s": {"array": "time_delta_s", "kind": "numeric"},
                 "turn_angle_deg": {"array": "turn_angle_deg", "kind": "numeric"},
-                "is_outlier": {"array": "is_outlier", "kind": "boolean"},
+                **({"is_outlier": {"array": "is_outlier", "kind": "boolean"}}
+                   if any(field["key"] == "is_outlier" for field in available_color_fields) else {}),
                 **optional_columns,
             },
             "color_stats": color_stats,

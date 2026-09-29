@@ -21335,6 +21335,8 @@ function movementColorFieldDescription(field) {
     [GPS_SPIKE_COLOR_FIELD_KEY]: `Colors outbound step length. A filter match requires both adjacent steps above the distance threshold and |turn angle| at least ${DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG}° unless changed.`,
     [STATIONARITY_COLOR_FIELD_KEY]: "Highlights fixes in stationary periods using the radius, minimum duration and maximum gap below. Matches are review candidates, not confirmed errors.",
     is_outlier: "Raw boolean outlier result supplied by move2utils. It is source data, not Scrub Data review state.",
+    "algorithm-marked-outlier": "Outlier marking supplied by the data owner’s algorithm. This source column is separate from move2utils results and app review decisions.",
+    "manually-marked-outlier": "Outlier marking supplied manually by the data owner. This source column is separate from move2utils results and app review decisions.",
   };
   if (descriptions[key]) return descriptions[key];
   return `Source column ${field?.label || key || "value"}, displayed without changing its source meaning.`;
