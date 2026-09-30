@@ -306,7 +306,8 @@ def _record_preview_latency(page, record_property):
 
 
 @pytest.mark.parametrize("source_format", ["csv", "rds"])
-def test_study_switch_resets_threshold_but_retains_color_field(tmp_path, source_format):
+@pytest.mark.parametrize("starting_view", ["browse", "queue"])
+def test_study_switch_resets_threshold_but_retains_color_field(tmp_path, source_format, starting_view):
     import playwright.sync_api as playwright_api
     data_root = tmp_path / "data"
     if source_format == "rds":
@@ -334,6 +335,9 @@ def test_study_switch_resets_threshold_but_retains_color_field(tmp_path, source_
             content = CSV_BROWSER_FIXTURE
             for individual in ["alpha", "beta", "gamma"]:
                 content = content.replace(individual, prefix + individual)
+            if prefix:
+                for old, new in [("-70.", "10."), ("-71.", "11."), ("-72.", "12.")]:
+                    content = content.replace(old, new)
             (study_dir / "movement.csv").write_text(content, encoding="utf-8")
         app = create_slim_movement_app(
             data_root=data_root, static_root=STATIC_ROOT, index_path=INDEX_PATH,
@@ -358,7 +362,35 @@ def test_study_switch_resets_threshold_but_retains_color_field(tmp_path, source_
         cutoff.press("Tab")
         page.locator('input[data-action="toggle-threshold-reverse"]').check()
 
-        page.locator('[data-role="study"]').select_option("second_study")
+        if starting_view == "queue":
+            browse_view = page.evaluate("window.__movementDiagnosticsSnapshot().mapView")
+            page.locator('[data-role="individual-view-queue"]').click()
+            page.wait_for_function("() => window.__movementDiagnosticsSnapshot().trackPlayerFixCount > 0")
+            page.locator('.maplibregl-ctrl-zoom-in').click()
+            page.wait_for_function(
+                "zoom => window.__movementDiagnosticsSnapshot().mapView.zoom > zoom + 0.9",
+                arg=browse_view["zoom"],
+            )
+            queue_view = page.evaluate("window.__movementDiagnosticsSnapshot().mapView")
+            # Populate both saved views, then leave the first study in its queue.
+            page.locator('[data-role="individual-view-browse"]').click()
+            page.wait_for_function(
+                "zoom => Math.abs(window.__movementDiagnosticsSnapshot().mapView.zoom - zoom) < 1e-6",
+                arg=browse_view["zoom"],
+            )
+            page.locator('[data-role="individual-view-queue"]').click()
+            page.wait_for_function(
+                "zoom => Math.abs(window.__movementDiagnosticsSnapshot().mapView.zoom - zoom) < 1e-6",
+                arg=queue_view["zoom"],
+            )
+
+        with page.expect_response(lambda response: "/study/second_study/" in response.url
+                                  and "/overview?" in response.url) as loaded:
+            page.locator('[data-role="study"]').select_option("second_study")
+        expected_view = loaded.value.json()["initial_view"]
+        page.wait_for_function("""() => document.querySelector(
+          '[data-role="individual-view-browse"]'
+        ).classList.contains('is-active')""")
         second = page.locator(f'[data-individual-checkbox="{second_individual}"]')
         second.wait_for(state="visible", timeout=30_000)
         page.wait_for_function("() => window.__movementDiagnosticsSnapshot().mapReady")
@@ -369,6 +401,18 @@ def test_study_switch_resets_threshold_but_retains_color_field(tmp_path, source_
         assert cutoff.input_value() == ""
         assert not page.locator('input[data-action="toggle-threshold-reverse"]').is_checked()
         assert page.locator('button[data-action="check-above-threshold"]').is_disabled()
+        # The new study must not inherit either map position from the old study.
+        for view_mode in ["browse", "queue", "browse"]:
+            page.locator(f'[data-role="individual-view-{view_mode}"]').click()
+            if view_mode == "queue":
+                page.wait_for_function("() => window.__movementDiagnosticsSnapshot().trackPlayerFixCount > 0")
+            else:
+                second.wait_for(state="visible")
+            view = page.evaluate("window.__movementDiagnosticsSnapshot().mapView")
+            assert view["center"] == pytest.approx([
+                expected_view["longitude"], expected_view["latitude"],
+            ])
+            assert view["zoom"] == pytest.approx(expected_view["zoom"])
         assert not page_errors
         browser.close()
 

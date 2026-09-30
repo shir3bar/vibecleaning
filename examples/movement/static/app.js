@@ -9194,10 +9194,31 @@ class MovementExampleApp {
     const familyName = this.currentFamily;
     const studyName = this.currentStudy;
     const studyLoadId = ++this.studyLoadId;
-    // Fresh study navigation must discard the previous study's selections,
-    // including when the load response delegates its overview to loadDataset.
+    // Fresh study navigation starts in Browse all. Saved queue/browse views
+    // belong to the old study; dataset reloads retain them via viewContext.
+    // Reset here as CSV loads can delegate their overview to loadDataset.
     if (!viewContext) {
+      const queue = this.individualReviewQueue;
+      queue.mode = "browse";
+      queue.pageIndex = 0;
+      queue.groupIndex = 0;
+      queue.activeIndividual = "";
+      queue.mapScope = "solo";
+      queue.browseContext = null;
+      queue.queueMapView = null;
+      queue.filterMode = "all";
+      queue.stagedDecisions.clear();
+      queue.commentDrafts.clear();
+      queue.commentEditingIndividual = "";
+      queue.skippedIndividuals.clear();
+      this.queueIssueGroups = null;
+      this.queueIssueHighlight = null;
+      this.individualSearchQuery = "";
+      this.refs.individualSearch.value = "";
+      this.refs.individualQueueFilter.value = "all";
       this.clearLoadedStudyState();
+      this.setSideSheet("individuals", { save: false });
+      this.renderIndividuals();
     }
     this.currentDataset = null;
     this.currentArtifactEntry = null;
@@ -10087,6 +10108,7 @@ class MovementExampleApp {
     if (!this.data) {
       return;
     }
+    const data = this.data;
     if (queue.mode === nextMode) {
       if (nextMode === "queue") {
         this.setSideSheet("individuals");
@@ -10118,6 +10140,7 @@ class MovementExampleApp {
         this.applyIndividualListHeight(this.individualQueueListHeightPx, { save: false });
       }
       await this.applyIndividualQueueMapScope({ zoom: false });
+      if (this.data !== data || queue.mode !== nextMode) return;
       if (queue.queueMapView && this.map) {
         this.map.jumpTo(queue.queueMapView);
       }
@@ -10156,6 +10179,7 @@ class MovementExampleApp {
       this.renderThresholdPane();
       this.renderLayers();
       await this.loadDetailForCurrentSelection({ requireObjects: true });
+      if (this.data !== data || queue.mode !== nextMode) return;
       this.setSideSheet(queue.browseSideSheet || "individuals", { save: false });
       if (context?.mapView && this.map) {
         this.map.jumpTo(context.mapView);
@@ -10181,6 +10205,7 @@ class MovementExampleApp {
     if (!this.data || this.individualReviewQueue.mode !== "queue") {
       return;
     }
+    const data = this.data;
     const individuals = this.getIndividualQueueMapIndividuals();
     this.data.selectedIndividuals = new Set(individuals);
     this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(
@@ -10194,6 +10219,7 @@ class MovementExampleApp {
     this.renderLayers();
     this.updateActionButtons();
     await this.loadDetailForCurrentSelection({ requireObjects: true });
+    if (this.data !== data || this.individualReviewQueue.mode !== "queue") return;
     this.syncTrackPlayer();
     this.renderLayers({ temporalOnly: true });
     if (zoom) {
@@ -10205,9 +10231,11 @@ class MovementExampleApp {
     if (!["solo", "group"].includes(scope)) {
       return;
     }
+    const data = this.data;
     const preservedMapView = this.captureCurrentMapView();
     this.individualReviewQueue.mapScope = scope;
     await this.applyIndividualQueueMapScope({ zoom: false });
+    if (this.data !== data || this.individualReviewQueue.mode !== "queue") return;
     if (preservedMapView && this.map) {
       this.map.jumpTo(preservedMapView);
     }
