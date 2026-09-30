@@ -240,8 +240,15 @@ const FIX_POPUP_EDGE_PADDING_PX = 12;
 const INDIVIDUAL_COLOR_FIELD_KEY = "individual";
 const GPS_SPIKE_COLOR_FIELD_KEY = "gps_spike_step_turn";
 const STATIONARITY_COLOR_FIELD_KEY = "stationarity";
+const STATIONARITY_ALGORITHM = "anchor-radius-v4";
+const STATIONARITY_POSITIONS = Object.freeze({
+  ends: {label: "Start/end of track", issueLabel: "Stationarity (start/end)"},
+  middle: {label: "Middle of track", issueLabel: "Stationarity (middle)"},
+  anywhere: {label: "Anywhere", issueLabel: "Stationarity"},
+});
 const DEFAULT_STATIONARITY_SETTINGS = Object.freeze({
-  radius_m: 50, minimum_duration_s: 21600, maximum_gap_s: 3600,
+  algorithm: STATIONARITY_ALGORITHM,
+  radius_m: 50, minimum_duration_s: 24 * 3600, maximum_gap_s: 72 * 3600,
   minimum_fixes: 3, position: "ends",
 });
 const STATIONARITY_COLOR_FIELD = Object.freeze({
@@ -11021,12 +11028,12 @@ class MovementExampleApp {
       const pending = state.rerun?.runId === run.run_id ? state.rerun : null;
       const spec = run.filter;
       return `<div class="movement-queue-issues" data-stationarity-rerun>
-        <strong>${escapeHtml(run.issue_type)}: inputs changed</strong>
-        <span class="movement-subtle">GPS flags or exclusions changed within this individual's examined track. ${spec.radius_m} m · ${formatMaybeNumber(spec.minimum_duration_s / 3600, "h")} · maximum gap ${formatMaybeNumber(spec.maximum_gap_s / 3600, "h")}.</span>
+        <strong>${escapeHtml(run.issue_type)}: ${run.rule_changed ? "filter rule updated" : "inputs changed"}</strong>
+        <span class="movement-subtle">${run.rule_changed ? "This saved filter used an earlier stationarity rule." : "GPS flags or exclusions changed within this individual's examined track."} ${spec.radius_m} m · ${formatMaybeNumber(spec.minimum_duration_s / 3600, "h")} · maximum gap ${formatMaybeNumber(spec.maximum_gap_s / 3600, "h")}.</span>
         ${pending?.status === "ready" ? `
           <span>${formatCount(pending.result.match_count)} candidate fixes: ${formatCount(pending.result.added_count)} new flags, ${formatCount(pending.result.removed_count)} obsolete flags.</span>
           ${pending.result.reviewed_difference_count ? `<span>${formatCount(pending.result.reviewed_difference_count)} previously reviewed fixes differ. Your decisions will be kept.</span>` : ""}
-          ${run.previous_algorithm !== "anchor-radius-v3" ? '<span class="movement-subtle">Uses the updated rule: skip GPS flags and measure gaps between retained fixes.</span>' : ""}
+          ${run.previous_algorithm !== STATIONARITY_ALGORITHM ? '<span class="movement-subtle">Uses the updated rule: skip GPS flags and confirmed exclusions; any of the first or last three remaining fixes makes the whole stationary period start/end.</span>' : ""}
           <div class="movement-queue-card-actions">${button("apply", "Update flags")}${button("cancel", "Cancel")}</div>
         ` : `${pending?.status === "loading" ? '<span>Rerunning filter…</span>' : ""}
           ${pending?.error ? `<span>${escapeHtml(pending.error)}</span>` : ""}
@@ -16503,7 +16510,7 @@ class MovementExampleApp {
       const key = stationarityInput.dataset.stationaritySetting;
       const value = key === "position" ? stationarityInput.value : Number(stationarityInput.value);
       if ((key !== "position" && (!Number.isFinite(value) || value <= 0))
-          || (key === "position" && !["ends", "anywhere"].includes(value))) {
+          || (key === "position" && !Object.hasOwn(STATIONARITY_POSITIONS, value))) {
         this.setStatus("Stationarity radius, duration and gap must be positive numbers.", true);
         this.renderThresholdPane({ commitStationarityInput: true });
         return;
@@ -19085,19 +19092,18 @@ class MovementExampleApp {
     const checked = this.isCheckedThresholdSelectionActive();
     const status = !this.getSelectedIndividuals().length ? "Select individuals to colour their fixes."
       : this.stationarityPreview?.status === "error" ? this.stationarityPreview.error
-      : ready ? `${formatCount(candidateCount)} stationary candidate fixes on visible tracks.`
+      : ready ? `${formatCount(candidateCount)} stationary candidate fixes`
       : "Calculating stationarity colours…";
+    const help = `At least 3 retained fixes are required. Saved GPS-spike flags and confirmed exclusions are skipped. Maximum gap is measured between the remaining fixes. A period containing any of the individual's first or last 3 remaining fixes is start/end in its entirety; other periods are middle. Tag changes and invalid records still split periods. Middle periods may represent real behaviour. Applies to visible individuals (${formatCount(this.getSelectedIndividuals().length)}).`;
     this.refs.thresholdPane.innerHTML = `
-      <div class="movement-threshold-head"><div class="movement-threshold-title">Stationarity${movementColorFieldHelp(STATIONARITY_COLOR_FIELD)}</div></div>
-        <label class="movement-threshold-range-label"><span>Radius from first fix (m)</span><input class="movement-threshold-range-input" type="number" min="0.01" step="any" data-role="stationarity-radius" data-stationarity-setting="radius_m" value="${settings.radius_m}"></label>
-        <label class="movement-threshold-range-label"><span>Minimum duration (hours)</span><input class="movement-threshold-range-input" type="number" min="0.001" step="any" data-role="stationarity-duration" data-stationarity-setting="minimum_duration_s" value="${settings.minimum_duration_s / 3600}"></label>
-        <label class="movement-threshold-range-label"><span>Maximum gap (hours)</span><input class="movement-threshold-range-input" type="number" min="0.001" step="any" data-role="stationarity-gap" data-stationarity-setting="maximum_gap_s" value="${settings.maximum_gap_s / 3600}"></label>
-        <label class="movement-threshold-range-label"><span>Where</span><select data-role="stationarity-position" data-stationarity-setting="position"><option value="ends" ${settings.position === "ends" ? "selected" : ""}>Start/end of track</option><option value="anywhere" ${settings.position === "anywhere" ? "selected" : ""}>Anywhere</option></select></label>
+      <div class="movement-threshold-head"><div class="movement-threshold-title">Stationarity${movementColorFieldHelp(STATIONARITY_COLOR_FIELD, help)}</div></div>
+        <label class="movement-threshold-range-label" title="Maximum distance from the first retained fix in a stationary period."><span>Radius (m)</span><input class="movement-threshold-range-input" type="number" min="0.01" step="any" data-role="stationarity-radius" data-stationarity-setting="radius_m" value="${settings.radius_m}"></label>
+        <label class="movement-threshold-range-label" title="Minimum elapsed time between the first and last retained fixes in a stationary period; at least 3 fixes are required."><span>Minimum duration (h)</span><input class="movement-threshold-range-input" type="number" min="0.001" step="any" data-role="stationarity-duration" data-stationarity-setting="minimum_duration_s" value="${settings.minimum_duration_s / 3600}"></label>
+        <label class="movement-threshold-range-label" title="Maximum time between consecutive retained fixes after skipping saved GPS-spike flags and confirmed exclusions. Longer gaps split stationary periods."><span>Maximum gap (h)</span><input class="movement-threshold-range-input" type="number" min="0.001" step="any" data-role="stationarity-gap" data-stationarity-setting="maximum_gap_s" value="${settings.maximum_gap_s / 3600}"></label>
+        <label class="movement-threshold-range-label" title="Start/end: the whole stationary period contains any of the individual's first or last 3 retained fixes. Middle: all other stationary periods. Select these separately to save distinct issue labels; Anywhere includes both under one Stationarity label."><span>Where</span><select data-role="stationarity-position" data-stationarity-setting="position">${Object.entries(STATIONARITY_POSITIONS).map(([position, option]) => `<option value="${position}" ${settings.position === position ? "selected" : ""}>${option.label}</option>`).join("")}</select></label>
       <div class="movement-threshold-meta" data-role="stationarity-status" aria-live="polite">${escapeHtml(status)}</div>
-      <label class="movement-threshold-toggle"><input type="checkbox" data-action="toggle-threshold-level" data-level="True" ${highlighted ? "checked" : ""}>Highlight stationary fixes</label>
-      <div class="movement-threshold-note">At least 3 retained fixes are required. Saved GPS-spike flags and confirmed exclusions are skipped. Maximum gap is measured between the remaining fixes. Tag changes and invalid records still split periods. Stationarity is a review candidate.</div>
-      <div class="movement-threshold-note">Applies to visible individuals (${escapeHtml(formatCount(this.getSelectedIndividuals().length))}).</div>
-      <div class="movement-threshold-actions"><button type="button" data-action="check-above-threshold" ${!ready || !count || checked ? "disabled" : ""}>Select fixes</button><button type="button" data-action="clear-threshold" ${highlighted ? "" : "disabled"}>Clear selection</button></div>
+      <label class="movement-threshold-toggle" title="Highlight stationary candidates on the map without saving flags."><input type="checkbox" data-action="toggle-threshold-level" data-level="True" ${highlighted ? "checked" : ""}>Highlight stationary fixes</label>
+      <div class="movement-threshold-actions"><button type="button" data-action="check-above-threshold" title="Preview matching fixes in the checked-fix list. This does not save flags; flagging separately applies to all matching fixes for visible individuals." ${!ready || !count || checked ? "disabled" : ""}>Select fixes</button><button type="button" data-action="clear-threshold" title="Clear the stationary highlight. Saved flags are unchanged." ${highlighted ? "" : "disabled"}>Clear selection</button></div>
     `;
     this.refs.thresholdPane.classList.remove("hidden");
   }
@@ -19278,9 +19284,9 @@ class MovementExampleApp {
     const stationary = target?.thresholdFilter?.kind === "stationarity" ? target.thresholdFilter : null;
     const isGpsSpikeTarget = isFilterTarget && !stationary && field?.key === GPS_SPIKE_COLOR_FIELD_KEY;
     const issueThreshold = stationary
-      ? `radius ≤ ${stationary.radius_m} m; duration ≥ ${stationary.minimum_duration_s / 3600} h; gaps ≤ ${stationary.maximum_gap_s / 3600} h; ≥ 3 fixes; ${stationary.position === "ends" ? "track start/end" : "anywhere"}`
+      ? `radius ≤ ${stationary.radius_m} m; duration ≥ ${stationary.minimum_duration_s / 3600} h; gaps ≤ ${stationary.maximum_gap_s / 3600} h; ≥ 3 fixes; ${STATIONARITY_POSITIONS[stationary.position]?.label || stationary.position}; start/end means any of the first or last 3 retained fixes in the whole period`
       : isFilterTarget ? this.getCurrentIssueThreshold() : "";
-    const filterVariable = stationary ? "Stationarity" : isGpsSpikeTarget
+    const filterVariable = stationary ? STATIONARITY_POSITIONS[stationary.position]?.issueLabel || "Stationarity" : isGpsSpikeTarget
       ? GPS_SPIKE_COLOR_FIELD.label
       : String(field?.label || field?.key || "threshold");
     const filterDescription = isFilterTarget

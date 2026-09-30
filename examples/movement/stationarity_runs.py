@@ -94,11 +94,16 @@ def run_contexts(study_dir, annotations, *, path, rds, logical_name, individual,
         _, current_inputs = evaluate_stationarity(records, spec, upstream, calculate=False)
         changed = windows != current_inputs
         source_changed = bool(latest.get("source_id") and latest["source_id"] != source_signature)
-        rule_changed = original_spec.get("algorithm") != ALGORITHM and any(
-            window["skipped_rows"] for window in current_inputs)
+        previous_algorithm = original_spec.get("algorithm", "anchor-radius-v1")
+        rule_changed = (
+            previous_algorithm != ALGORITHM and original_spec.get("position", "ends") == "ends"
+            or previous_algorithm in {"anchor-radius-v1", "anchor-radius-v2"}
+            and any(window["skipped_rows"] for window in current_inputs)
+        )
         result.append({
             "run_id": root_id, "annotation_id": latest["annotation_id"], "individual": individual,
             "issue_type": latest.get("issue_type") or "Stationarity", "stale": changed or source_changed or rule_changed,
+            "rule_changed": rule_changed,
             "filter": spec, "previous_algorithm": original_spec.get("algorithm", "anchor-radius-v1"),
             "input_windows": windows, "current_inputs": current_inputs,
             "_records": records, "_annotations": upstream, "_family": family, "_latest": latest,
@@ -107,7 +112,7 @@ def run_contexts(study_dir, annotations, *, path, rds, logical_name, individual,
 
 
 def public_run(context):
-    return {key: context[key] for key in ("run_id", "annotation_id", "individual", "issue_type", "stale",
+    return {key: context[key] for key in ("run_id", "annotation_id", "individual", "issue_type", "stale", "rule_changed",
                                          "filter", "previous_algorithm")}
 
 

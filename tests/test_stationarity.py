@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.state import get_dataset_artifact
 from examples.movement.review_annotations import resolve_filter_row_ranges
 from examples.movement.rds_index import resolve_rds_review_scope
-from examples.movement.stationarity import stationary_fix_keys, validate_stationarity_filter
+from examples.movement.stationarity import ALGORITHM, evaluate_stationarity, stationary_fix_keys, validate_stationarity_filter
 from test_movement_fixes import create_movement_test_client
 from test_rds_movement import _client
 
@@ -44,8 +44,55 @@ def test_stationarity_distinguishes_ends_and_interior_and_uses_elapsed_time():
     points = records([0, 0, 0, .01, .02, .02, .02, .03, .04, .04, .04])
     assert stationary_fix_keys(points, SPEC) == ["1", "2", "3", "9", "10", "11"]
     assert stationary_fix_keys(points, {**SPEC, "position": "anywhere"}) == ["1", "2", "3", "5", "6", "7", "9", "10", "11"]
+    assert stationary_fix_keys(points, {**SPEC, "position": "middle"}) == ["5", "6", "7"]
     assert stationary_fix_keys(points, {**SPEC, "minimum_duration_s": 121}) == []
     assert stationary_fix_keys(records([0, 0], [0, 120]), {**SPEC, "maximum_gap_s": 120}) == []
+
+
+def test_stationarity_labels_whole_period_touching_third_retained_endpoint():
+    points = records([.1, .2, *([0] * 5), .3, .4, *([1] * 4), .5, .6, *([2] * 5), .7, .8])
+    ends = [str(i) for i in [*range(3, 8), *range(16, 21)]]
+    middle = [str(i) for i in range(10, 14)]
+    assert stationary_fix_keys(points, SPEC) == ends
+    assert stationary_fix_keys(points, {**SPEC, "position": "middle"}) == middle
+    assert set(stationary_fix_keys(points, {**SPEC, "position": "anywhere"})) == set(ends + middle)
+    # Explicit historical filters keep their original endpoint definition.
+    for algorithm in ("anchor-radius-v1", "anchor-radius-v2", "anchor-radius-v3"):
+        assert stationary_fix_keys(points, {**SPEC, "algorithm": algorithm}) == []
+
+
+def test_stationarity_period_after_third_fix_and_before_last_three_is_middle():
+    points = records([.1, .2, .3, *([0] * 6), .4, .5, .6])
+    assert stationary_fix_keys(points, SPEC) == []
+    assert stationary_fix_keys(points, {**SPEC, "position": "middle"}) == [str(i) for i in range(4, 10)]
+
+
+def test_stationarity_endpoints_follow_remaining_fixes_after_gps_and_confirmations():
+    points = records([.1, .2, .3, .4, .5, .6, *([0] * 5), .7, .8, .9])
+    for i, point in enumerate(points):
+        point.update(source_artifact="track.csv", individual="alpha", set_name="train", row_index=i + 1)
+    assert evaluate_stationarity(points, SPEC, [])[0] == []
+    gps = {"annotation_id": "gps", "status": "suspected", "issue_type": "GPS spikes",
+           "scope": {"kind": "fix", "row_ranges": [[1, 4]]}}
+    assert evaluate_stationarity(points, SPEC, [gps])[0] == [str(i) for i in range(7, 12)]
+    assert evaluate_stationarity(points, {**SPEC, "position": "middle"}, [gps])[0] == []
+    assert evaluate_stationarity(points, SPEC, [{**gps, "status": "confirmed", "issue_type": "Other"}])[0] == [str(i) for i in range(7, 12)]
+    # A dismissed GPS flag brings the original first fixes back into the count.
+    dismissed = {**gps, "annotation_id": "dismissal", "parent_annotation_id": "gps", "status": "dismissed"}
+    assert evaluate_stationarity(points, SPEC, [gps, dismissed])[0] == []
+
+
+def test_stationarity_endpoints_belong_to_individual_not_each_set():
+    points = records([.1, .2, .3, *([0] * 4), .4, .5, .6])
+    for i, point in enumerate(points):
+        point.update(source_artifact="track.csv", individual="alpha", row_index=i + 1,
+                     set_name="test" if 3 <= i < 7 else "train")
+    assert evaluate_stationarity(points, SPEC, [])[0] == []
+    assert evaluate_stationarity(points, {**SPEC, "position": "middle"}, [])[0] == ["4", "5", "6", "7"]
+    # Endpoint changes in another set must invalidate the cached classification.
+    gps = {"annotation_id": "gps", "status": "suspected", "issue_type": "GPS spikes",
+           "scope": {"kind": "fix", "row_ranges": [[1, 1]]}}
+    assert evaluate_stationarity(points, SPEC, [gps])[0] == ["4", "5", "6", "7"]
 
 
 @pytest.mark.parametrize("barrier", ["gap", "duplicate", "segment", "excluded"])
@@ -73,7 +120,7 @@ def test_stationarity_gap_setting_crosses_short_source_bursts_but_preserves_v1()
     assert stationary_fix_keys(points, spec) == [str(i) for i in range(1, 8)]
     assert stationary_fix_keys(points, {**spec, "maximum_gap_s": 23 * 3600}) == []
     assert stationary_fix_keys(points, {**spec, "algorithm": "anchor-radius-v1"}) == []
-    assert validate_stationarity_filter(spec)["algorithm"] == "anchor-radius-v3"
+    assert validate_stationarity_filter(spec)["algorithm"] == ALGORITHM
     assert validate_stationarity_filter({**spec, "algorithm": "anchor-radius-v1"})["algorithm"] == "anchor-radius-v1"
 
 
@@ -101,9 +148,9 @@ def test_stationarity_bounds_total_extent_not_just_short_steps():
 
 
 def test_gap_edges_are_not_track_ends():
-    points = records([.01, 0, 0, 0, .02], [0, 600, 660, 720, 1300])
+    points = records([.01, .02, .03, 0, 0, 0, .04, .05, .06], [0, 60, 120, 600, 660, 720, 1300, 1360, 1420])
     assert stationary_fix_keys(points, SPEC) == []
-    assert stationary_fix_keys(points, {**SPEC, "position": "anywhere"}) == ["2", "3", "4"]
+    assert stationary_fix_keys(points, {**SPEC, "position": "anywhere"}) == ["4", "5", "6"]
 
 
 def test_csv_filter_tracks_source_rows_scopes_exclusions_and_unsorted_input(tmp_path):
@@ -118,7 +165,7 @@ def test_csv_filter_tracks_source_rows_scopes_exclusions_and_unsorted_input(tmp_
     assert resolve_filter_row_ranges(path, SPEC, confirmed_individual_tracks={("alpha", "train")}) == ([], 0)
 
 
-@pytest.mark.parametrize("key,value", [("radius_m", 0), ("maximum_gap_s", True), ("minimum_duration_s", float("nan")), ("minimum_fixes", 2), ("position", "middle"), ("algorithm", "future")])
+@pytest.mark.parametrize("key,value", [("radius_m", 0), ("maximum_gap_s", True), ("minimum_duration_s", float("nan")), ("minimum_fixes", 2), ("position", "nowhere"), ("algorithm", "future")])
 def test_stationarity_rejects_invalid_settings(key, value):
     with pytest.raises(ValueError, match="[Ss]tationarity"):
         validate_stationarity_filter({**SPEC, key: value})
@@ -146,7 +193,7 @@ def test_csv_preview_and_saved_decision_agree_and_preserve_raw_data(tmp_path):
     _, sidecar = get_dataset_artifact(study, saved["dataset"]["dataset_id"], "movement_review_annotations.json")
     annotation = json.loads(sidecar.read_text(encoding="utf-8"))["annotations"][0]
     assert annotation["scope"]["row_ranges"] == scope["row_ranges"]
-    assert annotation["scope"]["filter"]["algorithm"] == "anchor-radius-v3"
+    assert annotation["scope"]["filter"]["algorithm"] == ALGORITHM
     assert len(annotation["scope"]["filter"]["implementation_sha256"]) == 64
     assert annotation["status"] == "suspected"
     assert (study / "movement.csv").read_text(encoding="utf-8") == content
@@ -316,7 +363,8 @@ def test_stationarity_color_column_settings_scope_and_save(tmp_path, source_form
         page.screenshot(path=tmp_path / "stationarity.png")
         page.locator('[data-role="mark-suspected"]').click()
         page.locator('[data-role="issue-modal"]').wait_for(state="visible", timeout=30_000)
-        assert page.locator('[data-role="issue-type"]').input_value() == "Filter Stationarity"
+        expected_label = "Filter Stationarity" if source_format == "car_talk" else "Filter Stationarity (start/end)"
+        assert page.locator('[data-role="issue-type"]').input_value() == expected_label
         assert f"Exact fixes to flag: {expected_flag_count}" in page.locator('[data-role="issue-meta"]').text_content().replace(",", "")
         with page.expect_response(lambda response: response.url.endswith("/actions/annotate-scope"), timeout=30_000) as saved:
             page.locator('[data-role="issue-submit"]').click()
@@ -325,12 +373,41 @@ def test_stationarity_color_column_settings_scope_and_save(tmp_path, source_form
         assert payload["step"]["summary"]["resolved_fix_count"] == expected_flag_count
         saved_filter = payload["step"]["parameters"]["scope"]["filter"]
         assert saved_filter["kind"] == "stationarity"
-        assert saved_filter["algorithm"] == "anchor-radius-v3"
+        assert saved_filter["algorithm"] == ALGORITHM
+        assert saved_filter["endpoint_rule"] == "any-first-or-last-3-retained-fixes-per-individual"
         assert saved_filter["individuals"] == (["alpha", "beta"] if select_all else [individual])
         assert saved_filter["radius_m"] == float(radius)
         assert saved_filter["minimum_duration_s"] == pytest.approx(float(duration) * 3600)
         assert saved_filter["maximum_gap_s"] == pytest.approx(float(gap) * 3600)
         page.locator('[data-role="issue-modal"]').wait_for(state="hidden", timeout=30_000)
+        if source_format != "car_talk":
+            # Save middle periods separately; suspected end flags must remain
+            # independent, with their own label and original source-row scope.
+            page.wait_for_function("document.querySelector('[data-role=dataset]').value === "
+                                   + json.dumps(payload["dataset"]["dataset_id"]))
+            page.locator('[data-role="stationarity-position"]').select_option("middle")
+            middle_count = 0 if is_rds else 3 * (2 if select_all else 1)
+            wait_for_matches(middle_count)
+            page.locator('[data-role="mark-suspected"]').click()
+            page.locator('[data-role="issue-modal"]').wait_for(state="visible")
+            assert page.locator('[data-role="issue-type"]').input_value() == "Filter Stationarity (middle)"
+            with page.expect_response(lambda response: response.url.endswith("/actions/annotate-scope")) as middle_saved:
+                page.locator('[data-role="issue-submit"]').click()
+            assert middle_saved.value.status == 200, middle_saved.value.text()
+            middle_payload = middle_saved.value.json()
+            assert middle_payload["step"]["summary"]["resolved_fix_count"] == middle_count
+            assert middle_payload["step"]["parameters"]["scope"]["filter"]["position"] == "middle"
+            _, sidecar = get_dataset_artifact(study, middle_payload["dataset"]["dataset_id"],
+                                             "movement_review_annotations.json")
+            annotations = json.loads(sidecar.read_text(encoding="utf-8"))["annotations"]
+            assert [item["issue_type"] for item in annotations] == [
+                "Filter Stationarity (start/end)", "Filter Stationarity (middle)"]
+            if not is_rds:
+                assert annotations[0]["scope"]["row_ranges"] == (
+                    [[1, 3], [9, 14], [20, 22]] if select_all else [[1, 3], [9, 11]])
+                assert annotations[1]["scope"]["row_ranges"] == (
+                    [[5, 7], [16, 18]] if select_all else [[5, 7]])
+            page.locator('[data-role="issue-modal"]').wait_for(state="hidden", timeout=30_000)
         assert not errors, errors
         browser.close()
 

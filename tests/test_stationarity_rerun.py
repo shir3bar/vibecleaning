@@ -6,7 +6,7 @@ import pytest
 
 from app.state import get_dataset_artifact, load_project_state
 from examples.movement.review_annotations import load_review_annotations
-from examples.movement.stationarity import stationary_fix_keys, stationarity_skips
+from examples.movement.stationarity import ALGORITHM, stationary_fix_keys, stationarity_skips
 from test_stationarity import SPEC, records
 from test_movement_fixes import create_movement_test_client
 from test_movement_issue_groups import CSV, post_review
@@ -64,9 +64,9 @@ def test_unchanged_inputs_reuse_distance_scan_and_input_checks_do_not_scan(monke
     calls = []
     original = stationarity.stationary_fix_keys
 
-    def counted(track, spec):
+    def counted(track, spec, **kwargs):
         calls.append(len(track))
-        return original(track, spec)
+        return original(track, spec, **kwargs)
 
     monkeypatch.setattr(stationarity, "stationary_fix_keys", counted)
     spec = {**SPEC, "maximum_gap_s": 120}
@@ -250,7 +250,22 @@ def test_saved_legacy_run_is_not_rewritten_and_explicit_rerun_records_new_rule(s
     assert run["stale"] and run["previous_algorithm"] == "anchor-radius-v2"
     assert s.apply()["removed_count"] == 1
     assert path.read_bytes() == original
-    assert s.groups()["stationarity_runs"][0]["previous_algorithm"] == "anchor-radius-v3"
+    assert s.groups()["stationarity_runs"][0]["previous_algorithm"] == ALGORITHM
+
+
+def test_saved_v3_end_filter_requires_explicit_rerun_for_endpoint_rule(study):
+    s = study
+    s.save_run(algorithm="anchor-radius-v3", position="ends", individuals=[s.individuals[0]])
+    _, sidecar = get_dataset_artifact(s.study, s.dataset, "movement_review_annotations.json")
+    original = sidecar.read_bytes()
+    run = s.groups()["stationarity_runs"][0]
+    assert run["stale"] and run["rule_changed"]
+    assert run["previous_algorithm"] == "anchor-radius-v3"
+    assert run["filter"]["algorithm"] == ALGORITHM
+    assert sidecar.read_bytes() == original
+    s.apply()
+    assert sidecar.read_bytes() == original
+    assert not s.groups()["stationarity_runs"][0]["rule_changed"]
 
 
 def test_rerun_apply_rejects_stale_head_and_keeps_current_history(study):

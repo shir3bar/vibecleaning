@@ -88,6 +88,28 @@ def test_preview_working_memory_is_bounded_for_many_tracks(tmp_path):
     assert peak < 20 * 1024 * 1024, f"Stationarity allocated {peak / 1024**2:.1f} MiB"
 
 
+def test_rds_middle_and_end_periods_partition_whole_runs_per_individual(tmp_path):
+    longitudes = [.1, .2, *([0] * 5), .3, .4, *([1] * 4), .5, .6, *([2] * 5), .7, .8]
+    index = make_index(tmp_path / "periods.sqlite", individuals=2, points=len(longitudes),
+                       sources=1, interleaved=False)
+    with closing(sqlite3.connect(index)) as db:
+        db.execute("UPDATE fixes SET source_outlier_status=''")
+        for individual in range(2):
+            db.executemany("UPDATE fixes SET lon=? WHERE source_row=?", [
+                (lon, individual * len(longitudes) + i + 1) for i, lon in enumerate(longitudes)])
+        db.commit()
+    expected = {"ends": [*range(3, 8), *range(16, 21)], "middle": list(range(10, 14))}
+    for position, rows in expected.items():
+        for individual in range(2):
+            scope, count = rds_index.resolve_rds_review_scope(index, {"kind": "filter", "filter": {
+                **SPEC, "position": position, "individuals": [f"animal-{individual}"],
+            }})
+            assert count == len(rows)
+            assert scope["source_rows"] == [{"logical_name": "source-0.rds", "row_ranges":
+                stationarity.compressed_rows(row + individual * len(longitudes) for row in rows)}]
+            assert scope["filter"]["position"] == position
+
+
 def test_failed_scan_releases_connection_and_next_preview_can_run(tmp_path, monkeypatch):
     index = make_index(tmp_path / "tracks.sqlite")
     evaluate = rds_index.evaluate_stationarity

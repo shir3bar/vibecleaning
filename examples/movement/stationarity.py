@@ -4,14 +4,16 @@ from hashlib import sha256
 from math import isfinite
 from bisect import bisect_left, bisect_right
 from collections import defaultdict, OrderedDict
+from heapq import nsmallest, nlargest
 import json
 from threading import Lock
 
 from .movement_features import geodesic_distance_meters
 
 
-ALGORITHM = "anchor-radius-v3"
-SUPPORTED_ALGORITHMS = {"anchor-radius-v1", "anchor-radius-v2", ALGORITHM}
+ALGORITHM = "anchor-radius-v4"
+SUPPORTED_ALGORITHMS = {"anchor-radius-v1", "anchor-radius-v2", "anchor-radius-v3", ALGORITHM}
+SKIP_GPS_ALGORITHMS = {"anchor-radius-v3", ALGORITHM}
 _SCAN_CACHE = OrderedDict()
 _SCAN_CACHE_LOCK = Lock()
 _SCAN_CACHE_MAX_FIXES = 250_000
@@ -115,7 +117,8 @@ def stationarity_inputs(records: list[dict], skipped: set[int]) -> list[dict]:
 
 
 def evaluate_stationarity(records: list[dict], spec: dict, annotations: list[dict], *, calculate=True):
-    skipped = stationarity_skips(records, annotations, skip_gps=spec.get("algorithm", ALGORITHM) == ALGORITHM)
+    algorithm = spec.get("algorithm", ALGORITHM)
+    skipped = stationarity_skips(records, annotations, skip_gps=algorithm in SKIP_GPS_ALGORITHMS)
     inputs = stationarity_inputs(records, skipped)
     if not calculate:
         return [], inputs
@@ -123,14 +126,31 @@ def evaluate_stationarity(records: list[dict], spec: dict, annotations: list[dic
     for i, record in enumerate(records):
         tracks[(record["source_artifact"], record["individual"], record["set_name"])].append(
             {**record, "excluded": i in skipped or record.get("invalid", False)})
+    endpoint_keys = {}
+    if algorithm == ALGORITHM:
+        # Start/end belongs to the individual's whole retained track, not each
+        # train/test set or each internal gap, burst or tag segment.
+        individuals = defaultdict(list)
+        for (_, individual, _), track in tracks.items():
+            individuals[individual].extend(track)
+        endpoint_keys = {individual: _endpoint_fix_keys(track)
+                         for individual, track in individuals.items()}
     matches = []
-    for track in tracks.values():
+    for (_, individual, _), track in tracks.items():
         track.sort(key=lambda item: (item["time_ms"], item["row_index"]))
-        matches.extend(_cached_scan(track, spec))
+        matches.extend(_cached_scan(track, spec, endpoint_keys.get(individual)))
     return matches, inputs
 
 
-def _cached_scan(records, spec):
+def _endpoint_fix_keys(records):
+    retained = [record for record in records
+                if not record.get("excluded") and not record.get("invalid")]
+    order = lambda record: (record["time_ms"], record.get("row_index", 0), record["fix_key"])
+    return frozenset(record["fix_key"] for record in (
+        nsmallest(3, retained, key=order) + nlargest(3, retained, key=order)))
+
+
+def _cached_scan(records, spec, endpoint_keys=None):
     # A new dataset or a confirmation of an already-skipped GPS flag does not
     # require another distance scan. Cache by actual track inputs and settings,
     # separately per individual/source/set, keeping only bounded result lists.
@@ -139,13 +159,13 @@ def _cached_scan(records, spec):
     points = [[record.get(key) for key in (
         "fix_key", "time_ms", "lon", "lat", "burst", "segment", "excluded", "invalid")]
         for record in records]
-    signature = sha256(json.dumps([criteria, points], separators=(",", ":")).encode()).digest()
+    signature = sha256(json.dumps([criteria, points, sorted(endpoint_keys or [])], separators=(",", ":")).encode()).digest()
     with _SCAN_CACHE_LOCK:
         cached = _SCAN_CACHE.get(signature)
         if cached is not None:
             _SCAN_CACHE.move_to_end(signature)
             return cached
-    result = tuple(stationary_fix_keys(records, spec))
+    result = tuple(stationary_fix_keys(records, spec, endpoint_keys=endpoint_keys))
     if len(result) <= _SCAN_CACHE_MAX_FIXES:
         with _SCAN_CACHE_LOCK:
             _SCAN_CACHE[signature] = result
@@ -172,33 +192,42 @@ def validate_stationarity_filter(value: dict) -> dict:
     if isinstance(points, bool) or not isinstance(points, int) or points < 3:
         raise ValueError("Stationarity requires at least 3 fixes")
     position = value.get("position", "ends")
-    if position not in {"ends", "anywhere"}:
-        raise ValueError("Stationarity position must be ends or anywhere")
+    if position not in {"ends", "middle", "anywhere"}:
+        raise ValueError("Stationarity position must be ends, middle or anywhere")
+    if position == "middle" and algorithm != ALGORITHM:
+        raise ValueError("Stationarity middle selection requires anchor-radius-v4")
     result.update(
         minimum_fixes=points,
         position=position,
         implementation_sha256=sha256(__loader__.get_source(__name__).encode("utf-8")).hexdigest(),
     )
-    if algorithm == ALGORITHM:
+    if algorithm in SKIP_GPS_ALGORITHMS:
         result["skip_policy"] = "confirmed-and-saved-gps-spikes"
+    if algorithm == ALGORITHM:
+        result["endpoint_rule"] = "any-first-or-last-3-retained-fixes-per-individual"
     return result
 
 
-def stationary_fix_keys(records: list[dict], spec: dict) -> list[str]:
+def stationary_fix_keys(records: list[dict], spec: dict, *, endpoint_keys=None) -> list[str]:
     """Scan one individual/source/track set in chronological order.
 
     Each non-overlapping run has a fixed centre: its first fix. A fix outside
     that radius starts the next run. This bounds spatial extent even under
     slow drift; it is deliberately not an exhaustive search over all possible
-    centres. V3 skips excluded fixes and measures gaps between retained fixes.
+    centres. V3/V4 skip excluded fixes and measure gaps between retained fixes.
     Invalid rows, non-increasing times and tag/time-fragment changes still break
     runs. Explicit v1/v2 filters retain their original exclusion rules.
-    Ends means the first/last retained record of this track, not the edges of
-    internal gaps or bursts. No coordinates are changed.
+    V4 classifies the whole run as start/end if it contains any of the first or
+    last three retained fixes of the individual; all other runs are middle.
+    Earlier algorithms retain their original first/last-record rule.
+    No coordinates are changed.
     """
     if not records:
         return []
-    if spec.get("algorithm", ALGORITHM) == ALGORITHM:
+    algorithm = spec.get("algorithm", ALGORITHM)
+    if algorithm == ALGORITHM and endpoint_keys is None:
+        endpoint_keys = _endpoint_fix_keys(records)
+    if algorithm in SKIP_GPS_ALGORITHMS:
         retained = []
         previous = None
         for record in records:
@@ -223,7 +252,12 @@ def stationary_fix_keys(records: list[dict], spec: dict) -> list[str]:
             return
         if run[-1]["time_ms"] - run[0]["time_ms"] < spec["minimum_duration_s"] * 1000:
             return
-        if spec["position"] == "ends" and run_start != 0 and end != len(records):
+        if algorithm == ALGORITHM:
+            at_end = any(item["fix_key"] in endpoint_keys for item in run)
+            if (spec["position"] == "ends" and not at_end
+                    or spec["position"] == "middle" and at_end):
+                return
+        elif spec["position"] == "ends" and run_start != 0 and end != len(records):
             return
         matched.extend(item["fix_key"] for item in run)
 
