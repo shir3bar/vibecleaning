@@ -191,12 +191,20 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         assert "Unflag dismisses this issue" in active.locator(f'{spike}[data-queue-issue-action="unflag"]').get_attribute("title")
         bursts = active.locator('[data-queue-bursts]')
         assert not bursts.evaluate("element => element.open")
-        bursts.locator('summary').click()
-        bursts.locator('[data-queue-burst-visible]').first.wait_for(state="visible")
         page.wait_for_function("""() => (window.__testMapLayers || []).some(layer =>
           layer.id.startsWith('movement-binary-points-') && layer.props.visible)
         """, timeout=30_000)
+        bursts.locator('summary').click()
+        bursts.locator('[data-queue-burst-visible]').first.wait_for(state="visible")
+        show_flagged = page.locator('[data-role="show-flagged"]')
+        assert show_flagged.is_checked()
+        assert page.locator('[data-role="hide-suspected"], [data-role="show-confirmed"]').count() == 0
+        show_flagged.uncheck()
+        page.wait_for_function("""() => !(window.__testMapLayers || []).some(layer =>
+          layer.id.startsWith('movement-binary-suspected-') || layer.id === 'movement-suspected-outline')
+        """)
         highlight.click()
+        assert show_flagged.is_checked()
         _wait_for_layer(page, "movement-queue-issue-highlight")
         assert highlight.get_attribute("aria-pressed") == "true"
         # Re-rendering the card must leave an explicitly opened menu open.
@@ -224,7 +232,11 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         }""")
         # Switching issue types shows the exact new group, including overlaps.
         stationary_highlight = active.locator(f'{stationary}[data-queue-issue-action="highlight"]')
+        show_flagged.uncheck()
+        page.wait_for_function("""() => !window.__testMapLayers.some(layer =>
+          layer.id === 'movement-queue-issue-highlight')""")
         stationary_highlight.click()
+        assert show_flagged.is_checked()
         assert highlight.get_attribute("aria-pressed") == "false"
         assert page.evaluate("() => window.__testMapLayers.at(-2).props.data.length") == 3
         first_stationary_row = int(alpha[3].rsplit(":", 1)[1])
@@ -235,6 +247,13 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
             && marker.props.data[0].sourceRow === row
             && marker.props.data[0].timeMs === state.trackPlayerTimeMs;
         }""", arg=first_stationary_row)
+        # Hiding a highlighted group and clicking it again must reveal it,
+        # rather than toggle the active group off or leave the checkbox off.
+        show_flagged.uncheck()
+        stationary_highlight.click()
+        assert show_flagged.is_checked()
+        _wait_for_layer(page, "movement-queue-issue-highlight")
+        assert stationary_highlight.get_attribute("aria-pressed") == "true"
         stationary_highlight.click()
         assert page.evaluate("window.__movementDiagnosticsSnapshot().trackPlayerSourceRow") == first_stationary_row
         assert page.evaluate("""() => {
@@ -325,6 +344,24 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         assert_retained_track(1)
         assert "1 flagged" in active.locator('.movement-queue-card-meta').inner_text()
         assert "5 confirmed" in active.locator('.movement-queue-card-meta').inner_text()
+        # The same positive checkbox controls both review statuses, without
+        # changing the saved decisions, playback position or retained map data.
+        page.wait_for_function("""() => window.__testMapLayers.some(layer =>
+          layer.id.startsWith('movement-binary-confirmed-') || layer.id === 'movement-confirmed-exclusions')""")
+        show_flagged.uncheck()
+        page.wait_for_function("""() => !window.__testMapLayers.some(layer =>
+          layer.id.startsWith('movement-binary-confirmed-')
+          || layer.id === 'movement-confirmed-exclusions'
+          || layer.id.startsWith('movement-binary-suspected-')
+          || layer.id === 'movement-suspected-outline'
+          || layer.id === 'movement-queue-issue-highlight')""")
+        assert "1 flagged" in active.locator('.movement-queue-card-meta').inner_text()
+        assert "5 confirmed" in active.locator('.movement-queue-card-meta').inner_text()
+        show_flagged.check()
+        page.wait_for_function("""() => window.__testMapLayers.some(layer =>
+          layer.id.startsWith('movement-binary-confirmed-') || layer.id === 'movement-confirmed-exclusions')""")
+        _wait_for_layer(page, "movement-binary-suspected")
+        assert_retained_track(1)
         with page.expect_response(lambda response: response.url.endswith("/actions/dismiss-issues")) as dismissed:
             stationary_button.click()
         assert dismissed.value.status == 200, dismissed.value.text()

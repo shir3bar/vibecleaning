@@ -1727,7 +1727,9 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_prop
             page.locator('[data-role="individual-view-queue"]').click()
             queue_outlier = page.locator('[data-queue-individual="MF006"]')
             queue_outlier.wait_for(state="visible", timeout=20_000)
-            queue_outlier.click()
+            # Target the individual name; the expanded card's center can be a
+            # review-decision button, which would leave an unintended draft.
+            queue_outlier.locator('.movement-title').click()
             page.wait_for_function(
                 "() => document.querySelector('[data-queue-individual=\"MF006\"]')?.classList.contains('queue-active')",
                 timeout=20_000,
@@ -1752,8 +1754,8 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_prop
             )
 
             page.evaluate("window.__suspiciousMapNode = document.querySelector('[data-role=map]')")
-            hide_suspicious = page.locator('[data-role="hide-suspected"]')
-            hide_suspicious.check()
+            show_flagged = page.locator('[data-role="show-flagged"]')
+            show_flagged.uncheck()
             page.wait_for_function(
                 "() => !window.__movementDiagnostics.renderedLayerIds.some(id => id.includes('movement-binary-suspected'))"
             )
@@ -1761,7 +1763,7 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_prop
             assert page.evaluate(
                 "window.__suspiciousMapNode === document.querySelector('[data-role=map]')"
             )
-            hide_suspicious.uncheck()
+            show_flagged.check()
             _wait_for_layer(page, "movement-binary-suspected")
             assert len(binary_requests) == requests_before_flag
 
@@ -1777,6 +1779,8 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_prop
             unflag_button.click()
             page.locator('[data-role="dismiss-modal"]').wait_for(state="visible")
             page.locator('[data-role="dismiss-submit"]').click()
+            dismissal_error = page.locator('[data-role="dismiss-status"].error')
+            assert not dismissal_error.count(), dismissal_error.text_content()
             page.locator('[data-role="dismiss-modal"]').wait_for(
                 state="hidden", timeout=20_000
             )

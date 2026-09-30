@@ -807,8 +807,7 @@ class MovementExampleApp {
         showTest: true,
         showPoints: true,
         showBursts: true,
-        showConfirmed: true,
-        hideSuspected: false,
+        showFlagged: true,
         burstGapMode: DEFAULT_BURST_GAP_MODE,
         burstGapSeconds: DEFAULT_BURST_GAP_SECONDS,
         burstGapQuantile: DEFAULT_BURST_GAP_QUANTILE,
@@ -846,8 +845,7 @@ class MovementExampleApp {
       showTest: this.refs.showTest.checked,
       showPoints: this.refs.showPoints.checked,
       showBursts: this.refs.showBursts.checked,
-      showConfirmed: this.refs.showConfirmed.checked,
-      hideSuspected: this.refs.hideSuspected.checked,
+      showFlagged: this.refs.showFlagged.checked,
       burstGapMode: this.getBurstGapMode(),
       burstGapSeconds: this.getBurstGapSeconds(),
       burstGapQuantile: this.getBurstGapQuantile(),
@@ -3866,8 +3864,7 @@ class MovementExampleApp {
           <label class="movement-toggle" data-role="show-test-control"><input type="checkbox" data-role="show-test"> Test</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-points"> Points</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-bursts"> Bursts</label>
-          <label class="movement-toggle"><input type="checkbox" data-role="show-confirmed"> Confirmed exclusions</label>
-          <label class="movement-toggle"><input type="checkbox" data-role="hide-suspected"> Hide suspicious fixes</label>
+          <label class="movement-toggle" title="Show suspicious fixes and confirmed exclusions on the map. This only changes visibility; saved review decisions stay unchanged."><input type="checkbox" data-role="show-flagged"> Show flagged fixes</label>
           <label data-role="burst-definition-control">Burst definition
             <select data-role="burst-gap-mode">
               <option value="quantile">Gap quantile</option>
@@ -4387,8 +4384,7 @@ class MovementExampleApp {
       showTestControl: this.mountEl.querySelector('[data-role="show-test-control"]'),
       showPoints: this.mountEl.querySelector('[data-role="show-points"]'),
       showBursts: this.mountEl.querySelector('[data-role="show-bursts"]'),
-      showConfirmed: this.mountEl.querySelector('[data-role="show-confirmed"]'),
-      hideSuspected: this.mountEl.querySelector('[data-role="hide-suspected"]'),
+      showFlagged: this.mountEl.querySelector('[data-role="show-flagged"]'),
       burstGapMode: this.mountEl.querySelector('[data-role="burst-gap-mode"]'),
       burstDefinitionControl: this.mountEl.querySelector('[data-role="burst-definition-control"]'),
       burstGapQuantileControl: this.mountEl.querySelector('[data-role="burst-gap-quantile-control"]'),
@@ -4607,8 +4603,8 @@ class MovementExampleApp {
     this.refs.showTest.checked = MOVEMENT_APP_CONFIG.mode === "slim_movement" || this.uiState.showTest !== false;
     this.refs.showPoints.checked = this.uiState.showPoints !== false;
     this.refs.showBursts.checked = this.uiState.showBursts !== false;
-    this.refs.showConfirmed.checked = this.uiState.showConfirmed !== false;
-    this.refs.hideSuspected.checked = this.uiState.hideSuspected === true;
+    this.refs.showFlagged.checked = this.uiState.showFlagged
+      ?? (this.uiState.showConfirmed !== false && this.uiState.hideSuspected !== true);
     this.refs.burstGapMode.value = ["manual", "quantile"].includes(this.uiState.burstGapMode)
       ? this.uiState.burstGapMode
       : DEFAULT_BURST_GAP_MODE;
@@ -4947,18 +4943,7 @@ class MovementExampleApp {
       this.renderLayers();
       this.renderTableSheet();
     });
-    this.refs.showConfirmed.addEventListener("change", () => {
-      this.saveUiState();
-      this.renderLayers();
-      if (this.refs.showConfirmed.checked && this.data?.confirmedState === "idle") {
-        void this.loadConfirmedFixes();
-      }
-    });
-    this.refs.hideSuspected.addEventListener("change", () => {
-      this.saveUiState();
-      this.renderLegend();
-      this.renderLayers();
-    });
+    this.refs.showFlagged.addEventListener("change", () => this.handleFlaggedVisibilityChange());
     this.refs.burstGapMode.addEventListener("change", () => this.handleBurstGapSettingsChange());
     this.refs.burstGapSeconds.addEventListener("change", () => this.handleBurstGapSettingsChange());
     this.refs.burstGapQuantile.addEventListener("change", () => this.handleBurstGapSettingsChange());
@@ -8176,6 +8161,15 @@ class MovementExampleApp {
     await this.loadDetailForCurrentSelection({ preservedFixKeys: nextSelected });
   }
 
+  handleFlaggedVisibilityChange() {
+    this.saveUiState();
+    this.renderLegend();
+    this.renderLayers();
+    if (this.refs.showFlagged.checked && ["idle", "error"].includes(this.data?.confirmedState)) {
+      void this.loadConfirmedFixes();
+    }
+  }
+
   handleVisibilityChange() {
     this.clearThresholdState();
     this.saveUiState();
@@ -9315,7 +9309,7 @@ class MovementExampleApp {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
       }
       void this.loadDetailForCurrentSelection({ preservedFixKeys });
-      if (this.refs.showConfirmed.checked) {
+      if (this.refs.showFlagged.checked) {
         void this.loadConfirmedFixes();
       }
       void this.loadSuspiciousFixes({ focus: false });
@@ -9508,7 +9502,7 @@ class MovementExampleApp {
         this.setStatus(`Loaded overview for ${formatCount(this.data.totalRows)} fixes across ${formatCount(this.data.individuals.length)} individuals from ${this.currentArtifact}. Select individuals to load fixes on demand.`);
       }
       void this.loadDetailForCurrentSelection({ preservedFixKeys });
-      if (this.refs.showConfirmed.checked) {
+      if (this.refs.showFlagged.checked) {
         void this.loadConfirmedFixes();
       }
       void this.loadSuspiciousFixes({ focus: false });
@@ -11068,14 +11062,16 @@ class MovementExampleApp {
     if (individual !== this.individualReviewQueue.activeIndividual || state?.key !== key || state.status !== "ready") return;
     const group = state.groups.find(item => item.issue_type === issueType);
     if (!group) return;
-    if (this.queueIssueHighlight?.key === key && this.queueIssueHighlight.issueType === issueType) {
+    if (this.refs.showFlagged.checked
+        && this.queueIssueHighlight?.key === key && this.queueIssueHighlight.issueType === issueType) {
       this.queueIssueHighlight = null;
     } else {
       const keys = new Set(group.fix_keys);
       this.queueIssueHighlight = {key, issueType, fixes: state.fixes.filter(fix => keys.has(fix.fixKey))};
     }
+    this.refs.showFlagged.checked = true;
     this.renderIndividuals();
-    this.renderLayers();
+    this.handleFlaggedVisibilityChange();
     if (this.queueIssueHighlight) {
       const firstFix = this.queueIssueHighlight.fixes.reduce((first, fix) => (
         !first || fix.timeMs < first.timeMs ? fix : first
@@ -12382,7 +12378,7 @@ class MovementExampleApp {
     const suspiciousCount = Number(this.data.suspiciousMatchingFixCount)
       || (this.data.fixes || []).filter(fix => fix.review?.status === "suspected").length;
     const suspiciousKey = suspiciousCount
-      ? `<div class="movement-legend-review-key"><span class="movement-legend-suspicious-ring"></span><span>${this.refs.hideSuspected.checked ? "Suspicious fixes hidden" : "Amber outline = saved suspicious fix"}</span></div>`
+      ? `<div class="movement-legend-review-key"><span class="movement-legend-suspicious-ring"></span><span>${!this.refs.showFlagged.checked ? "Suspicious fixes hidden" : "Amber outline = saved suspicious fix"}</span></div>`
       : "";
     legendEl.innerHTML = `${header}${body}${suspiciousKey}${sourceFlagNote}`;
     legendEl.classList.remove("hidden");
@@ -13081,7 +13077,7 @@ class MovementExampleApp {
         ), candidates[0]);
         for (let index = Math.max(start, focalIndex - 1); index <= Math.min(end - 1, focalIndex + 1); index += 1) {
           const reviewStatus = Number(binary.arrays.review_status[index]);
-          if (reviewStatus === 2 || (reviewStatus === 1 && this.refs.hideSuspected.checked)) continue;
+          if (reviewStatus === 2 || (reviewStatus === 1 && !this.refs.showFlagged.checked)) continue;
           const burstId = this.binaryBurstIdAt(binary, index, individual);
           if (this.hiddenBurstIds.has(burstId)) continue;
           const fix = this.binaryFixAt(index, { remember: false, binary });
@@ -13113,7 +13109,7 @@ class MovementExampleApp {
       const endIndex = Math.min(fixes.length - 1, focusIndex + 1);
       for (let index = startIndex; index <= endIndex; index += 1) {
         const fix = fixes[index];
-        if (this.refs.hideSuspected.checked && fix.review?.status === "suspected") continue;
+        if (!this.refs.showFlagged.checked && fix.review?.status === "suspected") continue;
         points.push({
           fixKey: fix.fixKey,
           individual: fix.individual,
@@ -13656,7 +13652,7 @@ class MovementExampleApp {
     const manualFlagIndividual = this.flagTargetKind === "individual"
       ? String(this.manualFlagTarget.individual || "")
       : "";
-    const hideSuspected = this.refs.hideSuspected.checked;
+    const hideSuspected = !this.refs.showFlagged.checked;
     const temporalContext = this.temporalSliderEngaged;
     const mutedSuspicious = this.getCurrentColorField()?.key !== INDIVIDUAL_COLOR_FIELD_KEY;
     const checkedThresholdSelection = this.isCheckedThresholdSelectionActive();
@@ -13788,7 +13784,7 @@ class MovementExampleApp {
           radiusMaxPixels: mutedSuspicious ? 18 : 20,
         }));
       }
-      if (this.refs.showConfirmed.checked && attributes.confirmedCount) {
+      if (this.refs.showFlagged.checked && attributes.confirmedCount) {
         layers.push(new deck.ScatterplotLayer({
           id: `movement-binary-confirmed-${suffix}`,
           data: deckData.confirmedData,
@@ -13896,7 +13892,7 @@ class MovementExampleApp {
     const visibleIndividuals = new Set(this.data.selectedIndividuals);
     const visibleSetNames = this.getVisibleSetNames();
     const showPoints = this.refs.showPoints.checked;
-    const hideSuspected = this.refs.hideSuspected.checked;
+    const hideSuspected = !this.refs.showFlagged.checked;
     const checkedThresholdSelection = this.isCheckedThresholdSelectionActive();
     const mutedSuspicious = this.getCurrentColorField()?.key !== INDIVIDUAL_COLOR_FIELD_KEY;
     const overviewPreviewTracks = this.getOverviewPreviewTracks(
@@ -13926,7 +13922,7 @@ class MovementExampleApp {
     const suspectedPointData = [];
     const confirmedPointData = [];
     const showSuspectedOutlines = this.data.suspiciousState === "loaded" && !hideSuspected;
-    if (this.refs.showConfirmed.checked) {
+    if (this.refs.showFlagged.checked) {
       const seenConfirmed = new Set();
       for (const fix of this.data.confirmedPointFixes || []) {
         if (
@@ -13953,7 +13949,7 @@ class MovementExampleApp {
       visibleIndividuals.has(step.individual)
       && visibleSetNames.has(step.setName)
       && !hiddenBurstFixKeys.has(step.fixKey)
-      && (step.status !== "confirmed" || this.refs.showConfirmed.checked)
+      && (step.status !== "confirmed" || this.refs.showFlagged.checked)
       && (step.status !== "suspected" || !hideSuspected)
     ));
     const visibleAutoBursts = this.getVisibleAutoBursts();
@@ -14547,7 +14543,7 @@ class MovementExampleApp {
       ...layers.filter(isRoiLayer),
     ];
     const queueHighlight = this.queueIssueHighlight;
-    if (queueHighlight?.key && queueHighlight.key === this.queueIssueGroupsKey()) {
+    if (this.refs.showFlagged.checked && queueHighlight?.key && queueHighlight.key === this.queueIssueGroupsKey()) {
       orderedLayers = orderedLayers.map(layer => this.greyQueueContextLayer(layer));
       // Keep flags above tracks and selection outlines, including coincident
       // fixes. The playback marker stays black and is drawn above these flags.
@@ -15158,9 +15154,9 @@ class MovementExampleApp {
       return false;
     }
     if (fix.analyticallyExcluded || fix.review?.status === "confirmed") {
-      return this.refs.showConfirmed.checked;
+      return this.refs.showFlagged.checked;
     }
-    if (fix.review?.status === "suspected" && this.refs.hideSuspected.checked) {
+    if (fix.review?.status === "suspected" && !this.refs.showFlagged.checked) {
       return false;
     }
     const visibleIndividuals = this.data.selectedIndividuals instanceof Set
