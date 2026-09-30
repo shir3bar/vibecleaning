@@ -1657,12 +1657,14 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_prop
         )
         threshold_input.fill(str(threshold_value))
         threshold_input.press("Tab")
+        # The default percentile can already have matches. Wait for the map's
+        # asynchronous colors to reflect the newly entered cutoff, not that old count.
+        highlighted_count = int(page.locator('.movement-threshold [role="status"]')
+                                .inner_text().split()[0].replace(",", ""))
+        assert highlighted_count > 0
         page.wait_for_function(
-            "() => window.__movementDiagnostics.binaryThresholdMatchCount > 0",
-            timeout=20_000,
-        )
-        highlighted_count = page.evaluate(
-            "window.__movementDiagnostics.binaryThresholdMatchCount"
+            "expected => window.__movementDiagnostics.binaryThresholdMatchCount === expected",
+            arg=highlighted_count, timeout=20_000,
         )
         page.locator('button[data-action="check-above-threshold"]').click()
         _wait_for_layer(page, "movement-binary-checked-threshold")

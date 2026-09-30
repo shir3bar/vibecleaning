@@ -83,19 +83,53 @@ def test_zero_filter_assignment_and_shared_percentile_steps(tmp_path, source_for
         page.locator('[data-role="issue-submit"]').click()
         page.wait_for_function("document.querySelector('[data-role=status]').textContent.includes('0 flags')")
         assert saved[1].json()["step"]["summary"]["resolved_fix_count"] == 0
+        assert page.locator('[data-action="set-threshold-percentile"]').count() == 0
+
+        # Numeric presets are exploration controls: use the pooled source values,
+        # retain signed values, and never open a save dialog or create a step.
+        dataset_before_preview = page.locator('[data-role="dataset"]').input_value()
+        for field in ["speed_mps", "step_length_m", "time_delta_s", "turn_angle_deg"]:
+            values = arrays[header["color_columns"][field]["array"]]
+            values = values[np.isfinite(values) & (arrays["review_status"] != 2)]
+            page.locator('[data-role="color-by"]').select_option(field)
+            for preset in [95, 99]:
+                button = page.locator(f'[data-action="set-threshold-percentile"][data-percentile="{preset}"]')
+                button.click()
+                assert float(cutoff.input_value()) == pytest.approx(np.quantile(values, preset / 100))
+                pw.expect(button).to_have_attribute("aria-pressed", "true")
+                pw.expect(page.locator('[data-role="issue-modal"]')).to_be_hidden()
+                assert page.locator('[data-role="dataset"]').input_value() == dataset_before_preview
+                assert len(saved) == 2
+            assert "without flagging" in button.get_attribute("title")
+            assert page.locator('.movement-threshold-note').count() == 0
+            help_icon = page.locator('.movement-threshold .movement-field-help')
+            assert "Applies to visible individuals (2)" in help_icon.get_attribute("data-tooltip")
+            help_icon.hover()
+            page.wait_for_function("getComputedStyle(document.querySelector('.movement-threshold .movement-field-help'), '::after').opacity === '1'")
 
         page.locator('[data-role="color-by"]').select_option("gps_spike_step_turn")
         page.locator('[data-action="set-gps-spike-turn-angle"]').fill("0")
         page.locator('[data-action="set-gps-spike-turn-angle"]').press("Tab")
-        assert float(page.locator('[data-action="set-threshold-value"]').input_value()) == pytest.approx(expected[0])
+        assert float(page.locator('[data-action="set-threshold-value"]').input_value()) == pytest.approx(expected[1])
         # Histogram zoom must not change the population or the numerical cutoff.
         page.locator('[data-action="set-histogram-mode"][data-mode="clipped"]').click()
-        assert float(page.locator('[data-action="set-threshold-value"]').input_value()) == pytest.approx(expected[0])
-        assert page.locator('[data-action="flag-gps-percentile"]').evaluate_all(
+        assert float(page.locator('[data-action="set-threshold-value"]').input_value()) == pytest.approx(expected[1])
+        assert page.locator('[data-action="set-threshold-percentile"]').evaluate_all(
             "buttons => buttons.map(button => button.dataset.percentile)") == ["95", "99"]
-        page.locator(f'[data-action="flag-gps-percentile"][data-percentile="{percentile}"]').click()
+        page.locator(f'[data-action="set-threshold-percentile"][data-percentile="{percentile}"]').click()
+        assert float(cutoff.input_value()) == pytest.approx(expected[0 if percentile == 95 else 1])
+        pw.expect(page.locator('[data-role="issue-modal"]')).to_be_hidden()
+        assert page.locator('[data-role="dataset"]').input_value() == dataset_before_preview
+        assert len(saved) == 2
+        # Changing the turn angle must leave the percentile cutoff unchanged.
+        page.locator('[data-action="set-gps-spike-turn-angle"]').fill("150")
+        page.locator('[data-action="set-gps-spike-turn-angle"]').press("Tab")
+        assert float(cutoff.input_value()) == pytest.approx(expected[0 if percentile == 95 else 1])
+        page.locator('[data-action="set-gps-spike-turn-angle"]').fill("0")
+        page.locator('[data-action="set-gps-spike-turn-angle"]').press("Tab")
+        # Only the separate flag action starts the save workflow.
+        page.locator('[data-role="mark-suspected"]').click()
         page.locator('[data-role="issue-modal"]').wait_for(state="visible")
-        assert f"{percentile}th percentile:" in page.locator('[data-role="issue-meta"]').text_content()
         with page.expect_response(lambda response: response.url.endswith("/actions/annotate-scope")) as percentile_response:
             page.locator('[data-role="issue-submit"]').click()
         response = percentile_response.value
@@ -112,6 +146,29 @@ def test_zero_filter_assignment_and_shared_percentile_steps(tmp_path, source_for
         assert len(spec["individuals"]) == 2
         assert f"{percentile}th" in step["parameters"]["issue_threshold"]
         assert step["parameters"]["issue_type"] == "Filter GPS spike (step + turn)"
+
+        # Non-GPS saved steps retain the chosen percentile and actual cutoff too.
+        page.locator('[data-role="color-by"]').select_option("speed_mps")
+        page.locator(f'[data-action="set-threshold-percentile"][data-percentile="{percentile}"]').click()
+        speed_cutoff = float(cutoff.input_value())
+        page.locator('[data-role="mark-suspected"]').click()
+        with page.expect_response(lambda response: response.url.endswith("/actions/annotate-scope")) as speed_response:
+            page.locator('[data-role="issue-submit"]').click()
+        response = speed_response.value
+        assert response.status == 200, response.text()
+        page.wait_for_function("document.querySelector('[data-role=dataset]').value === "
+                               + json.dumps(response.json()["dataset"]["dataset_id"]))
+        step = response.json()["step"]
+        spec = step["parameters"]["scope"]["filter"]
+        assert spec["field_key"] == "speed_mps"
+        assert spec["threshold_value"] == pytest.approx(speed_cutoff)
+        assert spec["percentile"]["probability"] == percentile / 100
+        assert spec["percentile"]["population"] == "finite-values-at-unconfirmed-fixes"
+        assert f"; {percentile}th percentile" in step["parameters"]["issue_threshold"]
+        assert float(
+            step["parameters"]["issue_threshold"].split(";")[0].split()[1]) == pytest.approx(speed_cutoff)
+        assert "both steps" not in step["parameters"]["issue_threshold"]
+        assert len(saved) == 4
         page.locator('[data-role="individual-view-queue"]').click()
         page.locator('[data-role="individual-queue-order"]').select_option("flagged")
         assert page.locator('[data-role="individual-queue-order"]').input_value() == "flagged"

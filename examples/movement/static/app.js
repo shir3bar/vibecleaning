@@ -2262,6 +2262,7 @@ class MovementExampleApp {
           gap: 2px;
         }
         .movement-threshold-title {
+          position: relative;
           display: flex;
           align-items: center;
           gap: 5px;
@@ -2279,11 +2280,6 @@ class MovementExampleApp {
           gap: 8px 12px;
           font-size: 11px;
           color: #dbe5f0;
-        }
-        .movement-threshold-note {
-          font-size: 10px;
-          color: #7e93aa;
-          line-height: 1.4;
         }
         .movement-threshold-chart-wrap {
           display: grid;
@@ -2351,7 +2347,8 @@ class MovementExampleApp {
           color: #dce7f3;
           font-size: 12px;
         }
-        .movement-threshold-zoom button.is-active {
+        .movement-threshold-zoom button.is-active,
+        .movement-threshold-actions button[aria-pressed="true"] {
           background: rgba(80, 180, 255, 0.18);
           border-color: rgba(80, 180, 255, 0.35);
         }
@@ -2504,6 +2501,15 @@ class MovementExampleApp {
         .movement-field-help:hover::after,
         .movement-field-help:focus-visible::after {
           opacity: 1;
+        }
+        .movement-threshold .movement-field-help {
+          position: static;
+        }
+        .movement-threshold .movement-field-help::after {
+          left: 0;
+          top: calc(100% + 8px);
+          bottom: auto;
+          transform: none;
         }
         .movement-legend-subtitle {
           font-size: 11px;
@@ -15397,8 +15403,8 @@ class MovementExampleApp {
         minimum_abs_turn_angle_deg: this.gpsSpikeTurnAngleDeg,
         individuals: thresholdScope.individuals,
         set_names: thresholdScope.setNames,
-        ...(this.gpsSpikePreset?.cutoff === this.thresholdState.value
-          ? {percentile: this.gpsSpikePreset.provenance} : {}),
+        ...(this.thresholdPercentilePreset?.cutoff === this.thresholdState.value
+          ? {percentile: this.thresholdPercentilePreset.provenance} : {}),
       };
     }
     return {
@@ -15413,6 +15419,9 @@ class MovementExampleApp {
         : [],
       individuals: thresholdScope.individuals,
       set_names: thresholdScope.setNames,
+      ...(field.kind === "numeric" && this.thresholdPercentilePreset?.fieldKey === field.key
+        && this.thresholdPercentilePreset.cutoff === this.thresholdState.value
+        ? {percentile: this.thresholdPercentilePreset.provenance} : {}),
     };
   }
 
@@ -15488,7 +15497,7 @@ class MovementExampleApp {
   }
 
   clearThresholdState() {
-    this.gpsSpikePreset = null;
+    this.thresholdPercentilePreset = null;
     this.gpsDefaultScope = "";
     this.thresholdState = {
       fieldKey: "",
@@ -15979,76 +15988,52 @@ class MovementExampleApp {
     return this.getThresholdContext()?.matchKeys || new Set();
   }
 
-  gpsSpikeQuantiles() {
+  thresholdQuantiles(field = this.getCurrentColorField()) {
+    if (field?.kind !== "numeric") return null;
+    const gpsSpikeMode = field.key === GPS_SPIKE_COLOR_FIELD_KEY;
+    const sourceKey = gpsSpikeMode ? "step_length_m" : field.key;
     const individuals = this.getSelectedIndividuals();
     if (!individuals.length || individuals.some(id => !this.data?.binaryBlocks?.has(id))) return null;
-    const signature = JSON.stringify([this.currentDatasetId, individuals.map(id => {
+    const signature = JSON.stringify([this.currentDatasetId, field.key, individuals.map(id => {
       const binary = this.data.binaryBlocks.get(id);
       return [id, binary.workerBlockId, binary.reviewRevision || 0];
     })]);
-    if (this.gpsQuantileCache?.signature === signature) return this.gpsQuantileCache;
+    if (this.thresholdQuantileCache?.signature === signature) return this.thresholdQuantileCache;
     const values = [];
     for (const id of individuals) {
       const binary = this.data.binaryBlocks.get(id);
       const code = binary.header.individuals.indexOf(id);
       const [start, end] = binary.individualRanges.get(code) || [0, 0];
-      const column = binary.header.color_columns?.step_length_m;
-      const steps = binary.arrays[column?.array || "step_length_m"];
+      const column = binary.header.color_columns?.[sourceKey];
+      const fieldValues = binary.arrays[column?.array || sourceKey];
       for (let index = start; index < end; index += 1) {
         if (Number(binary.arrays.review_status[index]) === 2) continue;
-        const value = steps?.[index];
-        if (Number.isFinite(value) && value >= 0) values.push(value);
+        const value = fieldValues?.[index];
+        if (Number.isFinite(value) && (!gpsSpikeMode || value >= 0)) values.push(value);
       }
     }
     values.sort((left, right) => left - right);
-    this.gpsQuantileCache = {signature, count: values.length,
+    this.thresholdQuantileCache = {signature, count: values.length,
       p95: values.length ? quantile(values, 0.95) : null,
       p99: values.length ? quantile(values, 0.99) : null};
-    return this.gpsQuantileCache;
+    return this.thresholdQuantileCache;
   }
 
-  setGpsPercentile(probability, quantiles = this.gpsSpikeQuantiles()) {
-    if (!quantiles?.count) return false;
+  setThresholdPercentile(probability, quantiles = this.thresholdQuantiles()) {
+    const field = this.getCurrentColorField();
+    if (field?.kind !== "numeric" || !quantiles?.count || ![0.95, 0.99].includes(probability)) return false;
+    const gpsSpikeMode = field.key === GPS_SPIKE_COLOR_FIELD_KEY;
     const cutoff = probability === 0.99 ? quantiles.p99 : quantiles.p95;
-    this.thresholdState = {...this.thresholdState, fieldKey: GPS_SPIKE_COLOR_FIELD_KEY,
-      value: cutoff, reverse: false, selectedLevels: []};
-    this.gpsDefaultScope = quantiles.signature;
-    this.gpsSpikePreset = {cutoff, provenance: {
+    this.thresholdState = {...this.thresholdState, fieldKey: field.key,
+      value: cutoff, reverse: !gpsSpikeMode && this.thresholdState.reverse === true, selectedLevels: []};
+    if (gpsSpikeMode) this.gpsDefaultScope = quantiles.signature;
+    this.thresholdPercentilePreset = {cutoff, fieldKey: field.key, signature: quantiles.signature, provenance: {
       probability, sample_count: quantiles.count, method: "linear",
-      population: "finite-nonnegative-outbound-steps-at-unconfirmed-fixes",
+      population: gpsSpikeMode ? "finite-nonnegative-outbound-steps-at-unconfirmed-fixes" : "finite-values-at-unconfirmed-fixes",
       scope: "selected-individuals-all-track-sets",
     }};
     this.flagTargetKind = "filter";
     return true;
-  }
-
-  async openGpsPercentileModal(probability) {
-    if (this.rejectLockedEdit() || this.gpsPercentileBusy) return;
-    const quantiles = this.gpsSpikeQuantiles();
-    if (!quantiles?.count) return;
-    this.gpsPercentileBusy = true;
-    const datasetId = this.currentDatasetId;
-    const individuals = this.getSelectedIndividuals().join("|");
-    try {
-      this.setGpsPercentile(probability, quantiles);
-      const filter = this.currentThresholdFilterDefinition();
-      const count = await this.previewThresholdFilterCount(filter);
-      if (datasetId !== this.currentDatasetId || individuals !== this.getSelectedIndividuals().join("|")
-          || this.getCurrentColorField()?.key !== GPS_SPIKE_COLOR_FIELD_KEY) return;
-      this.openIssueModal("suspected", {kind: "filter", fixes: [], thresholdFilter: filter,
-        matchCount: count, resolvedMatchCount: count});
-      if (!this.pendingIssueContext) return;
-      this.refs.issueTitle.textContent = "Save GPS filter";
-      this.refs.issueMeta.innerHTML += `<div><strong>${Math.round(probability * 100)}th percentile:</strong> ${escapeHtml(formatColorValue(filter.step_length_threshold_m, "numeric"))} m · ${formatCount(count)} flags</div>`;
-      this.refs.issueNote.value = `GPS spike filter: ${Math.round(probability * 100)}th percentile of step lengths across the selected individuals; |turn| ≥ ${this.gpsSpikeTurnAngleDeg}°.`;
-    } catch (error) {
-      if (!this.isAbortError(error)) this.setStatus(`Could not prepare GPS filter: ${error.message}`, true);
-    } finally {
-      this.gpsPercentileBusy = false;
-      this.renderThresholdPane();
-      this.renderLayers();
-      this.updateActionButtons();
-    }
   }
 
   renderThresholdPane({ commitStationarityInput = false } = {}) {
@@ -16077,10 +16062,12 @@ class MovementExampleApp {
       this.renderStationarityThresholdPane();
       return;
     }
-    const gpsQuantiles = this.getCurrentColorField()?.key === GPS_SPIKE_COLOR_FIELD_KEY ? this.gpsSpikeQuantiles() : null;
-    if (gpsQuantiles?.count && (!this.gpsDefaultScope
-        || (this.gpsSpikePreset && this.gpsDefaultScope !== gpsQuantiles.signature))) {
-      this.setGpsPercentile(this.gpsSpikePreset?.provenance.probability || 0.95, gpsQuantiles);
+    const currentField = this.getCurrentColorField();
+    const quantiles = this.thresholdQuantiles(currentField);
+    if (quantiles?.count && ((currentField.key === GPS_SPIKE_COLOR_FIELD_KEY && !this.gpsDefaultScope)
+        || (this.thresholdPercentilePreset?.fieldKey === currentField.key
+          && this.thresholdPercentilePreset.signature !== quantiles.signature))) {
+      this.setThresholdPercentile(this.thresholdPercentilePreset?.provenance.probability || 0.99, quantiles);
     }
     const context = this.getThresholdContext();
     const field = context?.field;
@@ -16100,11 +16087,26 @@ class MovementExampleApp {
     const histogramInputMax = finiteOrNull(context?.histogramInputMax);
     const gpsSpikeMode = context?.gpsSpikeMode === true;
     const selectedIndividualCount = this.getSelectedIndividuals().length;
-    const thresholdScopeNote = `<div class="movement-threshold-note">Applies to visible individuals (${escapeHtml(formatCount(selectedIndividualCount))}).</div>`;
+    const thresholdScopeHelp = `Applies to visible individuals (${formatCount(selectedIndividualCount)}). Flagging applies the filter across all track sets for those individuals.`;
+    const percentileHelp = quantiles
+      ? `Percentiles use all ${formatCount(quantiles.count)} ${gpsSpikeMode ? "eligible outbound step lengths" : "finite values"} across the selected individuals and all track sets${gpsSpikeMode ? ", before filtering by turn angle" : ""}. Confirmed exclusions are skipped.`
+      : "Loading all selected tracks to calculate exact percentiles…";
+    const percentileControl = field?.kind === "numeric"
+      ? `
+        <div class="movement-threshold-actions" title="${escapeHtml(percentileHelp)}">
+          ${[95, 99].map(percentile => `
+            <button type="button" data-action="set-threshold-percentile" data-percentile="${percentile}"
+              aria-pressed="${this.thresholdPercentilePreset?.fieldKey === field.key && this.thresholdPercentilePreset.cutoff === this.thresholdState.value && this.thresholdPercentilePreset.provenance.probability === percentile / 100}"
+              title="${escapeHtml(`Set the threshold to the ${percentile}th percentile and preview matches without flagging. ${percentileHelp}`)}"
+              ${!quantiles?.count ? "disabled" : ""}>Use ${percentile}th</button>
+          `).join("")}
+        </div>
+        ${quantiles ? "" : '<div class="movement-threshold-meta" role="status">Loading percentiles…</div>'}
+      ` : "";
     const gpsSpikeControl = gpsSpikeMode
       ? `
-        <label class="movement-threshold-range-label">
-          <span>Minimum absolute turn angle (°)</span>
+        <label class="movement-threshold-range-label" title="All fixes remain colored by outbound step length. A match requires both inbound and outbound steps above the selected threshold and |turn angle| at least this value. Changing the angle does not change the percentile cutoff.">
+          <span>Minimum |turn| (°)</span>
           <input
             class="movement-threshold-range-input"
             type="number"
@@ -16115,12 +16117,6 @@ class MovementExampleApp {
             value="${escapeHtml(String(this.gpsSpikeTurnAngleDeg))}"
           >
         </label>
-        <div class="movement-threshold-note">All fixes remain colored by outbound step length. A match requires both inbound and outbound steps above the selected threshold and |turn angle| ≥ ${escapeHtml(formatColorValue(this.gpsSpikeTurnAngleDeg, "numeric"))}°.</div>
-        <div class="movement-threshold-actions">
-          <button type="button" data-action="flag-gps-percentile" data-percentile="95" ${!gpsQuantiles?.count || this.gpsPercentileBusy || !this.canPersistEdits() ? "disabled" : ""}>Flag 95th</button>
-          <button type="button" data-action="flag-gps-percentile" data-percentile="99" ${!gpsQuantiles?.count || this.gpsPercentileBusy || !this.canPersistEdits() ? "disabled" : ""}>Flag 99th</button>
-        </div>
-        <div class="movement-threshold-note">${gpsQuantiles ? `Percentiles use all ${formatCount(gpsQuantiles.count)} eligible step lengths across the selected individuals and all track sets, before filtering by turn angle.` : "Loading all selected tracks to calculate exact percentiles…"}</div>
       `
       : "";
 
@@ -16146,9 +16142,7 @@ class MovementExampleApp {
       `;
     } else if (field.kind !== "numeric") {
       const subtitle = `${formatCount(levelOptions.length)} levels in the visible fixes`;
-      const meta = selectedLevels.length
-        ? `${formatCount(matchCount)} fixes match ${formatCount(selectedLevels.length)} selected levels.`
-        : "Choose one or more levels to highlight matching fixes.";
+      const meta = selectedLevels.length ? `${formatCount(matchCount)} matches` : "No levels selected";
       const selectionNote = checkedThresholdSelection
         ? previewTruncated
           ? `All ${formatCount(matchCount)} matching fixes have an amber outline; details for the first ${formatCount(context.matchKeys.size)} are listed below.`
@@ -16161,10 +16155,9 @@ class MovementExampleApp {
       body = `
         <div class="movement-threshold-head">
           <div>
-            <div class="movement-threshold-title">${escapeHtml(field.label)}${movementColorFieldHelp(field)}</div>
-            <div class="movement-threshold-subtitle">${escapeHtml(field.source)} | ${escapeHtml(subtitle)}</div>
+            <div class="movement-threshold-title">${escapeHtml(field.label)}${movementColorFieldHelp(field, `${field.source} | ${subtitle}. ${thresholdScopeHelp}`)}</div>
           </div>
-          <div class="movement-threshold-meta">${escapeHtml(meta)}</div>
+          <div class="movement-threshold-meta" role="status" title="${escapeHtml(selectionNote)}">${escapeHtml(meta)}</div>
         </div>
         <div class="movement-threshold-levels">
           ${levelOptions.map(option => `
@@ -16180,25 +16173,27 @@ class MovementExampleApp {
             </label>
           `).join("")}
         </div>
-        <div class="movement-threshold-note">${escapeHtml(selectionNote)} Checking matches only changes the local checked-fix preview. Flagging applies the selected-level filter to the visible individuals.</div>
-        ${thresholdScopeNote}
         <div class="movement-threshold-actions">
           <button
             type="button"
             data-action="check-above-threshold"
+            title="${escapeHtml(`${selectionNote} Checking matches only changes the local checked-fix preview. ${thresholdScopeHelp}`)}"
             ${matchCount === 0 || checkedThresholdSelection ? "disabled" : ""}
           >Select fixes</button>
           <button
             type="button"
             data-action="clear-threshold"
+            title="Clear the level selection and its map highlight. Saved flags are unchanged."
             ${selectedLevels.length === 0 ? "disabled" : ""}
           >Clear selection</button>
         </div>
       `;
     } else if (!numericCount || !histogram) {
       body = `
+        <div class="movement-threshold-title">${escapeHtml(field.label)}${movementColorFieldHelp(field, thresholdScopeHelp)}</div>
         ${gpsSpikeControl}
-        <label class="movement-threshold-range-label"><span>Threshold &gt;</span>
+        ${percentileControl}
+        <label class="movement-threshold-range-label"><span>Threshold${gpsSpikeMode ? " (m)" : ""} &gt;</span>
           <input class="movement-threshold-inline-input" type="number" step="any" data-action="set-threshold-value"
             value="${Number.isFinite(this.thresholdState.value) ? escapeHtml(String(this.thresholdState.value)) : ""}" placeholder="value">
         </label>
@@ -16232,9 +16227,8 @@ class MovementExampleApp {
       const subtitle = gpsSpikeMode
         ? `${formatCount(numericCount)} sharp-turn fixes in the visible scope`
         : `${formatCount(numericCount)} visible fixes`;
-      const thresholdPrompt = thresholdValue === null
-        ? `Click the histogram or type a ${reverse ? "lower-tail" : "upper-tail"} threshold`
-        : "Threshold";
+      const thresholdPrompt = gpsSpikeMode ? "Threshold (m)" : "Threshold";
+      const thresholdHelp = `Click the histogram or type a ${reverse ? "lower-tail" : "upper-tail"} threshold to preview matching fixes.`;
       const selectionNote = thresholdValue === null
         ? "No threshold set"
         : matchCount === 0
@@ -16247,13 +16241,11 @@ class MovementExampleApp {
               ? `${formatCount(matchCount)} matches • Select fixes replaces the checked-fix preview with its first ${formatCount(context.matchKeys.size)}`
               : `${formatCount(matchCount)} matches • Select fixes replaces the checked-fix preview`;
       body = `
-        ${gpsSpikeControl}
         <div class="movement-threshold-head">
           <div>
-            <div class="movement-threshold-title">${escapeHtml(field.label)}${movementColorFieldHelp(field)}</div>
-            <div class="movement-threshold-subtitle">${escapeHtml(field.source)} | ${escapeHtml(subtitle)}</div>
+            <div class="movement-threshold-title">${escapeHtml(field.label)}${movementColorFieldHelp(field, `${field.source} | ${subtitle}. ${thresholdScopeHelp}`)}</div>
           </div>
-          <div class="movement-threshold-meta">
+          <label class="movement-threshold-meta" title="${escapeHtml(thresholdHelp)}">
             <span>${escapeHtml(thresholdPrompt)}</span>
             <span>${reverse ? "&lt;" : "&gt;"}</span>
             <input
@@ -16264,25 +16256,30 @@ class MovementExampleApp {
               placeholder="value"
               value="${thresholdValue === null ? "" : escapeHtml(String(thresholdValue))}"
             >
-          </div>
+          </label>
         </div>
+        ${gpsSpikeControl}
+        ${percentileControl}
         <div class="movement-threshold-zoom">
           <button
             type="button"
             data-action="set-histogram-mode"
             data-mode="clipped"
+            title="Zoom the histogram to the color scale range. The threshold and percentile population stay unchanged."
             class="${histogramMode === "clipped" ? "is-active" : ""}"
           >Zoom in</button>
           <button
             type="button"
             data-action="set-histogram-mode"
             data-mode="full"
+            title="Show the full histogram range. The threshold and percentile population stay unchanged."
             class="${histogramMode === "full" ? "is-active" : ""}"
           >Zoom out</button>
         </div>
         <div class="movement-threshold-chart-wrap">
           <div
             class="movement-threshold-chart"
+            title="${escapeHtml(thresholdHelp)}"
             data-role="threshold-chart"
             data-field-key="${escapeHtml(field.key)}"
             data-min="${escapeHtml(String(histogram.min))}"
@@ -16293,7 +16290,7 @@ class MovementExampleApp {
           </div>
         </div>
         <div class="movement-threshold-range">
-          <label class="movement-threshold-range-label">
+          <label class="movement-threshold-range-label" title="Lower limit of the displayed histogram; does not change the filter threshold.">
             <span>Min</span>
             <input
               class="movement-threshold-range-input"
@@ -16303,7 +16300,7 @@ class MovementExampleApp {
               value="${histogramInputMin === null ? "" : escapeHtml(String(histogramInputMin))}"
             >
           </label>
-          <label class="movement-threshold-range-label">
+          <label class="movement-threshold-range-label" title="Upper limit of the displayed histogram; does not change the filter threshold.">
             <span>Max</span>
             <input
               class="movement-threshold-range-input"
@@ -16314,30 +16311,32 @@ class MovementExampleApp {
             >
           </label>
         </div>
-        ${gpsSpikeMode ? "" : `<label class="movement-threshold-toggle">
+        ${gpsSpikeMode ? "" : `<label class="movement-threshold-toggle" title="Highlight values below the threshold instead of above it.">
           <input
             type="checkbox"
             data-action="toggle-threshold-reverse"
             ${reverse ? "checked" : ""}
           >
-          Reverse threshold: highlight values below the line
+          Below threshold
         </label>`}
-        <div class="movement-threshold-note">${escapeHtml(selectionNote)} Checking matches only changes the local checked-fix preview. Flagging applies the full threshold filter to the visible individuals.</div>
-        ${thresholdScopeNote}
+        <div class="movement-threshold-meta" role="status" title="${escapeHtml(selectionNote)}">${thresholdValue === null ? "No threshold set" : `${formatCount(matchCount)} matches`}</div>
         <div class="movement-threshold-actions">
           <button
             type="button"
             data-action="check-above-threshold"
+            title="${escapeHtml(`${selectionNote}. Checking matches only changes the local checked-fix preview. ${thresholdScopeHelp}`)}"
             ${matchCount === 0 || checkedThresholdSelection ? "disabled" : ""}
           >Select fixes</button>
           <button
             type="button"
             data-action="clear-threshold"
+            title="Clear the threshold and its map highlight. Saved flags are unchanged."
             ${thresholdValue === null ? "disabled" : ""}
           >Clear threshold</button>
           <button
             type="button"
             data-action="reset-histogram-limits"
+            title="Reset the histogram to its full range without changing the threshold."
             ${(this.thresholdState.fieldKey !== field.key || (this.thresholdState.histogramMin === null && this.thresholdState.histogramMax === null && histogramMode === "full")) ? "disabled" : ""}
           >Reset limits</button>
         </div>
@@ -16369,8 +16368,12 @@ class MovementExampleApp {
     const actionButton = target.closest("button[data-action]");
     if (actionButton) {
       const action = actionButton.dataset.action || "";
-      if (action === "flag-gps-percentile") {
-        void this.openGpsPercentileModal(Number(actionButton.dataset.percentile) / 100);
+      if (action === "set-threshold-percentile") {
+        if (this.setThresholdPercentile(Number(actionButton.dataset.percentile) / 100)) {
+          this.renderThresholdPane();
+          this.renderLayers();
+          this.syncFlagTargetToThreshold();
+        }
         return;
       }
       if (action === "set-histogram-mode") {
@@ -16389,7 +16392,7 @@ class MovementExampleApp {
         this.renderThresholdPane();
         this.renderLayers();
       } else if (action === "clear-threshold") {
-        this.gpsSpikePreset = null;
+        this.thresholdPercentilePreset = null;
         const field = this.getCurrentColorField();
         this.thresholdState = {
           fieldKey: field?.key || "",
@@ -16447,7 +16450,7 @@ class MovementExampleApp {
     const thresholdValue = histogram
       ? histogramRatioToValue(histogram, ratio)
       : (min === max ? min : min + ((max - min) * ratio));
-    this.gpsSpikePreset = null;
+    this.thresholdPercentilePreset = null;
     this.thresholdState = {
       fieldKey,
       value: thresholdValue,
@@ -16530,7 +16533,7 @@ class MovementExampleApp {
       } else if (action === "set-histogram-max") {
         nextHistogramMax = parsedValue;
       } else if (action === "set-threshold-value") {
-        this.gpsSpikePreset = null;
+        this.thresholdPercentilePreset = null;
         nextThresholdValue = parsedValue;
       }
       const effectiveMin = nextHistogramMin ?? fallbackMin;
@@ -19650,7 +19653,10 @@ class MovementExampleApp {
       };
       const filter = context.thresholdFilter;
       if (filter?.percentile?.probability) {
-        body.issue_threshold = `both steps > ${filter.step_length_threshold_m} m and |turn| >= ${filter.minimum_abs_turn_angle_deg}°; ${Math.round(filter.percentile.probability * 100)}th percentile`;
+        const thresholdDescription = filter.kind === "gps_spike"
+          ? `both steps > ${filter.step_length_threshold_m} m and |turn| >= ${filter.minimum_abs_turn_angle_deg}°`
+          : `${filter.operator === "lt" ? "<" : ">"} ${filter.threshold_value}`;
+        body.issue_threshold = `${thresholdDescription}; ${Math.round(filter.percentile.probability * 100)}th percentile`;
       }
       const result = await this.requestJSON(endpoint, {method: "POST", body: JSON.stringify(body)});
       const queueReviewIndividual = String(context.queueReviewIndividual || "");
@@ -21566,8 +21572,8 @@ function movementColorFieldDescription(field) {
   return `Source column ${field?.label || key || "value"}, displayed without changing its source meaning.`;
 }
 
-function movementColorFieldHelp(field) {
-  const description = movementColorFieldDescription(field);
+function movementColorFieldHelp(field, extraDescription = "") {
+  const description = [movementColorFieldDescription(field), extraDescription].filter(Boolean).join(" ");
   return `<span class="movement-field-help" tabindex="0" role="img" aria-label="${escapeHtml(description)}" data-tooltip="${escapeHtml(description)}">?</span>`;
 }
 

@@ -641,6 +641,21 @@ def _validate_status(value: object) -> str:
     return status
 
 
+def _validate_filter_percentile(value: object, *, gps_spike: bool = False) -> dict:
+    if not isinstance(value, dict) or value.get("probability") not in (0.95, 0.99):
+        raise ValueError("Filter percentile must be 95th or 99th")
+    count = value.get("sample_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise ValueError("Filter percentile requires a positive sample count")
+    return {
+        "probability": value["probability"], "sample_count": count,
+        "method": "linear",
+        "population": "finite-nonnegative-outbound-steps-at-unconfirmed-fixes"
+        if gps_spike else "finite-values-at-unconfirmed-fixes",
+        "scope": "selected-individuals-all-track-sets",
+    }
+
+
 def _validate_filter_scope(value: object) -> dict:
     if not isinstance(value, dict):
         raise ValueError("Filter definition is required")
@@ -685,16 +700,7 @@ def _validate_filter_scope(value: object) -> dict:
         }
         percentile = value.get("percentile")
         if percentile is not None:
-            if not isinstance(percentile, dict) or percentile.get("probability") not in (0.95, 0.99):
-                raise ValueError("GPS spike percentile must be 95th or 99th")
-            count = percentile.get("sample_count")
-            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-                raise ValueError("GPS spike percentile requires a positive sample count")
-            result["percentile"] = {
-                "probability": percentile["probability"], "sample_count": count,
-                "method": "linear", "population": "finite-nonnegative-outbound-steps-at-unconfirmed-fixes",
-                "scope": "selected-individuals-all-track-sets",
-            }
+            result["percentile"] = _validate_filter_percentile(percentile, gps_spike=True)
         return result
     field_key = _validate_required_text(
         value.get("field_key"),
@@ -724,6 +730,8 @@ def _validate_filter_scope(value: object) -> dict:
         if operator not in {"gt", "lt"}:
             raise ValueError("Invalid numeric filter operator")
         result.update({"operator": operator, "threshold_value": threshold})
+        if value.get("percentile") is not None:
+            result["percentile"] = _validate_filter_percentile(value["percentile"])
     else:
         raw_levels = value.get("selected_levels")
         if not isinstance(raw_levels, list):
