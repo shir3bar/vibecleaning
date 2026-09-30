@@ -8,13 +8,14 @@ import numpy as np
 import pytest
 
 from app.reviews import active_review, load_review_state
+from examples.movement.rds_index import read_movement_rds
 from examples.slim_movement.app import create_slim_movement_app
 from examples.rds_movement.app import create_rds_movement_app
 from test_movement_browser import (
     _auth_manager, _serve, _open_browser, _new_page, _login_and_wait,
     _delay_binary_responses, STATIC_ROOT, INDEX_PATH, CSV_TRACK_PLAYER_FIXTURE,
 )
-from test_rds_movement import _sample_files
+from test_rds_movement import _sample_files, KAMI_SAMPLE_ROOT
 
 pytestmark = pytest.mark.browser
 
@@ -35,6 +36,74 @@ def make_app(tmp_path, source_format):
         app = create_slim_movement_app(data_root=tmp_path / "data", static_root=STATIC_ROOT,
             index_path=INDEX_PATH, auth_manager=_auth_manager())
     return app, study
+
+
+@pytest.mark.parametrize("levels", [["geometric_spike"], ["geometric_spike", "consensus"]])
+def test_rds_error_categories_can_be_flagged_and_reopened(tmp_path, levels):
+    import playwright.sync_api as pw
+    study = tmp_path / "data" / "movement_rds" / "kami_categories"
+    study.mkdir(parents=True)
+    sources = sorted(KAMI_SAMPLE_ROOT.glob("*_KAMI.rds"))[:2]
+    assert len(sources) == 2, "KAMI detector-score RDS samples are unavailable"
+    for source in sources:
+        shutil.copy2(source, study / source.name.replace("_KAMI.rds", ".rds"))
+    source = study / sources[0].name.replace("_KAMI.rds", ".rds")
+    frame = read_movement_rds(source)
+    individual = str(frame["individual_local_identifier"].iloc[0])
+    expected = {f"file:{source.name}#row:{i + 1}"
+                for i, matched in enumerate(frame["error_class"].isin(levels)) if matched}
+    assert expected
+    originals = {path.name: path.read_bytes() for path in study.glob("*.rds")}
+    app = create_rds_movement_app(data_root=tmp_path / "data", cache_root=tmp_path / "cache",
+        static_root=STATIC_ROOT, index_path=INDEX_PATH, auth_manager=_auth_manager())
+    api = "/api/apps/movement/family/movement_rds/study/kami_categories"
+    with _serve(app) as base_url, pw.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = _new_page(browser, viewport={"width": 1440, "height": 1000})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _login_and_wait(page, base_url, "kami_categories")
+        selected = page.locator(f'[data-individual-checkbox="{individual}"]')
+        selected.wait_for(state="visible", timeout=30_000)
+        page.locator('[data-role="select-none"]').click()
+        selected.check()
+        page.locator('[data-role="color-by"]').select_option("error_class")
+        for level in levels:
+            page.locator(f'[data-action="toggle-threshold-level"][data-level="{level}"]').check()
+        page.locator('[data-action="check-above-threshold"]').click()
+        before = page.locator('[data-role="dataset"]').input_value()
+        with page.expect_response(lambda response: response.url.endswith("/actions/preview-filter")) as preview:
+            page.locator('[data-role="mark-suspected"]').click()
+        assert preview.value.status == 200, preview.value.text()
+        assert preview.value.json()["match_count"] == len(expected)
+        page.locator('[data-role="issue-modal"]').wait_for(state="visible")
+        assert page.locator('[data-role="dataset"]').input_value() == before
+        with page.expect_response(lambda response: response.url.endswith("/actions/annotate-scope")) as saved:
+            page.locator('[data-role="issue-submit"]').click()
+        response = saved.value
+        assert response.status == 200, response.text()
+        result = response.json()
+        spec = result["step"]["parameters"]["scope"]["filter"]
+        assert spec["field_key"] == "error_class"
+        assert spec["field_kind"] == "categorical"
+        assert set(spec["selected_levels"]) == set(levels)
+        assert spec["individuals"] == [individual]
+        assert result["step"]["summary"]["resolved_fix_count"] == len(expected)
+        dataset = result["dataset"]["dataset_id"]
+        page.wait_for_function("document.querySelector('[data-role=dataset]').value === " + json.dumps(dataset))
+        page.reload(wait_until="domcontentloaded")
+        page.locator('[data-role="study"] option[value="kami_categories"]').wait_for(state="attached")
+        page.locator('[data-role="study"]').select_option("kami_categories")
+        selected.wait_for(state="visible", timeout=30_000)
+        assert page.locator('[data-role="dataset"]').input_value() == dataset
+        flagged = page.request.get(base_url + api + f"/dataset/{dataset}/fixes", params={
+            "logical_name": source.name, "review_status": "suspected",
+        })
+        assert flagged.status == 200, flagged.text()
+        assert {fix["fix_key"] for fix in flagged.json()["fixes"]} == expected
+        assert not errors
+        browser.close()
+    assert {name: (study / name).read_bytes() for name in originals} == originals
 
 
 @pytest.mark.parametrize("source_format", ["csv", "rds"])

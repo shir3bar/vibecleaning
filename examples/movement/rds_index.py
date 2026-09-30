@@ -2004,14 +2004,9 @@ def resolve_rds_review_scope(
         scoped_individuals = [
             str(item) for item in spec.get("individuals") or [] if str(item)
         ]
-        field_columns = {
-            "step_length_m": "f.step_length_m",
-            "speed_mps": "f.speed_mps",
-            "time_delta_s": "f.time_delta_s",
-            "turn_angle_deg": "f.turn_angle_deg",
-            "is_outlier": "f.is_outlier",
-            **{field["key"]: f'f."{field["column_name"]}"' for field in RDS_OWNER_COLOR_FIELDS},
-        }
+        # Match the same indexed fields offered by Color by. Derive SQL column
+        # names only from this registry, never from the submitted field name.
+        filter_fields = {field["key"]: field for field in RDS_COLOR_FIELDS}
         values: list[object] = []
         if filter_kind == "gps_spike":
             where = """
@@ -2048,29 +2043,32 @@ def resolve_rds_review_scope(
                 values.extend(scoped_individuals)
         else:
             field_key = str(spec.get("field_key") or "")
-            column = field_columns.get(field_key)
-            if column is None:
+            field = filter_fields.get(field_key)
+            if field is None:
                 raise ValueError(f"Unsupported RDS filter field: {field_key}")
             field_kind = str(spec.get("field_kind") or "")
+            if field_kind != field["kind"]:
+                raise ValueError(f"Invalid RDS filter field kind for {field_key}")
+            column = f'f."{field.get("column_name", field["key"])}"'
             if field_kind == "numeric":
                 operator = "<" if spec.get("operator") == "lt" else ">"
                 where = f"{column} {operator} ?"
                 values.append(float(spec["threshold_value"]))
-            elif field_kind == "boolean" and field_key in {
-                "is_outlier", *(field["key"] for field in RDS_OWNER_COLOR_FIELDS)
-            }:
+            elif field_kind in {"boolean", "categorical"}:
                 selected = {str(item) for item in spec.get("selected_levels") or []}
-                accepted = []
-                if "True" in selected:
-                    accepted.append(1)
-                if "False" in selected:
-                    accepted.append(0)
+                if field_kind == "boolean":
+                    accepted = [value for label, value in (("True", 1), ("False", 0))
+                                if label in selected]
+                else:
+                    accepted = sorted(selected)
                 terms = []
                 if accepted:
                     terms.append(column + " IN (" + ",".join("?" for _ in accepted) + ")")
                     values.extend(accepted)
                 if "Missing" in selected:
                     terms.append(column + " IS NULL")
+                    if field_kind == "categorical":
+                        terms.append(column + " = ''")
                 if not terms:
                     return {"kind": "filter", "filter": spec, "source_rows": []}, 0
                 where = "(" + " OR ".join(terms) + ")"
