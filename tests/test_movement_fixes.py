@@ -1620,9 +1620,25 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
         f"{base_url}/edit-profile",
         params={"dataset_id": suspected_dataset_id},
     ).json()
-    assert rewound_profile["editable"] is True
-    assert rewound_profile["blockers"] == []
-    assert rewound_profile["resume"]["allowed"] is False
+    assert rewound_profile["editable"] is False
+    assert rewound_profile["blockers"][0]["code"] == "historical_version"
+    assert rewound_profile["resume"]["allowed"] is True
+    assert rewound_profile["resume"]["discard_step_count"] == 1
+    blocked_after_undo = client.post(
+        f"{base_url}/actions/confirm-issues",
+        json={
+            "dataset_id": suspected_dataset_id,
+            "expected_current_dataset_id": suspected_dataset_id,
+            "logical_name": "movement.csv",
+            "confirmations": [{
+                "parent_annotation_id": suspected_annotation_id,
+                "fix_keys": ["id:fix_a_2#row:2"],
+            }],
+            "user": "reviewer",
+        },
+    )
+    assert blocked_after_undo.status_code == 423
+    assert client.get(f"{base_url}/graph").json()["steps"] == graph_before["steps"]
 
     restored_head = client.post(
         f"{base_url}/head",
@@ -1654,32 +1670,17 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0,test
         f"{base_url}/edit-profile",
         params={"dataset_id": root_id},
     ).json()
-    assert root_profile["editable"] is True
-    assert root_profile["resume"]["allowed"] is False
-
-    restore_before_explicit_resume = client.post(
-        f"{base_url}/head",
-        json={
-            "dataset_id": confirmed_dataset_id,
-            "expected_current_dataset_id": root_id,
-        },
-    )
-    assert restore_before_explicit_resume.status_code == 200
-    historical_root_profile = client.get(
-        f"{base_url}/edit-profile",
-        params={"dataset_id": root_id},
-    ).json()
-    assert historical_root_profile["editable"] is False
-    assert historical_root_profile["resume"]["allowed"] is True
-    assert historical_root_profile["resume"]["discard_dataset_count"] == 2
-    assert historical_root_profile["resume"]["discard_step_count"] == 2
+    assert root_profile["editable"] is False
+    assert root_profile["resume"]["allowed"] is True
+    assert root_profile["resume"]["discard_dataset_count"] == 2
+    assert root_profile["resume"]["discard_step_count"] == 2
 
     resumed = client.post(
         f"{base_url}/resume",
         json={
             "dataset_id": root_id,
-            "expected_current_dataset_id": confirmed_dataset_id,
-            "resume_token": historical_root_profile["resume"]["token"],
+            "expected_current_dataset_id": root_id,
+            "resume_token": root_profile["resume"]["token"],
             "user": "reviewer",
         },
     )

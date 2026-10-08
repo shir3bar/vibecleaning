@@ -86,7 +86,7 @@ def _step(project_dir: Path, parent_dataset_id: str, value: str) -> dict:
     )
 
 
-def test_edit_profile_locks_historical_but_not_rewound_current_versions(tmp_path):
+def test_edit_profile_locks_historical_and_rewound_current_versions(tmp_path):
     project_dir, root_id = _project(tmp_path)
     first_id = _step(project_dir, root_id, "one")["dataset"]["dataset_id"]
     second_id = _step(project_dir, first_id, "two")["dataset"]["dataset_id"]
@@ -105,9 +105,10 @@ def test_edit_profile_locks_historical_but_not_rewound_current_versions(tmp_path
     )
     assert undone["dataset"]["dataset_id"] == first_id
     rewound = build_edit_lock_profile(project_dir, first_id)
-    assert rewound["editable"] is True
-    assert rewound["blockers"] == []
-    assert rewound["resume"]["allowed"] is False
+    assert rewound["editable"] is False
+    assert [item["code"] for item in rewound["blockers"]] == ["historical_version"]
+    assert rewound["resume"]["allowed"] is True
+    assert rewound["resume"]["discard_step_count"] == 1
 
     undone_again = undo_guarded(
         project_dir,
@@ -115,8 +116,9 @@ def test_edit_profile_locks_historical_but_not_rewound_current_versions(tmp_path
     )
     assert undone_again["dataset"]["dataset_id"] == root_id
     root_profile = build_edit_lock_profile(project_dir, root_id)
-    assert root_profile["editable"] is True
-    assert root_profile["resume"]["allowed"] is False
+    assert root_profile["editable"] is False
+    assert root_profile["resume"]["allowed"] is True
+    assert root_profile["resume"]["discard_step_count"] == 2
     assert {item["dataset_id"] for item in list_datasets(project_dir)} == {
         root_id,
         first_id,
@@ -125,35 +127,63 @@ def test_edit_profile_locks_historical_but_not_rewound_current_versions(tmp_path
     assert not project_paths(project_dir)["archives"].exists()
 
 
-def test_undo_keeps_the_undone_step_as_an_unarchived_branch(tmp_path):
+def test_undo_requires_explicit_resume_before_creating_a_replacement_step(tmp_path):
     project_dir, root_id = _project(tmp_path)
     first_id = _step(project_dir, root_id, "one")["dataset"]["dataset_id"]
-    second_id = _step(project_dir, first_id, "two")["dataset"]["dataset_id"]
+    second = _step(project_dir, first_id, "two")
+    second_id = second["dataset"]["dataset_id"]
     history_before = list_history(project_dir)
 
     undo_guarded(project_dir, expected_current_dataset_id=second_id)
+    payload = {
+        "user": "reviewer",
+        "title": "replacement step",
+        "kind": "python",
+        "script": STEP_SCRIPT,
+        "parameters": {"value": "replacement"},
+        "input_artifacts": ["movement.csv"],
+        "output_artifacts": ["replacement.txt"],
+        "set_as_head": True,
+    }
+    with pytest.raises(EditLockedError):
+        create_guarded_step(
+            project_dir,
+            payload,
+            selected_dataset_id=first_id,
+            expected_current_dataset_id=first_id,
+        )
+    assert list_history(project_dir) == history_before
+    assert not project_paths(project_dir)["archives"].exists()
+    assert (project_paths(project_dir)["outputs"] / second_id / "marker_two.txt").exists()
+
+    profile = build_edit_lock_profile(project_dir, first_id)
+    resumed = resume_from_dataset(
+        project_dir,
+        selected_dataset_id=first_id,
+        expected_current_dataset_id=first_id,
+        resume_token=profile["resume"]["token"],
+        user="reviewer",
+    )
+    assert resumed["profile"]["editable"] is True
+    archive_dir = project_paths(project_dir)["archives"] / resumed["archive"]["archive_id"]
+    manifest = json.loads((archive_dir / "manifest.json").read_text())
+    assert manifest["discarded_step_ids"] == [second["step"]["step_id"]]
+    assert (archive_dir / "steps" / second["step"]["step_id"] / "step.json").exists()
+    assert not (project_paths(project_dir)["outputs"] / second_id).exists()
+
     replacement = create_guarded_step(
         project_dir,
-        {
-            "user": "reviewer",
-            "title": "replacement branch",
-            "kind": "python",
-            "script": STEP_SCRIPT,
-            "parameters": {"value": "replacement"},
-            "input_artifacts": ["movement.csv"],
-            "output_artifacts": ["replacement.txt"],
-            "set_as_head": True,
-        },
+        payload,
         selected_dataset_id=first_id,
         expected_current_dataset_id=first_id,
     )
 
     dataset_ids = {item["dataset_id"] for item in list_datasets(project_dir)}
     step_ids = {item["step_id"] for item in list_history(project_dir)["steps"]}
-    assert second_id in dataset_ids
+    assert second_id not in dataset_ids
     assert replacement["dataset"]["dataset_id"] in dataset_ids
-    assert {item["step_id"] for item in history_before["steps"]} <= step_ids
-    assert not project_paths(project_dir)["archives"].exists()
+    assert second["step"]["step_id"] not in step_ids
+    assert replacement["dataset"]["parent_dataset_id"] == first_id
 
 
 def test_restore_forward_head_moves_rewound_pointer_without_discarding_history(tmp_path):
@@ -330,8 +360,8 @@ def test_resume_before_active_review_baseline_cancels_assignment_and_restores_pr
     undo_guarded(project_dir, expected_current_dataset_id=second_id)
     undo_guarded(project_dir, expected_current_dataset_id=first_id)
     rewound_profile = build_edit_lock_profile(project_dir, root_id)
-    assert rewound_profile["editable"] is True
-    assert rewound_profile["resume"]["allowed"] is False
+    assert rewound_profile["editable"] is False
+    assert rewound_profile["resume"]["allowed"] is True
 
     restore_forward_head_guarded(
         project_dir,

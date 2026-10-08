@@ -150,22 +150,24 @@ def build_edit_lock_profile(
         raise ProjectStateError("Unknown dataset")
     state = load_project_state(project_dir)
     current_dataset_id = str(state["current_dataset_id"])
-    blockers: list[dict] = []
-    if selected_dataset_id != current_dataset_id:
-        blockers.append(
-            _blocker(
-                "historical_version",
-                "Historical versions are read-only until Resume discards forward history.",
-                scope="dataset",
-            )
-        )
-    blockers.extend(dict(item) for item in (additional_blockers or []))
     resume = _resume_plan(
         project_dir,
         selected_dataset_id,
         datasets=datasets,
         dataset_by_id=dataset_by_id,
     )
+    blockers: list[dict] = []
+    # Undo moves the head pointer but retains the undone steps. Editing that
+    # head must still require Resume, just like selecting a historical version.
+    if selected_dataset_id != current_dataset_id or resume["discard_dataset_ids"]:
+        blockers.append(
+            _blocker(
+                "historical_version",
+                "This version is read-only. Use Resume to archive the discarded history before editing.",
+                scope="dataset",
+            )
+        )
+    blockers.extend(dict(item) for item in (additional_blockers or []))
     resume_allowed = bool(resume["discard_dataset_ids"]) and any(
         blocker.get("code") == "historical_version"
         for blocker in blockers

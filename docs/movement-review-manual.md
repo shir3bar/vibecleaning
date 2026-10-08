@@ -115,6 +115,11 @@ shows the effective decision for the active round.
 ## 8. Versions, undo, and provenance
 
 Every persistent review action creates a new dataset node. **Undo** moves the head
-back one step; it does not erase the recorded lineage. Opening an older dataset
-may be read-only when it is not the active graph head. Use the version controls
-and the existing resume workflow rather than editing raw source files.
+back one step and retains the undone steps. The earlier version is read-only,
+just as when you select it from the version dropdown. You can continue undoing
+or return to the latest version without discarding anything.
+
+To make new edits from the earlier version, choose **Resume** and confirm the
+warning. Resume archives the discarded steps' metadata, scripts, and summaries,
+records them in an archive manifest, and deletes their generated outputs. Editing
+is enabled after Resume completes. Raw source files remain unchanged.

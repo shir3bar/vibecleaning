@@ -1448,11 +1448,19 @@ def test_admin_dashboard_refreshes_active_review_without_rebuilding_rows(tmp_pat
         browser.close()
 
 
-def test_dataset_dropdown_restores_rewound_forward_tip(tmp_path):
+@pytest.mark.parametrize("source_format", ["csv", "rds"])
+def test_undo_requires_resume_and_can_restore_forward_tip(tmp_path, source_format):
     import playwright.sync_api as playwright_api
-    study_dir = tmp_path / "data" / "movement_clean" / "forward_tip"
+    family = "movement_rds" if source_format == "rds" else "movement_clean"
+    study_dir = tmp_path / "data" / family / "forward_tip"
     study_dir.mkdir(parents=True)
-    (study_dir / "movement.csv").write_text(CSV_BROWSER_FIXTURE, encoding="utf-8")
+    if source_format == "rds":
+        sample = RDS_SAMPLE_ROOT / "268904527_269302895.rds"
+        shutil.copy2(sample, study_dir / sample.name)
+        input_artifact = sample.name
+    else:
+        (study_dir / "movement.csv").write_text(CSV_BROWSER_FIXTURE, encoding="utf-8")
+        input_artifact = "movement.csv"
     root_id = ensure_project_state(study_dir)["current_dataset_id"]
     latest_id = create_step(
         study_dir,
@@ -1462,24 +1470,25 @@ def test_dataset_dropdown_restores_rewound_forward_tip(tmp_path):
             "kind": "python",
             "script": FORWARD_HEAD_STEP_SCRIPT,
             "parent_dataset_id": root_id,
-            "input_artifacts": ["movement.csv"],
+            "input_artifacts": [input_artifact],
             "output_artifacts": ["forward.txt"],
             "parameters": {"value": "forward"},
             "set_as_head": True,
         },
     )["dataset"]["dataset_id"]
-    app = create_app(
-        data_root=tmp_path / "data",
-        static_root=STATIC_ROOT,
-        index_path=INDEX_PATH,
-        auth_manager=_auth_manager(),
-    )
-    register_movement_routes(
-        app,
-        data_root=tmp_path / "data",
-        overview_fix_limit=1,
-        overview_series_points=250,
-    )
+    if source_format == "rds":
+        app = create_rds_movement_app(
+            data_root=tmp_path / "data", cache_root=tmp_path / "cache",
+            static_root=STATIC_ROOT, index_path=INDEX_PATH, auth_manager=_auth_manager(),
+        )
+    else:
+        app = create_app(
+            data_root=tmp_path / "data", static_root=STATIC_ROOT,
+            index_path=INDEX_PATH, auth_manager=_auth_manager(),
+        )
+        register_movement_routes(
+            app, data_root=tmp_path / "data", overview_fix_limit=1, overview_series_points=250,
+        )
 
     with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
         browser = _open_browser(playwright)
@@ -1501,11 +1510,17 @@ def test_dataset_dropdown_restores_rewound_forward_tip(tmp_path):
             timeout=20_000,
         )
         page.locator('[data-role="edit-lock-profile"]').wait_for(
-            state="hidden", timeout=20_000
+            state="visible", timeout=20_000
         )
         page.locator('[data-role="resume-history"]').wait_for(
-            state="hidden", timeout=20_000
+            state="visible", timeout=20_000
         )
+        page.locator('[data-role="resume-history"]').click()
+        page.locator('[data-role="resume-modal"]').wait_for(state="visible")
+        assert "Generated outputs will be deleted" in page.locator('[data-role="resume-warning"]').inner_text()
+        page.locator('[data-role="resume-close"]').click()
+        assert not (study_dir / "scrubdata" / "archives").exists()
+        assert (study_dir / "scrubdata" / "outputs" / latest_id / "forward.txt").exists()
 
         page.locator('[data-role="dataset"]').select_option(latest_id)
         page.wait_for_function(
@@ -1517,6 +1532,21 @@ def test_dataset_dropdown_restores_rewound_forward_tip(tmp_path):
             state="hidden", timeout=20_000
         )
         assert len(head_requests) == 1
+
+        # Undo again, then explicitly confirm Resume before editing.
+        page.locator('[data-role="undo"]').click()
+        page.locator('[data-role="resume-history"]').wait_for(state="visible", timeout=20_000)
+        page.locator('[data-role="resume-history"]').click()
+        page.locator('[data-role="resume-modal"]').wait_for(state="visible")
+        page.locator('[data-role="resume-submit"]').click()
+        page.locator('[data-role="resume-modal"]').wait_for(state="hidden", timeout=20_000)
+        page.locator('[data-role="edit-lock-profile"]').wait_for(state="hidden", timeout=20_000)
+        assert page.locator('[data-role="dataset"]').input_value() == root_id
+        assert page.locator(f'[data-role="dataset"] option[value="{latest_id}"]').count() == 0
+        manifests = list((study_dir / "scrubdata" / "archives").glob('*/manifest.json'))
+        assert len(manifests) == 1
+        assert json.loads(manifests[0].read_text())["discarded_dataset_ids"] == [latest_id]
+        assert not (study_dir / "scrubdata" / "outputs" / latest_id).exists()
         browser.close()
 
 

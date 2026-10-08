@@ -1611,6 +1611,19 @@ def register_movement_routes(
             raise ReviewForbiddenError("Reviewers cannot undo before the assignment baseline")
         target_index = lineage.index(target_id)
         forward_ids = set(lineage[target_index + 1 :])
+        if selected_dataset_id is not None:
+            # Resume archives every dataset outside the selected ancestry,
+            # including steps retained by Undo beyond the current head.
+            kept_ids = set()
+            cursor = target_id
+            while cursor:
+                kept_ids.add(cursor)
+                cursor = str(load_dataset(study_dir, cursor).get("parent_dataset_id") or "")
+            forward_ids = {
+                str(step.get("output_dataset_id") or "")
+                for step in list_history(study_dir)["steps"]
+                if str(step.get("output_dataset_id") or "") not in kept_ids
+            }
         steps = [
             step
             for step in list_history(study_dir)["steps"]

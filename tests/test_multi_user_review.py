@@ -91,6 +91,76 @@ def _decision(
     }
 
 
+@pytest.mark.parametrize("discarded_step_owner", ["reviewer", "editor", "previous_review", "dataset_update"])
+def test_resume_after_undo_checks_ownership_of_retained_steps(tmp_path, discarded_step_owner):
+    editor, reviewer = _actors()
+    data_root = tmp_path / "data"
+    study = data_root / "movement_raw" / "study_one"
+    study.mkdir(parents=True)
+    (study / "movement.csv").write_text(
+        "eventid,individual,timestamp,longitude,latitude\n"
+        "a1,alpha,2024-01-01T00:00:00Z,-70,40\n"
+    )
+    root_id = ensure_project_state(study)["current_dataset_id"]
+    assigned = assign_review(
+        study, editor=editor, reviewer=reviewer,
+        expected_current_dataset_id=root_id, expected_review_revision=0,
+        individuals=["alpha"],
+    )
+    step_actor = editor if discarded_step_owner == "editor" else reviewer
+    result = create_step(study, {
+        "user": step_actor.display_name,
+        "actor": step_actor.as_dict(),
+        "title": "Retained step",
+        "kind": "python",
+        "script": STEP_SCRIPT,
+        "parent_dataset_id": root_id,
+        "input_artifacts": ["movement.csv"],
+        "output_artifacts": ["movement.csv"],
+        "parameters": {"workflow": {
+            "review_id": "previous_review" if discarded_step_owner == "previous_review" else assigned["review"]["review_id"],
+            "review_effect": "dataset_update" if discarded_step_owner == "dataset_update" else "annotation_only",
+        }},
+        "set_as_head": True,
+    })
+    # An editor can rewind any of these histories; the reviewer must still be
+    # authorized for every discarded step when they subsequently use Resume.
+    undo_to_parent(study)
+    manager = AuthManager([build_user_record(
+        username="reviewer", display_name=reviewer.display_name, role="reviewer",
+        password="reviewer-password-long", user_id=reviewer.user_id,
+    )])
+    app = create_app(
+        data_root=data_root,
+        static_root=REPO_ROOT / "examples" / "movement" / "static",
+        auth_manager=manager,
+    )
+    register_movement_routes(app, data_root=data_root, allowed_families={"movement_raw"})
+    client = TestClient(app)
+    assert client.post("/api/auth/login", json={
+        "username": "reviewer", "password": "reviewer-password-long",
+    }).status_code == 200
+    base_url = "/api/apps/movement/family/movement_raw/study/study_one"
+    profile = client.get(f"{base_url}/edit-profile", params={"dataset_id": root_id}).json()
+    own_step = discarded_step_owner == "reviewer"
+    assert profile["editable"] is False
+    assert profile["resume"]["allowed"] is own_step
+    response = client.post(f"{base_url}/resume", json={
+        "dataset_id": root_id,
+        "expected_current_dataset_id": root_id,
+        "expected_review_revision": profile["review_revision"],
+        "resume_token": profile["resume"]["token"],
+    })
+    assert response.status_code == (200 if own_step else 403), response.text
+    step_path = project_paths(study)["steps"] / result["step"]["step_id"]
+    if own_step:
+        assert not step_path.exists()
+        assert response.json()["profile"]["editable"] is True
+    else:
+        assert step_path.exists()
+        assert not project_paths(study)["archives"].exists()
+
+
 def test_cookie_authentication_and_server_owned_attribution():
     manager = AuthManager(
         [
