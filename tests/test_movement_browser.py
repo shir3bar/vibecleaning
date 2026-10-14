@@ -1716,7 +1716,7 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_prop
         _wait_for_layer(page, "movement-binary-paths-individual-")
         assert len(binary_requests) == 1
 
-        page.locator('[data-role="color-by"]').select_option("gps_spike_step_turn")
+        page.locator('[data-role="color-by"]').select_option("gps_spike_speed_turn")
         turn_angle = page.locator(
             'input[data-action="set-gps-spike-turn-angle"]'
         )

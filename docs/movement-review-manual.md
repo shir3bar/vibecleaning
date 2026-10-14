@@ -47,6 +47,15 @@ not create a dataset version. **Select fixes** adds a bounded set of matches to
 the checked-fix list for inspection; **Flag thresholded fixes** applies the saved
 filter to the selected scope, including matches not materialized in that preview.
 
+For **GPS spike (two-stage speed)** and **GPS spike (physiology)**, expand
+**Edit thresholds** to change the two speed cutoffs (m/s) and the two minimum
+absolute turn angles. Click **Preview changes**, inspect the updated map and
+histogram, then flag when ready. **Reset defaults** restores the calculated
+cutoffs and default angles. Custom values are recorded in the saved filter step.
+The physiology default uses the speed cap's **lower confidence bound**
+(`vmax_ci_lower`), with study Q3 still required as the lower speed cutoff.
+Previously saved filters retain their recorded thresholds.
+
 The timeline similarly keeps the nearest fix and its immediate neighbors colored
 while temporarily graying other context.
 
@@ -83,6 +92,24 @@ originating suspicion.
 Open **Review queue** to work through individuals. Record **OK**, **Fix & Keep**,
 or **Remove**, and use **Needs check** when another decision is required. Moving
 to another individual saves a staged decision using the existing queue workflow.
+
+Under the active individual's saved flags, open **Flagged periods / fixes**.
+The scrollable list groups clickable rows by issue type, with dates and counts.
+**Periods / segments** uses the saved stationarity filter's actual periods:
+source bursts and skipped GPS fixes do not split them. Other flags are grouped
+by consecutive fixes in their source track. **Each fix** lists every unresolved
+fix separately, with Previous/Next pages for long lists. Click a row to
+highlight it, show flagged fixes, zoom to it with nearby track context,
+and pause the player at its first fix. The black player marker shows that fix.
+Times are UTC. This is navigation only: **Confirm** and **Unflag** beside an issue
+type still act on that individual's whole group of flags for that issue.
+
+Stationarity measures radius from the first fix of each candidate period. A fix
+outside that radius or a gap above the maximum starts a new period. Each period
+must independently meet the minimum duration. Start/end then selects periods
+containing any of the individual's first/last three retained fixes. A noisy tail
+can therefore contain long qualifying periods followed by a short final period
+that fails the duration setting; Start/end will not join them automatically.
 
 Keyboard shortcuts in the queue:
 

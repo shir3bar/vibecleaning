@@ -231,6 +231,9 @@ def _movement_graph_payload(study_dir: Path, history: dict | None = None) -> dic
             for key in (
                 "kind", "field_key", "field_kind", "operator", "threshold_value",
                 "selected_levels", "step_length_threshold_m", "minimum_abs_turn_angle_deg", "percentile",
+                "metric", "method", "algorithm", "speed_threshold_mps", "cutoff_preset",
+                "lower_speed_mps", "upper_speed_mps", "selected_stages", "distribution", "species_cap", "species_cap_field",
+                "threshold_overrides", "moderate_min_abs_turn_deg", "fast_min_abs_turn_deg",
                 "radius_m", "minimum_duration_s", "maximum_gap_s", "minimum_fixes", "position",
             )
             if key in spec
@@ -354,6 +357,7 @@ MOVEMENT_SUMMARY_MODULES = (
 MOVEMENT_REVIEW_MODULES = (
     *MOVEMENT_SUMMARY_MODULES,
     "examples.movement.stationarity",
+    "examples.movement.speed_spikes",
     "examples.movement.review_annotations",
 )
 MOVEMENT_ANOMALY_MODULES = (
@@ -641,7 +645,7 @@ def _validate_status(value: object) -> str:
     return status
 
 
-def _validate_filter_percentile(value: object, *, gps_spike: bool = False) -> dict:
+def _validate_filter_percentile(value: object, *, gps_spike: bool = False, speed: bool = False) -> dict:
     if not isinstance(value, dict) or value.get("probability") not in (0.95, 0.99):
         raise ValueError("Filter percentile must be 95th or 99th")
     count = value.get("sample_count")
@@ -650,10 +654,24 @@ def _validate_filter_percentile(value: object, *, gps_spike: bool = False) -> di
     return {
         "probability": value["probability"], "sample_count": count,
         "method": "linear",
-        "population": "finite-nonnegative-outbound-steps-at-unconfirmed-fixes"
+        "population": "finite-nonnegative-outbound-speeds-at-unconfirmed-fixes" if speed else "finite-nonnegative-outbound-steps-at-unconfirmed-fixes"
         if gps_spike else "finite-values-at-unconfirmed-fixes",
         "scope": "selected-individuals-all-track-sets",
     }
+
+
+def _validate_speed_iqr_preset(value):
+    from .speed_spikes import finite_number
+    if not isinstance(value, dict) or value.get("method") != "q3-plus-100-iqr":
+        raise ValueError("Invalid speed IQR preset")
+    q1, q3 = (finite_number(value.get(k), k) for k in ("q1", "q3"))
+    count = value.get("sample_count")
+    if q3 < q1 or isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise ValueError("Invalid speed IQR population")
+    return {"method": "q3-plus-100-iqr", "q1": q1, "q3": q3, "multiplier": 100,
+            "sample_count": count, "quantile_method": "linear",
+            "population": "finite-nonnegative-outbound-speeds-at-unconfirmed-fixes",
+            "scope": "selected-individuals-all-track-sets"}
 
 
 def _validate_filter_scope(value: object) -> dict:
@@ -682,6 +700,14 @@ def _validate_filter_scope(value: object) -> dict:
             "individuals": individuals, "set_names": set_names,
         }
     if filter_kind == "gps_spike":
+        from .speed_spikes import is_speed_spike, validate_speed_spike
+        if is_speed_spike(value):
+            result = {**validate_speed_spike(value), "individuals": individuals, "set_names": set_names}
+            if value.get("percentile") is not None:
+                result["percentile"] = _validate_filter_percentile(value["percentile"], gps_spike=True, speed=True)
+            if value.get("cutoff_preset") is not None:
+                result["cutoff_preset"] = _validate_speed_iqr_preset(value["cutoff_preset"])
+            return result
         try:
             step_threshold = float(value.get("step_length_threshold_m"))
             turn_threshold = float(value.get("minimum_abs_turn_angle_deg"))
@@ -732,6 +758,10 @@ def _validate_filter_scope(value: object) -> dict:
         result.update({"operator": operator, "threshold_value": threshold})
         if value.get("percentile") is not None:
             result["percentile"] = _validate_filter_percentile(value["percentile"])
+        if value.get("cutoff_preset") is not None:
+            if field_key != "speed_mps":
+                raise ValueError("IQR speed preset applies only to speed")
+            result["cutoff_preset"] = _validate_speed_iqr_preset(value["cutoff_preset"])
     else:
         raw_levels = value.get("selected_levels")
         if not isinstance(raw_levels, list):
@@ -2161,6 +2191,12 @@ def register_movement_routes(
             payload = await individual_issue_groups(
                 study_dir, dataset_id, logical_name, individual,
             )
+            from .stationarity_runs import public_run, navigation_periods
+            contexts, _, _ = await stationarity_contexts(study_dir, dataset_id, logical_name, individual)
+            periods = await run_in_threadpool(navigation_periods, contexts, payload["groups"])
+            for group in payload["groups"]:
+                if group["issue_type"] in periods:
+                    group["stationary_periods"] = periods[group["issue_type"]]
             # The browser needs counts and map positions, not every allegation's
             # repeated provenance. Mutations resolve the parent links on the server.
             payload["groups"] = [
@@ -2171,8 +2207,6 @@ def register_movement_routes(
                 {key: fix[key] for key in ("fix_key", "individual", "time_ms", "lon", "lat")}
                 for fix in payload["fixes"]
             ]
-            from .stationarity_runs import public_run
-            contexts, _, _ = await stationarity_contexts(study_dir, dataset_id, logical_name, individual)
             payload["stationarity_runs"] = [public_run(context) for context in contexts]
             return JSONResponse(payload)
         except ReviewForbiddenError as exc:
@@ -3458,6 +3492,8 @@ def register_movement_routes(
                 study_dir, dataset_id, logical_name
             )
             filter_spec = _validate_filter_scope(body.get("filter"))
+            if filter_spec.get("metric") == "speed":
+                filter_spec["study_key"] = study_name
             if configured_source.bundle_scoped:
                 bundle, index_path = await run_in_threadpool(
                     ensure_configured_rds_index, study_dir, dataset_id
@@ -3500,7 +3536,7 @@ def register_movement_routes(
             return JSONResponse({
                 "match_count": int(match_count),
                 **({"resolved_scope": _resolved_scope}
-                   if filter_spec.get("kind") == "stationarity" else {}),
+                   if filter_spec.get("kind") == "stationarity" or filter_spec.get("metric") == "speed" else {}),
                 "scope": (
                     "selected_individuals"
                     if filter_spec.get("individuals")
@@ -3693,6 +3729,8 @@ def register_movement_routes(
                 })
             elif scope_kind == "filter":
                 scope["filter"] = _validate_filter_scope(raw_scope.get("filter"))
+                if scope["filter"].get("metric") == "speed":
+                    scope["filter"]["study_key"] = study_name
                 rds_scope["filter"] = scope["filter"]
             elif scope_kind == "roi":
                 scope = _validate_roi_scope(raw_scope)
@@ -3798,6 +3836,17 @@ def register_movement_routes(
                     "scope": scope,
                     "resolved_fix_count": resolved_fix_count,
                 }]
+            if not configured_source.bundle_scoped and scope_kind == "filter" and scope["filter"].get("metric") == "speed":
+                # Freeze automatically derived cutoffs before creating the step.
+                # Its bundled replay script must not depend on a local cap table.
+                _, artifact_path = get_dataset_artifact(study_dir, dataset_id, logical_name)
+                annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+                confirmed_keys, confirmed_tracks = confirmed_exclusion_scopes(annotations, source_artifact=logical_name)
+                details = {}
+                await run_in_threadpool(resolve_filter_row_ranges, artifact_path, scope["filter"],
+                    confirmed_fix_keys=confirmed_keys, confirmed_individual_tracks=confirmed_tracks,
+                    annotations=annotations, source_artifact=logical_name, stationarity_details=details)
+                scope.update(details)
             if any(
                 artifact.get("logical_name") == "movement_review_annotations.json"
                 for artifact in dataset.get("artifacts", [])

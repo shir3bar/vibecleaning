@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 *.pyc
 *.csv
+!examples/movement/species_speed_caps.csv
 *.rds
 *.RDS
 !tests/fixtures/deployment/data/**/*.rds

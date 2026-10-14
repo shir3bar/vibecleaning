@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.state import get_dataset_artifact
 from examples.movement.review_annotations import resolve_filter_row_ranges
 from examples.movement.rds_index import resolve_rds_review_scope
-from examples.movement.stationarity import ALGORITHM, evaluate_stationarity, stationary_fix_keys, validate_stationarity_filter
+from examples.movement.stationarity import ALGORITHM, evaluate_stationarity, stationary_fix_keys, stationary_periods, validate_stationarity_filter
 from test_movement_fixes import create_movement_test_client
 from test_rds_movement import _client
 
@@ -65,6 +65,44 @@ def test_stationarity_period_after_third_fix_and_before_last_three_is_middle():
     points = records([.1, .2, .3, *([0] * 6), .4, .5, .6])
     assert stationary_fix_keys(points, SPEC) == []
     assert stationary_fix_keys(points, {**SPEC, "position": "middle"}) == [str(i) for i in range(4, 10)]
+
+
+def test_short_final_anchor_run_is_not_a_day_long_end_period():
+    # Like Car Talk's tail: drift outside the first fix's 50 m circle starts
+    # a new run. Its final 20 hours cannot satisfy a 24-hour minimum.
+    points = records([0, 0, .0003, .0006, .0005, .0006],
+                     [h * 3600 for h in [0, 24, 42, 43, 53, 63]])
+    spec = {**SPEC, 'radius_m': 50, 'minimum_duration_s': 86400, 'maximum_gap_s': 259200}
+    assert stationary_fix_keys(points, spec) == ['1', '2', '3']  # Start only.
+    assert stationary_periods(points, {**spec, 'position': 'anywhere'}) == [['1', '2', '3']]
+    assert stationary_periods(points, {**spec, 'minimum_duration_s': 20 * 3600}) == [['1', '2', '3'], ['4', '5', '6']]
+
+
+def test_navigation_periods_use_saved_skips_and_ignore_bursts_and_later_decisions():
+    from examples.movement.stationarity_runs import navigation_periods
+    points = records([0, 1, 0, 0, .01, .01, .01, .01, .01, .01],
+                     [h * 3600 for h in [0, 1, 24, 48, 60, 84, 108, 200, 224, 248]])
+    for i, point in enumerate(points):
+        point.update(source_artifact='track.csv', individual='alpha', set_name='train', row_index=i+1, burst=i)
+    spec = {**SPEC, 'radius_m': 50, 'minimum_duration_s': 86400,
+            'maximum_gap_s': 259200, 'position': 'anywhere'}
+    gps = {'annotation_id': 'gps', 'status': 'suspected', 'issue_type': 'GPS spikes',
+           'scope': {'kind': 'fix', 'row_ranges': [[2, 2]]}}
+    periods = []
+    matches, inputs = evaluate_stationarity(points, spec, [gps], periods=periods)
+    assert periods == [('1', '3', '4'), ('5', '6', '7'), ('8', '9', '10')]
+    assert matches == ['1', '3', '4', '5', '6', '7', '8', '9', '10']
+    parent = {'annotation_id': 'stationary', 'scope': {'filter': spec, 'stationarity_inputs': inputs}}
+    # Fix 3 was subsequently reviewed; the saved GPS exclusion at 2 is now
+    # dismissed. Navigation must still show the three originally saved periods.
+    groups = [{'issue_type': 'Stationarity', 'resolutions': [{'parent_annotation_id': 'stationary',
+               'fix_keys': [key for key in matches if key != '3']}]}]
+    contexts = [{'individual': 'alpha', '_family': [parent], '_records': points, '_annotations': []}]
+    result = navigation_periods(contexts, groups)['Stationarity']
+    assert [p['fix_keys'] for p in result] == [['1', '4'], ['5', '6', '7'], ['8', '9', '10']]
+    assert result[0]['start_ms'] == 0 and result[0]['end_ms'] == 48*3600000
+    assert result[0]['original_fix_count'] == 3
+    assert navigation_periods(contexts, []) == {}
 
 
 def test_stationarity_endpoints_follow_remaining_fixes_after_gps_and_confirmations():
@@ -197,6 +235,12 @@ def test_csv_preview_and_saved_decision_agree_and_preserve_raw_data(tmp_path):
     assert len(annotation["scope"]["filter"]["implementation_sha256"]) == 64
     assert annotation["status"] == "suspected"
     assert (study / "movement.csv").read_text(encoding="utf-8") == content
+    groups = client.get(base + f"/dataset/{saved['dataset']['dataset_id']}/issue-groups",
+                        params={'logical_name': 'movement.csv', 'individual': 'alpha'})
+    assert groups.status_code == 200, groups.text
+    periods = groups.json()['groups'][0]['stationary_periods']
+    assert [len(period['fix_keys']) for period in periods] == [3, 3]
+    assert {key for period in periods for key in period['fix_keys']} == set(groups.json()['groups'][0]['fix_keys'])
     # Trying a different threshold does not change the saved scope.
     client.post(base + "/actions/preview-filter", json={**body, "filter": {**SPEC, "minimum_duration_s": 900}})
     assert json.loads(sidecar.read_text(encoding="utf-8"))["annotations"][0] == annotation
@@ -253,6 +297,12 @@ def test_rds_preview_matches_csv_and_saved_source_scopes(tmp_path):
     annotation = json.loads(sidecar.read_text(encoding="utf-8"))["annotations"][0]
     assert annotation["scope"]["source_rows"] == scope["source_rows"]
     assert annotation["scope"]["filter"] == scope["filter"]
+    groups = client.get(base + f"/dataset/{saved['dataset']['dataset_id']}/issue-groups",
+                        params={'logical_name': logical, 'individual': individual})
+    assert groups.status_code == 200, groups.text
+    periods = groups.json()['groups'][0]['stationary_periods']
+    assert sum(len(period['fix_keys']) for period in periods) == preview['match_count']
+    assert {key for period in periods for key in period['fix_keys']} == set(groups.json()['groups'][0]['fix_keys'])
     excluded_scope, count = resolve_rds_review_scope(index, scope, annotations=[{**annotation, "status": "confirmed"}])
     assert count == 0
     assert excluded_scope["source_rows"] == []

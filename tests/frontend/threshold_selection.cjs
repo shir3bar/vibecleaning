@@ -5,9 +5,9 @@ const source = fs.readFileSync(process.argv[2] === '--stdin' ? 0 : process.argv[
 const profile = process.argv[3] || 'rds_movement';
 const start = source.indexOf('class MovementExampleApp {');
 const end = source.indexOf('\n}\n', start) + 2;
-const App = new Function('MOVEMENT_APP_CONFIG', 'GPS_SPIKE_COLOR_FIELD_KEY', 'STATIONARITY_COLOR_FIELD_KEY', 'formatCount',
+const App = new Function('MOVEMENT_APP_CONFIG', 'GPS_SPIKE_COLOR_FIELD_KEY', 'STATIONARITY_COLOR_FIELD_KEY', 'formatCount', 'SPEED_SPIKE_FIELDS',
   `${source.slice(start, end)}; return MovementExampleApp;`
-)({rdsSource: profile === 'rds_movement'}, 'gps_spike_step_turn', 'stationarity', String);
+)({rdsSource: profile === 'rds_movement'}, 'gps_spike_speed_turn', 'stationarity', String, {});
 
 function handler(name, next) {
   const marker = `this.refs.${name}.addEventListener("click", () => {`;

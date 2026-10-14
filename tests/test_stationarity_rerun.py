@@ -62,13 +62,13 @@ def test_unchanged_inputs_reuse_distance_scan_and_input_checks_do_not_scan(monke
            "scope": {"kind": "fix", "row_ranges": [[3, 3]]}}
     stationarity._SCAN_CACHE.clear()
     calls = []
-    original = stationarity.stationary_fix_keys
+    original = stationarity.stationary_periods
 
     def counted(track, spec, **kwargs):
         calls.append(len(track))
         return original(track, spec, **kwargs)
 
-    monkeypatch.setattr(stationarity, "stationary_fix_keys", counted)
+    monkeypatch.setattr(stationarity, "stationary_periods", counted)
     spec = {**SPEC, "maximum_gap_s": 120}
     first = stationarity.evaluate_stationarity(points, spec, [gps])
     assert len(calls) == 1

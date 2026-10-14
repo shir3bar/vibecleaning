@@ -28,6 +28,18 @@ params.scope.filter = {kind: 'gps_spike', step_length_threshold_m: 20000,
   minimum_abs_turn_angle_deg: 150};
 assert.equal(formatStepLabel(fresh, dataset), 'GPS spike');
 assert.equal(formatStepDetails(fresh, dataset), 'suspected: GPS spike: both steps > 20000 m, |turn| ≥ 150°');
+params.scope.filter = {kind: 'gps_spike', metric: 'speed', method: 'manual',
+  speed_threshold_mps: 12.5, minimum_abs_turn_angle_deg: 166};
+assert.equal(formatStepDetails(fresh, dataset), 'suspected: GPS spike: both speeds > 12.5 m/s, |turn| ≥ 166°');
+params.scope.filter = {kind: 'gps_spike', metric: 'speed', method: 'physiology',
+  lower_speed_mps: 1, upper_speed_mps: 36, selected_stages: ['fast']};
+assert.equal(formatStepDetails(fresh, dataset), 'suspected: GPS spike: both speeds > Q3 (1 m/s); |turn| ≥166°, or ≥157° when both speeds > species cap (36 m/s); above species cap group only');
+params.scope.filter = {...params.scope.filter, species_cap_field: 'vmax_ci_lower', upper_speed_mps: 17};
+assert.equal(formatStepDetails(fresh, dataset), 'suspected: GPS spike: both speeds > Q3 (1 m/s); |turn| ≥166°, or ≥157° when both speeds > cap lower CI (17 m/s); above cap lower CI group only');
+params.scope.filter = {...params.scope.filter, lower_speed_mps: 2, upper_speed_mps: 10,
+  moderate_min_abs_turn_deg: 140, fast_min_abs_turn_deg: 130,
+  threshold_overrides: {lower_speed_mps: 2, upper_speed_mps: 10, moderate_min_abs_turn_deg: 140, fast_min_abs_turn_deg: 130}};
+assert.equal(formatStepDetails(fresh, dataset), 'suspected: GPS spike: both speeds > custom lower cutoff (2 m/s); |turn| ≥140°, or ≥130° when both speeds > custom upper cutoff (10 m/s); above custom upper cutoff group only');
 params.scope.filter = {field_key: 'is_outlier', selected_levels: ['True']};
 assert.equal(formatStepLabel(fresh, dataset), 'Outlier flag');
 assert.equal(formatStepDetails(fresh, dataset), 'suspected: Outlier flag in True');

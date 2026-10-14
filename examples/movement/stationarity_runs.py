@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from app.state import get_dataset_artifact, ProjectStateError
-from .review_annotations import load_review_annotations, row_number_in_ranges
+from .review_annotations import load_review_annotations, row_number_in_ranges, fix_key_row_number
 from .stationarity import (
     ALGORITHM, compressed_rows, evaluate_stationarity, stationarity_scope_matcher,
     validate_stationarity_filter,
@@ -114,6 +114,57 @@ def run_contexts(study_dir, annotations, *, path, rds, logical_name, individual,
 def public_run(context):
     return {key: context[key] for key in ("run_id", "annotation_id", "individual", "issue_type", "stale", "rule_changed",
                                          "filter", "previous_algorithm")}
+
+
+def navigation_periods(contexts, groups):
+    """Recover the detector's periods from saved inputs, not today's bursts.
+
+    Saved skipped-row snapshots freeze the GPS/exclusion baseline. Later review
+    decisions only remove entries from this navigation list; they never split
+    a recorded period or change its original start/end dates. Older imported
+    flags without an input snapshot use ordinary consecutive-fix navigation.
+    """
+    by_parent = {resolution["parent_annotation_id"]: (group["issue_type"], set(resolution["fix_keys"]))
+                 for group in groups for resolution in group.get("resolutions", [])}
+    result, seen = {}, set()
+    for context in contexts:
+        for parent in context["_family"]:
+            parent_id = parent["annotation_id"]
+            if parent_id not in by_parent:
+                continue
+            windows = _scoped_inputs(parent, context["individual"])
+            if not windows:
+                continue
+            records = _window_records(context["_records"], windows)
+            matcher = stationarity_scope_matcher(records)
+            skipped = matcher({"scope": {"source_rows": [
+                {"logical_name": window["source_artifact"], "row_ranges": window["skipped_rows"]}
+                for window in windows]}})
+            frozen = [{**record, "excluded": i in skipped, "source_annotation": None}
+                      for i, record in enumerate(records)]
+            periods = []
+            evaluate_stationarity(frozen, parent["scope"]["filter"], [], periods=periods)
+            by_key = {record["fix_key"]: record for record in records}
+            issue_type, unresolved = by_parent[parent_id]
+            # CSV scanning uses row:N while the map preserves event-ID keys.
+            # Match these through the same original source row; RDS file keys
+            # already include their source identity and must remain exact.
+            csv_keys = {fix_key_row_number(key): key for key in unresolved
+                        if not key.startswith("file:") and (key.startswith("row:") or "#row:" in key)}
+            for period in periods:
+                keys = [key if key in unresolved else csv_keys.get(by_key[key]["row_index"])
+                        if key.startswith("row:") else None for key in period]
+                keys = [key for key in keys if key is not None]
+                identity = (issue_type, tuple(keys))
+                if not keys or identity in seen:
+                    continue
+                seen.add(identity)
+                result.setdefault(issue_type, []).append({
+                    "fix_keys": keys, "start_ms": by_key[period[0]]["time_ms"],
+                    "end_ms": by_key[period[-1]]["time_ms"],
+                    "original_fix_count": len(period), "annotation_id": parent_id,
+                })
+    return result
 
 
 def _scope(keys, *, rds, logical_name):

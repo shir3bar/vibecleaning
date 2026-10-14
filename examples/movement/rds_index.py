@@ -2001,6 +2001,8 @@ def resolve_rds_review_scope(
         filter_kind = str(spec.get("kind") or "").strip().lower()
         if filter_kind == "stationarity":
             return _resolve_rds_stationarity(index_path, spec, annotations)
+        if filter_kind == "gps_spike" and spec.get("metric") == "speed":
+            return _resolve_rds_speed_spike(index_path, spec, annotations or [])
         scoped_individuals = [
             str(item) for item in spec.get("individuals") or [] if str(item)
         ]
@@ -2090,6 +2092,21 @@ def resolve_rds_review_scope(
             "source_rows": source_rows,
         }, len(fix_keys)
     raise ValueError("Invalid RDS review scope")
+
+
+def _resolve_rds_speed_spike(index_path, spec, annotations):
+    from .speed_spikes import resolve_speed_spikes, species_cap
+    def load_cap():
+        with closing(_connect(index_path)) as connection:
+            metadata = connection.execute("SELECT study_id, report_metadata FROM artifacts").fetchall()
+        names = {json.loads(row["report_metadata"]).get("species", "") for row in metadata}
+        return species_cap(spec.get("study_key", ""), names, study_ids={row["study_id"] for row in metadata})
+    stat = index_path.stat()
+    key = hashlib.sha256(json.dumps([str(index_path.resolve()), stat.st_size, stat.st_mtime_ns,
+                                    annotations], sort_keys=True).encode()).digest()
+    return resolve_speed_spikes(lambda: _rds_stationarity_tracks(index_path, {}), spec, annotations,
+                                cap_loader=load_cap, cache_key=key,
+                                candidate_factory=lambda: _rds_stationarity_tracks(index_path, spec))
 
 
 def _resolve_rds_stationarity(

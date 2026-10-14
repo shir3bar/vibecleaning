@@ -238,7 +238,7 @@ const FIX_POPUP_DEFAULT_FIELDS = [
 const FIX_POPUP_OFFSET_PX = 14;
 const FIX_POPUP_EDGE_PADDING_PX = 12;
 const INDIVIDUAL_COLOR_FIELD_KEY = "individual";
-const GPS_SPIKE_COLOR_FIELD_KEY = "gps_spike_step_turn";
+const GPS_SPIKE_COLOR_FIELD_KEY = "gps_spike_speed_turn";
 const STATIONARITY_COLOR_FIELD_KEY = "stationarity";
 const STATIONARITY_ALGORITHM = "anchor-radius-v4";
 const STATIONARITY_POSITIONS = Object.freeze({
@@ -264,10 +264,80 @@ const INDIVIDUAL_COLOR_FIELD = Object.freeze({
 });
 const GPS_SPIKE_COLOR_FIELD = Object.freeze({
   key: GPS_SPIKE_COLOR_FIELD_KEY,
-  label: "GPS spike (step + turn)",
+  label: "GPS spike (speed + turn)",
   kind: "numeric",
   source: "derived",
 });
+const SPEED_SPIKE_FIELDS = Object.freeze({
+  gps_spike_two_stage: {key: "gps_spike_two_stage", label: "GPS spike (two-stage speed)", method: "study_quantiles", kind: "categorical", source: "derived"},
+  gps_spike_physiology: {key: "gps_spike_physiology", label: "GPS spike (physiology)", method: "physiology", kind: "categorical", source: "derived"},
+});
+function speedSpikeLevels(fieldKey, spec = {}) {
+  const edits = spec.threshold_overrides || {};
+  const lower = Object.hasOwn(edits, "lower_speed_mps") ? "Lower" : "Q3";
+  const upper = Object.hasOwn(edits, "upper_speed_mps") ? "Upper"
+    : fieldKey === "gps_spike_physiology" ? (spec.species_cap_field === "v_max_m_s" ? "species cap" : "cap lower CI") : "P99.9";
+  const moderate = edits.moderate_min_abs_turn_deg ?? spec.moderate_min_abs_turn_deg ?? 166;
+  const fast = edits.fast_min_abs_turn_deg ?? spec.fast_min_abs_turn_deg ?? 157;
+  return ["Not a candidate", `${lower}–${upper} · |turn| ≥${moderate}°`, `Above ${upper} · |turn| ≥${fast}°`];
+}
+function speedHistogramMarkup(spec, histogram, scale = "log") {
+  if (!histogram?.sample_count) return "";
+  const logarithmic = scale !== "linear";
+  const {edges, counts} = histogram[logarithmic ? "log" : "linear"];
+  const edits = spec.threshold_overrides || {};
+  const markers = [
+    {key: "q3", label: Object.hasOwn(edits, "lower_speed_mps") ? "Lower" : "Q3", value: spec.lower_speed_mps, color: "#f5b536", y: 14},
+    {key: "upper", label: Object.hasOwn(edits, "upper_speed_mps") ? "Upper" : spec.method === "physiology" ? (spec.species_cap_field === "vmax_ci_lower" ? "Cap CI" : "Cap") : "P99.9", value: spec.upper_speed_mps, color: "#f25067", y: 30},
+  ].filter(marker => Number.isFinite(marker.value));
+  // Include cutoffs outside the observed speeds without manufacturing bins.
+  const positiveBounds = [...edges, ...markers.map(marker => marker.value)].filter(value => value > 0);
+  let lower = logarithmic ? Math.min(...positiveBounds, Infinity) : 0;
+  let upper = Math.max(...positiveBounds, 0);
+  if (!Number.isFinite(lower) || upper <= 0) { lower = 0.5; upper = 1; }
+  if (lower === upper) { lower /= 2; upper *= 2; }
+  const left = logarithmic ? 54 : 18, right = 306, bottom = 112, height = 66;
+  const x = value => logarithmic
+    ? (value <= 0 ? 18 : left + (Math.log(value) - Math.log(lower)) / (Math.log(upper) - Math.log(lower)) * (right - left))
+    : left + value / upper * (right - left);
+  const largestCount = Math.max(...counts, logarithmic ? histogram.zero_count : 0, 1);
+  const number = value => value === 0 ? "0" : Number(value.toPrecision(3)).toString();
+  const bar = (start, end, count, title) => {
+    const h = count / largestCount * height;
+    return `<rect x="${start}" y="${bottom - h}" width="${Math.max(0.2, end - start - 1)}" height="${h}" fill="#54cbb7"><title>${escapeHtml(title)}</title></rect>`;
+  };
+  const bars = counts.map((count, i) => bar(x(edges[i]), x(edges[i + 1]), count,
+    `${edges[i]}–${edges[i + 1]} m/s: ${formatCount(count)} steps`)).join("");
+  const zero = logarithmic ? bar(12, 25, histogram.zero_count, `0 m/s: ${formatCount(histogram.zero_count)} steps`) : "";
+  const lines = markers.map(marker => {
+    const px = x(marker.value);
+    const anchor = px < 60 ? "start" : px > 270 ? "end" : "middle";
+    return `<g data-speed-marker="${marker.key}" data-speed-value="${marker.value}" fill="${marker.color}">
+      <title>${marker.label}: ${marker.value} m/s</title>
+      <line x1="${px}" x2="${px}" y1="${marker.y + 3}" y2="${bottom}" stroke="${marker.color}" stroke-width="1.5"/>
+      <text x="${px}" y="${marker.y}" text-anchor="${anchor}">${marker.label}</text>
+    </g>`;
+  }).join("");
+  const mid = logarithmic ? Math.exp((Math.log(lower) + Math.log(upper)) / 2) : upper / 2;
+  return `<div class="movement-speed-histogram" data-role="speed-histogram" data-scale="${logarithmic ? "log" : "linear"}" data-sample-count="${histogram.sample_count}">
+    <div class="movement-speed-histogram-heading"><span title="All eligible study step speeds, each step counted once, before angle filtering. Bar height is the number of steps.">Study speeds</span>
+      <span>${["log", "linear"].map(option => `<button type="button" data-action="set-speed-histogram-scale" data-scale="${option}" aria-pressed="${(logarithmic ? "log" : "linear") === option}" title="Change only the speed axis; the cutoffs and flags stay the same.">${option === "log" ? "Log" : "Linear"}</button>`).join("")}</span>
+    </div>
+    <svg viewBox="0 0 324 153" role="img" aria-label="Whole-study speed distribution with the active lower and upper cutoffs marked; ${logarithmic ? "logarithmic" : "linear"} speed axis, bar height is step count.">
+      <text x="4" y="42" fill="#9badc2" font-size="9">${formatCount(largestCount)} steps</text>
+      <line x1="12" x2="310" y1="${bottom}" y2="${bottom}" stroke="#536278"/>
+      ${zero}${bars}${lines}
+      <g fill="#b7c7d9" font-size="10">
+        ${logarithmic ? '<text x="18" y="127" text-anchor="middle">0</text><text x="38" y="114" text-anchor="middle">//</text>' : ""}
+        <text x="${left}" y="127" text-anchor="${logarithmic ? "start" : "middle"}">${number(logarithmic ? lower : 0)}</text>
+        <text x="${x(mid)}" y="127" text-anchor="middle">${number(mid)}</text>
+        <text x="${right}" y="127" text-anchor="end">${number(upper)}</text>
+        <text x="162" y="146" text-anchor="middle">Speed (m/s) · ${logarithmic ? "log axis; zero separate" : "linear axis"}</text>
+      </g>
+    </svg>
+  </div>`;
+}
+const SPEED_SPIKE_COLORS = [[112, 122, 133, 175], [245, 181, 54, 235], [242, 80, 103, 245]];
 const CONTEXT_GRAY_POINT = Object.freeze([112, 122, 133, 175]);
 const CONTEXT_GRAY_LINE = Object.freeze([112, 122, 133, 155]);
 
@@ -2156,6 +2226,9 @@ class MovementExampleApp {
           bottom: 16px;
           z-index: 4;
           width: min(320px, calc(100% - 32px));
+          max-height: calc(100% - 32px);
+          overflow-y: auto;
+          overscroll-behavior: contain;
           display: grid;
           gap: 10px;
           padding: 12px 13px;
@@ -2290,6 +2363,37 @@ class MovementExampleApp {
           display: grid;
           gap: 6px;
         }
+        .movement-speed-histogram {
+          border: 1px solid rgba(255, 255, 255, 0.09);
+          border-radius: 10px;
+          padding: 6px;
+          background: rgba(15, 23, 42, 0.72);
+        }
+        .movement-speed-histogram-heading {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          color: #b7c7d9;
+          font-size: 11px;
+        }
+        .movement-speed-histogram-heading button {
+          padding: 3px 7px;
+          font-size: 10px;
+          margin-left: 3px;
+        }
+        .movement-speed-histogram-heading button[aria-pressed="true"] {
+          background: rgba(84, 203, 183, 0.22);
+          color: #d5fff6;
+        }
+        .movement-speed-histogram svg {
+          display: block;
+          width: 100%;
+          font-size: 11px;
+        }
+        .movement-spike-editor { font-size: 11px; color: #b7c7d9; }
+        .movement-spike-editor summary { cursor: pointer; }
+        .movement-spike-editor label { display: grid; grid-template-columns: 1fr 110px; align-items: center; gap: 6px; margin: 6px 0; }
+        .movement-spike-editor input { width: 100%; min-width: 0; }
         .movement-threshold-chart {
           position: relative;
           display: flex;
@@ -2979,6 +3083,7 @@ class MovementExampleApp {
         .movement-individual-view-tabs button,
         .movement-queue-controls button,
         .movement-queue-controls select,
+        .movement-queue-flag-jumps select,
         .movement-queue-issue-row button,
         .movement-queue-card-actions button,
         .movement-queue-card-comment {
@@ -3173,6 +3278,25 @@ class MovementExampleApp {
           outline: 2px solid #f65c6e;
           background: rgba(246, 92, 110, 0.15);
         }
+        .movement-queue-flag-jumps { min-width: 0; font-size: 11px; }
+        .movement-queue-flag-jumps summary { cursor: pointer; color: #b7c7d9; }
+        .movement-queue-flag-jumps label { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+        .movement-queue-flag-list { max-height: 220px; }
+        .movement-queue-flag-list button {
+          width: 100%; min-width: 0; display: grid; gap: 3px; padding: 7px;
+          text-align: left; white-space: normal; overflow-wrap: anywhere;
+          color: #e8eff8; background: rgba(255, 255, 255, 0.045);
+          border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 6px; cursor: pointer;
+        }
+        .movement-queue-flag-list button:hover { background: rgba(255, 255, 255, 0.085); }
+        .movement-queue-flag-list button:disabled { opacity: 0.5; cursor: default; }
+        .movement-queue-flag-list button strong { font-size: 11px; }
+        .movement-queue-flag-list button span { font-size: 10px; color: #b7c7d9; }
+        .movement-queue-flag-list button[aria-pressed="true"] {
+          border-color: #f65c6e; background: rgba(246, 92, 110, 0.15);
+        }
+        .movement-queue-flag-list h5 { margin: 6px 3px 3px; font-size: 11px; }
+        .movement-queue-flag-pages { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
         .movement-queue-flag-target {
           display: grid;
           gap: 6px;
@@ -4758,6 +4882,19 @@ class MovementExampleApp {
       }
     });
     this.refs.individuals.addEventListener("click", event => {
+      const flagJump = event.target.closest("button[data-queue-flag-jump]");
+      if (flagJump) {
+        void this.jumpQueueFlag(flagJump.dataset.queueFlagJump);
+        return;
+      }
+      const flagPage = event.target.closest("button[data-queue-flag-page]");
+      if (flagPage && this.queueIssueGroups) {
+        this.queueIssueGroups.navigationPage = Number(flagPage.dataset.queueFlagPage);
+        const list = this.refs.individuals.querySelector("[data-queue-flag-list]");
+        if (list) list.scrollTop = 0;
+        this.renderIndividuals();
+        return;
+      }
       const rerunButton = event.target.closest("button[data-stationarity-run-action]");
       if (rerunButton) {
         void this.rerunStationarity(rerunButton.dataset.stationarityRun,
@@ -4805,6 +4942,16 @@ class MovementExampleApp {
       }
     });
     this.refs.individuals.addEventListener("change", event => {
+      const flagListMode = event.target.closest("select[data-queue-flag-list-mode]");
+      if (flagListMode) {
+        this.queueFlagListMode = flagListMode.value === "fixes" ? "fixes" : "segments";
+        if (this.queueIssueGroups) {
+          this.queueIssueGroups.navigationSelection = "";
+          this.queueIssueGroups.navigationPage = 0;
+        }
+        this.renderIndividuals();
+        return;
+      }
       const needsCheckInput = event.target.closest("input[data-review-needs-check]");
       if (needsCheckInput) {
         this.stageIndividualNeedsCheck(
@@ -4928,7 +5075,9 @@ class MovementExampleApp {
       await this.rebuildMap(true);
     });
     this.refs.colorBy.addEventListener("change", () => {
+      if (this.data) this.data.speedMetricsError = "";
       this.clearStationarityPreview();
+      this.clearSpeedSpikePreview();
       this.clearThresholdState();
       this.saveUiState();
       this.refreshCurrentColorStyle();
@@ -5186,6 +5335,14 @@ class MovementExampleApp {
     this.refs.thresholdPane.addEventListener("click", event => this.handleThresholdPaneClick(event));
     this.refs.thresholdPane.addEventListener("change", event => this.handleThresholdPaneChange(event));
     this.refs.thresholdPane.addEventListener("input", event => {
+      if (event.target?.matches?.("[data-spike-threshold]")) {
+        this.captureSpeedSpikeDraft(event.target.dataset.spikeThreshold);
+        this.updateActionButtons();
+        const selectButton = this.refs.thresholdPane.querySelector('[data-action="check-above-threshold"]');
+        if (selectButton) selectButton.disabled = true;
+        this.refs.thresholdPane.querySelector('[data-role="spike-edit-status"]').textContent = "Preview changes to update matches.";
+        return;
+      }
       if (event.target?.matches?.("[data-stationarity-setting]")) {
         this.stationarityInputEditing = true;
         this.clearStationarityPreview();
@@ -5567,7 +5724,7 @@ class MovementExampleApp {
     binary.attributeRenderKeys = new Set();
     for (const field of data.colorFields) {
       const statsKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY
-        ? "step_length_m"
+        ? "speed_mps"
         : field.key;
       const stats = binary.header.color_stats?.[statsKey];
       if (field.kind === "numeric" && stats) {
@@ -5643,12 +5800,16 @@ class MovementExampleApp {
       if (stationarity?.scope && stationarity.signature === this.stationaritySignature()) {
         await this.applyStationarityColumn([binary]);
       }
+      if (this.speedSpikePreview?.scope && this.speedSpikePreview.signature === this.speedSpikeSignature()) {
+        await this.applySpeedSpikeColumn([binary]);
+      }
       this.beginPreviewHandoff(loadedIndividuals);
       if (
         this.individualReviewQueue.mode === "queue"
         && loadedIndividuals.includes(this.queueActiveIndividual())
       ) {
         this.syncTrackPlayer();
+        this.renderIndividuals();
         this.renderLayers({ temporalOnly: true });
       }
     }
@@ -8975,8 +9136,10 @@ class MovementExampleApp {
   }
 
   clearLoadedStudyState() {
+    this.cancelRequest("speedMetrics");
     this.stationarityInputEditing = false;
     this.clearStationarityPreview();
+    this.clearSpeedSpikePreview();
     this.clearTrackPlayer();
     this.clearRoiSelection();
     this.cancelBinaryRequests();
@@ -9112,7 +9275,9 @@ class MovementExampleApp {
         this.refs.family.appendChild(option);
       }
       if (!this.families.length) {
-        this.showOverlay("No movement studies were found. Run the movement sample-data migration to create family/study roots.");
+        this.showOverlay(MOVEMENT_APP_CONFIG.rdsSource
+          ? "No RDS studies found. Set the server's data root to the folder containing movement_rds, with each study's RDS files inside its own subfolder."
+          : "No movement studies found. Check that the server's data root contains movement family folders, with CSV files inside each study subfolder.");
         this.setStatus("No movement studies were found.", true);
         return;
       }
@@ -11011,14 +11176,105 @@ class MovementExampleApp {
       ${state.groups.map(group => {
         const label = group.issue_type || "Unspecified issue";
         const attrs = `data-individual="${escapeHtml(individual)}" data-issue-type="${escapeHtml(group.issue_type)}"`;
-        const highlighted = this.queueIssueHighlight?.key === key && this.queueIssueHighlight.issueType === group.issue_type;
+        const highlighted = this.queueIssueHighlight?.key === key && this.queueIssueHighlight.issueType === group.issue_type
+          && !this.queueIssueHighlight.navigationId;
         return `<div class="movement-queue-issue-row">
           <button type="button" class="movement-queue-issue-name" data-queue-issue-action="highlight" ${attrs} aria-pressed="${highlighted}" title="Highlight all these flags and jump the player to the first flagged fix. Click again to restore colors.">${escapeHtml(label)} · ${formatCount(group.fix_count)} fixes</button>
           <button type="button" data-queue-issue-action="confirm" ${attrs} ${disabled ? "disabled" : ""} title="Confirm excludes these ${formatCount(group.fix_count)} fixes for ${escapeHtml(individual)} under ${escapeHtml(label)}. Leave uncertain flags unresolved.">Confirm</button>
           <button type="button" data-queue-issue-action="unflag" ${attrs} ${disabled ? "disabled" : ""} title="Unflag dismisses this issue for ${escapeHtml(individual)}; other issue types are unchanged. Leave uncertain flags unresolved.">Unflag</button>
         </div>`;
       }).join("")}
+      ${this.queueFlagNavigationHtml(state)}
     </div>`;
+  }
+
+  queueFlagNavigation(state = this.queueIssueGroups) {
+    if (state?.status !== "ready" || state.key !== this.queueIssueGroupsKey()) return null;
+    const individual = this.individualReviewQueue.activeIndividual;
+    const binary = this.data.binaryBlocks?.get(individual);
+    if (!binary) return null;
+    if (state.navigation?.binary !== binary) {
+      const sequence = this.trackPlayer.binary === binary && this.trackPlayer.individual === individual
+        ? this.trackPlayer.sequence : this.buildTrackPlayerSequence(binary, individual);
+      state.navigation = {binary, sequence,
+        groups: buildQueueFlagNavigation(binary, sequence, state.groups, state.fixes)};
+    }
+    return state.navigation;
+  }
+
+  queueFlagNavigationHtml(state) {
+    const navigation = this.queueFlagNavigation(state);
+    const mode = this.queueFlagListMode || "segments";
+    const disabled = this.trackPlayerJumpPending || this.individualReviewQueue.saving || this.queueIssueMutation;
+    const entries = navigation?.groups.flatMap((group, groupIndex) => group[mode].map((entry, entryIndex) => ({group, groupIndex, entry, entryIndex}))) || [];
+    const pageSize = 100;
+    const page = Math.max(0, Math.min(state.navigationPage || 0, Math.ceil(entries.length / pageSize) - 1));
+    const startIndex = page * pageSize;
+    let previousGroup = -1;
+    return `<details class="movement-queue-bursts movement-queue-flag-jumps" data-queue-flag-jumps>
+      <summary>Flagged periods / fixes${navigation ? ` (${formatCount(entries.length)})` : ""}</summary>
+      ${navigation ? `<label>List <select data-queue-flag-list-mode aria-label="Group flagged fixes" ${disabled ? "disabled" : ""} title="Stationary periods use the saved filter's actual boundaries, including skipped GPS flags and the maximum gap. Other segments group consecutive flagged fixes. Clicking a row highlights it and jumps the player; it saves no decision.">
+        <option value="segments" ${mode === "segments" ? "selected" : ""}>Periods / segments</option>
+        <option value="fixes" ${mode === "fixes" ? "selected" : ""}>Each fix</option>
+      </select></label>
+      <div class="movement-queue-flag-bursts movement-queue-flag-list" data-queue-flag-list aria-label="Flagged periods and fixes">
+          ${entries.slice(startIndex, startIndex + pageSize).map(({group, groupIndex, entry, entryIndex}) => {
+            const first = entry.fixes[0], last = entry.fixes.at(-1);
+            const startMs = entry.startMs ?? first.timeMs, endMs = entry.endMs ?? last.timeMs;
+            const start = formatTimestamp(startMs);
+            const end = formatTimestamp(endMs);
+            const range = start === end ? start : `${start} – ${start.slice(0, 10) === end.slice(0, 10) ? end.slice(11) : end}`;
+            const value = `${mode}:${groupIndex}:${entryIndex}`;
+            const available = Number.isInteger(first.sequenceIndex);
+            const heading = previousGroup === groupIndex ? "" : `<h5 data-queue-flag-group="${escapeHtml(group.issueType)}">${escapeHtml(group.issueType || "Unspecified issue")}</h5>`;
+            previousGroup = groupIndex;
+            const duration = endMs > startMs ? ` · ${formatMaybeNumber((endMs - startMs) / 3600000, "h")}` : "";
+            const kind = entry.kind === "stationary-period" ? "Stationary period" : entry.fixes.length > 1 ? "Segment" : "Fix";
+            return `${heading}<button type="button" data-queue-flag-jump="${value}" data-issue-type="${escapeHtml(group.issueType)}" aria-pressed="${state.navigationSelection === value}" ${available && !disabled ? "" : "disabled"} title="Times are UTC. Jump to the first unresolved fix and highlight these ${entry.fixes.length} fixes. Confirm and Unflag still apply to the whole issue group. ${escapeHtml(first.fixKey)}">
+              <strong>${kind} ${entryIndex + 1} · ${formatCount(entry.fixes.length)} flagged${duration}</strong>
+              <span>${escapeHtml(range)}${available ? "" : " · unavailable in track"}</span>
+            </button>`;
+          }).join("")}
+      </div>
+      ${entries.length > pageSize ? `<div class="movement-queue-flag-pages">
+        <button type="button" data-queue-flag-page="${page - 1}" ${page === 0 || disabled ? "disabled" : ""}>Previous</button>
+        <span>${formatCount(startIndex + 1)}–${formatCount(Math.min(startIndex + pageSize, entries.length))} of ${formatCount(entries.length)}</span>
+        <button type="button" data-queue-flag-page="${page + 1}" ${startIndex + pageSize >= entries.length || disabled ? "disabled" : ""}>Next</button>
+      </div>` : ""}` : '<div class="movement-subtle">Waiting for track data…</div>'}
+    </details>`;
+  }
+
+  async jumpQueueFlag(value) {
+    const state = this.queueIssueGroups;
+    const navigation = this.queueFlagNavigation(state);
+    if (!navigation || this.trackPlayerJumpPending || this.individualReviewQueue.saving || this.queueIssueMutation) return;
+    const [mode, groupIndex, entryIndex] = String(value).split(":");
+    if (!["segments", "fixes"].includes(mode)) return;
+    const group = navigation.groups[Number(groupIndex)];
+    const entry = group?.[mode]?.[Number(entryIndex)];
+    if (!entry || !Number.isInteger(entry.fixes[0].sequenceIndex)) return;
+    state.navigationSelection = value;
+    this.queueIssueHighlight = {key: state.key, issueType: group.issueType, navigationId: value, fixes: entry.fixes};
+    this.refs.showFlagged.checked = true;
+    this.handleFlaggedVisibilityChange();
+    // Include two nearby source-track fixes on either side of the entry. Other
+    // source files or train/test sets can overlap in time, so skip those here.
+    const {binary, sequence} = navigation;
+    const path = entry.fixes.map(fix => fix.position);
+    for (const [edge, direction] of [[entry.fixes[0], -1], [entry.fixes.at(-1), 1]]) {
+      let found = 0;
+      for (let i = edge.sequenceIndex + direction; i >= 0 && i < sequence.length && found < 2; i += direction) {
+        const index = sequence[i];
+        if (Number(binary.arrays.artifact_codes[index]) !== edge.artifactCode
+            || Number(binary.arrays.set_codes?.[index] || 0) !== edge.setCode) continue;
+        path.push([Number(binary.arrays.positions[index * 2]), Number(binary.arrays.positions[index * 2 + 1])]);
+        found++;
+      }
+    }
+    const jump = this.jumpTrackPlayerToFix(entry.fixes[0], {mapPath: path});
+    this.renderIndividuals();
+    await jump;
+    this.renderIndividuals();
   }
 
   stationarityRerunsHtml(state) {
@@ -11098,12 +11354,14 @@ class MovementExampleApp {
     const group = state.groups.find(item => item.issue_type === issueType);
     if (!group) return;
     if (this.refs.showFlagged.checked
-        && this.queueIssueHighlight?.key === key && this.queueIssueHighlight.issueType === issueType) {
+        && this.queueIssueHighlight?.key === key && this.queueIssueHighlight.issueType === issueType
+        && !this.queueIssueHighlight.navigationId) {
       this.queueIssueHighlight = null;
     } else {
       const keys = new Set(group.fix_keys);
       this.queueIssueHighlight = {key, issueType, fixes: state.fixes.filter(fix => keys.has(fix.fixKey))};
     }
+    state.navigationSelection = "";
     this.refs.showFlagged.checked = true;
     this.renderIndividuals();
     this.handleFlaggedVisibilityChange();
@@ -11324,11 +11582,19 @@ class MovementExampleApp {
       `;
       if (card.__movementQueueMarkup !== cardMarkup) {
         const burstsOpen = card.querySelector("[data-queue-bursts]")?.open;
+        const flagJumpsOpen = card.querySelector("[data-queue-flag-jumps]")?.open;
+        const flagListScroll = card.querySelector("[data-queue-flag-list]")?.scrollTop || 0;
         card.innerHTML = cardMarkup;
         if (burstsOpen) {
           const bursts = card.querySelector("[data-queue-bursts]");
           if (bursts) bursts.open = true;
         }
+        if (flagJumpsOpen) {
+          const jumps = card.querySelector("[data-queue-flag-jumps]");
+          if (jumps) jumps.open = true;
+        }
+        const flagList = card.querySelector("[data-queue-flag-list]");
+        if (flagList) flagList.scrollTop = flagListScroll;
         card.__movementQueueMarkup = cardMarkup;
       }
       if (isNewCard) {
@@ -12724,7 +12990,7 @@ class MovementExampleApp {
     this.scheduleTemporalFocusRender();
   }
 
-  async jumpTrackPlayerToFix(fix) {
+  async jumpTrackPlayerToFix(fix, {mapPath = null} = {}) {
     if (!fix || !this.data || this.trackPlayerJumpPending
         || this.individualReviewQueue.saving || this.queueIssueMutation) return;
     const data = this.data;
@@ -12758,7 +13024,8 @@ class MovementExampleApp {
       this.trackPlayer.hidden = false;
       this.setTrackPlayerIndex(index, {pause: true});
       this.saveUiState();
-      if (mapView && this.map) this.map.jumpTo(mapView);
+      if (mapPath?.length) this.zoomToPath(mapPath);
+      else if (mapView && this.map) this.map.jumpTo(mapView);
       this.closeFixPopup();
       this.refs.trackPlayer.focus({preventScroll: true});
     } catch (error) {
@@ -13158,6 +13425,7 @@ class MovementExampleApp {
   }
 
   binaryColorForIndex(binary, index, field) {
+    if (SPEED_SPIKE_FIELDS[field?.key] && !this.speedSpikeReady()) return [120, 136, 153, 120];
     if (field?.key === STATIONARITY_COLOR_FIELD_KEY && !this.stationarityReady()) {
       return [120, 136, 153, 120];
     }
@@ -13175,7 +13443,7 @@ class MovementExampleApp {
       return [120, 136, 153, 120];
     }
     if (field.kind === "numeric") {
-      const sourceKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY ? "step_length_m" : field.key;
+      const sourceKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY ? "speed_mps" : field.key;
       const column = binary.header.color_columns?.[sourceKey];
       const values = arrays[column?.array || sourceKey];
       const range = this.data.colorStyles.get(field.key)?.range
@@ -13224,6 +13492,8 @@ class MovementExampleApp {
         selectedLevels: [...(this.thresholdState.selectedLevels || [])].sort(),
       },
       gpsSpikeTurnAngleDeg: this.gpsSpikeTurnAngleDeg,
+      speedSpike: SPEED_SPIKE_FIELDS[field?.key]
+        ? [this.speedSpikeSignature(), this.speedSpikePreview?.status, binary?.speedSpikeRevision || 0] : null,
       stationarity: field?.key === STATIONARITY_COLOR_FIELD_KEY
         ? [this.stationaritySignature(), this.stationarityPreview?.status,
           binary?.stationarityRevision || 0] : null,
@@ -13248,6 +13518,7 @@ class MovementExampleApp {
         },
         gpsSpikeTurnAngleDeg: this.gpsSpikeTurnAngleDeg,
         stationarityReady: this.stationarityReady(),
+        speedSpikeReady: this.speedSpikeReady(),
       },
     };
   }
@@ -13368,24 +13639,24 @@ class MovementExampleApp {
           const level = code > 0 ? String(column?.levels?.[code - 1] || "Missing") : "Missing";
           thresholdFilter[index] = thresholdLevels.has(level) ? 1 : 0;
         } else if (field.kind === "numeric" && thresholdValue !== null) {
-          const sourceKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY ? "step_length_m" : field.key;
+          const sourceKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY ? "speed_mps" : field.key;
           const column = binary.header.color_columns?.[sourceKey];
           const value = Number(arrays[column?.array || sourceKey]?.[index]);
-          const inboundStepLength = binaryInboundStepLength(binary, index);
+          const inboundSpeed = binaryInboundSpeed(binary, index);
           const validGpsTurn = field.key !== GPS_SPIKE_COLOR_FIELD_KEY
             || (
               Number.isFinite(Number(arrays.turn_angle_deg?.[index]))
               && Math.abs(Number(arrays.turn_angle_deg[index])) >= this.gpsSpikeTurnAngleDeg
             );
-          const validGpsInboundStep = field.key !== GPS_SPIKE_COLOR_FIELD_KEY
+          const validGpsInboundSpeed = field.key !== GPS_SPIKE_COLOR_FIELD_KEY
             || (
-              Number.isFinite(inboundStepLength)
-              && inboundStepLength > thresholdValue
+              Number.isFinite(inboundSpeed)
+              && inboundSpeed > thresholdValue
             );
           const matches = this.thresholdState.reverse === true
             ? value < thresholdValue
             : value > thresholdValue;
-          thresholdFilter[index] = Number.isFinite(value) && validGpsTurn && validGpsInboundStep && matches ? 1 : 0;
+          thresholdFilter[index] = Number.isFinite(value) && validGpsTurn && validGpsInboundSpeed && matches ? 1 : 0;
         }
       }
       suspectedCount += suspectedFilter[index];
@@ -14619,6 +14890,7 @@ class MovementExampleApp {
 
   baseColorForFix(fix) {
     const field = this.data.colorFieldByKey.get(this.refs.colorBy.value) || this.data.colorFields[0];
+    if (SPEED_SPIKE_FIELDS[field?.key] && !this.speedSpikeReady()) return [120, 136, 153, 120];
     if (field?.key === STATIONARITY_COLOR_FIELD_KEY && !this.stationarityReady()) return [120, 136, 153, 120];
     if (!field) {
       return [124, 210, 255, POINT_ALPHA];
@@ -15423,6 +15695,13 @@ class MovementExampleApp {
     const field = this.getCurrentColorField();
     const thresholdScope = this.getThresholdFlagScope();
     if (!field || !this.hasActiveThreshold(field) || !thresholdScope.individuals.length) return null;
+    if (SPEED_SPIKE_FIELDS[field.key]) {
+      const levels = this.getSpeedSpikeLevels(field.key);
+      return {...this.speedSpikePreview.scope.filter,
+        individuals: thresholdScope.individuals, set_names: [],
+        selected_stages: this.thresholdState.selectedLevels.map(level =>
+          level === levels[1] ? "moderate" : level === levels[2] ? "fast" : null).filter(Boolean)};
+    }
     if (field.key === STATIONARITY_COLOR_FIELD_KEY) {
       return {kind: "stationarity", ...this.stationaritySettings,
         individuals: thresholdScope.individuals, set_names: thresholdScope.setNames};
@@ -15430,12 +15709,15 @@ class MovementExampleApp {
     if (field.key === GPS_SPIKE_COLOR_FIELD_KEY) {
       return {
         kind: "gps_spike",
-        step_length_threshold_m: this.thresholdState.value,
+        metric: "speed", method: "manual",
+        speed_threshold_mps: this.thresholdState.value,
         minimum_abs_turn_angle_deg: this.gpsSpikeTurnAngleDeg,
         individuals: thresholdScope.individuals,
         set_names: thresholdScope.setNames,
-        ...(this.thresholdPercentilePreset?.cutoff === this.thresholdState.value
+        ...(this.thresholdPercentilePreset?.provenance.probability && this.thresholdPercentilePreset.cutoff === this.thresholdState.value
           ? {percentile: this.thresholdPercentilePreset.provenance} : {}),
+        ...(this.thresholdPercentilePreset?.provenance.method === "q3-plus-100-iqr" && this.thresholdPercentilePreset.cutoff === this.thresholdState.value
+          ? {cutoff_preset: this.thresholdPercentilePreset.provenance} : {}),
       };
     }
     return {
@@ -15450,9 +15732,12 @@ class MovementExampleApp {
         : [],
       individuals: thresholdScope.individuals,
       set_names: thresholdScope.setNames,
-      ...(field.kind === "numeric" && this.thresholdPercentilePreset?.fieldKey === field.key
+      ...(field.kind === "numeric" && this.thresholdPercentilePreset?.provenance.probability && this.thresholdPercentilePreset.fieldKey === field.key
         && this.thresholdPercentilePreset.cutoff === this.thresholdState.value
         ? {percentile: this.thresholdPercentilePreset.provenance} : {}),
+      ...(field.key === "speed_mps" && this.thresholdPercentilePreset?.provenance.method === "q3-plus-100-iqr"
+        && this.thresholdPercentilePreset.cutoff === this.thresholdState.value
+        ? {cutoff_preset: this.thresholdPercentilePreset.provenance} : {}),
     };
   }
 
@@ -15464,6 +15749,8 @@ class MovementExampleApp {
   }
 
   hasActiveThreshold(field = this.getCurrentColorField()) {
+    if (!this.speedMetricsReady(field)) return false;
+    if (SPEED_SPIKE_FIELDS[field?.key] && !this.speedSpikeReady()) return false;
     if (field?.key === STATIONARITY_COLOR_FIELD_KEY && !this.stationarityReady()) return false;
     if (!field || this.thresholdState.fieldKey !== field.key) return false;
     if (field.kind === "numeric") return Number.isFinite(this.thresholdState.value);
@@ -15482,11 +15769,11 @@ class MovementExampleApp {
     const threshold = finiteOrNull(this.thresholdState.value);
     if (number === null || threshold === null) return false;
     if (field.key === GPS_SPIKE_COLOR_FIELD_KEY) {
-      const inboundStep = movementInboundStepLength(this.data, fix);
+      const inboundSpeed = movementInboundSpeed(this.data, fix);
       const turnAngle = finiteOrNull(fix.attributes?.turn_angle_deg);
       return (
-        inboundStep !== null
-        && inboundStep > threshold
+        inboundSpeed !== null
+        && inboundSpeed > threshold
         && number > threshold
         && turnAngle !== null
         && Math.abs(turnAngle) >= this.gpsSpikeTurnAngleDeg
@@ -15571,6 +15858,7 @@ class MovementExampleApp {
         Number(range[0]) || 0,
         Number(range[1]) || 0,
         Number(binary.stationarityRevision) || 0,
+        Number(binary.speedSpikeRevision) || 0,
       ];
     });
     const contextCacheKey = JSON.stringify({
@@ -15674,7 +15962,7 @@ class MovementExampleApp {
         previewTruncated: matchCount > matchKeys.size,
       });
     }
-    const sourceKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY ? "step_length_m" : field.key;
+    const sourceKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY ? "speed_mps" : field.key;
     const gpsSpikeMode = field.key === GPS_SPIKE_COLOR_FIELD_KEY;
     const numericValues = [];
     const eligibleRefs = [];
@@ -15682,20 +15970,20 @@ class MovementExampleApp {
       const column = ref.binary.header.color_columns?.[sourceKey];
       const value = Number(ref.binary.arrays[column?.array || sourceKey]?.[ref.index]);
       const turnAngle = Number(ref.binary.arrays.turn_angle_deg?.[ref.index]);
-      const inboundStepLength = binaryInboundStepLength(ref.binary, ref.index);
+      const inboundSpeed = binaryInboundSpeed(ref.binary, ref.index);
       if (
         !Number.isFinite(value)
         || (
           gpsSpikeMode
           && (
-            !Number.isFinite(inboundStepLength)
+            !Number.isFinite(inboundSpeed)
             || !Number.isFinite(turnAngle)
             || Math.abs(turnAngle) < this.gpsSpikeTurnAngleDeg
           )
         )
       ) continue;
       numericValues.push(value);
-      eligibleRefs.push({ ...ref, inboundStepLength });
+      eligibleRefs.push({ ...ref, inboundSpeed });
     }
     const styleRange = this.data.colorStyles.get(field.key)?.range
       || this.data.colorStyles.get(sourceKey)?.range
@@ -15720,7 +16008,7 @@ class MovementExampleApp {
           ? numericValues[position] < thresholdValue
           : (
             numericValues[position] > thresholdValue
-            && (!gpsSpikeMode || ref.inboundStepLength > thresholdValue)
+            && (!gpsSpikeMode || ref.inboundSpeed > thresholdValue)
           );
         if (!matches) return;
         matchCount += 1;
@@ -15810,6 +16098,11 @@ class MovementExampleApp {
       return null;
     }
     const field = this.getCurrentColorField();
+    if (!this.speedMetricsReady(field)) return null;
+    if (SPEED_SPIKE_FIELDS[field?.key] && !this.speedSpikeReady()) {
+      return {field, visibleFixes: [], numericFixes: [], selectedLevels: [], levelOptions: [],
+        matchKeys: new Set(), uncheckedMatchKeys: new Set(), matchCount: 0};
+    }
     if (field?.key === STATIONARITY_COLOR_FIELD_KEY && !this.stationarityReady()) {
       return {field, visibleFixes: [], numericFixes: [], selectedLevels: [], levelOptions: [],
         matchKeys: new Set(), uncheckedMatchKeys: new Set(), matchCount: 0};
@@ -15905,8 +16198,8 @@ class MovementExampleApp {
       .map(fix => ({
         fix,
         value: finiteOrNull(movementColorFieldValue(fix, field)),
-        inboundStepLength: gpsSpikeMode
-          ? finiteOrNull(movementInboundStepLength(this.data, fix))
+        inboundSpeed: gpsSpikeMode
+          ? finiteOrNull(movementInboundSpeed(this.data, fix))
           : null,
         turnAngle: finiteOrNull(fix.attributes?.turn_angle_deg),
       }))
@@ -15915,7 +16208,7 @@ class MovementExampleApp {
         && (
           !gpsSpikeMode
           || (
-            typeof item.inboundStepLength === "number"
+            typeof item.inboundSpeed === "number"
             && typeof item.turnAngle === "number"
             && Math.abs(item.turnAngle) >= this.gpsSpikeTurnAngleDeg
           )
@@ -15962,7 +16255,7 @@ class MovementExampleApp {
           ? item.value < activeThresholdValue
           : (
             item.value > activeThresholdValue
-            && (!gpsSpikeMode || item.inboundStepLength > activeThresholdValue)
+            && (!gpsSpikeMode || item.inboundSpeed > activeThresholdValue)
           )
       ));
     const matchKeys = new Set(matchItems.map(item => item.fix.fixKey));
@@ -16002,12 +16295,6 @@ class MovementExampleApp {
       if (!Number.isFinite(this.thresholdState.value)) {
         return new Set();
       }
-      if (
-        field.key === GPS_SPIKE_COLOR_FIELD_KEY
-        && this.thresholdState.value <= 0
-      ) {
-        return new Set();
-      }
     } else {
       const selectedLevels = Array.isArray(this.thresholdState.selectedLevels)
         ? this.thresholdState.selectedLevels
@@ -16021,8 +16308,9 @@ class MovementExampleApp {
 
   thresholdQuantiles(field = this.getCurrentColorField()) {
     if (field?.kind !== "numeric") return null;
+    if (!this.speedMetricsReady(field)) return null;
     const gpsSpikeMode = field.key === GPS_SPIKE_COLOR_FIELD_KEY;
-    const sourceKey = gpsSpikeMode ? "step_length_m" : field.key;
+    const sourceKey = gpsSpikeMode ? "speed_mps" : field.key;
     const individuals = this.getSelectedIndividuals();
     if (!individuals.length || individuals.some(id => !this.data?.binaryBlocks?.has(id))) return null;
     const signature = JSON.stringify([this.currentDatasetId, field.key, individuals.map(id => {
@@ -16045,9 +16333,26 @@ class MovementExampleApp {
     }
     values.sort((left, right) => left - right);
     this.thresholdQuantileCache = {signature, count: values.length,
+      q1: values.length ? quantile(values, 0.25) : null,
+      q3: values.length ? quantile(values, 0.75) : null,
       p95: values.length ? quantile(values, 0.95) : null,
       p99: values.length ? quantile(values, 0.99) : null};
     return this.thresholdQuantileCache;
+  }
+
+  setSpeedIqrPreset(quantiles = this.thresholdQuantiles()) {
+    const field = this.getCurrentColorField();
+    if (!["speed_mps", GPS_SPIKE_COLOR_FIELD_KEY].includes(field?.key) || !quantiles?.count) return false;
+    const cutoff = quantiles.q3 + 100 * (quantiles.q3 - quantiles.q1);
+    this.thresholdState = {...this.thresholdState, fieldKey: field.key, value: cutoff, reverse: false, selectedLevels: []};
+    if (field.key === GPS_SPIKE_COLOR_FIELD_KEY) this.gpsDefaultScope = quantiles.signature;
+    this.thresholdPercentilePreset = {cutoff, fieldKey: field.key, signature: quantiles.signature, provenance: {
+      method: "q3-plus-100-iqr", multiplier: 100, q1: quantiles.q1, q3: quantiles.q3, sample_count: quantiles.count,
+      quantile_method: "linear", population: "finite-nonnegative-outbound-speeds-at-unconfirmed-fixes",
+      scope: "selected-individuals-all-track-sets",
+    }};
+    this.flagTargetKind = "filter";
+    return true;
   }
 
   setThresholdPercentile(probability, quantiles = this.thresholdQuantiles()) {
@@ -16060,7 +16365,7 @@ class MovementExampleApp {
     if (gpsSpikeMode) this.gpsDefaultScope = quantiles.signature;
     this.thresholdPercentilePreset = {cutoff, fieldKey: field.key, signature: quantiles.signature, provenance: {
       probability, sample_count: quantiles.count, method: "linear",
-      population: gpsSpikeMode ? "finite-nonnegative-outbound-steps-at-unconfirmed-fixes" : "finite-values-at-unconfirmed-fixes",
+      population: gpsSpikeMode ? "finite-nonnegative-outbound-speeds-at-unconfirmed-fixes" : "finite-values-at-unconfirmed-fixes",
       scope: "selected-individuals-all-track-sets",
     }};
     this.flagTargetKind = "filter";
@@ -16075,7 +16380,18 @@ class MovementExampleApp {
     // Protect a focused setting even before its first input event: background
     // previews/track loads can finish between focus and the user's first key.
     if (!commitStationarityInput && pane.contains(document.activeElement)
-        && document.activeElement?.matches?.('[data-stationarity-setting]')) return;
+        && document.activeElement?.matches?.('[data-stationarity-setting], [data-spike-threshold]')) return;
+    if (this.data && !this.speedMetricsReady()) {
+      void this.refreshRetainedSpeedMetrics();
+      pane.innerHTML = `<div class="movement-threshold-meta" role="status">${escapeHtml(this.data.speedMetricsError || "Updating speeds after exclusions…")}</div>`;
+      pane.classList.remove("hidden");
+      return;
+    }
+    if (this.data && SPEED_SPIKE_FIELDS[this.getCurrentColorField()?.key]
+        && (this.individualReviewQueue.mode !== "queue"
+          || arraysEqual(this.getSelectedIndividuals(), [...this.getIndividualQueueMapIndividuals()].sort((a, b) => a.localeCompare(b))))) {
+      this.scheduleSpeedSpikePreview();
+    }
     // During queue entry the selected set briefly still belongs to Browse all.
     // Only calculate after the queue's individual/group scope has taken effect.
     if (this.data && this.getCurrentColorField()?.key === STATIONARITY_COLOR_FIELD_KEY
@@ -16089,6 +16405,10 @@ class MovementExampleApp {
       return;
     }
 
+    if (SPEED_SPIKE_FIELDS[this.getCurrentColorField()?.key]) {
+      this.renderSpeedSpikeThresholdPane();
+      return;
+    }
     if (this.getCurrentColorField()?.key === STATIONARITY_COLOR_FIELD_KEY) {
       this.renderStationarityThresholdPane();
       return;
@@ -16098,7 +16418,8 @@ class MovementExampleApp {
     if (quantiles?.count && ((currentField.key === GPS_SPIKE_COLOR_FIELD_KEY && !this.gpsDefaultScope)
         || (this.thresholdPercentilePreset?.fieldKey === currentField.key
           && this.thresholdPercentilePreset.signature !== quantiles.signature))) {
-      this.setThresholdPercentile(this.thresholdPercentilePreset?.provenance.probability || 0.99, quantiles);
+      if (this.thresholdPercentilePreset?.provenance.method === "q3-plus-100-iqr") this.setSpeedIqrPreset(quantiles);
+      else this.setThresholdPercentile(this.thresholdPercentilePreset?.provenance.probability || 0.99, quantiles);
     }
     const context = this.getThresholdContext();
     const field = context?.field;
@@ -16120,7 +16441,7 @@ class MovementExampleApp {
     const selectedIndividualCount = this.getSelectedIndividuals().length;
     const thresholdScopeHelp = `Applies to visible individuals (${formatCount(selectedIndividualCount)}). Flagging applies the filter across all track sets for those individuals.`;
     const percentileHelp = quantiles
-      ? `Percentiles use all ${formatCount(quantiles.count)} ${gpsSpikeMode ? "eligible outbound step lengths" : "finite values"} across the selected individuals and all track sets${gpsSpikeMode ? ", before filtering by turn angle" : ""}. Confirmed exclusions are skipped.`
+      ? `Percentiles use all ${formatCount(quantiles.count)} ${gpsSpikeMode ? "eligible outbound speeds" : "finite values"} across the selected individuals and all track sets${gpsSpikeMode ? ", before filtering by turn angle" : ""}. Confirmed exclusions are skipped.`
       : "Loading all selected tracks to calculate exact percentiles…";
     const percentileControl = field?.kind === "numeric"
       ? `
@@ -16132,11 +16453,12 @@ class MovementExampleApp {
               ${!quantiles?.count ? "disabled" : ""}>Use ${percentile}th</button>
           `).join("")}
         </div>
+        ${["speed_mps", GPS_SPIKE_COLOR_FIELD_KEY].includes(field.key) ? `<div class="movement-threshold-actions"><button type="button" data-action="set-speed-iqr" aria-pressed="${this.thresholdPercentilePreset?.provenance.method === "q3-plus-100-iqr" && this.thresholdPercentilePreset.cutoff === this.thresholdState.value}" title="Set Q3 + 100 × (Q3 − Q1) from eligible speeds across the selected individuals. Preview only; does not flag.${quantiles?.count ? ` Q1=${quantiles.q1}, Q3=${quantiles.q3} m/s.` : ""}" ${!quantiles?.count ? "disabled" : ""}>Q3 + 100 × IQR</button></div>` : ""}
         ${quantiles ? "" : '<div class="movement-threshold-meta" role="status">Loading percentiles…</div>'}
       ` : "";
     const gpsSpikeControl = gpsSpikeMode
       ? `
-        <label class="movement-threshold-range-label" title="All fixes remain colored by outbound step length. A match requires both inbound and outbound steps above the selected threshold and |turn angle| at least this value. Changing the angle does not change the percentile cutoff.">
+        <label class="movement-threshold-range-label" title="All fixes remain colored by outbound speed (m/s). A match requires both incoming and outgoing speeds above the selected threshold and |turn angle| at least this value. Changing the angle does not change the percentile cutoff.">
           <span>Minimum |turn| (°)</span>
           <input
             class="movement-threshold-range-input"
@@ -16224,7 +16546,7 @@ class MovementExampleApp {
         <div class="movement-threshold-title">${escapeHtml(field.label)}${movementColorFieldHelp(field, thresholdScopeHelp)}</div>
         ${gpsSpikeControl}
         ${percentileControl}
-        <label class="movement-threshold-range-label"><span>Threshold${gpsSpikeMode ? " (m)" : ""} &gt;</span>
+        <label class="movement-threshold-range-label"><span>Threshold${gpsSpikeMode ? " (m/s)" : ""} &gt;</span>
           <input class="movement-threshold-inline-input" type="number" step="any" data-action="set-threshold-value"
             value="${Number.isFinite(this.thresholdState.value) ? escapeHtml(String(this.thresholdState.value)) : ""}" placeholder="value">
         </label>
@@ -16258,7 +16580,7 @@ class MovementExampleApp {
       const subtitle = gpsSpikeMode
         ? `${formatCount(numericCount)} sharp-turn fixes in the visible scope`
         : `${formatCount(numericCount)} visible fixes`;
-      const thresholdPrompt = gpsSpikeMode ? "Threshold (m)" : "Threshold";
+      const thresholdPrompt = gpsSpikeMode ? "Threshold (m/s)" : "Threshold";
       const thresholdHelp = `Click the histogram or type a ${reverse ? "lower-tail" : "upper-tail"} threshold to preview matching fixes.`;
       const selectionNote = thresholdValue === null
         ? "No threshold set"
@@ -16399,6 +16721,23 @@ class MovementExampleApp {
     const actionButton = target.closest("button[data-action]");
     if (actionButton) {
       const action = actionButton.dataset.action || "";
+      if (action === "preview-spike-edits" || action === "reset-spike-defaults") {
+        this.applySpeedSpikeEdits(action === "reset-spike-defaults");
+        return;
+      }
+      if (action === "set-speed-histogram-scale") {
+        this.speedHistogramScale = actionButton.dataset.scale === "linear" ? "linear" : "log";
+        this.renderThresholdPane();
+        return;
+      }
+      if (action === "set-speed-iqr") {
+        if (this.setSpeedIqrPreset()) {
+          this.renderThresholdPane();
+          this.renderLayers();
+          this.syncFlagTargetToThreshold();
+        }
+        return;
+      }
       if (action === "set-threshold-percentile") {
         if (this.setThresholdPercentile(Number(actionButton.dataset.percentile) / 100)) {
           this.renderThresholdPane();
@@ -16504,6 +16843,7 @@ class MovementExampleApp {
     if (!target) {
       return;
     }
+    if (target.matches("[data-spike-threshold]")) return;
     const stationarityInput = target.closest('[data-stationarity-setting]');
     if (stationarityInput) {
       this.stationarityInputEditing = false;
@@ -18118,6 +18458,7 @@ class MovementExampleApp {
       || !hasSelectedIndividuals
       || !canEditFlagTarget
       || !flagTarget.ready
+      || this.speedSpikeDraftIsDirty()
     );
     this.refs.markConfirmed.disabled = (
       !canPersistEdits
@@ -19042,6 +19383,334 @@ class MovementExampleApp {
     }
   }
 
+  speedMetricsReady(field = this.getCurrentColorField()) {
+    if (!["speed_mps", GPS_SPIKE_COLOR_FIELD_KEY, ...Object.keys(SPEED_SPIKE_FIELDS)].includes(field?.key)) return true;
+    return !this.getSelectedIndividuals().some(id => this.data?.staleSpeedIndividuals?.has(id));
+  }
+
+  async refreshRetainedSpeedMetrics() {
+    const data = this.data;
+    if (!data || data.speedMetricsLoading || data.speedMetricsError) return;
+    const datasetId = this.currentDatasetId;
+    const family = this.currentFamily, study = this.currentStudy, artifact = this.currentArtifact;
+    const controller = this.beginRequest("speedMetrics");
+    const isCurrent = () => data === this.data && datasetId === this.currentDatasetId && !controller.signal.aborted;
+    data.speedMetricsLoading = true;
+    try {
+      for (const individual of this.getSelectedIndividuals().filter(id => data.staleSpeedIndividuals?.has(id))) {
+        // Reuse the existing binary endpoint, one individual at a time. Only
+        // patch numerical values: the retained map geometry/view never moves.
+        const params = new URLSearchParams({logical_name: artifact, individuals: individual});
+        const response = await this.fetchResponse(`/api/apps/movement/family/${encodeURIComponent(family)}/study/${encodeURIComponent(study)}/dataset/${encodeURIComponent(datasetId)}/fixes-binary?${params}`, {signal: controller.signal});
+        if (!response.ok) throw new Error(`Speed refresh failed (${response.status})`);
+        const fresh = parseMovementBinary(await response.arrayBuffer());
+        if (!isCurrent()) return;
+        const signature = fresh.header.source_bundle_signature || fresh.header.source_signature;
+        if (signature && data.sourceSignature && signature !== data.sourceSignature) throw new Error("Movement source changed; reopen the study");
+        const columns = ["step_length_m", "speed_mps", "time_delta_s", "turn_angle_deg"];
+        const jobs = [];
+        for (const binary of new Set([data.fullBinaryMovement, ...data.binaryBlocks.values()].filter(Boolean))) {
+          const code = binary.header.individuals.indexOf(individual);
+          const range = binary.individualRanges?.get(code);
+          if (!range) continue;
+          const [start, end] = range;
+          if (end - start !== fresh.header.row_count) throw new Error("Speed refresh rows changed; reopen the study");
+          for (let i = start; i < end; i += 1) {
+            if (binary.arrays.source_rows[i] !== fresh.arrays.source_rows[i - start]
+                || binary.header.artifacts[binary.arrays.artifact_codes[i]] !== fresh.header.artifacts[fresh.arrays.artifact_codes[i - start]]) throw new Error("Speed refresh row order changed; reopen the study");
+          }
+          for (const key of columns) binary.arrays[key].set(fresh.arrays[key], start);
+          binary.reviewRevision = (binary.reviewRevision || 0) + 1;
+          binary.renderCaches?.clear();
+          binary.deckDataCaches?.clear();
+          if (movementBinaryWorkerClient && binary.workerBlockId) jobs.push(movementBinaryWorkerClient.request("metrics", {
+            blockId: binary.workerBlockId, start, values: Object.fromEntries(columns.map(key => [key, fresh.arrays[key]])),
+          }));
+        }
+        // Popup/detail objects share their attribute objects with retained caches.
+        const indexByRow = new Map([...fresh.arrays.source_rows].map((row, i) =>
+          [`${fresh.header.artifacts[fresh.arrays.artifact_codes[i]]}#row:${row}`, i]));
+        for (const fix of data.fixByKey.values()) {
+          if (fix.individual !== individual) continue;
+          const row = Number(fix.sourceRow || String(fix.fixKey).match(/(?:#row:|^row:)(\d+)/)?.[1]);
+          const source = fix.sourceArtifact || (String(fix.fixKey).startsWith("file:")
+            ? String(fix.fixKey).split("#row:")[0].replace(/^file:/, "") : artifact);
+          const index = indexByRow.get(`${source}#row:${row}`);
+          if (index !== undefined) for (const key of columns) fix.attributes[key] = fresh.arrays[key][index];
+        }
+        await Promise.all(jobs);
+        if (!isCurrent()) return;
+        data.staleSpeedIndividuals.delete(individual);
+      }
+      this.thresholdQuantileCache = null;
+      this.binaryThresholdContextCache.clear();
+    } catch (error) {
+      if (isCurrent()) data.speedMetricsError = `Could not update speeds: ${error.message}`;
+    } finally {
+      data.speedMetricsLoading = false;
+      if (data === this.data) {
+        this.renderThresholdPane();
+        this.renderLayers();
+        this.updateActionButtons();
+      }
+    }
+  }
+
+  getSpeedSpikeOverrides(fieldKey = this.getCurrentColorField()?.key) {
+    const context = JSON.stringify([this.currentFamily, this.currentStudy, this.currentArtifact]);
+    if (this.speedSpikeEdits?.context !== context) this.speedSpikeEdits = {context, fields: {}};
+    return this.speedSpikeEdits.fields[fieldKey] || {};
+  }
+
+  speedSpikeDraftKey() {
+    return JSON.stringify([this.currentFamily, this.currentStudy, this.currentDatasetId,
+      this.currentArtifact, this.getCurrentColorField()?.key]);
+  }
+
+  speedSpikeDraftIsDirty() {
+    return Boolean(SPEED_SPIKE_FIELDS[this.getCurrentColorField()?.key]
+      && this.speedSpikeDraft?.key === this.speedSpikeDraftKey());
+  }
+
+  getSpeedSpikeLevels(fieldKey) {
+    return speedSpikeLevels(fieldKey, {threshold_overrides: this.getSpeedSpikeOverrides(fieldKey)});
+  }
+
+  captureSpeedSpikeDraft(editedKey) {
+    const key = this.speedSpikeDraftKey();
+    const draft = this.speedSpikeDraft?.key === key ? this.speedSpikeDraft : {key, edited: new Set()};
+    draft.values = Object.fromEntries([...this.refs.thresholdPane.querySelectorAll('[data-spike-threshold]')]
+      .map(input => [input.dataset.spikeThreshold, input.value]));
+    draft.edited.add(editedKey);
+    this.speedSpikeDraft = draft;
+  }
+
+  applySpeedSpikeEdits(reset = false) {
+    const field = this.getCurrentColorField();
+    if (!SPEED_SPIKE_FIELDS[field?.key]) return;
+    const oldLevels = this.getSpeedSpikeLevels(field.key);
+    const selected = this.thresholdState.selectedLevels.map(level => oldLevels.indexOf(level));
+    const overrides = reset ? {} : {...this.getSpeedSpikeOverrides(field.key)};
+    if (!reset && this.speedSpikeDraftIsDirty()) {
+      const inputs = [...this.refs.thresholdPane.querySelectorAll('[data-spike-threshold]')];
+      for (const input of inputs) {
+        if (!input.reportValidity()) return;
+        if (this.speedSpikeDraft.edited.has(input.dataset.spikeThreshold)) {
+          overrides[input.dataset.spikeThreshold] = Number(input.value);
+        }
+      }
+    }
+    this.speedSpikeEdits.fields[field.key] = overrides;
+    this.speedSpikeDraft = null;
+    this.speedSpikeEditorOpen = true;
+    const levels = this.getSpeedSpikeLevels(field.key);
+    this.thresholdState.selectedLevels = selected.filter(index => index > 0).map(index => levels[index]);
+    if (this.checkedThresholdSignature && this.data) this.data.selectedFixKeys = new Set();
+    this.checkedThresholdSignature = "";
+    this.clearSpeedSpikePreview();
+    this.binaryThresholdContextCache.clear();
+    this.renderThresholdPane();
+    this.renderLayers();
+    this.renderSelectedFixes();
+    this.updateActionButtons();
+  }
+
+  speedSpikeEditorHtml(spec) {
+    if (!spec) return "";
+    const overrides = this.getSpeedSpikeOverrides();
+    const draft = this.speedSpikeDraftIsDirty() ? this.speedSpikeDraft : null;
+    const defaults = {lower_speed_mps: spec.distribution.q3,
+      upper_speed_mps: spec.method === "physiology" ? spec.species_cap[spec.species_cap_field || "v_max_m_s"] : spec.distribution.p999,
+      moderate_min_abs_turn_deg: 166, fast_min_abs_turn_deg: 157};
+    const rows = [
+      ["lower_speed_mps", "Lower speed (m/s)", "Both adjacent speeds must exceed this floor."],
+      ["upper_speed_mps", "Upper speed (m/s)", "Both adjacent speeds must exceed this cutoff to use the upper group's angle limit. The lower speed floor still applies."],
+      ["moderate_min_abs_turn_deg", "Turn below upper (°)", "Minimum absolute turn when the slower adjacent speed is above the lower cutoff and at or below the upper cutoff."],
+      ["fast_min_abs_turn_deg", "Turn above upper (°)", "Minimum absolute turn when both adjacent speeds exceed both speed cutoffs."],
+    ];
+    return `<details class="movement-spike-editor" data-role="spike-editor" ${this.speedSpikeEditorOpen ? "open" : ""}>
+      <summary>Edit thresholds</summary>
+      ${rows.map(([key, label, help]) => `<label title="${help} Default: ${defaults[key] ?? "no eligible speeds"}.">${label}
+        <input class="movement-threshold-range-input" data-spike-threshold="${key}" type="number" min="0" ${key.endsWith("_deg") ? 'max="180"' : ""} step="any" required aria-label="${label}" value="${escapeHtml(String(draft?.values[key] ?? overrides[key] ?? defaults[key] ?? ""))}">
+      </label>`).join("")}
+      <div class="movement-threshold-actions"><button type="button" data-action="preview-spike-edits" title="Update the preview using these values; no flags are saved.">Preview changes</button><button type="button" data-action="reset-spike-defaults" title="Restore study Q3 and P99.9 or the cap's lower confidence bound, with angle limits 166° and 157°.">Reset defaults</button></div>
+      <div data-role="spike-edit-status" role="status">${draft ? "Preview changes to update matches." : ""}</div>
+    </details>`;
+  }
+
+  speedSpikeSignature() {
+    return JSON.stringify([this.currentFamily, this.currentStudy, this.currentDatasetId,
+      this.currentArtifact, this.data?.sourceSignature, this.refs.colorBy.value, this.getSelectedIndividuals(),
+      this.getSpeedSpikeOverrides()]);
+  }
+
+  speedSpikeReady() {
+    return this.speedSpikePreview?.status === "ready" && this.speedSpikePreview.signature === this.speedSpikeSignature();
+  }
+
+  clearSpeedSpikePreview() {
+    window.clearTimeout(this.speedSpikeTimer);
+    this.cancelRequest("speedSpike");
+    this.speedSpikePreview = null;
+    if (this.data) this.data.speedSpikeValueForFix = null;
+  }
+
+  scheduleSpeedSpikePreview() {
+    const field = this.getCurrentColorField();
+    if (this.thresholdState.fieldKey !== field.key) {
+      this.thresholdState = {...this.thresholdState, fieldKey: field.key, value: null,
+        reverse: false, selectedLevels: this.getSpeedSpikeLevels(field.key).slice(1)};
+    }
+    const signature = this.speedSpikeSignature();
+    if (this.speedSpikePreview?.signature === signature) return;
+    this.clearSpeedSpikePreview();
+    this.speedSpikePreview = {signature, status: "waiting"};
+    if (this.getSelectedIndividuals().length) {
+      this.speedSpikeTimer = window.setTimeout(() => void this.previewSpeedSpikes(), 180);
+    }
+  }
+
+  renderSpeedSpikeThresholdPane() {
+    const field = this.getCurrentColorField();
+    const levels = this.getSpeedSpikeLevels(field.key);
+    const openEditor = this.refs.thresholdPane.querySelector('[data-role="spike-editor"]');
+    if (openEditor) this.speedSpikeEditorOpen = openEditor.open;
+    if (this.thresholdState.fieldKey !== field.key) {
+      this.thresholdState = {...this.thresholdState, fieldKey: field.key, value: null,
+        reverse: false, selectedLevels: levels.slice(1)};
+    }
+    const ready = this.speedSpikeReady();
+    const spec = ready ? this.speedSpikePreview.scope.filter : null;
+    const edits = this.getSpeedSpikeOverrides(field.key);
+    const editorSpec = spec || (this.speedSpikeEditorSpec?.key === this.speedSpikeDraftKey() ? this.speedSpikeEditorSpec.spec : null);
+    const context = this.getThresholdContext();
+    const count = Number(context?.matchCount) || context?.matchKeys?.size || 0;
+    const speed = value => Number.isFinite(value) ? `${Number(value.toPrecision(7))} m/s` : "No eligible steps";
+    const help = "Defaults use study Q3 and P99.9 or the supplied lower confidence bound of the species speed cap, before angle filtering. Both adjacent speeds must exceed the lower cutoff, even when the cap's lower CI is zero or below Q3. Above the upper cutoff both must exceed it. Angles are absolute signed bearing changes, with defaults 166° and 157°. Edit thresholds to preview alternatives. Confirmed exclusions are removed before deriving steps; unresolved flags remain. Flagging applies only to selected individuals.";
+    const status = !this.getSelectedIndividuals().length ? "Select individuals to preview spikes."
+      : this.speedSpikePreview?.status === "error" ? this.speedSpikePreview.error
+      : ready ? `${formatCount(count)} candidate fixes` : "Calculating study speed cutoffs…";
+    this.refs.thresholdPane.innerHTML = `
+      <div class="movement-threshold-title">${escapeHtml(field.label)}${movementColorFieldHelp(field, help)}</div>
+      ${spec ? `<div class="movement-threshold-meta" title="Default Q3 (third quartile): ${speed(spec.distribution.q3)}. Both adjacent speeds must exceed the active lower cutoff.">${Object.hasOwn(edits, "lower_speed_mps") ? "Lower cutoff (custom)" : "Study Q3"}: <output data-role="spike-q3" title="${spec.lower_speed_mps}">${speed(spec.lower_speed_mps)}</output></div>
+      <div class="movement-threshold-meta" title="${spec.method === "physiology" ? escapeHtml(`Default lower confidence bound ${spec.species_cap.vmax_ci_lower} m/s; point estimate ${spec.species_cap.v_max_m_s} m/s for ${spec.species_cap.scientific_name}; ${spec.species_cap.body_mass_kg} kg; ${spec.species_cap.movement_mode}. Source: ${spec.species_cap.source_file}.`) : `Default 99.9th percentile: ${speed(spec.distribution.p999)}.`}">${Object.hasOwn(edits, "upper_speed_mps") ? "Upper cutoff (custom)" : spec.method === "physiology" ? "Cap lower CI" : "Study P99.9"}: <output data-role="spike-upper" title="${spec.upper_speed_mps}">${speed(spec.upper_speed_mps)}</output></div>
+      ${spec.method === "physiology" ? `<div class="movement-threshold-meta">${escapeHtml(spec.species_cap.common_name || spec.species_cap.scientific_name)}</div>` : ""}
+      <div class="movement-threshold-meta" title="The cutoffs stay the same when selecting different individuals in this dataset.">${formatCount(spec.distribution.sample_count)} study steps</div>
+      ${speedHistogramMarkup(spec, this.speedSpikePreview.scope.speed_histogram, this.speedHistogramScale)}` : ""}
+      <div class="movement-threshold-meta" data-role="speed-spike-status" role="status">${escapeHtml(status)}</div>
+      ${this.speedSpikeEditorHtml(editorSpec)}
+      <div class="movement-threshold-subtitle" title="Use the slower of the incoming and outgoing speeds. It must be strictly above the lower cutoff in both groups. The lower group includes equality with the upper cutoff; the upper group requires exceeding it. |turn| means absolute turn angle.">Groups use the slower adjacent speed.</div>
+      ${levels.slice(1).map((level, i) => `<label class="movement-threshold-toggle" title="${i ? "Both speeds must exceed both speed cutoffs and meet this angle limit." : "Both speeds must exceed the lower cutoff, with at least one at or below the upper cutoff, and meet this angle limit."}"><input type="checkbox" data-action="toggle-threshold-level" data-spike-stage="${i ? "fast" : "moderate"}" data-level="${escapeHtml(level)}" ${this.thresholdState.selectedLevels.includes(level) ? "checked" : ""}>${level}</label>`).join("")}
+      <div class="movement-threshold-actions"><button type="button" data-action="check-above-threshold" title="Preview candidates without saving flags." ${!ready || !count || this.isCheckedThresholdSelectionActive() || this.speedSpikeDraftIsDirty() ? "disabled" : ""}>Select fixes</button></div>`;
+    this.refs.thresholdPane.classList.remove("hidden");
+  }
+
+  async applySpeedSpikeColumn(blocks = [...new Set([
+    this.data?.fullBinaryMovement, ...(this.data?.binaryBlocks?.values() || []),
+  ].filter(Boolean))]) {
+    const preview = this.speedSpikePreview;
+    if (!preview?.scope) return;
+    const fieldKey = preview.fieldKey;
+    const levels = speedSpikeLevels(fieldKey, preview.scope.filter);
+    const groups = preview.scope.spike_groups || [];
+    const ranges = groups.map(group => new Map(group.source_rows.map(source => [source.logical_name, source.row_ranges])));
+    const selected = new Set(preview.individuals);
+    const inRanges = (row, pairs) => {
+      let lo = 0, hi = pairs.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >>> 1, [start, end] = pairs[mid];
+        if (row < start) hi = mid - 1;
+        else if (row > end) lo = mid + 1;
+        else return true;
+      }
+      return false;
+    };
+    const codeAt = (individual, artifact, row) => {
+      if (!selected.has(individual)) return 0;
+      for (let i = 0; i < groups.length; i += 1) {
+        if (inRanges(row, ranges[i].get(artifact) || [])) return groups[i].stage === "fast" ? 3 : 2;
+      }
+      return 1;
+    };
+    const jobs = [];
+    for (const binary of blocks) {
+      const values = new Uint8Array(Number(binary.header.row_count) || 0);
+      for (let i = 0; i < values.length; i += 1) {
+        values[i] = codeAt(binary.header.individuals[Number(binary.arrays.individual_codes[i])],
+          binary.header.artifacts[Number(binary.arrays.artifact_codes[i])], Number(binary.arrays.source_rows[i]));
+      }
+      binary.arrays[fieldKey] = values;
+      binary.header.color_columns ||= {};
+      binary.header.color_columns[fieldKey] = {array: fieldKey, kind: "categorical", levels: levels};
+      binary.speedSpikeRevision = (binary.speedSpikeRevision || 0) + 1;
+      binary.renderCaches?.clear();
+      binary.deckDataCaches?.clear();
+      if (movementBinaryWorkerClient && binary.workerBlockId) jobs.push(movementBinaryWorkerClient.request("spike_groups", {
+        blockId: binary.workerBlockId, fieldKey, values, levels: levels,
+      }));
+    }
+    this.data.speedSpikeValueForFix = fix => {
+      const row = Number(fix.sourceRow || String(fix.fixKey).match(/(?:#row:|^row:)(\d+)/)?.[1]);
+      const artifact = fix.sourceArtifact || (String(fix.fixKey).startsWith("file:")
+        ? String(fix.fixKey).split("#row:")[0].replace(/^file:/, "") : this.currentArtifact);
+      return levels[codeAt(fix.individual, artifact, row) - 1] || null;
+    };
+    for (const fix of this.data.fixByKey.values()) fix.attributes[fieldKey] = this.data.speedSpikeValueForFix(fix);
+    this.data.speedSpikeFieldKey = fieldKey;
+    this.data.colorStyles.set(fieldKey, {kind: "categorical", categories: new Map(levels.map((level, i) => [level, SPEED_SPIKE_COLORS[i]]))});
+    this.binaryThresholdContextCache.clear();
+    await Promise.all(jobs);
+  }
+
+  async previewSpeedSpikes() {
+    const field = SPEED_SPIKE_FIELDS[this.getCurrentColorField()?.key];
+    if (!this.data || !field || !this.getSelectedIndividuals().length) return;
+    const signature = this.speedSpikeSignature();
+    const overrides = {...this.getSpeedSpikeOverrides(field.key)};
+    const controller = this.beginRequest("speedSpike");
+    this.speedSpikePreview = {signature, status: "loading"};
+    try {
+      const individuals = this.getSelectedIndividuals();
+      const payload = await this.requestJSON(
+        `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/actions/preview-filter`,
+        {method: "POST", signal: controller.signal, body: JSON.stringify({
+          dataset_id: this.currentDatasetId, logical_name: this.currentArtifact,
+          source_bundle_signature: this.data.sourceSignature || "",
+          filter: {kind: "gps_spike", metric: "speed", method: field.method, individuals, set_names: [],
+            ...(field.method === "physiology" ? {species_cap_field: "vmax_ci_lower"} : {}),
+            threshold_overrides: overrides},
+        })});
+      if (this.requestControllers.speedSpike !== controller || signature !== this.speedSpikeSignature()) return;
+      if (field.method === "physiology" && payload.resolved_scope?.filter?.species_cap_field !== "vmax_ci_lower") {
+        throw new Error("The server did not use the cap's lower confidence bound. Restart the server and retry.");
+      }
+      if (Object.entries(overrides).some(([key, value]) =>
+        payload.resolved_scope?.filter?.[key] !== value
+          || payload.resolved_scope?.filter?.threshold_overrides?.[key] !== value)) {
+        throw new Error("The server did not apply the edited thresholds. Restart the server and retry.");
+      }
+      this.speedSpikePreview = {signature, status: "loading", fieldKey: field.key, individuals, scope: payload.resolved_scope};
+      this.speedSpikeEditorSpec = {key: this.speedSpikeDraftKey(), spec: payload.resolved_scope.filter};
+      await this.applySpeedSpikeColumn();
+      if (this.requestControllers.speedSpike !== controller || signature !== this.speedSpikeSignature()) return;
+      this.speedSpikePreview.status = "ready";
+      this.syncFlagTargetToThreshold();
+      this.renderLegend();
+      this.renderLayers();
+      this.renderSelectedFixes();
+    } catch (error) {
+      if (!this.isAbortError(error) && this.requestControllers.speedSpike === controller && signature === this.speedSpikeSignature()) {
+        this.speedSpikePreview = {signature, status: "error", error: `Spikes could not be calculated: ${error.message}`};
+      }
+    } finally {
+      if (this.requestControllers.speedSpike === controller) {
+        this.requestControllers.speedSpike = null;
+        this.renderThresholdPane();
+        this.updateActionButtons();
+      }
+    }
+  }
+
   stationaritySignature() {
     return JSON.stringify([
       this.currentFamily, this.currentStudy, this.currentDatasetId, this.currentArtifact,
@@ -19316,8 +19985,9 @@ class MovementExampleApp {
       origin,
       sourceAnalysisId: candidateGenerated ? this.candidateQueryPreview.analysisId : "",
       stationaritySignature: stationary ? this.stationaritySignature() : "",
+      speedSpikeSignature: SPEED_SPIKE_FIELDS[field?.key] ? this.speedSpikeSignature() : "",
       issueField: stationary ? "stationarity" : isGpsSpikeTarget
-        ? "inbound_step_length_m + outbound_step_length_m + abs(turn_angle_deg)"
+        ? "inbound_speed_mps + outbound_speed_mps + abs(turn_angle_deg)"
         : field?.key || "",
       issueThreshold,
       thresholdFilter,
@@ -19337,7 +20007,7 @@ class MovementExampleApp {
       <div><strong>${isFilterTarget ? "Visible preview matches" : "Checked fixes"}:</strong> ${escapeHtml(formatCount(isFilterTarget ? target?.matchCount || selectedFixes.length : selectedFixes.length))}</div>
       ${isFilterTarget ? `<div><strong>Exact fixes to flag:</strong> ${escapeHtml(formatCount(target?.resolvedMatchCount || 0))}</div>${!target.resolvedMatchCount ? "<div>The filter settings and a result of 0 flags will be saved as a step.</div>" : ""}` : ""}
       <div><strong>Flag scope:</strong> ${isFilterTarget ? `all matching fixes for ${formatCount(thresholdFilter.individuals.length)} visible individual(s), across all track sets` : "checked fixes"}</div>
-      <div><strong>Issue variable:</strong> ${escapeHtml(stationary ? "Stationarity" : isGpsSpikeTarget ? "Step length + absolute turn angle" : field?.label || "Not set")}</div>
+      <div><strong>Issue variable:</strong> ${escapeHtml(stationary ? "Stationarity" : isGpsSpikeTarget ? "Speed + absolute turn angle" : field?.label || "Not set")}</div>
       <div><strong>Issue threshold:</strong> ${escapeHtml(issueThreshold || "Not set")}</div>
       <div><strong>Origin:</strong> ${escapeHtml(origin)}</div>
     `;
@@ -19562,11 +20232,12 @@ class MovementExampleApp {
 
   getCurrentIssueThreshold() {
     const field = this.getCurrentColorField();
+    if (SPEED_SPIKE_FIELDS[field?.key] && this.speedSpikeReady()) return speedSpikeDescription(this.speedSpikePreview.scope.filter);
     if (
       field?.key === GPS_SPIKE_COLOR_FIELD_KEY
       && Number.isFinite(this.thresholdState.value)
     ) {
-      return `both steps > ${this.thresholdState.value} m and |turn| >= ${this.gpsSpikeTurnAngleDeg}°`;
+      return `both speeds > ${this.thresholdState.value} m/s and |turn| >= ${this.gpsSpikeTurnAngleDeg}°`;
     }
     return getIssueThresholdFromState(field, this.thresholdState);
   }
@@ -19599,6 +20270,10 @@ class MovementExampleApp {
     }
     if (context.stationaritySignature && context.stationaritySignature !== this.stationaritySignature()) {
       this.refs.issueStatus.textContent = "Selection or version changed. Close this dialog and check the updated stationarity colours.";
+      return;
+    }
+    if (context.speedSpikeSignature && context.speedSpikeSignature !== this.speedSpikeSignature()) {
+      this.refs.issueStatus.textContent = "Selection or version changed. Close this dialog and preview the spike filter again.";
       return;
     }
     if (context.mode === "bursts" && !(context.burstIds || []).length) {
@@ -19684,10 +20359,11 @@ class MovementExampleApp {
       const filter = context.thresholdFilter;
       if (filter?.percentile?.probability) {
         const thresholdDescription = filter.kind === "gps_spike"
-          ? `both steps > ${filter.step_length_threshold_m} m and |turn| >= ${filter.minimum_abs_turn_angle_deg}°`
+          ? `both speeds > ${filter.speed_threshold_mps} m/s and |turn| >= ${filter.minimum_abs_turn_angle_deg}°`
           : `${filter.operator === "lt" ? "<" : ">"} ${filter.threshold_value}`;
         body.issue_threshold = `${thresholdDescription}; ${Math.round(filter.percentile.probability * 100)}th percentile`;
       }
+      if (filter?.cutoff_preset) body.issue_threshold += "; Q3 + 100 × IQR";
       const result = await this.requestJSON(endpoint, {method: "POST", body: JSON.stringify(body)});
       const queueReviewIndividual = String(context.queueReviewIndividual || "");
       this.setUser(user);
@@ -20181,6 +20857,11 @@ class MovementExampleApp {
           Number(arrays.source_rows[index]),
         );
         if (Number(arrays.review_status[index]) !== status) {
+          if ((Number(arrays.review_status[index]) === 2) !== (status === 2)) {
+            this.data.staleSpeedIndividuals ||= new Set();
+            this.data.staleSpeedIndividuals.add(individual);
+            this.data.speedMetricsError = "";
+          }
           arrays.review_status[index] = status;
           changed = true;
         }
@@ -20977,6 +21658,65 @@ function collectSummaryIndividuals(summary) {
   return [...names].sort((left, right) => left.localeCompare(right));
 }
 
+// Navigation only: use saved group membership and full track order. Never infer
+// flags from the current threshold, row-number adjacency, or the visible map.
+function buildQueueFlagNavigation(binary, sequence, groups, fixes) {
+  const byKey = new Map(fixes.map(fix => [fix.fixKey, fix]));
+  const located = new Map();
+  const ordinalByTrack = new Map();
+  const arrays = binary.arrays;
+  const decoder = new TextDecoder();
+  for (let sequenceIndex = 0; sequenceIndex < sequence.length; sequenceIndex++) {
+    const index = sequence[sequenceIndex];
+    const artifactCode = Number(arrays.artifact_codes[index]);
+    const sourceArtifact = binary.header.artifacts[artifactCode];
+    const sourceRow = Number(arrays.source_rows[index]);
+    const setCode = Number(arrays.set_codes?.[index] || 0);
+    const track = `${artifactCode}:${setCode}`;
+    const ordinal = ordinalByTrack.get(track) || 0;
+    ordinalByTrack.set(track, ordinal + 1);
+    const fixKey = arrays.fix_key_offsets && arrays.fix_key_bytes
+      ? decoder.decode(arrays.fix_key_bytes.subarray(arrays.fix_key_offsets[index], arrays.fix_key_offsets[index + 1]))
+      : `file:${sourceArtifact}#row:${sourceRow}`;
+    if (!byKey.has(fixKey)) continue;
+    located.set(fixKey, {...byKey.get(fixKey), sequenceIndex, sourceArtifact, sourceRow,
+      artifactCode, setCode, track, ordinal, burst: Number(arrays.burst_values?.[index] || 0),
+      timeMs: Number(arrays.time_ms[index]),
+      position: [Number(arrays.positions[index * 2]), Number(arrays.positions[index * 2 + 1])],
+    });
+  }
+  return groups.map(group => {
+    const ordered = group.fix_keys.map(key => located.get(key) || byKey.get(key)).filter(Boolean)
+      .sort((a, b) => a.timeMs - b.timeMs || (a.sequenceIndex ?? Infinity) - (b.sequenceIndex ?? Infinity)
+        || a.fixKey.localeCompare(b.fixKey));
+    const segments = [], lastByTrack = new Map(), covered = new Set();
+    const groupKeys = new Set(group.fix_keys);
+    for (const period of group.stationary_periods || []) {
+      const members = period.fix_keys.filter(key => groupKeys.has(key)).map(key => located.get(key) || byKey.get(key)).filter(Boolean)
+        .sort((a, b) => a.timeMs - b.timeMs || (a.sequenceIndex ?? Infinity) - (b.sequenceIndex ?? Infinity));
+      if (!members.length) continue;
+      members.forEach(fix => covered.add(fix.fixKey));
+      segments.push({fixes: members, kind: "stationary-period", startMs: period.start_ms, endMs: period.end_ms});
+    }
+    for (const fix of ordered) {
+      if (covered.has(fix.fixKey)) continue;
+      const previous = lastByTrack.get(fix.track);
+      const last = previous?.fixes.at(-1);
+      if (Number.isInteger(fix.sequenceIndex) && last && fix.ordinal === last.ordinal + 1
+          && fix.burst === last.burst && fix.timeMs > last.timeMs) {
+        previous.fixes.push(fix);
+      } else {
+        const entry = {fixes: [fix]};
+        segments.push(entry);
+        if (Number.isInteger(fix.sequenceIndex)) lastByTrack.set(fix.track, entry);
+      }
+    }
+    segments.sort((a, b) => (a.startMs ?? a.fixes[0].timeMs) - (b.startMs ?? b.fixes[0].timeMs)
+      || (a.fixes[0].sequenceIndex ?? Infinity) - (b.fixes[0].sequenceIndex ?? Infinity));
+    return {issueType: group.issue_type, segments, fixes: ordered.map(fix => ({fixes: [fix]}))};
+  });
+}
+
 function parseMovementFixes(items) {
   return Array.isArray(items) ? items.map(item => ({
     fixKey: String(item?.fix_key || ""),
@@ -21431,6 +22171,9 @@ function refreshMovementFixCollections(data, { colorFieldKeys = null, recomputeC
       fix.attributes[STATIONARITY_COLOR_FIELD_KEY] = data.stationarityValueForFix(fix);
     }
   }
+  if (data.speedSpikeValueForFix) {
+    for (const fix of data.fixes) fix.attributes[data.speedSpikeFieldKey] = data.speedSpikeValueForFix(fix);
+  }
   data.fixByKey = new Map(data.fixes.map(fix => [fix.fixKey, fix]));
   data.confirmedPointFixes = data.fixes.filter(fix => fix.review?.status === "confirmed");
   data.eligibleFixesByTrack = buildMovementFixTrackIndex(data.fixes);
@@ -21570,6 +22313,7 @@ function buildMovementColorFields(fields) {
   const merged = [
     INDIVIDUAL_COLOR_FIELD,
     GPS_SPIKE_COLOR_FIELD,
+    ...Object.values(SPEED_SPIKE_FIELDS),
     STATIONARITY_COLOR_FIELD,
     ...(Array.isArray(fields) ? fields : []),
   ];
@@ -21592,8 +22336,10 @@ function movementColorFieldDescription(field) {
     speed_mps: "Step length divided by the positive time interval to the following fix, attached to the segment's starting fix.",
     time_delta_s: "Elapsed seconds from this fix to the following fix, attached to the segment's starting fix.",
     turn_angle_deg: "Signed change in WGS84 geodesic bearing at this fix, using the preceding and following fixes.",
-    [GPS_SPIKE_COLOR_FIELD_KEY]: `Colors outbound step length. A filter match requires both adjacent steps above the distance threshold and |turn angle| at least ${DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG}° unless changed.`,
+    [GPS_SPIKE_COLOR_FIELD_KEY]: `Colors outbound speed (m/s). A filter match requires both adjacent speeds above the speed threshold and |turn angle| at least ${DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG}° unless changed.`,
     [STATIONARITY_COLOR_FIELD_KEY]: "Highlights fixes in stationary periods using the radius, minimum duration and maximum gap below. Matches are review candidates, not confirmed errors.",
+    gps_spike_two_stage: "Roland-style speed adaptation: study Q3 floor, P99.9 upper cutoff, and separate 166° / 157° turn rules.",
+    gps_spike_physiology: "Study Q3 floor with the supplied species speed cap replacing the upper percentile cutoff.",
     is_outlier: "Raw boolean outlier result supplied by move2utils. It is source data, not Scrub Data review state.",
     "algorithm-marked-outlier": "Outlier marking supplied by the data owner’s algorithm. This source column is separate from move2utils results and app review decisions.",
     "manually-marked-outlier": "Outlier marking supplied manually by the data owner. This source column is separate from move2utils results and app review decisions.",
@@ -21651,31 +22397,26 @@ function computeMovementColorStyles(colorFields, fixes) {
 function movementColorFieldValue(fix, field) {
   if (!fix || !field) return null;
   const attributeKey = field.key === GPS_SPIKE_COLOR_FIELD_KEY
-    ? "step_length_m"
+    ? "speed_mps"
     : field.key;
   return fix.attributes?.[attributeKey];
 }
 
-function binaryInboundStepLength(binary, index) {
+function binaryInboundSpeed(binary, index) {
   if (!binary?.arrays || index <= 0) return null;
   const arrays = binary.arrays;
-  if (Number(arrays.individual_codes?.[index - 1]) !== Number(arrays.individual_codes?.[index])) {
-    return null;
-  }
-  if (
-    arrays.set_codes
-    && Number(arrays.set_codes[index - 1]) !== Number(arrays.set_codes[index])
-  ) {
-    return null;
-  }
-  return finiteOrNull(arrays.step_length_m?.[index - 1]);
+  let previous = index - 1;
+  const sameTrack = i => Number(arrays.individual_codes[i]) === Number(arrays.individual_codes[index])
+    && (!arrays.set_codes || Number(arrays.set_codes[i]) === Number(arrays.set_codes[index]));
+  while (previous >= 0 && sameTrack(previous) && Number(arrays.review_status[previous]) === 2) previous -= 1;
+  return previous >= 0 && sameTrack(previous) ? finiteOrNull(arrays.speed_mps?.[previous]) : null;
 }
 
-function movementInboundStepLength(data, fix) {
+function movementInboundSpeed(data, fix) {
   const position = data?.eligibleTrackPositionByFixKey?.get(fix?.fixKey);
   if (!position || position.index <= 0) return null;
   const previous = data.eligibleFixesByTrack?.get(position.trackKey)?.[position.index - 1];
-  return finiteOrNull(previous?.attributes?.step_length_m);
+  return finiteOrNull(previous?.attributes?.speed_mps);
 }
 
 function computeNumericRange(values) {
@@ -21983,6 +22724,19 @@ function formatStepLabel(step, dataset) {
   return step?.title || dataset.note || (dataset.parent_dataset_id ? "Review step" : "Original input");
 }
 
+function speedSpikeDescription(filter) {
+  if (filter.metric !== "speed") return `both steps > ${filter.step_length_threshold_m} m, |turn| ≥ ${filter.minimum_abs_turn_angle_deg}°`;
+  if (filter.method === "manual") return `both speeds > ${filter.speed_threshold_mps} m/s, |turn| ≥ ${filter.minimum_abs_turn_angle_deg}°`;
+  const lower = filter.lower_speed_mps, upper = filter.upper_speed_mps;
+  const stages = filter.selected_stages || ["moderate", "fast"];
+  const edits = filter.threshold_overrides || {};
+  const lowerLabel = Object.hasOwn(edits, "lower_speed_mps") ? "custom lower cutoff" : "Q3";
+  const upperLabel = Object.hasOwn(edits, "upper_speed_mps") ? "custom upper cutoff"
+    : filter.method === "physiology" ? (filter.species_cap_field === "vmax_ci_lower" ? "cap lower CI" : "species cap") : "P99.9";
+  const moderate = filter.moderate_min_abs_turn_deg ?? 166, fast = filter.fast_min_abs_turn_deg ?? 157;
+  return `both speeds > ${lowerLabel} (${lower ?? "no eligible steps"} m/s); |turn| ≥${moderate}°, or ≥${fast}° when both speeds > ${upperLabel} (${upper ?? "no eligible steps"} m/s)${stages.length === 1 ? `; ${stages[0] === "fast" ? `above ${upperLabel}` : `${lowerLabel}–${upperLabel}`} group only` : ""}`;
+}
+
 function formatStepDetails(step, dataset) {
   // Graph responses carry a compact projection; newly created steps carry
   // their full parameters. Both describe the saved action, not current UI state.
@@ -22000,7 +22754,7 @@ function formatStepDetails(step, dataset) {
     if (filter.kind === "stationarity") {
       criterion = `Stationarity: radius ≤ ${filter.radius_m} m, duration ≥ ${filter.minimum_duration_s / 3600} h, gaps ≤ ${filter.maximum_gap_s / 3600} h (${filter.position})`;
     } else if (filter.kind === "gps_spike") {
-      criterion = `GPS spike: both steps > ${filter.step_length_threshold_m} m, |turn| ≥ ${filter.minimum_abs_turn_angle_deg}°`;
+      criterion = `GPS spike: ${speedSpikeDescription(filter)}`;
     } else if (filter.field_key) {
       const [name, unit] = fields[filter.field_key] || [filter.field_key, ""];
       const operator = {gt: ">", lt: "<", gte: "≥", lte: "≤", eq: "="}[filter.operator || "gt"];

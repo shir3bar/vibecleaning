@@ -26,8 +26,9 @@ def is_gps_spike_annotation(annotation: dict) -> bool:
               for label in str(annotation.get("issue_type") or "").split(";")}
     return (
         ((annotation.get("scope") or {}).get("filter") or {}).get("kind") == "gps_spike"
-        or annotation.get("issue_field") == "gps_spike_step_turn"
-        or bool(labels & {"gps spike", "gps spikes", "gps spike (step + turn)"})
+        or annotation.get("issue_field") in {"gps_spike_step_turn", "gps_spike_speed_turn", "gps_spike_two_stage", "gps_spike_physiology"}
+        or bool(labels & {"gps spike", "gps spikes", "gps spike (step + turn)", "gps spike (speed + turn)",
+                          "gps spike (two-stage speed)", "gps spike (physiology)"})
     )
 
 
@@ -116,7 +117,7 @@ def stationarity_inputs(records: list[dict], skipped: set[int]) -> list[dict]:
     } for (artifact, individual, set_name), entries in sorted(groups.items())]
 
 
-def evaluate_stationarity(records: list[dict], spec: dict, annotations: list[dict], *, calculate=True):
+def evaluate_stationarity(records: list[dict], spec: dict, annotations: list[dict], *, calculate=True, periods=None):
     algorithm = spec.get("algorithm", ALGORITHM)
     skipped = stationarity_skips(records, annotations, skip_gps=algorithm in SKIP_GPS_ALGORITHMS)
     inputs = stationarity_inputs(records, skipped)
@@ -138,7 +139,10 @@ def evaluate_stationarity(records: list[dict], spec: dict, annotations: list[dic
     matches = []
     for (_, individual, _), track in tracks.items():
         track.sort(key=lambda item: (item["time_ms"], item["row_index"]))
-        matches.extend(_cached_scan(track, spec, endpoint_keys.get(individual)))
+        track_periods = _cached_scan(track, spec, endpoint_keys.get(individual))
+        matches.extend(key for period in track_periods for key in period)
+        if periods is not None:
+            periods.extend(track_periods)
     return matches, inputs
 
 
@@ -165,11 +169,11 @@ def _cached_scan(records, spec, endpoint_keys=None):
         if cached is not None:
             _SCAN_CACHE.move_to_end(signature)
             return cached
-    result = tuple(stationary_fix_keys(records, spec, endpoint_keys=endpoint_keys))
-    if len(result) <= _SCAN_CACHE_MAX_FIXES:
+    result = tuple(tuple(period) for period in stationary_periods(records, spec, endpoint_keys=endpoint_keys))
+    if sum(map(len, result)) <= _SCAN_CACHE_MAX_FIXES:
         with _SCAN_CACHE_LOCK:
             _SCAN_CACHE[signature] = result
-            while len(_SCAN_CACHE) > 32 or sum(map(len, _SCAN_CACHE.values())) > _SCAN_CACHE_MAX_FIXES:
+            while len(_SCAN_CACHE) > 32 or sum(len(period) for periods in _SCAN_CACHE.values() for period in periods) > _SCAN_CACHE_MAX_FIXES:
                 _SCAN_CACHE.popitem(last=False)
     return result
 
@@ -209,6 +213,10 @@ def validate_stationarity_filter(value: dict) -> dict:
 
 
 def stationary_fix_keys(records: list[dict], spec: dict, *, endpoint_keys=None) -> list[str]:
+    return [key for period in stationary_periods(records, spec, endpoint_keys=endpoint_keys) for key in period]
+
+
+def stationary_periods(records: list[dict], spec: dict, *, endpoint_keys=None) -> list[list[str]]:
     """Scan one individual/source/track set in chronological order.
 
     Each non-overlapping run has a fixed centre: its first fix. A fix outside
@@ -259,7 +267,7 @@ def stationary_fix_keys(records: list[dict], spec: dict, *, endpoint_keys=None) 
                 return
         elif spec["position"] == "ends" and run_start != 0 and end != len(records):
             return
-        matched.extend(item["fix_key"] for item in run)
+        matched.append([item["fix_key"] for item in run])
 
     for index, record in enumerate(records):
         if record.get("excluded"):

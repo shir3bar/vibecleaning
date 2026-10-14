@@ -1,5 +1,7 @@
 import hashlib
 import json
+from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -13,6 +15,13 @@ CSV = "eventid,individual,timestamp,longitude,latitude,set\n" + "".join(
     f"{individual}{index},{individual},2024-01-01T00:{index:02d}:00Z,-70,40,train\n"
     for individual in ("alpha", "beta") for index in range(8)
 )
+
+
+def test_flag_navigation_uses_full_track_order_and_source_identity(node_runtime):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run([node_runtime, str(root / 'tests/frontend/queue_flag_navigation.cjs'),
+                             str(root / 'examples/movement/static/app.js')], capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def post_review(client, base, action, body):
@@ -165,6 +174,11 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         page.locator('[data-individual-checkbox]').first.wait_for(state="attached")
         page.evaluate("""() => {
           const original = deck.MapboxOverlay.prototype.setProps;
+          const fit = maplibregl.Map.prototype.fitBounds;
+          maplibregl.Map.prototype.fitBounds = function(bounds, ...args) {
+            window.__testFittedBounds = bounds.toArray();
+            return fit.call(this, bounds, ...args);
+          };
           deck.MapboxOverlay.prototype.setProps = function(props) {
             if (props.layers) window.__testMapLayers = props.layers;
             if (window.__testObserveReview && props.layers && !props.layers.some(layer =>
@@ -194,6 +208,47 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         page.wait_for_function("""() => (window.__testMapLayers || []).some(layer =>
           layer.id.startsWith('movement-binary-points-') && layer.props.visible)
         """, timeout=30_000)
+        jumps = active.locator('[data-queue-flag-jumps]')
+        assert not jumps.evaluate('el => el.open')
+        jumps.locator('summary').click()
+        destination = jumps.locator('[data-queue-flag-list]')
+        destination.wait_for(state='visible')
+        assert destination.locator('button[data-issue-type="GPS spikes"]').count() >= 1
+        assert destination.locator('button[data-issue-type="Stationarity"]').count() >= 1
+        # Every flag remains reachable, independent of grouping, current map
+        # visibility and duplicate times; navigation creates no saved action.
+        jumps.locator('[data-queue-flag-list-mode]').select_option('fixes')
+        assert jumps.evaluate('el => el.open')
+        assert destination.locator('button[data-issue-type="GPS spikes"]').count() == 5
+        assert destination.locator('button[data-issue-type="Stationarity"]').count() == 3
+        before_navigation = page.locator('[data-role="dataset"]').input_value()
+        before_navigation_requests = len(track_requests)
+        page.locator('[data-role="show-flagged"]').uncheck()
+        page.evaluate('window.__testFittedBounds = null')
+        destination.locator('[data-queue-flag-jump="fixes:0:4"]').click()
+        target_row = int(alpha[4].rsplit(':', 1)[1])
+        page.wait_for_function("""row => {
+          const state = window.__movementDiagnosticsSnapshot();
+          const marker = window.__testMapLayers.at(-1);
+          return !state.trackPlayerPlaying && state.trackPlayerSourceRow === row
+            && marker.id === 'movement-track-player-position'
+            && marker.props.data[0].sourceRow === row
+            && window.__testFittedBounds !== null;
+        }""", arg=target_row)
+        assert page.locator('[data-role="show-flagged"]').is_checked()
+        assert page.evaluate("window.__testMapLayers.at(-2).props.data.length") == 1
+        assert len(track_requests) == before_navigation_requests
+        assert page.locator('[data-role="dataset"]').input_value() == before_navigation
+        assert destination.locator('[data-queue-flag-jump="fixes:0:4"]').get_attribute('aria-pressed') == 'true'
+        # Grouped navigation seeks to the beginning and highlights every fix
+        # in the chosen segment, while keeping the foldout open.
+        jumps.locator('[data-queue-flag-list-mode]').select_option('segments')
+        destination.locator('[data-queue-flag-jump="segments:1:0"]').click()
+        page.wait_for_function("row => window.__movementDiagnosticsSnapshot().trackPlayerSourceRow === row",
+                               arg=int(alpha[3].rsplit(':', 1)[1]))
+        assert jumps.evaluate('el => el.open')
+        jumps.screenshot(path=tmp_path / 'queue-flag-navigation.png')
+        jumps.locator('summary').click()
         bursts.locator('summary').click()
         bursts.locator('[data-queue-burst-visible]').first.wait_for(state="visible")
         show_flagged = page.locator('[data-role="show-flagged"]')
@@ -338,6 +393,9 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         active.locator(f'{spike}[data-queue-issue-action="confirm"]').wait_for(state="detached", timeout=30_000)
         stationary_button = active.locator(f'{stationary}[data-queue-issue-action="unflag"]')
         stationary_button.wait_for(state="visible", timeout=30_000)
+        active.locator('[data-queue-flag-group="Stationarity"]').wait_for(state="attached", timeout=30_000)
+        assert active.locator('[data-queue-flag-group="GPS spikes"]').count() == 0
+        assert active.locator('[data-queue-flag-group="Stationarity"]').count() == 1
         assert active.locator('[data-review-decision="fix_keep"]').get_attribute("class") == "is-selected"
         assert "unsaved" in active.locator('.movement-review-state').text_content()
         assert page.locator('[data-role="confirm-modal"]').is_hidden()
@@ -366,6 +424,7 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
             stationary_button.click()
         assert dismissed.value.status == 200, dismissed.value.text()
         active.get_by_text("No unresolved flags.", exact=True).wait_for(timeout=30_000)
+        assert active.locator('[data-queue-flag-jumps]').count() == 0
         assert_retained_track(0)
         assert "0 flagged" in active.locator('.movement-queue-card-meta').inner_text()
         page.evaluate("() => { window.__testObserveReview = false; }")

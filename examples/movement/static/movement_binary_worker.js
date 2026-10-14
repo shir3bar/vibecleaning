@@ -1,5 +1,5 @@
 const movements = new Map();
-const GPS_SPIKE_FIELD_KEY = "gps_spike_step_turn";
+const GPS_SPIKE_FIELD_KEY = "gps_spike_speed_turn";
 const MOVE2_OUTBOUND_FIELDS = new Set([
   "step_length_m",
   "speed_mps",
@@ -106,6 +106,7 @@ function burstIdAt(movement, index, individual) {
 function colorAt(movement, index, spec) {
   const arrays = movement.arrays;
   const field = spec.field || {};
+  if (["gps_spike_two_stage", "gps_spike_physiology"].includes(field.key) && !spec.speedSpikeReady) return [120, 136, 153, 120];
   if (field.key === "stationarity" && !spec.stationarityReady) return [120, 136, 153, 120];
   const individual = String(
     movement.header.individuals?.[Number(arrays.individual_codes[index])] || "",
@@ -114,7 +115,7 @@ function colorAt(movement, index, spec) {
     const color = spec.individualColors?.[individual] || [124, 210, 255];
     return [color[0], color[1], color[2], 215];
   }
-  const sourceKey = field.key === GPS_SPIKE_FIELD_KEY ? "step_length_m" : field.key;
+  const sourceKey = field.key === GPS_SPIKE_FIELD_KEY ? "speed_mps" : field.key;
   const column = movement.header.color_columns?.[sourceKey];
   const value = arrays[column?.array || sourceKey]?.[index];
   if (field.kind === "boolean") {
@@ -128,19 +129,14 @@ function colorAt(movement, index, spec) {
   return spec.categoryColors?.[level] || categoricalColor(level);
 }
 
-function inboundStepLengthAt(movement, index) {
+function inboundSpeedAt(movement, index) {
   if (index <= 0) return Number.NaN;
   const arrays = movement.arrays;
-  if (Number(arrays.individual_codes?.[index - 1]) !== Number(arrays.individual_codes?.[index])) {
-    return Number.NaN;
-  }
-  if (
-    arrays.set_codes
-    && Number(arrays.set_codes[index - 1]) !== Number(arrays.set_codes[index])
-  ) {
-    return Number.NaN;
-  }
-  return Number(arrays.step_length_m?.[index - 1]);
+  let previous = index - 1;
+  const sameTrack = i => Number(arrays.individual_codes[i]) === Number(arrays.individual_codes[index])
+    && (!arrays.set_codes || Number(arrays.set_codes[i]) === Number(arrays.set_codes[index]));
+  while (previous >= 0 && sameTrack(previous) && Number(arrays.review_status[previous]) === 2) previous -= 1;
+  return previous >= 0 && sameTrack(previous) ? Number(arrays.speed_mps?.[previous]) : Number.NaN;
 }
 
 function buildAttributes(movement, spec) {
@@ -174,7 +170,7 @@ function buildAttributes(movement, spec) {
     confirmedFilter[index] = !hidden && status === 2 ? 1 : 0;
     if (!hidden && status !== 2 && threshold.active) {
       const field = spec.field || {};
-      const sourceKey = field.key === GPS_SPIKE_FIELD_KEY ? "step_length_m" : field.key;
+      const sourceKey = field.key === GPS_SPIKE_FIELD_KEY ? "speed_mps" : field.key;
       const column = movement.header.color_columns?.[sourceKey];
       const value = arrays[column?.array || sourceKey]?.[index];
       if (field.kind === "boolean") {
@@ -187,13 +183,13 @@ function buildAttributes(movement, spec) {
       } else if (field.kind === "numeric" && Number.isFinite(Number(threshold.value))) {
         const number = Number(value);
         const turn = Number(arrays.turn_angle_deg?.[index]);
-        const inboundStep = inboundStepLengthAt(movement, index);
+        const inboundSpeed = inboundSpeedAt(movement, index);
         const validTurn = field.key !== GPS_SPIKE_FIELD_KEY
           || (Number.isFinite(turn) && Math.abs(turn) >= Number(spec.gpsSpikeTurnAngleDeg));
-        const validInboundStep = field.key !== GPS_SPIKE_FIELD_KEY
-          || (Number.isFinite(inboundStep) && inboundStep > Number(threshold.value));
+        const validInboundSpeed = field.key !== GPS_SPIKE_FIELD_KEY
+          || (Number.isFinite(inboundSpeed) && inboundSpeed > Number(threshold.value));
         const matches = threshold.reverse ? number < Number(threshold.value) : number > Number(threshold.value);
-        thresholdFilter[index] = Number.isFinite(number) && validTurn && validInboundStep && matches ? 1 : 0;
+        thresholdFilter[index] = Number.isFinite(number) && validTurn && validInboundSpeed && matches ? 1 : 0;
       }
     }
     suspectedCount += suspectedFilter[index];
@@ -301,6 +297,30 @@ self.addEventListener("message", event => {
       }
       movement.arrays.review_status.set(reviewStatus);
       self.postMessage({ type: "review_status", requestId });
+      return;
+    }
+    if (event.data?.type === "metrics") {
+      const movement = movements.get(String(event.data.blockId || ""));
+      const start = Number(event.data.start);
+      if (!movement || !Number.isInteger(start) || start < 0) throw new Error("Invalid metric patch");
+      for (const key of ["step_length_m", "speed_mps", "time_delta_s", "turn_angle_deg"]) {
+        const values = event.data.values?.[key];
+        if (!values || start + values.length > movement.header.row_count) throw new Error("Metric patch length mismatch");
+        movement.arrays[key].set(values, start);
+      }
+      self.postMessage({type: "metrics", requestId});
+      return;
+    }
+    if (event.data?.type === "spike_groups") {
+      const movement = movements.get(String(event.data.blockId || ""));
+      const fieldKey = event.data.fieldKey;
+      if (!movement || !["gps_spike_two_stage", "gps_spike_physiology"].includes(fieldKey)) throw new Error("Invalid spike column");
+      const values = new Uint8Array(event.data.values || []);
+      if (values.length !== Number(movement.header.row_count)) throw new Error("Spike column length mismatch");
+      movement.arrays[fieldKey] = values;
+      movement.header.color_columns ||= {};
+      movement.header.color_columns[fieldKey] = {array: fieldKey, kind: "categorical", levels: event.data.levels};
+      self.postMessage({type: "spike_groups", requestId});
       return;
     }
     if (event.data?.type === "stationarity") {

@@ -1,4 +1,5 @@
 import csv
+from collections import defaultdict
 from functools import lru_cache
 import json
 from pathlib import Path
@@ -235,6 +236,12 @@ def resolve_filter_row_ranges(
             details=stationarity_details,
         )
     if str(filter_spec.get("kind") or "").strip().lower() == "gps_spike":
+        if filter_spec.get("metric") == "speed":
+            return _resolve_speed_spike_row_ranges(
+                path, filter_spec, annotations=annotations or [], source_artifact=source_artifact,
+                confirmed_fix_keys=confirmed_fix_keys, confirmed_individual_tracks=confirmed_individual_tracks,
+                details=stationarity_details,
+            )
         return _resolve_gps_spike_row_ranges(
             path,
             filter_spec,
@@ -460,6 +467,37 @@ def csv_stationarity_records(path: Path, filter_spec: dict, *, source_artifact: 
                 "segment": (raw.get(tag_column), fragments.get(track, 0)),
             })
     return records
+
+
+def _resolve_speed_spike_row_ranges(path, spec, *, annotations, source_artifact,
+                                    confirmed_fix_keys, confirmed_individual_tracks, details):
+    from .speed_spikes import resolve_speed_spikes, species_cap
+    from hashlib import sha256
+    # Full source supplies the study distribution even when only one individual
+    # is selected for flagging. Canonical metrics use retained fixes.
+    records = csv_stationarity_records(path, {}, source_artifact=source_artifact,
+        confirmed_fix_keys=confirmed_fix_keys, confirmed_individual_tracks=confirmed_individual_tracks)
+    groups = defaultdict(list)
+    for row in records:
+        groups[(row["individual"], row["set_name"])].append(row)
+    def load_cap():
+        with path.open(newline="", encoding="utf-8") as stream:
+            reader = csv.DictReader(stream)
+            columns = [key for key in (reader.fieldnames or []) if key.lower().replace("-", "_") in {
+                "individual_taxon_canonical_name", "scientific_name", "species", "taxon"}]
+            species = {row[key] for row in reader for key in columns if row.get(key)}
+        return species_cap(spec.get("study_key", path.parent.name), species)
+    stat = path.stat()
+    key = sha256(json.dumps([str(path.resolve()), stat.st_size, stat.st_mtime_ns,
+        annotations, sorted(confirmed_fix_keys or []), sorted(confirmed_individual_tracks or [])], sort_keys=True).encode()).digest()
+    scope, count = resolve_speed_spikes(lambda: iter(groups.values()), spec, annotations,
+                                      cap_loader=load_cap, cache_key=key)
+    rows = [pair for source in scope.pop("source_rows") for pair in source["row_ranges"]]
+    if details is not None:
+        details.update(filter=scope["filter"], spike_groups=scope["spike_groups"])
+        if "speed_histogram" in scope:
+            details["speed_histogram"] = scope["speed_histogram"]
+    return rows, count
 
 
 def _resolve_gps_spike_row_ranges(

@@ -129,7 +129,7 @@ def test_zero_filter_assignment_and_shared_percentile_steps(tmp_path, source_for
         offset = ((8 + header_length + 7) // 8) * 8
         arrays = {key: np.frombuffer(binary, dtype=column["dtype"], count=column["length"],
                     offset=offset + column["offset"]) for key, column in header["arrays"].items()}
-        steps = arrays[header["color_columns"]["step_length_m"]["array"]]
+        steps = arrays[header["color_columns"]["speed_mps"]["array"]]
         steps = steps[np.isfinite(steps) & (steps >= 0) & (arrays["review_status"] != 2)]
         expected = np.quantile(steps, [0.95, 0.99])
 
@@ -170,13 +170,21 @@ def test_zero_filter_assignment_and_shared_percentile_steps(tmp_path, source_for
                 assert page.locator('[data-role="dataset"]').input_value() == dataset_before_preview
                 assert len(saved) == 2
             assert "without flagging" in button.get_attribute("title")
+            if field == "speed_mps":
+                page.locator('[data-action="set-speed-iqr"]').click()
+                q1, q3 = np.quantile(values, [.25, .75])
+                assert float(cutoff.input_value()) == pytest.approx(q3 + 100 * (q3 - q1))
+                assert page.locator('[data-role="dataset"]').input_value() == dataset_before_preview
+                assert len(saved) == 2
+            else:
+                assert page.locator('[data-action="set-speed-iqr"]').count() == 0
             assert page.locator('.movement-threshold-note').count() == 0
             help_icon = page.locator('.movement-threshold .movement-field-help')
             assert "Applies to visible individuals (2)" in help_icon.get_attribute("data-tooltip")
             help_icon.hover()
             page.wait_for_function("getComputedStyle(document.querySelector('.movement-threshold .movement-field-help'), '::after').opacity === '1'")
 
-        page.locator('[data-role="color-by"]').select_option("gps_spike_step_turn")
+        page.locator('[data-role="color-by"]').select_option("gps_spike_speed_turn")
         page.locator('[data-action="set-gps-spike-turn-angle"]').fill("0")
         page.locator('[data-action="set-gps-spike-turn-angle"]').press("Tab")
         assert float(page.locator('[data-action="set-threshold-value"]').input_value()) == pytest.approx(expected[1])
@@ -209,12 +217,12 @@ def test_zero_filter_assignment_and_shared_percentile_steps(tmp_path, source_for
                                + json.dumps(response.json()["dataset"]["dataset_id"]))
         assert len(saved) == 3
         spec = step["parameters"]["scope"]["filter"]
-        assert spec["step_length_threshold_m"] == pytest.approx(expected[0 if percentile == 95 else 1])
+        assert spec["speed_threshold_mps"] == pytest.approx(expected[0 if percentile == 95 else 1])
         assert spec["percentile"]["probability"] == percentile / 100
         assert spec["percentile"]["sample_count"] == len(steps)
         assert len(spec["individuals"]) == 2
         assert f"{percentile}th" in step["parameters"]["issue_threshold"]
-        assert step["parameters"]["issue_type"] == "Filter GPS spike (step + turn)"
+        assert step["parameters"]["issue_type"] == "Filter GPS spike (speed + turn)"
 
         # Non-GPS saved steps retain the chosen percentile and actual cutoff too.
         page.locator('[data-role="color-by"]').select_option("speed_mps")
@@ -236,7 +244,7 @@ def test_zero_filter_assignment_and_shared_percentile_steps(tmp_path, source_for
         assert f"; {percentile}th percentile" in step["parameters"]["issue_threshold"]
         assert float(
             step["parameters"]["issue_threshold"].split(";")[0].split()[1]) == pytest.approx(speed_cutoff)
-        assert "both steps" not in step["parameters"]["issue_threshold"]
+        assert "both speeds" not in step["parameters"]["issue_threshold"]
         assert len(saved) == 4
         page.locator('[data-role="individual-view-queue"]').click()
         page.locator('[data-role="individual-queue-order"]').select_option("flagged")
