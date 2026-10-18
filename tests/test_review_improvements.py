@@ -137,6 +137,8 @@ def test_completion_exports_full_inputs_and_decisions_idempotently(tmp_path, sou
     original = {p.name: p.read_bytes() for p in study.glob('*.' + source_format)}
     body = remove_all(client, base, loaded)
     body['background'] = background
+    # Existing callers may serialize the revision as a numeric string.
+    body['expected_review_revision'] = str(body['expected_review_revision'])
     response = client.post(base + '/review/complete', json=body)
     assert response.status_code == (202 if background else 200), response.text
     result = response.json()

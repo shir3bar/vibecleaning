@@ -727,6 +727,10 @@ def complete_review(
     with project_mutation_lock(project_dir):
         if preflight is not None:
             preflight()
+        try:
+            expected_review_revision = int(expected_review_revision)
+        except (TypeError, ValueError) as exc:
+            raise ReviewConflictError("Review state changed; reload before continuing") from exc
         state = load_review_state(project_dir)
         # A lost response or concurrent retry of the same saved export is safe.
         if active_review(state) is None:
