@@ -272,3 +272,70 @@ def test_interrupted_publication_restores_previous_export(tmp_path, had_previous
     assert destination.exists() == had_previous
     if had_previous:
         assert (destination / 'individual_decisions.csv').read_bytes() == b'old'
+
+
+def test_multi_csv_study_covers_all_sources_and_ignores_context_exports(tmp_path):
+    app, study = make_app(tmp_path, 'csv')
+    (study / 'second.csv').write_text('eventid,individual,timestamp,longitude,latitude\ng1,gamma,2024-01-01T00:00:00Z,-71,41\n')
+    (study / 'movement_osm_context.csv').write_text('context,value\nwater,true\n')
+    client = TestClient(app)
+    client.post('/api/auth/login', json={'username': 'browser-reviewer', 'password': 'test-password-long'})
+    base = '/api/apps/movement/family/movement_raw/study/readiness'
+    loaded = client.get(base + '/load').json()
+    dataset = loaded['dataset_id']
+    header = client.head(base + f'/dataset/{dataset}/individual-decisions.csv')
+    assert header.status_code == 200, header.text
+    assert header.headers['X-Individual-Count'] == '3'
+    body = remove_all(client, base, loaded)
+    rows = downloaded_decisions(client, base, loaded['dataset_id'])
+    assert {row['individual'] for row in rows} == {'alpha', 'beta', 'gamma'}
+    assert {row['review_decision'] for row in rows} == {'remove'}
+    completed = client.post(base + '/review/complete', json=body)
+    assert completed.status_code == 200, completed.text
+    assert completed.json()['coverage']['required_count'] == 3
+    manifest = json.loads((study / 'scrubdata/cleaned_files/writer_manifest.json').read_text())
+    assert {item['logical_name'] for item in manifest['files']} == {'movement.csv', 'second.csv'}
+
+
+def test_review_permissions_flags_prior_reasons_and_completed_download(tmp_path):
+    from app.auth import AuthManager, build_user_record
+    from examples.slim_movement.app import create_slim_movement_app
+    from test_movement_browser import STATIC_ROOT, INDEX_PATH
+    _, study = make_app(tmp_path, 'csv')
+    manager = AuthManager([build_user_record(username=name, user_id=name, role=role,
+        password='test-password-long') for name, role in [('editor', 'editor'), ('one', 'reviewer'), ('two', 'reviewer')]])
+    app = create_slim_movement_app(data_root=tmp_path / 'data', static_root=STATIC_ROOT,
+                                  index_path=INDEX_PATH, auth_manager=manager)
+    clients = {}
+    for name in ['editor', 'one', 'two']:
+        clients[name] = TestClient(app)
+        clients[name].post('/api/auth/login', json={'username': name, 'password': 'test-password-long'})
+    editor, reviewer, other = (clients[name] for name in ['editor', 'one', 'two'])
+    base = '/api/apps/movement/family/movement_raw/study/readiness'
+    loaded = editor.get(base + '/load').json()
+    body = decision_body(editor, base, loaded, 'alpha')
+    assigned = editor.post(base + '/review/assign', json={**body, 'reviewer_user_id': 'one'})
+    assert assigned.status_code == 200, assigned.text
+    body = decision_body(reviewer, base, loaded, 'alpha')
+    assert other.post(base + '/actions/remove-study', json={**body, 'removal_reason': 'nest'}).status_code == 403
+    assert other.get(base + f"/dataset/{loaded['dataset_id']}/individual-decisions.csv").status_code == 403
+    flagged = reviewer.post(base + '/actions/annotate-scope', json={**body,
+        'scope': {'kind': 'individual', 'individual': 'alpha'}, 'status': 'suspected',
+        'issue_type': 'Existing issue', 'comment': 'Retain this flag', 'origin': 'manual'})
+    assert flagged.status_code == 200, flagged.text
+    loaded['dataset_id'] = flagged.json()['dataset']['dataset_id']
+    body = remove_all(reviewer, base, loaded)
+    _, annotations_path = get_dataset_artifact(study, loaded['dataset_id'], 'movement_review_annotations.json')
+    annotations = json.loads(annotations_path.read_text())['annotations']
+    assert annotations[0]['comment'] == 'Retain this flag'
+    assert annotations[0]['status'] == 'suspected'
+    assert reviewer.post(base + '/review/complete', json=body).status_code == 200
+    assert len(downloaded_decisions(reviewer, base, loaded['dataset_id'])) == 2
+    assert reviewer.post(base + '/actions/remove-study', json={**body, 'removal_reason': 'nest'}).status_code in {403, 409, 423}
+    body = decision_body(editor, base, loaded, 'alpha')
+    assigned = editor.post(base + '/review/assign', json={**body, 'reviewer_user_id': 'two'})
+    assert assigned.status_code == 200, assigned.text
+    profile = other.get(base + '/edit-profile', params={'dataset_id': loaded['dataset_id']}).json()
+    assert profile['completed'] is False
+    assert profile['coverage']['prior_decisions_by_individual']['alpha']['removal_reason'] == 'short_track'
+    assert {row['review_decision'] for row in downloaded_decisions(other, base, loaded['dataset_id'])} == {'undecided'}

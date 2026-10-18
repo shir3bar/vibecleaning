@@ -56,7 +56,11 @@ def test_removal_reason_blocks_navigation_and_saves(tmp_path, source_format):
 @pytest.mark.parametrize('source_format', ['csv', 'rds'])
 def test_bulk_removal_dialog_covers_unselected_individuals(tmp_path, source_format):
     import playwright.sync_api as pw
-    app, _ = make_app(tmp_path, source_format)
+    app, study = make_app(tmp_path, source_format)
+    count = 2
+    if source_format == 'csv':
+        (study / 'second.csv').write_text('eventid,individual,timestamp,longitude,latitude\ng1,gamma,2024-01-01T00:00:00Z,-71,41\n')
+        count = 3
     with _serve(app) as url, pw.sync_playwright() as playwright:
         browser = _open_browser(playwright)
         page = _new_page(browser)
@@ -66,12 +70,12 @@ def test_bulk_removal_dialog_covers_unselected_individuals(tmp_path, source_form
         page.locator('[data-role="remove-study"]').click()
         modal = page.locator('[data-role="remove-study-modal"]')
         pw.expect(modal).to_be_visible()
-        pw.expect(modal).to_contain_text('2 individuals')
+        pw.expect(modal).to_contain_text(f'{count} individuals')
         modal.locator('select').select_option('nest')
         with page.expect_response(lambda r: r.url.endswith('/actions/remove-study')) as saved:
             page.locator('[data-role="remove-study-submit"]').click()
         assert saved.value.status == 200, saved.value.text()
-        assert saved.value.json()['step']['summary']['reviewed_remove_count'] == 2
+        assert saved.value.json()['step']['summary']['reviewed_remove_count'] == count
         pw.expect(modal).to_be_hidden()
         browser.close()
 

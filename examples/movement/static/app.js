@@ -11158,7 +11158,7 @@ class MovementExampleApp {
       if (priorDecision) {
         const badge = document.createElement("div");
         badge.className = `movement-prior-decision-badge ${reviewDecisionClass(priorDecision, priorReview?.needs_check)}`;
-        badge.textContent = `Prior review: ${reviewDecisionLabel(priorDecision)}`;
+        badge.textContent = `Prior review: ${reviewDecisionLabel(priorDecision, priorReview?.removal_reason)}`;
         if (priorReview?.needs_check) badge.textContent += " • Needs check";
         card.appendChild(badge);
       }
@@ -11600,12 +11600,12 @@ class MovementExampleApp {
       const priorDecision = String(reviewState.priorDecision?.review_decision || "");
       const priorNeedsCheck = reviewState.priorDecision?.needs_check === true;
       const priorLabel = priorDecision
-        ? `Prior review: ${reviewDecisionLabel(priorDecision)}`
+        ? `Prior review: ${reviewDecisionLabel(priorDecision, reviewState.priorDecision?.removal_reason)}`
         : "";
       const priorClass = reviewDecisionClass(priorDecision, priorNeedsCheck);
       card.className = `movement-card queue-card interactive${isActive ? " queue-active" : ""}${unresolvedCount ? " has-unresolved-issues" : ""}`;
       const stateLabel = reviewState.reviewed
-        ? reviewDecisionLabel(reviewState.reviewDecision)
+        ? reviewDecisionLabel(reviewState.reviewDecision, reviewState.removalReason)
         : priorDecision && priorDecision !== "ok"
           ? `Needs review—prior ${reviewDecisionLabel(priorDecision)}`
           : queue.skippedIndividuals.has(individual)
@@ -20594,19 +20594,28 @@ class MovementExampleApp {
     } catch (error) { this.setStatus(error.message, true); }
   }
 
-  openRemoveStudy() {
+  async openRemoveStudy() {
     if (!this.data || this.rejectLockedEdit()) return;
     if (this.hasUnsavedIndividualReviewDrafts()) {
       this.setStatus("Save or discard unsaved decisions before removing the entire study.", true);
       return;
     }
     const modal = this.refs.removeStudyModal;
-    this.removeStudyContext = {url: this.reviewActionUrl("actions/remove-study"),
+    const context = {url: this.reviewActionUrl("actions/remove-study"),
       family: this.currentFamily, study: this.currentStudy,
       body: {...this.reviewMutationBody(), dataset_id: this.currentDatasetId, logical_name: this.currentArtifact,
         source_bundle_signature: this.data.sourceSignature || ""}};
+    let count;
+    try {
+      const response = await this.fetchResponse(this.reviewActionUrl(`dataset/${encodeURIComponent(this.currentDatasetId)}/individual-decisions.csv`), {method: "HEAD", cache: "no-store"});
+      if (!response.ok) throw new Error(`Could not count study individuals (${response.status})`);
+      count = Number(response.headers.get("X-Individual-Count"));
+      if (!Number.isInteger(count) || count < 1) throw new Error("The study has no individuals to remove");
+    } catch (error) { this.setStatus(error.message, true); return; }
+    if (context.family !== this.currentFamily || context.study !== this.currentStudy || context.body.dataset_id !== this.currentDatasetId) return;
+    this.removeStudyContext = context;
     modal.querySelector('[data-role="remove-study-description"]').textContent =
-      `Mark all ${formatCount(this.data.individuals.length)} individuals in ${this.currentStudy} as Remove? This supersedes their current decisions, including individuals outside the visible selection. Previous decisions and notes remain in history. Complete review is a separate action.`;
+      `Mark all ${formatCount(count)} individuals in ${this.currentStudy} as Remove? This supersedes their current decisions, including individuals outside the visible selection. Previous decisions and notes remain in history. Complete review is a separate action.`;
     modal.querySelector('[data-role="remove-study-reason"]').value = "";
     modal.querySelector('[data-role="remove-study-comment"]').value = "";
     modal.querySelector('[data-role="remove-study-status"]').textContent = "";
@@ -22840,10 +22849,13 @@ function isMovementTrackLineLayer(id) {
       "movement-segments"].includes(id);
 }
 
-function reviewDecisionLabel(value) {
+function reviewDecisionLabel(value, removalReason = "") {
   if (value === "ok") return "OK";
   if (value === "fix_keep") return "Fix & Keep";
-  if (value === "remove") return "Remove";
+  if (value === "remove") {
+    const reason = {redeployment: "Redeployment", short_track: "Short track", confined: "Confined", other: "Other", nest: "Nest"}[removalReason];
+    return reason ? `Remove · ${reason}` : "Remove";
+  }
   return "Undecided";
 }
 

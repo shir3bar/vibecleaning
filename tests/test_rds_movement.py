@@ -730,10 +730,11 @@ def test_rds_wrapper_serves_shared_ui_and_full_binary_columns(tmp_path):
     assert manifest_response.status_code == 200
     cleaned_dir = study_dir / "scrubdata" / "cleaned_files"
     assert {item.name for item in cleaned_dir.iterdir()} == {
-        *(cleaned_rds_name(name) for name in header["artifacts"]), "writer_manifest.json",
+        *(cleaned_rds_name(name) for name in header["artifacts"]), "writer_manifest.json", "individual_decisions.csv",
     }
     assert manifest_response.json()["dataset_id"] == reviewed_dataset_id
     assert manifest_response.json()["analysis_id"] == export_id
+    assert manifest_response.json()["auxiliary_files"][0]["output_name"] == "individual_decisions.csv"
 
 
 def test_rds_detector_scores_are_available_as_color_fields(tmp_path):

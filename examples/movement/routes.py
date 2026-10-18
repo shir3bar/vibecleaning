@@ -45,7 +45,7 @@ from app.reviews import (
     reconcile_review_state_after_resume,
     review_coverage,
     review_profile,
-    review_scope,
+    review_with_provenance,
     start_editor_control,
     valid_review_decisions,
 )
@@ -1424,7 +1424,7 @@ def register_movement_routes(
 
     def individual_decision_snapshot(study_dir: Path, dataset_id: str, review_context=None):
         dataset = load_dataset(study_dir, dataset_id)
-        names = [a["logical_name"] for a in dataset.get("artifacts", []) if configured_source.accepts(a)]
+        names = [a["logical_name"] for a in dataset.get("artifacts", []) if configured_artifact_filter(a)]
         individuals = set()
         for name in names[:1] if configured_source.bundle_scoped else names:
             individuals.update(source_individuals(configured_source, study_dir, dataset_id, name))
@@ -1432,7 +1432,8 @@ def register_movement_routes(
         review = None
         valid = {}
         needs_checks = []
-        candidates = [review_context] if review_context else load_review_state(study_dir).get("reviews") or []
+        review_state = load_review_state(study_dir)
+        candidates = [review_context] if review_context else review_state.get("reviews") or []
         for candidate in reversed(candidates):
             if candidate.get("status") not in {"active", "completed"}:
                 continue
@@ -1440,7 +1441,7 @@ def register_movement_routes(
                 valid = valid_review_decisions(study_dir, candidate, annotations, current_dataset_id=dataset_id)
             except ReviewStateError:
                 continue  # A selected historical dataset can precede this review.
-            review = candidate
+            review = review_with_provenance(review_state, candidate)
             if candidate.get("status") == "active":
                 needs_checks = carryover_needs_checks(study_dir, candidate, annotations, current_dataset_id=dataset_id)
             break
@@ -2948,7 +2949,14 @@ def register_movement_routes(
             logical_name,
         )
         source_bundle_signature = ""
-        source_input_artifacts = [logical_name]
+        source_input_artifacts = [a["logical_name"] for a in dataset.get("artifacts", [])
+                                  if configured_artifact_filter(a)]
+        if not configured_source.bundle_scoped:
+            required = set(individuals)
+            for name in source_input_artifacts:
+                if name != logical_name:
+                    required.update(await run_in_threadpool(source_individuals, configured_source, study_dir, current_id, name))
+            individuals = sorted(required)
         if configured_source.bundle_scoped:
             bundle, _ = await run_in_threadpool(
                 ensure_configured_rds_index, study_dir, current_id
@@ -3156,7 +3164,7 @@ def register_movement_routes(
             rows = await run_in_threadpool(individual_decision_snapshot, study_dir, dataset_id, review)
             valid = valid_review_decisions(study_dir, review, annotations, current_dataset_id=dataset_id)
             dataset = load_dataset(study_dir, dataset_id)
-            sources = [a["logical_name"] for a in dataset["artifacts"] if configured_source.accepts(a)]
+            sources = [a["logical_name"] for a in dataset["artifacts"] if configured_artifact_filter(a)]
             if not sources:
                 raise ValueError("The study has no source files to export")
             inputs = sources + (["movement_review_annotations.json"] if any(
@@ -4381,15 +4389,16 @@ def register_movement_routes(
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
-    @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}/individual-decisions.csv")
+    @app.api_route("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}/individual-decisions.csv", methods=["GET", "HEAD"])
     async def get_individual_decisions_csv(family_name: str, study_name: str, dataset_id: str, request: Request):
         try:
             study_dir = configured_study_dir(family_name, study_name)
             require_read(request, study_dir)
             dataset_id = validate_path_part(dataset_id, label="dataset")
             rows = await run_in_threadpool(individual_decision_snapshot, study_dir, dataset_id)
-            return StreamingResponse(iter([decision_csv(rows)]), media_type="text/csv; charset=utf-8",
-                headers={"Content-Disposition": 'attachment; filename="individual_decisions.csv"', "Cache-Control": "no-store"})
+            return StreamingResponse(iter([] if request.method == "HEAD" else [decision_csv(rows)]), media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": 'attachment; filename="individual_decisions.csv"', "Cache-Control": "no-store",
+                         "X-Individual-Count": str(len(rows))})
         except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
             return _review_error_response(exc)
         except (ValueError, ProjectStateError) as exc:
@@ -4429,7 +4438,7 @@ def register_movement_routes(
                     "comment": common["comment"], "needs_check": row["needs_check"] == "true",
                     "decision_origin": "study_removal", "scope": scope, "resolved_fix_count": count})
             inputs = [a["logical_name"] for a in dataset["artifacts"]
-                      if configured_source.accepts(a) or a["logical_name"] == "movement_review_annotations.json"]
+                      if configured_artifact_filter(a) or a["logical_name"] == "movement_review_annotations.json"]
             payload = {"user": effective_user(request, body), "title": f"Remove entire study: {len(rows)} individuals",
                 "kind": "python", "script": RDS_REVIEW_STEP_SCRIPT, "parent_dataset_id": dataset_id,
                 "input_artifacts": inputs, "output_artifacts": ["movement_review_annotations.json"], "set_as_head": True,

@@ -17,7 +17,7 @@ def decision_rows(study, dataset_id, individuals, decisions, review=None, needs_
     rows = []
     for individual in sorted(set(individuals)):
         decision = decisions.get(individual) or {}
-        actor = decision.get("actor") or (review.get("reviewer") if decision else {}) or {}
+        actor = decision.get("actor") or review.get("reviewer") or {}
         rows.append({
             "study": study, "dataset_id": dataset_id, "individual": individual,
             "review_decision": decision.get("review_decision") or "undecided",
