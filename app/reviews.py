@@ -719,9 +719,27 @@ def complete_review(
     expected_review_revision: int,
     annotations: Iterable[dict],
     reason: str = "",
+    validate_only: bool = False,
+    export_metadata: dict | None = None,
+    persist: Callable[[dict, Callable[[], None]], None] | None = None,
+    preflight: Callable[[], None] | None = None,
 ) -> dict:
     with project_mutation_lock(project_dir):
+        if preflight is not None:
+            preflight()
         state = load_review_state(project_dir)
+        # A lost response or concurrent retry of the same saved export is safe.
+        if active_review(state) is None:
+            for prior in reversed(state.get("reviews") or []):
+                if (prior.get("status") == "completed"
+                    and prior.get("completion_export")
+                    and prior.get("completion_request_revision") == expected_review_revision
+                    and prior.get("final_dataset_id") == expected_current_dataset_id
+                    and (prior.get("completed_by") or {}).get("user_id") == actor.user_id
+                    and int(state.get("revision") or 0) == expected_review_revision + 1):
+                    _check_expected_head(project_dir, expected_current_dataset_id)
+                    return {"review": prior, "coverage": prior["completion_coverage"], "state": state,
+                            "already_completed": True}
         _check_expected_revision(state, expected_review_revision)
         current = _check_expected_head(project_dir, expected_current_dataset_id)
         review = active_review(state)
@@ -739,12 +757,17 @@ def complete_review(
                 f"{coverage['remaining_count']} individual(s) still require review",
                 code="review_incomplete",
             )
+        if validate_only:
+            return {"review": review, "coverage": coverage, "state": state}
         review["status"] = "completed"
         review["final_dataset_id"] = current
         review["completed_at"] = now_iso()
         review["completed_by"] = actor.as_dict()
         review["completion_reason"] = normalized_reason
         review["completion_coverage"] = coverage
+        if export_metadata is not None:
+            review["completion_export"] = export_metadata
+            review["completion_request_revision"] = expected_review_revision
         state["editor_control"] = None
         _event(
             state,
@@ -754,8 +777,12 @@ def complete_review(
             dataset_id=current,
             reason=normalized_reason,
         )
-        save_review_state(project_dir, state)
-        return {"review": review, "coverage": coverage, "state": state}
+        result = {"review": review, "coverage": coverage, "state": state}
+        if persist is None:
+            save_review_state(project_dir, state)
+        else:
+            persist(result, lambda: save_review_state(project_dir, state))
+        return result
 
 
 def authorize_analysis(project_dir: Path, actor: Actor) -> dict | None:

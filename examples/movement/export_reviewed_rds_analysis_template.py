@@ -75,15 +75,20 @@ def main():
         output_dir=Path(output["path"]).parent,
         # Use the directory containing this analysis; do not initiate metadata
         # migration from a worker while an export is already in progress.
-        cleaned_dir=spec_path.parents[2] / "cleaned_files",
+        cleaned_dir=None if params.get("defer_publication") else spec_path.parents[2] / "cleaned_files",
         provenance={
             "dataset_id": params["dataset_id"],
             "analysis_id": spec["analysis"]["analysis_id"],
             "user": spec["analysis"]["user"],
             "exported_at": now_iso(),
+            "review_id": params.get("review_id", ""),
+            "review_round": params.get("review_round", ""),
+            "review_revision": params.get("review_revision"),
+            "actor": spec["analysis"].get("actor"),
         },
         writer=os.environ.get("VIBECLEANING_RDS_WRITER", params.get("writer", "auto")),
         progress=progress,
+        decisions=params.get("individual_decisions"),
     )
     summary_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 

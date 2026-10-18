@@ -296,7 +296,7 @@ def _publish_cleaned_files(output_dir: Path, destination: Path, manifest: dict, 
     with tempfile.TemporaryDirectory(prefix=".cleaned-files-", dir=destination.parent) as temporary:
         staged = Path(temporary) / "ready"
         staged.mkdir()
-        for index, item in enumerate(manifest["files"]):
+        for index, item in enumerate(manifest["files"] + manifest.get("auxiliary_files", [])):
             report("saving", index, len(manifest["files"]), item["output_name"])
             shutil.copy2(output_dir / item["output_name"], staged / item["output_name"])
         shutil.copy2(output_dir / "writer_manifest.json", staged / "writer_manifest.json")
@@ -312,7 +312,7 @@ def _publish_cleaned_files(output_dir: Path, destination: Path, manifest: dict, 
                 # pre-existing folder containing unrelated user files.
                 try:
                     previous = json.loads((destination / "writer_manifest.json").read_text(encoding="utf-8"))
-                    expected = {item["output_name"] for item in previous["files"]} | {"writer_manifest.json"}
+                    expected = {item["output_name"] for item in previous["files"] + previous.get("auxiliary_files", [])} | {"writer_manifest.json"}
                     actual = {item.name for item in destination.iterdir() if item.name != ".DS_Store"}
                     if destination.is_symlink() or actual != expected:
                         raise ValueError("Folder contains files outside the previous export")
@@ -337,10 +337,11 @@ def export_reviewed_rds_bundle(
     rows_by_artifact: dict[str, list[dict]],
     annotations: list[dict],
     output_dir: Path,
-    cleaned_dir: Path,
+    cleaned_dir: Path | None,
     provenance: dict | None = None,
     writer: str = "auto",
     progress: Callable[[str, int, int, str], None] | None = None,
+    decisions: list[dict] | None = None,
 ) -> dict:
     def report(stage: str, completed: int, total: int, name: str = "") -> None:
         if progress is not None:
@@ -383,14 +384,18 @@ def export_reviewed_rds_bundle(
         "review_columns": list(RDS_REVIEW_COLUMNS),
         "files": manifest_files,
     }
+    if decisions is not None:
+        from examples.movement.decision_export import save_decision_export
+        manifest["auxiliary_files"] = [save_decision_export(output_dir, decisions)]
     atomic_write_json(output_dir / "writer_manifest.json", manifest)
-    _publish_cleaned_files(output_dir, cleaned_dir, manifest, report)
+    if cleaned_dir is not None:
+        _publish_cleaned_files(output_dir, cleaned_dir, manifest, report)
     report("finishing", len(sources), len(sources))
     return {
         "run_status": "completed",
         "writer_engine": engine,
         "file_count": len(manifest_files),
         "row_count": sum(item["row_count"] for item in manifest_files),
-        "output_directory": str(cleaned_dir.resolve()),
+        "output_directory": str((cleaned_dir or output_dir).resolve()),
         "output_artifact": "writer_manifest.json",
     }

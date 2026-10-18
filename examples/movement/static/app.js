@@ -8419,14 +8419,11 @@ class MovementExampleApp {
     const review = profile.review || null;
     const coverage = profile.coverage || null;
     const control = profile.editor_control || null;
-    // The study list was loaded before this edit. Update its assignment label
-    // immediately when the first saved action creates a self-assigned review.
-    const option = [...(this.refs.study?.options || [])].find(item => item.value === this.currentStudy);
-    if (option) {
-      const reviewerName = review?.reviewer?.display_name || "";
-      option.textContent = reviewerName
-        ? `${this.currentStudy} · active review: ${reviewerName}`
-        : `${this.currentStudy} · unassigned/history`;
+    const studyEntry = (this.studies || []).find(item => item.name === this.currentStudy);
+    if (studyEntry && profile.actor) {
+      studyEntry.review = review;
+      studyEntry.completed = profile.completed === true;
+      this.renderStudyOptions();
     }
     if (this.refs.authIdentity) {
       this.refs.authIdentity.textContent = actor.display_name
@@ -8460,7 +8457,13 @@ class MovementExampleApp {
         || actor.role === "editor"
         || review.reviewer_user_id === actor.user_id
       ));
-      this.refs.completeReview.disabled = capabilities.can_complete !== true;
+      const drafts = [...(this.individualReviewQueue?.stagedDecisions?.values() || [])];
+      const validDrafts = drafts.length > 0 && drafts.every(d => d.review_decision && !this.individualRemovalError(d));
+      this.refs.completeReview.disabled = Boolean(this.completingReview)
+        || !(capabilities.can_complete || (capabilities.can_review && validDrafts))
+        || drafts.some(d => !d.review_decision || this.individualRemovalError(d));
+      this.refs.completeReview.textContent = this.completingReview ? "Saving review…"
+        : this.completionFailed ? "Retry completion" : "Complete review";
       this.refs.completeReview.title = capabilities.can_complete
         ? "Complete this study-level review"
         : `${coverage?.remaining_count || 0} individual(s) still require a decision`;
@@ -8766,15 +8769,46 @@ class MovementExampleApp {
       : "";
     if (!window.confirm(`Mark this study review complete?${warning}`)) return;
     try {
-      await this.requestJSON(this.reviewActionUrl("review/complete"), {
+      if (this.completingReview) return;
+      this.completingReview = true;
+      this.completionFailed = false;
+      this.renderReviewControls();
+      // Saving may advance the dataset. Each decision uses the freshly loaded
+      // head and review revision, then completion pins the final version.
+      for (const individual of [...this.individualReviewQueue.stagedDecisions.keys()]) {
+        if (this.individualReviewDraftDiffers(individual)
+          && !(await this.saveActiveIndividualReviewDecision({advance: false, individual}))) {
+          throw new Error("Save a valid decision and removal reason for every pending individual.");
+        }
+      }
+      const study = this.currentStudy;
+      const family = this.currentFamily;
+      const baseUrl = this.reviewActionUrl("").replace(/\/$/, "");
+      this.refs.exportProgress.hidden = false;
+      this.refs.exportProgress.classList.remove("error");
+      this.renderRdsExportProgress({}, study, Date.now());
+      let result = await this.requestJSON(`${baseUrl}/review/complete`, {
         method: "POST",
-        body: JSON.stringify(this.reviewMutationBody({ reason })),
+        body: JSON.stringify(this.reviewMutationBody({ reason, background: true })),
       });
-      await this.loadStudy({ preferredDatasetId: this.expectedCurrentDatasetId(), viewContext: this.captureDatasetViewContext() });
-      this.setStatus("Review completed. The study can now be reassigned.");
+      if (result.job_id) result = await this.waitForRdsExportJob(result.job_id, baseUrl, study, Date.now());
+      this.refs.exportProgressText.textContent = `${study}: Review completed. Annotated files and individual_decisions.csv saved to scrubdata/cleaned_files/.`;
+      this.refs.exportProgressBar.max = 1;
+      this.refs.exportProgressBar.value = 1;
+      if (family === this.currentFamily && study === this.currentStudy) {
+        await this.loadStudy({ preferredDatasetId: this.expectedCurrentDatasetId(), viewContext: this.captureDatasetViewContext() });
+      }
+      this.setStatus(`Review completed for ${study}. Cleaned files and individual decisions saved.`);
     } catch (error) {
+      this.completionFailed = true;
       await this.handleEditRequestError(error);
-      this.setStatus(`Could not complete review: ${error.message}`, true);
+      this.refs.exportProgressText.textContent = `Completion failed: ${error.message}`;
+      this.refs.exportProgress.classList.add("error");
+      this.refs.exportProgressBar.hidden = true;
+      this.setStatus(`Could not complete review: ${error.message}. Use Retry completion after refreshing or resolving the error.`, true);
+    } finally {
+      this.completingReview = false;
+      this.renderReviewControls();
     }
   }
 
@@ -9328,6 +9362,17 @@ class MovementExampleApp {
     }
   }
 
+  renderStudyOptions() {
+    const selected = this.refs.study.value;
+    this.refs.study.replaceChildren(new Option("Select a study", ""));
+    for (const study of [...(this.studies || [])].sort((a, b) => Number(Boolean(a.completed)) - Number(Boolean(b.completed)))) {
+      const reviewerName = study.review?.reviewer?.display_name || "";
+      const label = study.completed ? "Completed" : reviewerName ? `active review: ${reviewerName}` : "unassigned/history";
+      this.refs.study.add(new Option(`${study.name} · ${label}`, study.name));
+    }
+    this.refs.study.value = selected;
+  }
+
   async loadStudies() {
     this.studyLoadId += 1;
     this.datasetLoadId += 1;
@@ -9350,20 +9395,7 @@ class MovementExampleApp {
         return;
       }
       this.studies = Array.isArray(payload.studies) ? payload.studies : [];
-      this.refs.study.innerHTML = "";
-      const placeholder = document.createElement("option");
-      placeholder.value = "";
-      placeholder.textContent = "Select a study";
-      this.refs.study.appendChild(placeholder);
-      for (const study of this.studies) {
-        const option = document.createElement("option");
-        option.value = study.name;
-        const reviewerName = study.review?.reviewer?.display_name || "";
-        option.textContent = reviewerName
-          ? `${study.name} · active review: ${reviewerName}`
-          : `${study.name} · unassigned/history`;
-        this.refs.study.appendChild(option);
-      }
+      this.renderStudyOptions();
       if (!this.studies.length) {
         this.resetSelect(this.refs.study, "No studies");
         this.clearLoadedStudyState();
@@ -10771,9 +10803,8 @@ class MovementExampleApp {
     return this.saveActiveIndividualReviewDecision({ advance: false });
   }
 
-  async saveActiveIndividualReviewDecision({ advance = true } = {}) {
+  async saveActiveIndividualReviewDecision({ advance = true, individual = this.individualReviewQueue.activeIndividual } = {}) {
     const queue = this.individualReviewQueue;
-    const individual = queue.activeIndividual;
     const decision = queue.stagedDecisions.get(individual);
     if (!individual || !decision || !decision.review_decision) return false;
     if (!this.individualReviewDraftDiffers(individual)) return false;
@@ -11698,6 +11729,7 @@ class MovementExampleApp {
   }
 
   updateIndividualDecisionSaveButton(editsLocked = !this.canPersistEdits()) {
+    this.renderReviewControls();
     const queue = this.individualReviewQueue;
     const activeDraft = queue.stagedDecisions.get(queue.activeIndividual);
     this.refs.individualQueueSave.disabled = (

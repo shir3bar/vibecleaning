@@ -2,6 +2,7 @@
 
 import csv
 import io
+import hashlib
 
 
 DECISION_FIELDS = (
@@ -40,3 +41,10 @@ def decision_csv(rows):
     writer.writeheader()
     writer.writerows(rows)
     return stream.getvalue()
+
+
+def save_decision_export(output_dir, rows):
+    path = output_dir / "individual_decisions.csv"
+    path.write_text(decision_csv(rows), encoding="utf-8", newline="")
+    return {"output_name": path.name, "row_count": len(rows),
+            "output_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}

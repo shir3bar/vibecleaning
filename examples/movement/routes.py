@@ -76,6 +76,7 @@ from .analysis_history import (
 from .binary_columns import build_csv_binary_columns
 from .catalog import family_names, get_study_dir, list_families, list_studies
 from .rds_export import cleaned_rds_name
+from .completion_publication import prepared_publication, recover_publication
 from .decision_export import decision_rows, decision_csv
 from .review_annotations import (
     annotation_applies,
@@ -418,7 +419,15 @@ EXPORT_REVIEWED_RDS_SCRIPT = build_self_contained_script(
         "app.state",
         "examples.movement.rds_index",
         "examples.movement.rds_export",
+        "examples.movement.decision_export",
     ),
+)
+
+COMPLETION_EXPORT_SCRIPT = build_self_contained_script(
+    Path(__file__).with_name("completion_export_analysis_template.py"),
+    (*MOVEMENT_REVIEW_MODULES, "app.filesystem", "app.runtime", "app.metadata", "app.state",
+     "examples.movement.rds_index", "examples.movement.rds_export", "examples.movement.decision_export",
+     "examples.movement.export_reviewed_rds_analysis_template"),
 )
 
 ANNOTATE_SCOPE_TEMPLATE_PATH = Path(__file__).with_name("annotate_scope_step_template.py")
@@ -1166,7 +1175,7 @@ def register_movement_routes(
             ]:
                 analysis_jobs.pop(str(job.get("job_id") or ""), None)
 
-    def run_analysis_job(job_id: str, study_dir: Path, payload: dict) -> None:
+    def run_analysis_job(job_id: str, study_dir: Path, payload: dict, finalize=None) -> None:
         with analysis_jobs_lock:
             job = analysis_jobs.get(job_id)
             if job is None:
@@ -1175,7 +1184,7 @@ def register_movement_routes(
             job["started_at"] = now_iso()
             job["_updated_monotonic"] = monotonic()
         try:
-            if (payload.get("parameters") or {}).get("action") == "export_reviewed_rds":
+            if (payload.get("parameters") or {}).get("action") in {"export_reviewed_rds", "complete_review_export"}:
                 def on_prepared(analysis_dir: Path) -> None:
                     with analysis_jobs_lock:
                         analysis_jobs[job_id]["_progress_path"] = analysis_dir / "progress.json"
@@ -1183,6 +1192,8 @@ def register_movement_routes(
                 result = create_analysis(study_dir, payload, on_prepared=on_prepared)
             else:
                 result = create_analysis(study_dir, payload)
+            if finalize is not None:
+                result = finalize(result)
         except Exception as exc:
             with analysis_jobs_lock:
                 job = analysis_jobs.get(job_id)
@@ -1206,6 +1217,7 @@ def register_movement_routes(
         study_name: str,
         study_dir: Path,
         payload: dict,
+        finalize=None,
     ) -> JSONResponse:
         prune_analysis_jobs()
         job_id = make_id("analysis_job")
@@ -1221,7 +1233,7 @@ def register_movement_routes(
         }
         with analysis_jobs_lock:
             analysis_jobs[job_id] = job
-        background_tasks.add_task(run_analysis_job, job_id, study_dir, payload)
+        background_tasks.add_task(run_analysis_job, job_id, study_dir, payload, finalize)
         return JSONResponse(
             {key: value for key, value in job.items() if not key.startswith("_")},
             status_code=202,
@@ -1234,7 +1246,9 @@ def register_movement_routes(
         return family
 
     def configured_study_dir(family_name: str, study_name: str) -> Path:
-        return get_study_dir(data_root, require_configured_family(family_name), study_name)
+        study_dir = get_study_dir(data_root, require_configured_family(family_name), study_name)
+        recover_publication(study_dir)
+        return study_dir
 
     def configured_artifact_filter(artifact: dict) -> bool:
         return configured_source.accepts(artifact) and (
@@ -1408,7 +1422,7 @@ def register_movement_routes(
             ]
         return result
 
-    def individual_decision_snapshot(study_dir: Path, dataset_id: str):
+    def individual_decision_snapshot(study_dir: Path, dataset_id: str, review_context=None):
         dataset = load_dataset(study_dir, dataset_id)
         names = [a["logical_name"] for a in dataset.get("artifacts", []) if configured_source.accepts(a)]
         individuals = set()
@@ -1418,7 +1432,8 @@ def register_movement_routes(
         review = None
         valid = {}
         needs_checks = []
-        for candidate in reversed(load_review_state(study_dir).get("reviews") or []):
+        candidates = [review_context] if review_context else load_review_state(study_dir).get("reviews") or []
+        for candidate in reversed(candidates):
             if candidate.get("status") not in {"active", "completed"}:
                 continue
             try:
@@ -1556,6 +1571,14 @@ def register_movement_routes(
 
         return updated, preflight, actor
 
+    def study_completed(study_dir: Path, state=None):
+        state = state or load_review_state(study_dir)
+        if active_review(state):
+            return False
+        current = load_project_state(study_dir)["current_dataset_id"]
+        latest = next((r for r in reversed(state.get("reviews") or []) if r.get("status") == "completed"), None)
+        return bool(latest and latest.get("final_dataset_id") == current)
+
     def combined_edit_profile(
         study_dir: Path,
         dataset_id: str,
@@ -1611,6 +1634,7 @@ def register_movement_routes(
             additional_blockers=blockers,
         )
         profile.update(workflow_profile)
+        profile["completed"] = study_completed(study_dir)
         if actor.role == "reviewer":
             try:
                 require_history_change(
@@ -1893,6 +1917,7 @@ def register_movement_routes(
                     {
                         **study,
                         "review_revision": int(review_state.get("revision") or 0),
+                        "completed": study_completed(study_dir, review_state),
                         "review": {
                             "review_id": review.get("review_id"),
                             "status": review.get("status"),
@@ -3102,13 +3127,9 @@ def register_movement_routes(
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
-    @app.post(
-        "/api/apps/movement/family/{family_name}/study/{study_name}/review/complete"
-    )
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/review/complete")
     async def post_movement_complete_review(
-        family_name: str,
-        study_name: str,
-        request: Request,
+        family_name: str, study_name: str, request: Request, background_tasks: BackgroundTasks,
     ):
         body = await parse_json_body(request)
         if body is None:
@@ -3118,24 +3139,63 @@ def register_movement_routes(
             if actor is None:
                 raise ReviewForbiddenError("Authentication is required")
             study_dir = configured_study_dir(family_name, study_name)
-            result = complete_review(
-                study_dir,
-                actor=actor,
-                expected_current_dataset_id=str(body.get("expected_current_dataset_id") or ""),
-                expected_review_revision=body.get("expected_review_revision"),
-                annotations=active_annotations(study_dir),
-                reason=str(body.get("reason") or ""),
-            )
-            publish_state_event(
-                family_name,
-                study_name,
-                study_dir,
-                reason="review_completed",
-                actor=actor,
-            )
-            return JSONResponse(result)
+            dataset_id = str(body.get("expected_current_dataset_id") or "")
+            annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+            def preflight():
+                manager = getattr(app.state, "auth_manager", None)
+                current = manager.actor_by_id(actor.user_id) if manager else actor
+                if current is None or current.as_dict() != actor.as_dict():
+                    raise ReviewForbiddenError("Your account permissions changed; refresh before completing")
+            completion_args = dict(actor=actor, expected_current_dataset_id=dataset_id,
+                expected_review_revision=body.get("expected_review_revision"), annotations=annotations,
+                reason=str(body.get("reason") or ""), preflight=preflight)
+            checked = await run_in_threadpool(complete_review, study_dir, **completion_args, validate_only=True)
+            if checked.get("already_completed"):
+                return JSONResponse(checked)
+            review = checked["review"]
+            rows = await run_in_threadpool(individual_decision_snapshot, study_dir, dataset_id, review)
+            valid = valid_review_decisions(study_dir, review, annotations, current_dataset_id=dataset_id)
+            dataset = load_dataset(study_dir, dataset_id)
+            sources = [a["logical_name"] for a in dataset["artifacts"] if configured_source.accepts(a)]
+            if not sources:
+                raise ValueError("The study has no source files to export")
+            inputs = sources + (["movement_review_annotations.json"] if any(
+                a["logical_name"] == "movement_review_annotations.json" for a in dataset["artifacts"]) else [])
+            outputs = [(cleaned_rds_name(name) if configured_source.bundle_scoped
+                        else Path(name).stem + "_cleaned.csv") for name in sources]
+            payload = apply_actor({"title": f"Complete review and save annotated files for {study_name}",
+                "kind": "python", "script": COMPLETION_EXPORT_SCRIPT, "dataset_id": dataset_id,
+                "input_artifacts": inputs, "output_artifacts": outputs + ["individual_decisions.csv", "writer_manifest.json"],
+                "parameters": {"app": "movement", "action": "complete_review_export", "dataset_id": dataset_id,
+                    "source_format": "rds" if configured_source.bundle_scoped else "csv", "defer_publication": True,
+                    "review_id": review["review_id"], "review_round": review.get("review_round", 1),
+                    "review_revision": body.get("expected_review_revision"), "individual_decisions": rows,
+                    "valid_individual_review_annotation_ids": [a["annotation_id"] for a in valid.values()]}}, actor)
+
+            def finalize(export):
+                manifest_entry = next(a for a in export["analysis"]["realized_output_artifacts"]
+                                      if a["logical_name"] == "writer_manifest.json")
+                manifest_path = study_dir / manifest_entry["path"]
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                with prepared_publication(study_dir, manifest_path.parent, manifest) as persist:
+                    result = complete_review(study_dir, **completion_args, persist=persist,
+                        export_metadata={"analysis_id": export["analysis"]["analysis_id"],
+                            "manifest": manifest_entry["path"], "directory": "scrubdata/cleaned_files"})
+                if not result.get("already_completed"):
+                    publish_state_event(family_name, study_name, study_dir, reason="review_completed", actor=actor)
+                return result if result.get("already_completed") else {**result, "export": export}
+
+            if body.get("background") is True:
+                return enqueue_analysis(background_tasks, family_name, study_name, study_dir, payload, finalize)
+            def run():
+                return finalize(create_analysis(study_dir, payload))
+            return JSONResponse(await run_in_threadpool(run))
         except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
             return _review_error_response(exc)
+        except (EditConflictError, EditLockedError) as exc:
+            return json_error(str(exc), 409)
+        except Exception as exc:
+            return json_error(f"Could not save completed review: {exc}. The review remains active; retry after resolving the error.", 400)
 
     @app.post(
         "/api/apps/movement/family/{family_name}/study/{study_name}/review/cancel"
@@ -4620,10 +4680,11 @@ def register_movement_routes(
                 "input_artifacts": input_artifacts,
                 "output_artifacts": [
                     cleaned_rds_name(name) for name in input_artifacts if name.lower().endswith(".rds")
-                ] + ["writer_manifest.json"],
+                ] + ["writer_manifest.json", "individual_decisions.csv"],
                 "parameters": {
                     "app": "movement",
                     "action": "export_reviewed_rds",
+                    "individual_decisions": individual_decision_snapshot(study_dir, dataset_id),
                     "dataset_id": dataset_id,
                     "writer": str(body.get("writer") or "auto"),
                     "user": user,
