@@ -776,7 +776,7 @@ class MovementExampleApp {
     };
     this.individualReviewQueue = {
       mode: "browse",
-      orderMode: this.uiState.individualQueueOrder === "flagged" ? "flagged" : "dataset",
+      orderMode: ["flagged", "flagged_asc"].includes(this.uiState.individualQueueOrder) ? this.uiState.individualQueueOrder : "dataset",
       filterMode: "all",
       pageIndex: Math.max(0, Number(this.uiState.individualQueuePage) || 0),
       groupIndex: 0,
@@ -882,6 +882,7 @@ class MovementExampleApp {
         basemap: "Positron",
         showTrain: true,
         showTest: true,
+        showTrackLines: true,
         showPoints: true,
         showBursts: true,
         showFlagged: true,
@@ -920,6 +921,7 @@ class MovementExampleApp {
       basemap: this.refs.basemap.value,
       showTrain: this.refs.showTrain.checked,
       showTest: this.refs.showTest.checked,
+      showTrackLines: this.refs.showTrackLines.checked,
       showPoints: this.refs.showPoints.checked,
       showBursts: this.refs.showBursts.checked,
       showFlagged: this.refs.showFlagged.checked,
@@ -1008,10 +1010,11 @@ class MovementExampleApp {
     }
     const selectedValue = this.individualReviewQueue?.orderMode === "ranking"
       ? String(this.individualReviewQueue.rankingMethod || this.getRankingMethod())
-      : this.individualReviewQueue?.orderMode === "flagged" ? "flagged" : "dataset";
+      : ["flagged", "flagged_asc"].includes(this.individualReviewQueue?.orderMode) ? this.individualReviewQueue.orderMode : "dataset";
     this.refs.individualQueueOrder.innerHTML = [
       ["dataset", "Dataset source"],
       ["flagged", "Flagged fixes — most first"],
+      ["flagged_asc", "Flagged fixes — fewest first"],
       ...this.rankingMethodOptions(),
     ].map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
     this.refs.individualQueueOrder.value = selectedValue;
@@ -3993,6 +3996,7 @@ class MovementExampleApp {
           <label>Color by <select data-role="color-by"></select></label>
           <label class="movement-toggle" data-role="show-train-control"><input type="checkbox" data-role="show-train"> Train</label>
           <label class="movement-toggle" data-role="show-test-control"><input type="checkbox" data-role="show-test"> Test</label>
+          <label class="movement-toggle"><input type="checkbox" data-role="show-track-lines"> Show track lines</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-points"> Points</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-bursts"> Bursts</label>
           <label class="movement-toggle" title="Show suspicious fixes and confirmed exclusions on the map. This only changes visibility; saved review decisions stay unchanged."><input type="checkbox" data-role="show-flagged"> Show flagged fixes</label>
@@ -4531,6 +4535,7 @@ class MovementExampleApp {
       showTrainControl: this.mountEl.querySelector('[data-role="show-train-control"]'),
       showTest: this.mountEl.querySelector('[data-role="show-test"]'),
       showTestControl: this.mountEl.querySelector('[data-role="show-test-control"]'),
+      showTrackLines: this.mountEl.querySelector('[data-role="show-track-lines"]'),
       showPoints: this.mountEl.querySelector('[data-role="show-points"]'),
       showBursts: this.mountEl.querySelector('[data-role="show-bursts"]'),
       showFlagged: this.mountEl.querySelector('[data-role="show-flagged"]'),
@@ -4753,6 +4758,7 @@ class MovementExampleApp {
     this.refs.reportBasemap.value = "current";
     this.refs.showTrain.checked = MOVEMENT_APP_CONFIG.mode === "slim_movement" || this.uiState.showTrain !== false;
     this.refs.showTest.checked = MOVEMENT_APP_CONFIG.mode === "slim_movement" || this.uiState.showTest !== false;
+    this.refs.showTrackLines.checked = this.uiState.showTrackLines !== false;
     this.refs.showPoints.checked = this.uiState.showPoints !== false;
     this.refs.showBursts.checked = this.uiState.showBursts !== false;
     this.refs.showFlagged.checked = this.uiState.showFlagged
@@ -5115,6 +5121,10 @@ class MovementExampleApp {
     });
     this.refs.showTrain.addEventListener("change", () => this.handleVisibilityChange());
     this.refs.showTest.addEventListener("change", () => this.handleVisibilityChange());
+    this.refs.showTrackLines.addEventListener("change", () => {
+      this.saveUiState();
+      this.renderLayers();
+    });
     this.refs.showPoints.addEventListener("change", () => {
       this.saveUiState();
       this.renderLayers();
@@ -9139,7 +9149,7 @@ class MovementExampleApp {
     }
     const queueState = preserved.queue || {};
     const queue = this.individualReviewQueue;
-    queue.orderMode = ["ranking", "flagged"].includes(queueState.orderMode) ? queueState.orderMode : "dataset";
+    queue.orderMode = ["ranking", "flagged", "flagged_asc"].includes(queueState.orderMode) ? queueState.orderMode : "dataset";
     queue.pageIndex = Math.max(0, Number(queueState.pageIndex) || 0);
     queue.groupIndex = Math.max(0, Number(queueState.groupIndex) || 0);
     queue.activeIndividual = String(queueState.activeIndividual || "");
@@ -9155,7 +9165,7 @@ class MovementExampleApp {
     queue.rankingMethod = String(
       queueState.rankingMethod || this.getRankingMethod(),
     );
-    if (queue.orderMode === "flagged") this.repositionIndividualQueueAroundActive();
+    if (["flagged", "flagged_asc"].includes(queue.orderMode)) this.repositionIndividualQueueAroundActive();
   }
 
   initializeDatasetView(viewContext = null) {
@@ -9997,10 +10007,11 @@ class MovementExampleApp {
       && this.individualReviewQueue.appliedRankingAnalysisId === queueRanking.analysisId
     );
     return [...visibleIndividuals].sort((left, right) => {
-      if (this.individualReviewQueue.orderMode === "flagged") {
+      if (["flagged", "flagged_asc"].includes(this.individualReviewQueue.orderMode)) {
         const difference = (Number(this.data.stats[right]?.suspectedCount) || 0)
           - (Number(this.data.stats[left]?.suspectedCount) || 0);
-        return difference || datasetIndex.get(left) - datasetIndex.get(right);
+        return (this.individualReviewQueue.orderMode === "flagged_asc" ? -difference : difference)
+          || datasetIndex.get(left) - datasetIndex.get(right);
       }
       const partitionDifference = this.priorReviewOkPartition(left)
         - this.priorReviewOkPartition(right);
@@ -10877,7 +10888,7 @@ class MovementExampleApp {
     const rankingMethods = new Set(this.rankingMethodOptions().map(([value]) => value));
     const requestedMethod = rankingMethods.has(orderValue) ? orderValue : "";
     if (!requestedMethod) {
-      this.individualReviewQueue.orderMode = orderValue === "flagged" ? "flagged" : "dataset";
+      this.individualReviewQueue.orderMode = ["flagged", "flagged_asc"].includes(orderValue) ? orderValue : "dataset";
       this.individualReviewQueue.appliedRankingAnalysisId = "";
       this.individualReviewQueue.pendingRankingAnalysisId = "";
     } else {
@@ -10947,8 +10958,8 @@ class MovementExampleApp {
       return;
     }
     target.classList.remove("error");
-    if (this.individualReviewQueue.orderMode === "flagged") {
-      target.textContent = "Most flagged fixes first. Counts update after saved review decisions.";
+    if (["flagged", "flagged_asc"].includes(this.individualReviewQueue.orderMode)) {
+      target.textContent = `${this.individualReviewQueue.orderMode === "flagged_asc" ? "Fewest" : "Most"} flagged fixes first. Counts update after saved review decisions.`;
       return;
     }
     const rankingMethod = String(
@@ -14965,12 +14976,19 @@ class MovementExampleApp {
       }));
     }
     orderedLayers.push(...layers.filter(isTrackPlayerLayer));
+    if (!this.refs.showTrackLines.checked) {
+      // Keep layer identities for progressive-loading handoff, while hiding
+      // only track geometry. Point rings, playback, ROI and OSM stay intact.
+      orderedLayers = orderedLayers.map(layer => isMovementTrackLineLayer(layer.id)
+        ? layer.clone({visible: false}) : layer);
+    }
 
     try {
       const renderedLayerIds = orderedLayers.map(
         layer => String(layer?.id || ""),
       );
       this.movementDiagnostics.renderedLayerIds = renderedLayerIds;
+      this.movementDiagnostics.visibleLayerIds = orderedLayers.filter(layer => layer.props.visible !== false).map(layer => layer.id);
       this.overlay.setProps({
         layers: orderedLayers,
         useDevicePixels: (
@@ -22812,6 +22830,14 @@ function finiteOrNull(value) {
 
 function formatCount(value) {
   return new Intl.NumberFormat().format(Number(value) || 0);
+}
+
+function isMovementTrackLineLayer(id) {
+  return ["movement-overview-preview-", "movement-binary-paths-",
+    "movement-binary-burst-casing-", "movement-binary-manual-flag-outline-"].some(prefix => id.startsWith(prefix))
+    || ["movement-burst-casing", "movement-bursts", "movement-manual-flag-target-outline",
+      "movement-table-selection-path", "movement-flagged-fix-steps", "movement-segment-outline",
+      "movement-segments"].includes(id);
 }
 
 function reviewDecisionLabel(value) {
