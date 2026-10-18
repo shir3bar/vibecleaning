@@ -1198,6 +1198,7 @@ def test_queue_navigation_auto_saves_active_review_decision(tmp_path):
             ),
         )
         page.keyboard.press("3")
+        page.locator('[data-queue-individual="delta"] [data-removal-reason]').select_option("short_track")
         assert "Remove" in page.locator(
             '[data-queue-individual="delta"] .movement-review-state'
         ).text_content()
@@ -1278,6 +1279,7 @@ def test_second_round_prior_ok_order_toggle_does_not_touch_map(tmp_path):
                 "decision": {
                     "individual": individual,
                     "review_decision": decision,
+                    "removal_reason": "short_track" if decision == "remove" else "",
                     "needs_check": False,
                     "comment": "",
                 },

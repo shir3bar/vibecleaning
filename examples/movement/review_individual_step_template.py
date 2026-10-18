@@ -38,6 +38,7 @@ def main():
         "origin": "manual",
         "reviewed": True,
         "review_decision": str(decision.get("review_decision") or "").strip(),
+        "removal_reason": str(decision.get("removal_reason") or "").strip(),
         "needs_check": decision.get("needs_check") is True,
         "comment": str(decision.get("comment") or "").strip(),
         "user": str(params.get("user") or "").strip(),

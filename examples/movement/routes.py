@@ -604,15 +604,21 @@ def _validate_individual_review_decision(value: object) -> dict:
     needs_check = value.get("needs_check")
     if not isinstance(needs_check, bool):
         raise ValueError("Individual review decision requires a boolean needs_check")
+    comment = _validate_optional_text(value.get("comment"), label="Review comment", max_length=1200)
+    removal_reason = str(value.get("removal_reason") or "").strip().lower()
+    if review_decision == "remove":
+        if removal_reason not in {"redeployment", "short_track", "confined", "other", "nest"}:
+            raise ValueError("Choose a removal reason: Redeployment, Short track, Confined, Other, or Nest")
+        if removal_reason == "other" and not comment:
+            raise ValueError("Explain the removal reason when choosing Other")
+    else:
+        removal_reason = ""
     return {
         "individual": individual,
         "review_decision": review_decision,
+        "removal_reason": removal_reason,
         "needs_check": needs_check,
-        "comment": _validate_optional_text(
-            value.get("comment"),
-            label="Review comment",
-            max_length=1200,
-        ),
+        "comment": comment,
     }
 
 
@@ -4216,6 +4222,7 @@ def register_movement_routes(
                     "annotation_kind": "individual_review",
                     "reviewed": True,
                     "review_decision": decision["review_decision"],
+                    "removal_reason": decision["removal_reason"],
                     "needs_check": decision["needs_check"],
                     "comment": decision["comment"],
                     "scope": resolved_scope,

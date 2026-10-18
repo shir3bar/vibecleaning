@@ -959,6 +959,7 @@ def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_p
             "decision": {
                 "individual": "alpha",
                 "review_decision": "remove",
+                "removal_reason": "short_track",
                 "needs_check": False,
                 "comment": "second-round override",
             },

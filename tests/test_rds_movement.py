@@ -277,6 +277,7 @@ def test_rds_ranking_survives_individual_review_decision_steps(tmp_path):
                 "decision": {
                     "individual": individuals[index % len(individuals)],
                     "review_decision": review_decision,
+                    "removal_reason": "short_track" if review_decision == "remove" else "",
                     "needs_check": False,
                     "comment": "",
                 },

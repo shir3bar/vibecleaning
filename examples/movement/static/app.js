@@ -4952,6 +4952,11 @@ class MovementExampleApp {
         this.renderIndividuals();
         return;
       }
+      const reasonInput = event.target.closest("select[data-removal-reason]");
+      if (reasonInput) {
+        this.stageIndividualRemovalReason(reasonInput.dataset.individual, reasonInput.value);
+        return;
+      }
       const needsCheckInput = event.target.closest("input[data-review-needs-check]");
       if (needsCheckInput) {
         this.stageIndividualNeedsCheck(
@@ -9789,6 +9794,7 @@ class MovementExampleApp {
         ...saved,
         reviewed: Boolean(draft.review_decision),
         reviewDecision: draft.review_decision,
+        removalReason: draft.removal_reason || "",
         reviewOk: draft.review_decision === "ok",
         needsCheck: draft.needs_check === true,
         comment: draft.comment || "",
@@ -9808,6 +9814,7 @@ class MovementExampleApp {
     return {
       reviewed: stats.reviewed === true,
       reviewDecision: stats.reviewDecision || "",
+      removalReason: stats.reviewRemovalReason || "",
       reviewOk: stats.reviewDecision === "ok",
       needsCheck: stats.needsCheck === true,
       priorDecision,
@@ -9825,6 +9832,7 @@ class MovementExampleApp {
     const saved = this.getSavedIndividualReviewState(individual);
     return (
       String(draft.review_decision || "") !== String(saved.reviewDecision || "")
+      || String(draft.removal_reason || "") !== String(saved.removalReason || "")
       || Boolean(draft.needs_check) !== Boolean(saved.needsCheck)
       || String(draft.comment || "").trim() !== String(saved.comment || "").trim()
     );
@@ -10603,6 +10611,7 @@ class MovementExampleApp {
     this.individualReviewQueue.stagedDecisions.set(individual, {
       individual,
       review_decision: reviewDecision,
+      removal_reason: reviewDecision === "remove" ? existingState.removalReason || "" : "",
       needs_check: existingState.needsCheck === true,
       comment,
     });
@@ -10624,6 +10633,7 @@ class MovementExampleApp {
     this.individualReviewQueue.stagedDecisions.set(individual, {
       individual,
       review_decision: existingState.reviewDecision || "",
+      removal_reason: existingState.removalReason || "",
       needs_check: needsCheck === true,
       comment,
     });
@@ -10638,6 +10648,7 @@ class MovementExampleApp {
     this.individualReviewQueue.stagedDecisions.set(individual, {
       individual,
       review_decision: existingState.reviewDecision || "",
+      removal_reason: existingState.removalReason || "",
       needs_check: existingState.needsCheck === true,
       comment,
     });
@@ -10645,11 +10656,31 @@ class MovementExampleApp {
     this.updateIndividualDecisionSaveButton();
   }
 
+  individualRemovalError(decision) {
+    if (decision?.review_decision !== "remove") return "";
+    if (!["redeployment", "short_track", "confined", "other", "nest"].includes(decision.removal_reason)) return "Choose a removal reason before saving or leaving this individual.";
+    if (decision.removal_reason === "other" && !String(decision.comment || "").trim()) return "Add a note explaining Other before saving or leaving this individual.";
+    return "";
+  }
+
+  stageIndividualRemovalReason(individual, reason) {
+    if (this.rejectLockedEdit()) return;
+    const state = this.getIndividualReviewState(individual);
+    this.individualReviewQueue.stagedDecisions.set(individual, {
+      individual, review_decision: "remove", removal_reason: reason,
+      needs_check: state.needsCheck, comment: state.comment || "",
+    });
+    if (reason === "other") this.individualReviewQueue.commentEditingIndividual = individual;
+    this.discardRedundantIndividualReviewDraft(individual);
+    this.renderIndividuals();
+  }
+
   async skipIndividualQueueItem(individual) {
     individual = individual || this.individualReviewQueue.activeIndividual;
     if (!individual) {
       return;
     }
+    if (!(await this.saveIndividualReviewDecisionBeforeNavigation())) return;
     const position = this.getIndividualQueuePosition();
     const currentIndex = position.page.indexOf(individual);
     const nextIndividual = position.page[currentIndex + 1] || "";
@@ -10719,6 +10750,11 @@ class MovementExampleApp {
     const decision = queue.stagedDecisions.get(individual);
     if (!individual || !decision || !decision.review_decision) return false;
     if (!this.individualReviewDraftDiffers(individual)) return false;
+    const removalError = this.individualRemovalError(decision);
+    if (removalError) {
+      this.setStatus(removalError, true);
+      return false;
+    }
     if (this.rejectLockedEdit()) {
       return false;
     }
@@ -10744,6 +10780,7 @@ class MovementExampleApp {
             decision: {
               individual,
               review_decision: decision.review_decision,
+              removal_reason: decision.removal_reason || "",
               needs_check: decision.needs_check === true,
               comment: String(decision.comment || "").trim(),
             },
@@ -11568,15 +11605,20 @@ class MovementExampleApp {
             </span>
             <button type="button" data-queue-skip data-individual="${escapeHtml(individual)}">Skip</button>
           </div>
+          ${selectedDecision === "remove" ? `<label>Removal reason
+            <select data-removal-reason data-individual="${escapeHtml(individual)}" ${editsLocked ? "disabled" : ""}>
+              <option value="">${reviewState.staged ? "Choose a reason" : "Not recorded (legacy)"}</option>
+              ${[["redeployment", "Redeployment"], ["short_track", "Short track"], ["confined", "Confined"], ["other", "Other"], ["nest", "Nest"]].map(([value, label]) => `<option value="${value}" ${reviewState.removalReason === value ? "selected" : ""}>${label}</option>`).join("")}
+            </select></label>` : ""}
           ${this.queueFlagTargetControlsHtml(individual)}
         ` : ""}
-        ${isEditingComment ? `
+        ${isEditingComment || (isActive && selectedDecision === "remove" && reviewState.removalReason === "other") ? `
           <input
             class="movement-queue-card-comment"
             data-queue-comment-input
             data-individual="${escapeHtml(individual)}"
             value="${escapeHtml(comment)}"
-            placeholder="Optional note for this individual"
+            placeholder="${selectedDecision === "remove" && reviewState.removalReason === "other" ? "Required: explain Other" : "Optional note for this individual"}"
           >
         ` : ""}
       `;
@@ -11635,6 +11677,7 @@ class MovementExampleApp {
       editsLocked
       || queue.saving
       || !activeDraft?.review_decision
+      || Boolean(this.individualRemovalError(activeDraft))
       || !this.individualReviewDraftDiffers(queue.activeIndividual)
     );
     this.refs.individualQueueSave.textContent = queue.saving
@@ -21025,6 +21068,7 @@ class MovementExampleApp {
       stats.reviewUser = String(decision.review_user || "");
       stats.reviewedAt = String(decision.reviewed_at || "");
       stats.reviewComment = String(decision.review_comment || "");
+      stats.reviewRemovalReason = String(decision.removal_reason || "");
       stats.reviewDecisionOrigin = String(decision.decision_origin || "");
       stats.reviewRound = Number(decision.review_round || 0);
     }
@@ -21431,6 +21475,7 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
       reviewUser: String(item?.review_user || ""),
       reviewedAt: String(item?.reviewed_at || ""),
       reviewComment: String(item?.review_comment || ""),
+      reviewRemovalReason: String(item?.removal_reason || ""),
       reviewDecisionOrigin: String(item?.decision_origin || ""),
       reviewRound: Number(item?.review_round || 0),
     };

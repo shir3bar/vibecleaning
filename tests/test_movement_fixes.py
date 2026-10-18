@@ -1998,6 +1998,7 @@ def test_movement_analysis_history_survives_individual_review_decision_steps(tmp
                 "decision": {
                     "individual": individual,
                     "review_decision": review_decision,
+                    "removal_reason": "short_track" if review_decision == "remove" else "",
                     "needs_check": False,
                     "comment": "",
                 },
@@ -2348,6 +2349,7 @@ fix_b_1,beta,2024-01-01T00:30:00Z,-71.0,41.0
             "decision": {
                 "individual": "beta",
                 "review_decision": "remove",
+                "removal_reason": "short_track",
                 "needs_check": False,
                 "comment": "Issues were marked separately",
             },

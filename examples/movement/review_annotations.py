@@ -682,6 +682,7 @@ def normalize_annotation(raw: dict) -> dict:
         "annotation_kind": annotation_kind,
         "reviewed": reviewed,
         "review_decision": raw_decision if reviewed else "",
+        "removal_reason": str(raw.get("removal_reason") or "") if reviewed and raw_decision == "remove" else "",
         "needs_check": raw.get("needs_check") is True if reviewed else False,
         "review_id": str(raw.get("review_id") or "").strip(),
         "review_round": review_round,
@@ -1170,6 +1171,7 @@ def build_review_projection(
             individual: {
                 "reviewed": True,
                 "review_decision": str(item.get("review_decision") or ""),
+                "removal_reason": str(item.get("removal_reason") or ""),
                 "needs_check": item.get("needs_check") is True,
                 "review_user": str(item.get("user") or ""),
                 "reviewed_at": str(item.get("created_at") or ""),
@@ -1418,6 +1420,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
         individual: {
             "reviewed": True,
             "review_decision": str(item.get("review_decision") or ""),
+            "removal_reason": str(item.get("removal_reason") or ""),
             "needs_check": item.get("needs_check") is True,
             "review_user": item.get("user") or "",
             "reviewed_at": item.get("created_at") or "",
@@ -1440,6 +1443,7 @@ def apply_review_annotations(summary: dict, annotations: list[dict], *, source_a
             {
                 "reviewed": bool(decision),
                 "review_decision": str(decision.get("review_decision") or "") if decision else "",
+                "removal_reason": str(decision.get("removal_reason") or "") if decision else "",
                 "needs_check": decision.get("needs_check") is True if decision else False,
                 "review_user": str(decision.get("user") or "") if decision else "",
                 "reviewed_at": str(decision.get("created_at") or "") if decision else "",
