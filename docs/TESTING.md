@@ -87,3 +87,17 @@ conversion and conflicting histories. A fresh `uv sync --locked --no-dev`
 environment also passed `scripts/check_deployment.py` for CSV and RDS, including
 export/reopen, raw-data preservation, cache rebuild and backup/restore. These
 local checks do not establish Windows/Mac upgrade or university-share readiness.
+
+Review improvements validation on 18 October 2026 (Linux, Python 3.11):
+the full suite finished with **579 passed, 1 skipped, 1 failed**. The skip is the
+Windows platform-default check. All 37 added cases passed. A separate run of the
+four CSV/RDS synchronous/background completion cases also passed after adding
+compatibility for numeric-string review revision tokens.
+
+The known failure is
+`tests/test_review_readiness_browser.py::test_queue_cancels_whole_study_loading_and_has_progress`.
+It expects a whole-study binary request in the browser's `requestfailed` events,
+but receives an empty list. The same assertion failed before these improvements
+at `4913cb5` and in an isolated checkout of `e1ff1ad`; track it separately from
+the review-completion changes. The pre-change full run was 542 passed, 1 skipped,
+and this same failure.
