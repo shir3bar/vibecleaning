@@ -1,8 +1,11 @@
 """Exercise the reviewer-facing changes through the real app and saved steps."""
+import asyncio
 import json
 from pathlib import Path
 import shutil
 import struct
+import threading
+from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 import pytest
@@ -13,7 +16,7 @@ from examples.slim_movement.app import create_slim_movement_app
 from examples.rds_movement.app import create_rds_movement_app
 from test_movement_browser import (
     _auth_manager, _serve, _open_browser, _new_page, _login_and_wait,
-    _delay_binary_responses, STATIC_ROOT, INDEX_PATH, CSV_TRACK_PLAYER_FIXTURE,
+    STATIC_ROOT, INDEX_PATH, CSV_TRACK_PLAYER_FIXTURE,
 )
 from test_rds_movement import _sample_files, KAMI_SAMPLE_ROOT
 
@@ -253,25 +256,67 @@ def test_zero_filter_assignment_and_shared_percentile_steps(tmp_path, source_for
         browser.close()
 
 
-def test_queue_cancels_whole_study_loading_and_has_progress(tmp_path):
+@pytest.mark.parametrize("source_format", ["csv", "rds"])
+@pytest.mark.parametrize("finish_before_queue", [False, True], ids=["pending", "finished"])
+def test_queue_cancels_whole_study_loading_and_has_progress(tmp_path, source_format, finish_before_queue):
     import playwright.sync_api as pw
-    app, _ = make_app(tmp_path, "rds")
-    _delay_binary_responses(app, seconds=1.5)
+    app, _ = make_app(tmp_path, source_format)
+    release = threading.Event()
+
+    class HoldWholeStudyResponse:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            async def hold_headers(message):
+                if (message["type"] == "http.response.start"
+                        and scope["path"].endswith("/fixes-binary")
+                        and "individuals" not in parse_qs(scope["query_string"].decode())):
+                    await asyncio.to_thread(release.wait)
+                await send(message)
+
+            await self.app(scope, receive, hold_headers)
+
+    # Hold the real bulk response until the test chooses its outcome. A fixed
+    # delay can expire before the queue click on a busy machine, leaving
+    # nothing to cancel. Individual requests still finish normally.
+    app.add_middleware(HoldWholeStudyResponse)
     with _serve(app) as base_url, pw.sync_playwright() as playwright:
         browser = _open_browser(playwright)
         page = _new_page(browser)
-        failures = []
-        page.on("requestfailed", lambda request: failures.append(request.url))
-        _login_and_wait(page, base_url, "readiness")
-        page.locator("[data-individual-checkbox]").first.wait_for(state="attached", timeout=30_000)
-        with page.expect_request(lambda request: "/fixes-binary?" in request.url) as full:
-            page.locator('[data-role="select-all"]').click()
-        page.locator('[data-role="fixes-progress"]').wait_for(state="visible")
-        assert "Preparing fixes" in page.locator('[data-role="fixes-progress-text"]').text_content()
-        assert page.locator('[data-role="fixes-progress-bar"]').get_attribute("value") is None
-        page.locator('[data-role="individual-view-queue"]').click()
-        page.wait_for_function("window.__movementDiagnosticsSnapshot().focusedObjectEntries >= 1", timeout=30_000)
-        assert full.value.url in failures
-        page.locator('[data-role="fixes-progress"]').wait_for(state="hidden", timeout=30_000)
-        assert page.locator('[data-queue-individual].queue-active').count() == 1
-        browser.close()
+        failures, errors = [], []
+        page.on("requestfailed", lambda request: failures.append(request))
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        try:
+            _login_and_wait(page, base_url, "readiness")
+            page.locator("[data-individual-checkbox]").first.wait_for(state="attached", timeout=30_000)
+            with page.expect_request(lambda request: "/fixes-binary?" in request.url
+                                     and "individuals" not in parse_qs(urlsplit(request.url).query)) as full:
+                page.locator('[data-role="select-all"]').click()
+            page.locator('[data-role="fixes-progress"]').wait_for(state="visible")
+            assert "Preparing fixes" in page.locator('[data-role="fixes-progress-text"]').text_content()
+            assert page.locator('[data-role="fixes-progress-bar"]').get_attribute("value") is None
+            if finish_before_queue:
+                with page.expect_event("requestfinished", predicate=lambda request: request == full.value):
+                    release.set()
+                page.locator('[data-role="fixes-progress"]').wait_for(state="hidden", timeout=30_000)
+                page.locator('[data-role="individual-view-queue"]').click()
+            else:
+                with page.expect_event("requestfailed", predicate=lambda request: request == full.value) as cancelled:
+                    page.locator('[data-role="individual-view-queue"]').click()
+                assert cancelled.value.failure == "net::ERR_ABORTED"
+            page.wait_for_function("""() => {
+                const state = window.__movementDiagnosticsSnapshot();
+                return state.activeIndividual && state.binaryBlockCount >= 1
+                    && state.trackPlayerFixCount > 0
+                    && state.trackPlayerIndividual === state.activeIndividual;
+            }""", timeout=30_000)
+            if source_format == "rds":
+                page.wait_for_function("window.__movementDiagnosticsSnapshot().focusedObjectEntries >= 1", timeout=30_000)
+            assert (full.value in failures) is not finish_before_queue
+            page.locator('[data-role="fixes-progress"]').wait_for(state="hidden", timeout=30_000)
+            assert page.locator('[data-queue-individual].queue-active').count() == 1
+            assert not errors
+        finally:
+            release.set()
+            browser.close()

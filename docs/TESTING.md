@@ -94,10 +94,19 @@ Windows platform-default check. All 37 added cases passed. A separate run of the
 four CSV/RDS synchronous/background completion cases also passed after adding
 compatibility for numeric-string review revision tokens.
 
-The known failure is
+The failure in that run was
 `tests/test_review_readiness_browser.py::test_queue_cancels_whole_study_loading_and_has_progress`.
-It expects a whole-study binary request in the browser's `requestfailed` events,
-but receives an empty list. The same assertion failed before these improvements
-at `4913cb5` and in an isolated checkout of `e1ff1ad`; track it separately from
-the review-completion changes. The pre-change full run was 542 passed, 1 skipped,
-and this same failure.
+It expected a whole-study binary request in the browser's `requestfailed` events,
+but received an empty list. The same assertion failed before these improvements
+at `4913cb5` and in an isolated checkout of `e1ff1ad`. The pre-change full run was
+542 passed, 1 skipped, and this same failure.
+
+Follow-up on 18 October reproduced the assertion when the bulk download finished
+before the queue click: the test's fixed 1.5-second delay had expired, so there
+was no pending request to cancel. A still-pending request was correctly aborted
+by the app. The test now holds the real server response until explicitly released
+and waits for cancellation of that exact request. All four cases passed: pending
+and already-finished downloads in both CSV and RDS, including queue loading,
+track-player readiness and progress cleanup. Both existing CSV/RDS progressive
+loading tests also passed (six targeted browser cases total). This follow-up
+changes tests and documentation only; the full suite was not rerun.
