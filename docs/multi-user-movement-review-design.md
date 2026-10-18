@@ -106,8 +106,9 @@ be same-origin. Production HTTPS deployments set the cookie's `Secure` flag.
 
 The request body is not an identity source. At the HTTP boundary, any supplied
 `user`, `actor`, or workflow actor fields are overwritten with the authenticated
-actor. Existing `user` strings remain for compatibility; a structured snapshot is
-also persisted:
+actor. `user` is the legacy readable author label, populated from the session
+display name. `actor` is the authenticated identity snapshot, including the stable
+user ID. Both fields remain for compatibility; they describe the same author:
 
 ```json
 {
@@ -479,3 +480,29 @@ reopens all.
 A database was rejected for the selected single-process, small-team scope. Startup-
 loaded users, in-memory sessions, cached review files, and existing file locks meet
 the concurrency and performance requirements with less operational weight.
+
+## Completion exports
+
+Movement `POST .../review/complete` retains synchronous responses by default.
+`background: true` returns HTTP 202 with an analysis job ID; poll the study's
+`analysis-jobs/{job_id}` endpoint for progress, failure, or the completed result.
+The browser saves pending individual decisions before sending the final head and
+review revision. API clients must save their decisions before requesting completion.
+
+The export analysis pins a dataset ID and review context. CSV and RDS files keep
+all original rows; `individual_decisions.csv` includes every individual, including
+undecided rows when downloaded during review. The manifest records dataset,
+review round/revision, analysis, attribution, and checksums. Analyses retain their
+scripts, specs, summaries, and outputs for reproduction.
+
+Publication copies and verifies outputs before taking the study mutation lock.
+Under that lock it rechecks the dataset head, assignment revision, coverage, and
+account identity. A stale attempt leaves the review active. A recoverable journal
+coordinates replacement of `cleaned_files` with the completed-review record;
+interrupted requests recover the previous export unless the completion record
+was already saved. Identical concurrent requests or retries record completion
+once. A failed job requires a new request with refreshed head/review tokens.
+
+A study is labelled Completed only when it has no active assignment and its most
+recent completed review names the current dataset. The UI groups these studies
+last, preserving source order within each group and the current selection.

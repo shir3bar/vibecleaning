@@ -36,7 +36,7 @@ Run from the app folder (go to the folder in the File Explorer and type `powersh
 ```powershell
 $env:UV_PROJECT_ENVIRONMENT = "$env:LOCALAPPDATA\Vibecleaning\venvs\development"
 uv sync --locked --no-dev
-uv run --no-sync python -m app.auth_cli --data-root ".\data" bootstrap editor --display-name "Reviewer"
+uv run --no-sync python -m app.auth_cli --data-root ".\data" bootstrap editor
 ```
 
 The first line chooses the Python environment used by the Windows launcher.
@@ -45,6 +45,10 @@ typing is invisible. In this example username is **editor**, you can change this
 
 Note that this is just a local username for testing, when we set up the shared data folder we will need to re-configure these user names.
 
+
+New accounts use their normalized username (trimmed and lowercase) as the display
+name. Optionally add `--display-name "Taylor Reviewer"` to `bootstrap` or `add`
+to choose another label. Existing accounts keep their current names.
 
 ## 4. Start the app — every time
 

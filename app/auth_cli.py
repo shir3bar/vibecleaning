@@ -8,7 +8,6 @@ import sys
 from .auth import (
     AuthenticationError,
     build_user_record,
-    normalize_display_name,
     normalize_role,
     normalize_username,
     read_users_file,
@@ -48,11 +47,11 @@ def main(argv: list[str] | None = None) -> int:
 
     bootstrap = subparsers.add_parser("bootstrap", help="Create the first editor registry")
     bootstrap.add_argument("username")
-    bootstrap.add_argument("--display-name", required=True)
+    bootstrap.add_argument("--display-name", help="Defaults to the normalized username")
 
     add = subparsers.add_parser("add", help="Add a reviewer or editor")
     add.add_argument("username")
-    add.add_argument("--display-name", required=True)
+    add.add_argument("--display-name", help="Defaults to the normalized username")
     add.add_argument("--role", choices=("reviewer", "editor"), required=True)
 
     reset = subparsers.add_parser("reset-password", help="Reset a password")
@@ -80,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                 users.append(
                     build_user_record(
                         username=username,
-                        display_name=normalize_display_name(args.display_name),
+                        display_name=args.display_name,
                         role="editor" if args.command == "bootstrap" else normalize_role(args.role),
                         password=_password(),
                     )

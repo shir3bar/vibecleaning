@@ -167,10 +167,14 @@ Create the first editor once per authoritative data root, before reviewer use.
 Passwords are prompted interactively; do not put them in a command or log.
 
 ```text
-uv run --no-sync python -m app.auth_cli --data-root "<data-root>" bootstrap editor --display-name "Study Editor"
-uv run --no-sync python -m app.auth_cli --data-root "<data-root>" add reviewer1 --display-name "Reviewer One" --role reviewer
+uv run --no-sync python -m app.auth_cli --data-root "<data-root>" bootstrap editor
+uv run --no-sync python -m app.auth_cli --data-root "<data-root>" add reviewer1 --role reviewer
 uv run --no-sync python -m app.auth_cli --data-root "<data-root>" list
 ```
+
+New accounts use their normalized username (trimmed and lowercase) as the display
+name. Optionally add `--display-name "Taylor Reviewer"` to `bootstrap` or `add`
+to choose another label. Existing accounts keep their current names.
 
 An editor assigns studies to reviewers through the existing review interface.
 Keep one registry at `<data-root>/scrubdata/users.json`; all clients must

@@ -152,9 +152,13 @@ Full and slim movement load the multi-user registry once from
 `<data-root>/scrubdata/users.json`. Bootstrap it before first startup:
 
 ```bash
-uv run python -m app.auth_cli bootstrap admin --display-name "Review Administrator"
-uv run python -m app.auth_cli add reviewer1 --display-name "Taylor Reviewer" --role reviewer
+uv run python -m app.auth_cli bootstrap admin
+uv run python -m app.auth_cli add reviewer1 --role reviewer
 ```
+
+New accounts use their normalized username (trimmed and lowercase) as the display
+name. Optionally add `--display-name "Taylor Reviewer"` to `bootstrap` or `add`
+to choose another label. Existing accounts keep their current names.
 
 Pass `--data-root` to override `VIBECLEANING_DATA_ROOT`. Account changes use a
 cross-process lock, but administrators should still make registry changes during

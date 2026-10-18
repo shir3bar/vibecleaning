@@ -153,7 +153,7 @@ def write_users_file(path: Path, users: Iterable[dict]) -> None:
 def build_user_record(
     *,
     username: str,
-    display_name: str,
+    display_name: str | None = None,
     role: str,
     password: str,
     user_id: str | None = None,
@@ -161,7 +161,7 @@ def build_user_record(
     return {
         "user_id": user_id or f"user_{secrets.token_hex(6)}",
         "username": normalize_username(username),
-        "display_name": normalize_display_name(display_name),
+        "display_name": normalize_username(username) if display_name is None else normalize_display_name(display_name),
         "role": normalize_role(role),
         "enabled": True,
         "auth_version": 1,

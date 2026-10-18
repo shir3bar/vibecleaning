@@ -44,6 +44,13 @@ Request rules:
 - `output_artifacts` and `remove_artifacts` must not overlap.
 - `user`, `title`, `kind`, and `script` are required.
 
+Authenticated movement requests derive both attribution fields from the session:
+`user` is the legacy readable author label (the display name); `actor` is the
+identity snapshot containing `user_id`, `username`, `display_name`, and `role`.
+Both are retained so existing scripts can read `user` while audit records and
+authorization use the stable authenticated identity. A client cannot override
+either field by sending a different value in its request.
+
 Script environment:
 
 - `SCRUBDATA_SPEC_PATH`

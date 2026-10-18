@@ -212,6 +212,20 @@ def test_passwords_have_no_minimum_length_but_cannot_be_empty():
         hash_password("")
 
 
+def test_account_display_name_defaults_and_overrides(tmp_path, monkeypatch):
+    from app.auth import read_users_file, users_path
+    monkeypatch.setattr(auth_cli, "_password", lambda: "test-password-long")
+    root_args = ["--data-root", str(tmp_path)]
+    assert auth_cli.main(root_args + ["bootstrap", "Admin"]) == 0
+    assert auth_cli.main(root_args + ["add", "Rae", "--role", "reviewer"]) == 0
+    assert auth_cli.main(root_args + ["add", "Eli", "--role", "editor", "--display-name", "Eli Editor"]) == 0
+    users = {user["username"]: user for user in read_users_file(users_path(tmp_path))}
+    assert users["admin"]["display_name"] == "admin"
+    assert users["rae"]["display_name"] == "rae"
+    assert users["eli"]["display_name"] == "Eli Editor"
+    assert build_user_record(username=" MixedCase ", role="reviewer", password="test-password-long")["display_name"] == "mixedcase"
+
+
 def test_operator_cli_bootstraps_and_manages_accounts(tmp_path, monkeypatch, capsys):
     data_root = tmp_path / "data"
     passwords = iter(["a", "b", "c"])

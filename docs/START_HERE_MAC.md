@@ -40,12 +40,16 @@ Run from the app folder:
 
 ```sh
 uv sync --locked --no-dev
-uv run --no-sync python -m app.auth_cli --data-root "./data" bootstrap editor --display-name "Reviewer"
+uv run --no-sync python -m app.auth_cli --data-root "./data" bootstrap editor
 ```
 
 `uv` installs Python and the app's dependencies. Enter your chosen password twice;
 typing is invisible. Your username is **editor**. If it says the user registry is
 already initialized, use your existing login and continue to step 4.
+
+New accounts use their normalized username (trimmed and lowercase) as the display
+name. Optionally add `--display-name "Taylor Reviewer"` to `bootstrap` or `add`
+to choose another label. Existing accounts keep their current names.
 
 ## 4. Start the app — every time
 

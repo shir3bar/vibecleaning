@@ -12,8 +12,10 @@ is loaded, how bursts are defined, and how reviewed data is exported.
    selecting one first shows its overview track and then replaces it with exact
    points and tracks when they are ready.
 3. Use **All individuals** only when the complete study is needed on the map.
-4. Use **Points**, **Bursts**, and the individual checkboxes to change the map
-   view. These controls do not create dataset versions.
+4. Use **Show track lines**, **Points**, **Bursts**, and the individual checkboxes
+   to change the map view. Turning off track lines also hides their line highlights
+   and preview paths; points, point highlights, the player marker, and other
+   overlays stay as they were. These preferences do not create dataset versions.
 
 RDS studies use the source `burst_` values as authoritative bursts. CSV studies
 use the configured movement burst definition.
@@ -92,6 +94,20 @@ originating suspicion.
 Open **Review queue** to work through individuals. Record **OK**, **Fix & Keep**,
 or **Remove**, and use **Needs check** when another decision is required. Moving
 to another individual saves a staged decision using the existing queue workflow.
+A new or changed Remove decision requires **Redeployment**, **Short track**,
+**Confined**, **Other**, or **Nest**. Other also requires a comment. Save and
+navigation wait until these fields are valid. Older saved Remove decisions stay
+valid even when no reason was recorded.
+
+**Remove entire study** shows the affected count and asks for a shared reason and
+comment. It supersedes decisions for every individual, including hidden or
+filtered individuals, in one undoable step. Existing Needs check values, fix-level
+flags, previous decisions, and notes remain available. Completion is a separate
+action.
+
+Use **Flagged fixes — most first** or **Flagged fixes — fewest first** in the queue
+order menu. Counts use the existing flagged-fix metric; equal counts keep dataset
+order. The direction is remembered and changing it keeps the active individual.
 
 Under the active individual's saved flags, open **Flagged periods / fixes**.
 The scrollable list groups clickable rows by issue type, with dates and counts.
@@ -124,13 +140,29 @@ shows the effective decision for the active round.
 
 ## 7. Rankings, reports, and export
 
+**Complete review** saves pending individual decisions, checks that all required
+individuals are reviewed, and saves annotated source files plus
+`individual_decisions.csv` to `<study>/scrubdata/cleaned_files/` on the app server.
+Watch the progress bar. The review becomes Completed only after saving succeeds.
+On failure, the review stays active and the last successful export is preserved;
+use **Retry completion** after resolving the error or refreshing a changed study.
+Completed studies are labelled and placed last in the study dropdown. A new
+assignment or a later dataset change removes that label.
+
+**Export individual decisions** downloads the selected dataset's current review
+context during review or after completion. Save pending decisions first. It has
+one row per individual, including undecided individuals, and includes the reason,
+Needs check, comment, review round, reviewer identity, timestamp, and originating
+step. Completion uses the same CSV generator and includes its checksum in
+`writer_manifest.json`.
+
 - **Rank bursts** refreshes available ranking analyses. The ranking tab and queue
   ordering can display saved rankings without rerunning them.
 - Reports are analyses: they capture the selected review context but do not change
   the dataset.
 - CSV export writes the reviewed CSV representation. **Export RDS** saves one
   `<source>_cleaned.rds` per source individual in the study's
-  `scrubdata/cleaned_files/` folder, together with `writer_manifest.json` recording
+  `scrubdata/cleaned_files/` folder, together with `individual_decisions.csv` and `writer_manifest.json` recording
   the exported dataset version and file checksums. The progress bar shows when
   the folder is ready; no browser download is needed. The folder is on the
   machine running the app.
