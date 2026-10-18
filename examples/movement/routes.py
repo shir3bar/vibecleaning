@@ -45,6 +45,7 @@ from app.reviews import (
     reconcile_review_state_after_resume,
     review_coverage,
     review_profile,
+    review_scope,
     start_editor_control,
     valid_review_decisions,
 )
@@ -75,6 +76,7 @@ from .analysis_history import (
 from .binary_columns import build_csv_binary_columns
 from .catalog import family_names, get_study_dir, list_families, list_studies
 from .rds_export import cleaned_rds_name
+from .decision_export import decision_rows, decision_csv
 from .review_annotations import (
     annotation_applies,
     apply_review_annotation_counts,
@@ -83,6 +85,7 @@ from .review_annotations import (
     compress_fix_keys,
     confirmed_exclusion_scopes,
     load_review_annotations,
+    individual_review_decisions,
     point_in_polygon,
     resolve_filter_row_ranges,
     row_tokens_for_scope,
@@ -604,7 +607,9 @@ def _validate_individual_review_decision(value: object) -> dict:
     needs_check = value.get("needs_check")
     if not isinstance(needs_check, bool):
         raise ValueError("Individual review decision requires a boolean needs_check")
-    comment = _validate_optional_text(value.get("comment"), label="Review comment", max_length=1200)
+    comment = str(value.get("comment") or "").strip()
+    if len(comment) > 1200:
+        raise ValueError("Review comment must be at most 1200 characters")
     removal_reason = str(value.get("removal_reason") or "").strip().lower()
     if review_decision == "remove":
         if removal_reason not in {"redeployment", "short_track", "confined", "other", "nest"}:
@@ -1402,6 +1407,32 @@ def register_movement_routes(
                 for individual in required
             ]
         return result
+
+    def individual_decision_snapshot(study_dir: Path, dataset_id: str):
+        dataset = load_dataset(study_dir, dataset_id)
+        names = [a["logical_name"] for a in dataset.get("artifacts", []) if configured_source.accepts(a)]
+        individuals = set()
+        for name in names[:1] if configured_source.bundle_scoped else names:
+            individuals.update(source_individuals(configured_source, study_dir, dataset_id, name))
+        annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+        review = None
+        valid = {}
+        needs_checks = []
+        for candidate in reversed(load_review_state(study_dir).get("reviews") or []):
+            if candidate.get("status") not in {"active", "completed"}:
+                continue
+            try:
+                valid = valid_review_decisions(study_dir, candidate, annotations, current_dataset_id=dataset_id)
+            except ReviewStateError:
+                continue  # A selected historical dataset can precede this review.
+            review = candidate
+            if candidate.get("status") == "active":
+                needs_checks = carryover_needs_checks(study_dir, candidate, annotations, current_dataset_id=dataset_id)
+            break
+        if review is None:
+            for name in names:
+                valid.update(individual_review_decisions(annotations, source_artifact=name))
+        return decision_rows(study_dir.name, dataset_id, individuals, valid, review, needs_checks)
 
     def display_annotations(
         study_dir: Path,
@@ -4280,6 +4311,75 @@ def register_movement_routes(
             publish_state_event(
                 family_name, study_name, study_dir, reason="dataset_head_changed", actor=actor
             )
+            return JSONResponse(result)
+        except EditLockedError as exc:
+            return _edit_locked_response(exc)
+        except EditConflictError as exc:
+            return _edit_conflict_response(exc)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}/individual-decisions.csv")
+    async def get_individual_decisions_csv(family_name: str, study_name: str, dataset_id: str, request: Request):
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
+            dataset_id = validate_path_part(dataset_id, label="dataset")
+            rows = await run_in_threadpool(individual_decision_snapshot, study_dir, dataset_id)
+            return StreamingResponse(iter([decision_csv(rows)]), media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": 'attachment; filename="individual_decisions.csv"', "Cache-Control": "no-store"})
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/remove-study")
+    async def post_remove_study(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            common = _validate_individual_review_decision({
+                "individual": "study", "review_decision": "remove", "needs_check": False,
+                "removal_reason": body.get("removal_reason"), "comment": body.get("comment"),
+            })
+            study_dir = configured_study_dir(family_name, study_name)
+            logical_name = validate_path_part(body.get("logical_name"), label="artifact")
+            body = await ensure_editor_self_review(request, study_dir, body, logical_name)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            dataset = load_dataset(study_dir, dataset_id)
+            rows = await run_in_threadpool(individual_decision_snapshot, study_dir, dataset_id)
+            if not rows:
+                raise ValueError("The study has no individuals to remove")
+            index_path, signature = None, ""
+            if configured_source.bundle_scoped:
+                bundle, index_path = await run_in_threadpool(ensure_configured_rds_index, study_dir, dataset_id)
+                validate_requested_bundle(body, bundle.signature)
+                signature = bundle.signature
+            records = []
+            for row in rows:
+                scope = {"kind": "individual", "individual": row["individual"], "set_name": ""}
+                count = 0
+                if index_path is not None:
+                    scope, count = resolve_rds_review_scope(index_path, scope)
+                records.append({"annotation_kind": "individual_review", "reviewed": True,
+                    "review_decision": "remove", "removal_reason": common["removal_reason"],
+                    "comment": common["comment"], "needs_check": row["needs_check"] == "true",
+                    "decision_origin": "study_removal", "scope": scope, "resolved_fix_count": count})
+            inputs = [a["logical_name"] for a in dataset["artifacts"]
+                      if configured_source.accepts(a) or a["logical_name"] == "movement_review_annotations.json"]
+            payload = {"user": effective_user(request, body), "title": f"Remove entire study: {len(rows)} individuals",
+                "kind": "python", "script": RDS_REVIEW_STEP_SCRIPT, "parent_dataset_id": dataset_id,
+                "input_artifacts": inputs, "output_artifacts": ["movement_review_annotations.json"], "set_as_head": True,
+                "parameters": {"app": "movement", "action": "remove_study", "dataset_id": dataset_id,
+                    "target_artifact": logical_name, "source_bundle_signature": signature,
+                    "removal_reason": common["removal_reason"], "comment": common["comment"], "records": records}}
+            payload, preflight, actor = prepare_step_payload(request, study_dir, body, payload, review_effect="annotation_only")
+            result = await run_in_threadpool(create_guarded_step, study_dir, payload, selected_dataset_id=dataset_id,
+                expected_current_dataset_id=str(body.get("expected_current_dataset_id") or dataset_id), preflight=preflight)
+            publish_state_event(family_name, study_name, study_dir, reason="dataset_head_changed", actor=actor)
             return JSONResponse(result)
         except EditLockedError as exc:
             return _edit_locked_response(exc)

@@ -4042,6 +4042,8 @@ class MovementExampleApp {
           <button type="button" data-role="run-burst-feature-space">Feature space</button>
           <button type="button" data-role="generate-report">Generate report</button>
           <button type="button" data-role="export-reviewed-csv">Export reviewed CSV</button>
+          <button type="button" data-role="export-individual-decisions">Export individual decisions</button>
+          <button type="button" data-role="remove-study">Remove entire study</button>
           <button type="button" data-role="undo">Undo</button>
         </div>
         <div class="movement-release-notice" data-role="release-notice" hidden>
@@ -4289,6 +4291,22 @@ class MovementExampleApp {
         </div>
       </div>
 
+      <div class="movement-modal hidden" data-role="remove-study-modal">
+        <div class="movement-modal-card">
+          <div class="movement-modal-head"><h3>Remove entire study</h3><button type="button" data-role="remove-study-close">Close</button></div>
+          <div class="movement-modal-body">
+            <p data-role="remove-study-description"></p>
+            <label>Removal reason <select data-role="remove-study-reason" required>
+              <option value="">Choose a reason</option><option value="redeployment">Redeployment</option>
+              <option value="short_track">Short track</option><option value="confined">Confined</option>
+              <option value="other">Other</option><option value="nest">Nest</option>
+            </select></label>
+            <label>Note (required for Other)<textarea data-role="remove-study-comment" maxlength="1200"></textarea></label>
+            <div data-role="remove-study-status" role="status"></div>
+            <button type="button" data-role="remove-study-submit">Mark all individuals Remove</button>
+          </div>
+        </div>
+      </div>
       <div class="movement-modal hidden" data-role="issue-modal">
         <div class="movement-modal-card">
           <div class="movement-modal-head">
@@ -4560,6 +4578,9 @@ class MovementExampleApp {
       runBurstFeatureSpace: this.mountEl.querySelector('[data-role="run-burst-feature-space"]'),
       generateReport: this.mountEl.querySelector('[data-role="generate-report"]'),
       exportReviewedCsv: this.mountEl.querySelector('[data-role="export-reviewed-csv"]'),
+      exportIndividualDecisions: this.mountEl.querySelector('[data-role="export-individual-decisions"]'),
+      removeStudy: this.mountEl.querySelector('[data-role="remove-study"]'),
+      removeStudyModal: this.mountEl.querySelector('[data-role="remove-study-modal"]'),
       exportProgress: this.mountEl.querySelector('[data-role="export-progress"]'),
       fixesProgress: this.mountEl.querySelector('[data-role="fixes-progress"]'),
       fixesProgressText: this.mountEl.querySelector('[data-role="fixes-progress-text"]'),
@@ -5212,6 +5233,12 @@ class MovementExampleApp {
       void this.runBurstFeatureSpace();
     });
     this.refs.generateReport.addEventListener("click", () => this.openReportModal());
+    this.refs.exportIndividualDecisions.addEventListener("click", () => void this.exportIndividualDecisions());
+    this.refs.removeStudy.addEventListener("click", () => this.openRemoveStudy());
+    this.refs.removeStudyModal.querySelector('[data-role="remove-study-close"]').addEventListener("click", () => {
+      if (!this.removeStudySaving) this.refs.removeStudyModal.classList.add("hidden");
+    });
+    this.refs.removeStudyModal.querySelector('[data-role="remove-study-submit"]').addEventListener("click", () => void this.removeEntireStudy());
     this.refs.exportReviewedCsv.addEventListener("click", () => {
       void this.exportReviewedCsv();
     });
@@ -18518,6 +18545,8 @@ class MovementExampleApp {
     );
     this.refs.generateReport.disabled = !hasData || !(this.data?.individuals || []).length;
     this.refs.exportReviewedCsv.disabled = !hasData || Boolean(this.exportInProgress);
+    this.refs.exportIndividualDecisions.disabled = !hasData;
+    this.refs.removeStudy.disabled = !hasData || !canPersistEdits || Boolean(this.removeStudySaving);
     this.refs.selectSuspicious.disabled = !hasData || !this.currentArtifact || suspiciousLoading;
     this.refs.clearFixes.disabled = !hasData || selectedCount === 0;
     this.refs.runCandidateQuery.disabled = !canPersistEdits || !hasData || !this.currentArtifact || candidatePreviewLoading || !selectedCandidateQuery;
@@ -20493,6 +20522,71 @@ class MovementExampleApp {
       this.renderRdsExportProgress(job, study, startedAt);
       await new Promise(resolve => window.setTimeout(resolve, ANALYSIS_JOB_POLL_INTERVAL_MS));
     }
+  }
+
+  async exportIndividualDecisions() {
+    if (!this.data) return;
+    if (this.hasUnsavedIndividualReviewDrafts()) {
+      this.setStatus("Save or discard the unsaved individual decisions before exporting.", true);
+      return;
+    }
+    try {
+      const url = this.reviewActionUrl(`dataset/${encodeURIComponent(this.currentDatasetId)}/individual-decisions.csv`);
+      const response = await this.fetchResponse(url, {cache: "no-store"});
+      if (!response.ok) throw new Error(`Export failed (${response.status})`);
+      const blobUrl = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = "individual_decisions.csv";
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+      this.setStatus("Exported individual decisions for this study.");
+    } catch (error) { this.setStatus(error.message, true); }
+  }
+
+  openRemoveStudy() {
+    if (!this.data || this.rejectLockedEdit()) return;
+    if (this.hasUnsavedIndividualReviewDrafts()) {
+      this.setStatus("Save or discard unsaved decisions before removing the entire study.", true);
+      return;
+    }
+    const modal = this.refs.removeStudyModal;
+    this.removeStudyContext = {url: this.reviewActionUrl("actions/remove-study"),
+      family: this.currentFamily, study: this.currentStudy,
+      body: {...this.reviewMutationBody(), dataset_id: this.currentDatasetId, logical_name: this.currentArtifact,
+        source_bundle_signature: this.data.sourceSignature || ""}};
+    modal.querySelector('[data-role="remove-study-description"]').textContent =
+      `Mark all ${formatCount(this.data.individuals.length)} individuals in ${this.currentStudy} as Remove? This supersedes their current decisions, including individuals outside the visible selection. Previous decisions and notes remain in history. Complete review is a separate action.`;
+    modal.querySelector('[data-role="remove-study-reason"]').value = "";
+    modal.querySelector('[data-role="remove-study-comment"]').value = "";
+    modal.querySelector('[data-role="remove-study-status"]').textContent = "";
+    modal.classList.remove("hidden");
+  }
+
+  async removeEntireStudy() {
+    if (this.removeStudySaving || !this.removeStudyContext) return;
+    const modal = this.refs.removeStudyModal;
+    const context = this.removeStudyContext;
+    const decision = {review_decision: "remove", removal_reason: modal.querySelector('[data-role="remove-study-reason"]').value,
+      comment: modal.querySelector('[data-role="remove-study-comment"]').value.trim()};
+    const error = this.individualRemovalError(decision);
+    const status = modal.querySelector('[data-role="remove-study-status"]');
+    if (error) { status.textContent = error; return; }
+    if (context.family !== this.currentFamily || context.study !== this.currentStudy || context.body.dataset_id !== this.currentDatasetId) {
+      status.textContent = "The study or dataset changed. Close and reopen this dialog."; return;
+    }
+    this.removeStudySaving = true;
+    const submit = modal.querySelector('[data-role="remove-study-submit"]');
+    submit.disabled = true;
+    try {
+      const result = await this.requestJSON(context.url, {method: "POST", body: JSON.stringify({...context.body, ...decision})});
+      modal.classList.add("hidden");
+      if (context.family === this.currentFamily && context.study === this.currentStudy) {
+        await this.loadStudyAtDataset(result.dataset.dataset_id, {preserveAnnotationContext: true, result});
+        this.setStatus(`Marked ${formatCount(result.step.summary.reviewed_individual_count)} individuals Remove. The review remains active.`);
+      }
+    } catch (error) { await this.handleEditRequestError(error); status.textContent = error.message; }
+    finally { this.removeStudySaving = false; submit.disabled = false; this.updateActionButtons(); }
   }
 
   async exportReviewedCsv() {

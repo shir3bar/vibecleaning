@@ -62,6 +62,9 @@ def main():
         "source_bundle_signature": str(params.get("source_bundle_signature") or ""),
         "materialized_rds": False,
     }
+    if params.get("action") == "remove_study":
+        summary.update(reviewed_individual_count=len(appended), reviewed_remove_count=len(appended),
+                       needs_check_count=sum(item.get("needs_check") is True for item in appended))
     if params.get("action") in {"confirm_issues", "dismiss_issues"}:
         summary["resolved_fix_count"] = len({
             token for item in appended for token in row_tokens_for_scope(item.get("scope") or {})
