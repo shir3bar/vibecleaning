@@ -3,6 +3,9 @@
 These steps open the RDS app with the **two MoveTraits studies included in Git**.
 Use **Terminal**. Run each block in order; if it fails, stop and copy the error.
 
+This guide uses the repository's [uv setup](ENVIRONMENT.md). You do not need to
+install Python separately, activate a virtual environment or use Conda.
+
 **Already installed and have a login? Go to step 4.**
 
 ## 1. Install Git and uv — once
@@ -34,16 +37,18 @@ cd "$HOME/Vibecleaning"
 and `git pull --ff-only`, then continue below. Use that folder's path in the
 `cd` command in step 4 too.
 
-## 3. Install dependencies and create your login — once
+## 3. Install dependencies and create your login — once per data folder
 
 Run from the app folder:
 
 ```sh
+export UV_PROJECT_ENVIRONMENT="$PWD/.venv"
 uv sync --locked --no-dev
 uv run --no-sync python -m app.auth_cli --data-root "./data" bootstrap editor
 ```
 
-`uv` installs Python and the app's dependencies. Enter your chosen password twice;
+The first line selects the same environment as the launcher. `uv` installs
+Python and the app's dependencies. Enter your chosen password twice;
 typing is invisible. Your username is **editor**. If it says the user registry is
 already initialized, use your existing login and continue to step 4.
 
@@ -73,7 +78,10 @@ step 4. Reviews are saved in `data`; back up that whole folder, including hidden
 folders.
 
 **Update:** stop the app, run `git pull --ff-only` in the app folder, then repeat
-step 4.
+step 4. The launcher installs any changed locked dependencies automatically.
+
+**CSV review:** use `--profile Csv` in step 4 and open `http://127.0.0.1:8421`.
+CSV studies belong under `data/movement_raw/`; RDS studies under `data/movement_rds/`.
 
 Shared folders and team accounts: [IT guide](IT_DEPLOYMENT_REQUIREMENTS.md).
 App controls: [review manual](movement-review-manual.md).

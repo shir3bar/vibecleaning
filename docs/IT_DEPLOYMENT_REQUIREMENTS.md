@@ -7,6 +7,11 @@ This longer document is for whoever manages installation, shared storage and
 backups. For the controls inside the app, use the
 [review manual](movement-review-manual.md).
 
+All installations use the [same uv environment policy](ENVIRONMENT.md).
+`pyproject.toml` and `uv.lock` define Python dependencies; the legacy pip and
+Conda files are not deployment inputs. Python 3.11 is selected by `.python-version`
+and can be installed by uv or supplied through IT's approved process.
+
 ## Deployment model
 
 Each reviewer runs the same versioned Scrub Data release locally on a
@@ -109,7 +114,8 @@ launcher uses `%LOCALAPPDATA%\Vibecleaning\venvs\<release-id>`.
 The normal installation uses Git, as shown in the quick-start guides above.
 The following packaging procedure is an alternative for an IT-managed handoff.
 
-Build a candidate with `python scripts/build_release.py`. This packages the
+From the development environment, build a candidate with
+`uv run --locked python scripts/build_release.py`. This packages the
 current app, including reviewed local changes, as `dist/scrubdata-p0-*.zip`.
 It also creates a small synthetic test-data ZIP and a SHA-256 file. Research
 data, accounts, caches, and live `scrubdata` or legacy metadata are excluded. The
@@ -125,13 +131,13 @@ the release identity. Rebuild after any code change, and test the new identity.
    contains `movement_raw/acceptance/movement.csv` and
    `movement_rds/acceptance/*.rds`: two synthetic animals, 24 fixes per profile.
    It needs no workspace paths, symlinks, R installation, or research data.
-3. From the application directory, verify both extractions:
-   `python scripts/verify_bundle.py .` and
-   `python scripts/verify_bundle.py "<test-data-directory>"`.
-4. Install Python 3.11 and `uv` through IT's approved process, then prepare the
+3. Install `uv` through IT's approved process, then prepare the
    locked production environment as below. No development dependencies are
    required. Initial installation needs package access; retain the installed
    environment for use where the share is offline.
+4. From the application directory, verify both extractions:
+   `uv run --no-sync python scripts/verify_bundle.py .` and
+   `uv run --no-sync python scripts/verify_bundle.py "<test-data-directory>"`.
 
 PowerShell setup (use the same terminal for account setup and diagnostics):
 
@@ -139,7 +145,7 @@ PowerShell setup (use the same terminal for account setup and diagnostics):
 $ReleaseId = (Get-Content .\release-manifest.json -Raw -Encoding UTF8 | ConvertFrom-Json).release_id
 $env:UV_PROJECT_ENVIRONMENT = Join-Path $env:LOCALAPPDATA "Vibecleaning\venvs\$ReleaseId"
 $env:PYTHONUTF8 = "1"
-uv sync --locked --no-dev --python 3.11
+uv sync --locked --no-dev
 ```
 
 Mac/Linux setup:
@@ -147,7 +153,7 @@ Mac/Linux setup:
 ```bash
 export UV_PROJECT_ENVIRONMENT="$PWD/.venv"
 export PYTHONUTF8=1
-uv sync --locked --no-dev --python 3.11
+uv sync --locked --no-dev
 ```
 
 Run the portable automatic checks from that environment:
@@ -165,6 +171,10 @@ the API in-process; browser, large-study and actual share checks are additional.
 
 Create the first editor once per authoritative data root, before reviewer use.
 Passwords are prompted interactively; do not put them in a command or log.
+Run these commands in the environment prepared by the OS quick-start guide or
+the ZIP setup above. Use that same terminal so `UV_PROJECT_ENVIRONMENT` remains
+set to the launcher's environment. To administer accounts later, repeat the
+environment selection and `uv sync --locked --no-dev` first.
 
 ```text
 uv run --no-sync python -m app.auth_cli --data-root "<data-root>" bootstrap editor

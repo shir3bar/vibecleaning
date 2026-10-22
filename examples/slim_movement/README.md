@@ -22,21 +22,28 @@ movement example's backend and frontend components with a restricted profile:
 
 The full `examples/movement/` application remains the development playground.
 
-## Run
+## Install and run
+
+Follow the [Windows](../../docs/START_HERE_WINDOWS.md) or
+[Mac](../../docs/START_HERE_MAC.md) guide for installation and login creation,
+then select the **Csv** launcher profile as described there.
+[Linux setup](../../docs/ENVIRONMENT.md#open-the-movement-review-app) uses the
+same uv workflow. The default address is `http://127.0.0.1:8421`.
+
+For development, complete the
+[development setup](../../docs/ENVIRONMENT.md#development-and-tests) and run
+the following commands from the repository root. Create accounts before first
+startup; skip `bootstrap` if the registry already exists:
 
 ```bash
-uv run python examples/slim_movement/server.py
+uv run --locked python -m app.auth_cli --data-root "./data" bootstrap editor
+uv run --locked python -m app.auth_cli --data-root "./data" add reviewer1 --role reviewer
+uv run --locked python examples/slim_movement/server.py
 ```
 
-The default address is `http://127.0.0.1:8421`.
-
-Before first startup, bootstrap an editor and add reviewer accounts. Passwords
-are prompted without echo and stored only as salted scrypt hashes:
-
-```bash
-uv run python -m app.auth_cli bootstrap admin --display-name "Review Administrator"
-uv run python -m app.auth_cli add reviewer1 --display-name "Taylor Reviewer" --role reviewer
-```
+Passwords are prompted without echo and stored only as salted scrypt hashes.
+Display names default to normalized usernames; use `--display-name` for an
+explicit override.
 
 Additional operator commands are `list`, `enable`, `disable`, and
 `reset-password`; pass `--data-root` before the command when using a data folder

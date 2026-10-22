@@ -13,8 +13,11 @@ It adds:
 
 ## Run
 
+Complete the [development setup](../../docs/ENVIRONMENT.md#development-and-tests),
+then run from the repository root:
+
 ```bash
-python examples/trajectory/server.py
+uv run --locked python examples/trajectory/server.py
 ```
 
 ## Routes

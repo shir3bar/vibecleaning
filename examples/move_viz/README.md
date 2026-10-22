@@ -42,8 +42,12 @@ Agents adapting the viewer to another SQLite schema should follow
 
 ## Run
 
+Complete the [development setup](../../docs/ENVIRONMENT.md#development-and-tests),
+then run from the repository root. This SQLite viewer uses the same uv
+environment as the other apps; no separate minimal installation is needed.
+
 ```bash
-python examples/move_viz/server.py
+uv run --locked python examples/move_viz/server.py
 ```
 
 The default address is `http://127.0.0.1:8422`.
@@ -65,7 +69,7 @@ The example contains the 4,800 rows from
 with:
 
 ```bash
-python examples/move_viz/scripts/create_sample_sqlite.py
+uv run --locked python examples/move_viz/scripts/create_sample_sqlite.py
 ```
 
 The browser reads only the SQLite header before uploading the original file,

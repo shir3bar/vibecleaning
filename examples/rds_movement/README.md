@@ -4,19 +4,32 @@ This thin application wrapper reuses the movement review backend and frontend
 with per-individual move2/sf RDS inputs grouped into one project per study.
 It treats `burst_` as authoritative, exposes `is_outlier` for color and ranking,
 and keeps review state in schema-v6 lineage sidecars. The SQLite files under
-`scrubdata/cache/movement/` are disposable fix-level indexes and rebuild
+the configured local cache root are disposable fix-level indexes and rebuild
 automatically when the RDS bundle changes or the cache is deleted.
 
-Import the flat sample folder and build its disposable SQLite indexes:
+## Install and run
+
+Use the [Windows](../../docs/START_HERE_WINDOWS.md) or
+[Mac](../../docs/START_HERE_MAC.md) guide for setup, account creation and daily
+startup with the RDS launcher. [Linux setup](../../docs/ENVIRONMENT.md#open-the-movement-review-app)
+uses the same uv workflow. The default address is `http://127.0.0.1:8422`.
+
+The included studies are already organized for the app; importing is not a
+first-time setup step. For development, complete the
+[development setup](../../docs/ENVIRONMENT.md#development-and-tests), including
+account creation, then run from the repository root:
 
 ```bash
-uv run python -m examples.rds_movement.import_studies data/movement_rds --build-index
+uv run --locked python examples/rds_movement/server.py
 ```
 
-Run the app on its default port:
+## Import other flat RDS folders
+
+To group another folder of flat RDS files into studies and build its disposable
+indexes, use the development environment and replace the source path below:
 
 ```bash
-uv run python examples/rds_movement/server.py
+uv run --locked python -m examples.rds_movement.import_studies /path/to/rds-files --family-dir data/movement_rds --build-index
 ```
 
 The included import currently contains:

@@ -21,8 +21,13 @@ It adds:
 
 ## Run
 
+Complete the [development setup](../../docs/ENVIRONMENT.md#development-and-tests),
+including account creation, then run from the repository root. This opens the
+development playground; for everyday review use the CSV or RDS launcher in the
+[environment reference](../../docs/ENVIRONMENT.md).
+
 ```bash
-python examples/movement/server.py
+uv run --locked python examples/movement/server.py
 ```
 
 ## Routes
@@ -61,14 +66,14 @@ annotation. Current steps reuse the source CSV and write only
 first inspect the proposed change:
 
 ```bash
-uv run python -m examples.movement.migrate_legacy_review_step \
+uv run --locked python -m examples.movement.migrate_legacy_review_step \
   data/movement_raw/<study> <dataset_id>
 ```
 
 Then apply it:
 
 ```bash
-uv run python -m examples.movement.migrate_legacy_review_step \
+uv run --locked python -m examples.movement.migrate_legacy_review_step \
   data/movement_raw/<study> <dataset_id> --apply
 ```
 

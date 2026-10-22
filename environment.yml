@@ -1,3 +1,5 @@
+# Legacy geospatial research environment; not needed to run the review app.
+# App setup uses uv; see docs/ENVIRONMENT.md.
 name: movebench
 channels:
   - conda-forge

@@ -1,29 +1,35 @@
 # Running the tests
 
-From the cloned repository, install the locked environment and browser once:
+Use the [development environment](ENVIRONMENT.md#development-and-tests), which
+selects the checkout's `.venv` on every OS. No activation is needed. From the
+repository root, install the locked environment and browser once:
 
 ```sh
 uv sync --locked
-uv run playwright install chromium
+uv run --locked playwright install chromium
 ```
 
-On Linux, also run `uv run playwright install-deps chromium` if the browser's
+On Linux, also run `uv run --locked playwright install-deps chromium` if the browser's
 system libraries are missing. Windows and Mac do not need that command.
 
 Run everything:
 
 ```sh
-uv run python -m pytest -q -ra
+uv run --locked python -m pytest -q -ra
 ```
 
 Allow several minutes. Tests use temporary studies; they do not edit your
 review data or need a running app. The RDS fixtures are included in Git.
 
+After using the Mac/Linux app launcher, run `uv sync --locked` again to restore
+development tools removed by its app-only sync. All commands below use
+`--locked` to preserve the committed dependency versions.
+
 To run just one group:
 
 ```sh
-uv run python -m pytest -q -m "not browser"
-uv run python -m pytest -q -m browser
+uv run --locked python -m pytest -q -m "not browser"
+uv run --locked python -m pytest -q -m browser
 ```
 
 The first command covers filters, review history, accounts and locking, reports,

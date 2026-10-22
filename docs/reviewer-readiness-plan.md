@@ -70,6 +70,6 @@ After a connection loss: read this file, inspect `git status` and recent commits
 Primary regression commands:
 
 ```sh
-.venv/bin/python -m pytest tests/test_filter_audit.py tests/test_movement_threshold_state.py tests/test_stationarity.py tests/test_stationarity_memory.py tests/test_stationarity_rerun.py tests/test_movement_fixes.py tests/test_multi_user_review.py tests/test_rds_movement.py tests/test_rds_export.py tests/test_rds_owner_colors.py tests/test_movement_issue_groups.py -m 'not browser' -q
-.venv/bin/python -m pytest tests/test_review_readiness_browser.py tests/test_movement_browser.py::test_rds_export_shows_live_progress_and_completion -q
+uv run --locked python -m pytest tests/test_filter_audit.py tests/test_movement_threshold_state.py tests/test_stationarity.py tests/test_stationarity_memory.py tests/test_stationarity_rerun.py tests/test_movement_fixes.py tests/test_multi_user_review.py tests/test_rds_movement.py tests/test_rds_export.py tests/test_rds_owner_colors.py tests/test_movement_issue_groups.py -m 'not browser' -q
+uv run --locked python -m pytest tests/test_review_readiness_browser.py tests/test_movement_browser.py::test_rds_export_shows_live_progress_and_completion -q
 ```

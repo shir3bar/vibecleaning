@@ -6,6 +6,13 @@ Default behavior:
 - Use `examples/trajectory/` only as a reference or when the user explicitly wants a separate app.
 - Keep `app/` generic.
 
+Environment and startup:
+
+- Follow `docs/ENVIRONMENT.md`; use uv with `.python-version`, `pyproject.toml` and `uv.lock`.
+- Use `uv sync --locked` for development and `uv run --locked` for commands. Everyday review uses the OS launchers, which synchronize app-only dependencies first.
+- Do not introduce separate pip/venv or Conda setup instructions for the app. `requirements.txt` and `environment.yml` are legacy external-workflow files.
+- Commit intentional dependency changes in `pyproject.toml` and `uv.lock` together.
+
 Project model:
 
 - A project lives under `data/<project>/`.

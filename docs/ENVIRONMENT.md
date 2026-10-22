@@ -1,219 +1,180 @@
-# Environment setup
+# Environment and startup reference
 
-Scrub Data is a Python application. It has no Node/npm build step; the map
-library and frontend assets used by the examples are served from the repository.
+**Use uv for installation, startup, development and tests.** It creates and
+manages the Python virtual environment; there is no separate venv activation
+step. Python 3.11 is selected by `.python-version`, direct dependencies live in
+`pyproject.toml`, and `uv.lock` records the resolved versions. There is no
+Node/npm build step.
 
-Python 3.11 is the reference version in `environment.yml`. Newer Python
-versions may work, but use 3.11 when diagnosing environment-specific failures.
+## Open the movement review app
 
-## Option 1: uv (recommended)
+Follow the guide for your computer:
 
-Install `uv` once if it is not already available:
+- [Windows: install, create a login, start and update](START_HERE_WINDOWS.md)
+- [Mac: install, create a login, start and update](START_HERE_MAC.md)
+- Linux: follow the commands below after installing Git and
+  [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
-```bash
-python -m pip install uv
+The workflow is the same: clone the repository locally, install the locked app
+packages, create an account once per data folder, then use the launcher each
+time. The launchers synchronize dependencies before starting the server. They
+select the RDS or CSV app, set the data/cache paths and check the local port.
+
+For Linux, from the repository root, prepare the included data and account once:
+
+```sh
+export UV_PROJECT_ENVIRONMENT="$PWD/.venv"
+uv sync --locked --no-dev
+uv run --no-sync python -m app.auth_cli --data-root "./data" bootstrap editor
 ```
 
-From the repository root, create the locked environment:
+Start it each time with:
 
-```bash
-uv sync --locked
+```sh
+bash scripts/start-vibecleaning.sh --profile Rds --data-root "./data"
 ```
 
-`uv` reads `.python-version`, creates `.venv/`, and installs the application
-dependencies plus the default `dev` dependency group from `pyproject.toml`.
-Run commands without manually activating the environment:
+Open `http://127.0.0.1:8422`. Use `--profile Csv` for CSV review on port 8421.
+Stop with Ctrl+C. To update, stop the app, run `git pull --ff-only` in the
+repository, then run the launcher again. For shared storage, accounts and ZIP
+releases, follow the [IT guide](IT_DEPLOYMENT_REQUIREMENTS.md).
 
-```bash
-uv run python examples/move_viz/server.py
-uv run pytest -q tests/test_move_viz.py
+## Where the environment lives
+
+All of these environments are managed by uv. Their location is selected by
+`UV_PROJECT_ENVIRONMENT`; it is independent of the folder containing review data.
+
+| Use | Python environment |
+| --- | --- |
+| Mac/Linux launcher | `.venv` inside the local checkout or extracted release |
+| Windows launcher, Git checkout | `%LOCALAPPDATA%\Vibecleaning\venvs\development` |
+| Windows launcher, packaged release | `%LOCALAPPDATA%\Vibecleaning\venvs\<release-id>` |
+| Development and tests on any OS | `.venv` inside the local checkout |
+
+The Windows launcher deliberately keeps its environment under local app data.
+Its quick-start guide selects that same path for account setup. A packaged
+release uses the ID from `release-manifest.json`; follow the IT guide for that
+case. Windows Git checkouts share the `development` environment, so stop one
+checkout's app before starting another version.
+
+Keep the application checkout, environments and caches on the local computer.
+Point `--data-root` / `-DataRoot` to the data folder or mounted share. Use the
+same data root for account creation and startup; otherwise the app will look
+for a different user registry.
+
+## Development and tests
+
+Run commands from the repository root. To select this checkout's environment,
+use one of these shell-specific commands, including when switching from a
+Windows reviewer setup:
+
+```sh
+# Mac/Linux
+export UV_PROJECT_ENVIRONMENT="$PWD/.venv"
 ```
-
-Use these commands when changing dependencies:
-
-```bash
-uv add package-name
-uv add --dev package-name
-uv lock
-uv sync --locked
-```
-
-Commit `pyproject.toml` and `uv.lock` together. CI and handoff verification
-should use `uv sync --locked`; do not regenerate the lockfile incidentally.
-`pyproject.toml` is the dependency source of truth for uv. When maintaining the
-legacy pip workflow, mirror direct dependency additions or removals in
-`requirements.txt` as well.
-
-The uv lock covers Python dependencies used by this repository. It does not
-replace Conda when work specifically requires system-level GDAL or HDF4
-libraries.
-
-## Option 2: Python virtual environment
-
-From the repository root:
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-On Windows PowerShell, activate with:
 
 ```powershell
-.venv\Scripts\Activate.ps1
+# Windows PowerShell
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location).Path ".venv"
 ```
 
-This installs the application, testing, movement-analysis, and OSM dependencies.
-The packages are not currently lock-file pinned, so record the resolved
-environment with `python -m pip freeze` when exact reproduction is required.
+Then install the app and development tools on any OS:
 
-## Option 3: Conda geospatial environment
-
-The tracked Conda environment provides Python and the heavier geospatial base.
-The Python application requirements are installed as a second explicit step:
-
-```bash
-conda env create -f environment.yml
-conda activate movebench
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-The environment is named `movebench` for historical reasons. Do not assume the
-Conda file alone installs FastAPI, pytest, or the movement-analysis packages.
-
-## Minimal move_viz environment
-
-To run and test only the lightweight SQLite viewer, the smallest practical
-environment is:
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install fastapi uvicorn httpx pytest
-```
-
-SQLite support comes from Python's standard library. The `sqlite3` command-line
-program is useful for inspecting a new database but is not required to run the
-app.
-
-Start the viewer with:
-
-```bash
-python examples/move_viz/server.py
-```
-
-Then open `http://127.0.0.1:8422`. Basemap tiles require network access; the
-SQLite review and data graph remain local.
-
-## Verify the installation
-
-For `move_viz`:
-
-```bash
+```sh
 uv sync --locked
-uv run python -c "import sqlite3, fastapi, uvicorn; print(sqlite3.sqlite_version)"
-uv run python -m compileall -q examples/move_viz tests/test_move_viz.py
-uv run pytest -q tests/test_move_viz.py
+uv run --locked python -m pytest -q tests/test_move_viz.py
 ```
 
-Or, inside an activated venv/Conda environment:
+[Running the tests](TESTING.md) covers Chromium installation and the full suite.
+Development launch commands use the same environment:
 
-```bash
-python -c "import sqlite3, fastapi, uvicorn; print(sqlite3.sqlite_version)"
-python -m compileall -q examples/move_viz tests/test_move_viz.py
-pytest -q tests/test_move_viz.py
+| App | Command | Default port |
+| --- | --- | --- |
+| Generic framework starter | `uv run --locked python server.py` | 8420 |
+| Full movement development playground | `uv run --locked python examples/movement/server.py` | 8420 |
+| CSV review | `uv run --locked python examples/slim_movement/server.py` | 8421 |
+| RDS review | `uv run --locked python examples/rds_movement/server.py` | 8422 |
+| SQLite viewer | `uv run --locked python examples/move_viz/server.py` | 8422 |
+| Trajectory reference | `uv run --locked python examples/trajectory/server.py` | 8420 |
+
+Run one app per port. The movement apps require a login registry before startup;
+for the repository's default `data` folder:
+
+```sh
+uv run --locked python -m app.auth_cli --data-root "./data" bootstrap editor
+uv run --locked python -m app.auth_cli --data-root "./data" add reviewer1 --role reviewer
 ```
 
-For the full movement app suite, browser installation, and optional GitHub runs,
-see [Running the tests](TESTING.md). Start with `uv sync --locked`; app-only
-environments may not include the test tools.
+Run `bootstrap` only for a new registry. New display names default to normalized
+usernames; `--display-name "Taylor Reviewer"` provides an explicit override.
+Restart running apps after account changes. Set `VIBECLEANING_DATA_ROOT` when
+launching a server directly against a different data folder; see the IT guide.
 
-## Configuration
+### What the uv flags mean here
 
-The example servers accept `HOST` and `PORT`. Movement deployments also use:
+- `uv sync --locked --no-dev`: install the locked app packages for reviewers.
+- `uv sync --locked`: also install the development/test tools.
+- `uv run --locked ...`: synchronize as needed without changing the lockfile;
+  use this for development commands.
+- `uv run --no-sync ...`: use an environment already synchronized by the
+  preceding setup command or launcher. This keeps reviewer commands from
+  installing development tools.
+
+These flags follow uv's [locking and syncing rules](https://docs.astral.sh/uv/concepts/projects/sync/).
+The Mac/Linux launcher shares the checkout's `.venv` and synchronizes with
+`--no-dev`, which can remove test tools. Run `uv sync --locked` again before
+returning to tests. Browser installation is only needed for browser tests, not
+for opening the app in your normal browser.
+
+### Changing dependencies
+
+```sh
+uv add package-name
+uv add --dev package-name
+uv sync --locked
+```
+
+Commit `pyproject.toml` and `uv.lock` together. Use `uv lock` when intentionally
+updating the lock after editing dependency declarations. Routine setup and CI
+must use `--locked` so an outdated lock is reported instead of silently changed.
+
+## Existing pip, venv or Conda setups
+
+`requirements.txt` is a legacy, unpinned dependency list. `environment.yml` is a
+legacy `movebench` geospatial environment with GDAL/HDF4 tools. Neither is the
+installation path for the review app, and neither defines its locked versions.
+They remain for older external workflows; new app dependencies belong in
+`pyproject.toml` and `uv.lock`. The SQLite viewer uses the same uv setup as the
+other apps; it does not need a separate minimal environment.
+
+To move an existing installation to uv, stop the app and open a fresh terminal
+without an activated project venv or Conda environment. Install uv, select the
+environment path above, and follow the appropriate setup guide. If an existing
+`.venv` must be retained for another workflow, rename that environment folder
+before syncing. Keep the data folder and its `scrubdata` history in place.
+
+R and its `sf`/`move2` packages are optional for R-native RDS export; they are
+separate from the Python environment. See the IT guide for deployment details.
+
+## Configuration and housekeeping
+
+Movement deployments use:
 
 ```text
-VIBECLEANING_DATA_ROOT       authoritative projects and review history
+VIBECLEANING_DATA_ROOT       authoritative projects, accounts and review history
 VIBECLEANING_CACHE_ROOT      machine-local disposable caches
 VIBECLEANING_SHARED_LOCKING  required (default) or disabled
 ```
 
-An explicit Python constructor or CLI path takes precedence over its environment
-variable; the environment takes precedence over platform defaults. The Windows
-cache default is `%LOCALAPPDATA%\Vibecleaning\cache`. The macOS default is
-`~/Library/Caches/Vibecleaning`, and Linux follows `XDG_CACHE_HOME` or
-`~/.cache/vibecleaning`.
+Explicit constructor/CLI paths override environment variables, which override
+platform defaults. Cache defaults are `%LOCALAPPDATA%\Vibecleaning\cache` on
+Windows, `~/Library/Caches/Vibecleaning` on Mac, and
+`${XDG_CACHE_HOME:-~/.cache}/vibecleaning` on Linux. Cache/account commands and
+shared-folder deployment instructions live in the [IT guide](IT_DEPLOYMENT_REQUIREMENTS.md).
 
-Full and slim movement load the multi-user registry once from
-`<data-root>/scrubdata/users.json`. Bootstrap it before first startup:
+The servers accept `HOST` and `PORT`. The SQLite viewer also accepts
+`MOVE_VIZ_MAX_UPLOAD_BYTES` (default 512 MiB), `MOVE_VIZ_MAX_ROWS` (100,000) and
+`MOVE_VIZ_MAX_REVIEW_ROWS` (250,000).
 
-```bash
-uv run python -m app.auth_cli bootstrap admin
-uv run python -m app.auth_cli add reviewer1 --role reviewer
-```
-
-New accounts use their normalized username (trimmed and lowercase) as the display
-name. Optionally add `--display-name "Taylor Reviewer"` to `bootstrap` or `add`
-to choose another label. Existing accounts keep their current names.
-
-Pass `--data-root` to override `VIBECLEANING_DATA_ROOT`. Account changes use a
-cross-process lock, but administrators should still make registry changes during
-a maintenance window and restart running instances afterward. Share ACLs are the
-security boundary for `users.json`; POSIX mode bits are not an access-control
-mechanism on Windows shares.
-
-Clear local RDS indexes explicitly with one of:
-
-```bash
-uv run python -m app.cache_cli clear-rds --all
-uv run python -m app.cache_cli clear-rds --older-than-days 30
-```
-
-On Windows 11, use the launcher from the repository root:
-
-```powershell
-.\scripts\start-vibecleaning.ps1 `
-  -Profile Rds `
-  -DataRoot "\\university-server\research\movement-data" `
-  -SharedLocking required
-```
-
-Use `-Profile Csv` for the slim CSV application and optionally pass
-`-CacheRoot`, `-Port`, or `-SharedLocking disabled`. The launcher keeps the uv
-environment and caches beneath `%LOCALAPPDATA%\Vibecleaning`, binds only to
-`127.0.0.1`, and refuses an occupied port.
-
-Use the same CLI's `list`, `enable`, `disable`, and `reset-password` commands for
-operator account management and restart the server after changes. The app must
-be placed behind HTTPS when shared beyond localhost. See
-`examples/slim_movement/README.md`.
-
-Set `VIBECLEANING_SECURE_COOKIE=1` when the browser reaches the app over HTTPS.
-
-`move_viz` also recognizes:
-
-```text
-MOVE_VIZ_MAX_UPLOAD_BYTES  default 512 MiB
-MOVE_VIZ_MAX_ROWS          default 100,000 rows per map page
-MOVE_VIZ_MAX_REVIEW_ROWS   default 250,000 fixes per graph step
-```
-
-Example:
-
-```bash
-HOST=0.0.0.0 PORT=8422 MOVE_VIZ_MAX_ROWS=100000 \
-  python examples/move_viz/server.py
-```
-
-## Environment hygiene
-
-- Do not commit `.venv/`, Conda environments, caches, or generated kernels.
-- Do not commit large generated SQLite samples unless the user explicitly asks.
-- Keep local graph projects under `data/` out of source-control commits.
-- Inspect `git status --short` before staging environment-related changes.
-- Treat untracked Docker/devcontainer files as user-owned unless they are
-  explicitly brought into scope.
+Do not commit environments, caches, generated kernels, user registries or live
+review data. Inspect `git status --short` before staging setup changes.

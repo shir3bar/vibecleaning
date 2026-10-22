@@ -1,3 +1,5 @@
+# Legacy unpinned dependencies for older external workflows.
+# App setup uses pyproject.toml + uv.lock; see docs/ENVIRONMENT.md.
 fastapi
 uvicorn
 httpx

@@ -4,9 +4,15 @@
 
 - [Windows: installation and startup](docs/START_HERE_WINDOWS.md)
 - [Mac: installation and startup](docs/START_HERE_MAC.md)
+- [Linux and development: environment reference](docs/ENVIRONMENT.md)
 
-Each guide covers getting the app through Git, creating a login, and reopening
+The Windows and Mac guides cover getting the app through Git, creating a login, and reopening
 it later, using the two included MoveTraits studies.
+
+All setup uses **uv**, Python 3.11 and the committed `uv.lock`. uv manages the
+virtual environment for you; no manual activation or Conda setup is needed.
+Use the OS guide for everyday startup and the environment reference for coding
+and tests.
 
 
 <p align="center">
@@ -34,10 +40,10 @@ Agents can perform data modifications, but are instructed to do so by submitting
 
 To begin working with the codebase:
 
-0. Clone this repository.
+0. Clone this repository and complete [development setup](docs/ENVIRONMENT.md#development-and-tests).
 1. Put your raw data files in `data/<project>/`.
 2. Launch an agent instance from your terminal from inside the codebase, for example by running `codex`, `claude code`, or `opencode`.
-3. Launch the web application from another terminal window with `python server.py`, and direct your browser to the appropriate port on `localhost` (8420 by default).
+3. From the repository root, launch the framework starter with `uv run --locked python server.py`, and open `http://127.0.0.1:8420`. For movement review, use the OS guides above.
 4. Ask your agent to extend the starter app in `server.py` and `static/` according to your needs.
 
 See `examples/trajectory/` for a reference starter app built for animal movement (GPS) data.

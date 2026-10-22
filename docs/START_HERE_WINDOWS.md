@@ -3,6 +3,9 @@
 These steps open the RDS app with the **two MoveTraits studies included in Git**.
 Use **PowerShell**. Run each block in order; if it fails, stop and copy the error.
 
+This guide uses the repository's [uv setup](ENVIRONMENT.md). You do not need to
+install Python separately, activate a virtual environment or use Conda.
+
 **Already installed and have a login? Go to step 4.**
 
 ## 1. Install Git and uv — once
@@ -31,7 +34,8 @@ and `git pull --ff-only`, then continue below. Use that folder's path in the
 
 ## 3. Install dependencies and create your local login — once per data folder
 
-Run from the app folder (go to the folder in the File Explorer and type `powershell` in the address, it should open a console in that folder):
+Run from the app folder. In File Explorer, open that folder and type
+`powershell` in the address bar to open a terminal there:
 
 ```powershell
 $env:UV_PROJECT_ENVIRONMENT = "$env:LOCALAPPDATA\Vibecleaning\venvs\development"
@@ -41,10 +45,10 @@ uv run --no-sync python -m app.auth_cli --data-root ".\data" bootstrap editor
 
 The first line chooses the Python environment used by the Windows launcher.
 `uv` installs Python and the app's dependencies. Enter your chosen password twice;
-typing is invisible. In this example username is **editor**, you can change this to your own name. If it says the user registry is already initialized, use your existing login and continue to step 4.
-
-Note that this is just a local username for testing, when we set up the shared data folder we will need to re-configure these user names.
-
+typing is invisible. Your username is **editor**, or replace it with your own
+name in the command. If the registry is already initialized, use your existing
+login and continue to step 4. Accounts belong to the selected data folder; a
+shared team data folder has its own registry, managed as described in the IT guide.
 
 New accounts use their normalized username (trimmed and lowercase) as the display
 name. Optionally add `--display-name "Taylor Reviewer"` to `bootstrap` or `add`
@@ -72,7 +76,10 @@ step 4. Reviews are saved in `data`; back up that whole folder, including hidden
 folders.
 
 **Update:** stop the app, run `git pull --ff-only` in the app folder, then repeat
-step 4.
+step 4. The launcher installs any changed locked dependencies automatically.
+
+**CSV review:** use `-Profile Csv` in step 4 and open `http://127.0.0.1:8421`.
+CSV studies belong under `data\movement_raw\`; RDS studies under `data\movement_rds\`.
 
 Shared folders and team accounts: [IT guide](IT_DEPLOYMENT_REQUIREMENTS.md).
 App controls: [review manual](movement-review-manual.md).
