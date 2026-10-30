@@ -18,6 +18,7 @@ from .summary import (
 from .movement_features import (
     centered_turn_angle_degrees,
     compute_track_movement,
+    speed_threshold_matches,
     step_movement_metrics,
 )
 from .stationarity import evaluate_stationarity, validate_stationarity_filter
@@ -309,6 +310,13 @@ def resolve_filter_row_ranges(
         for row_index, raw in enumerate(reader, start=1):
             valid = _valid_movement_row(raw, columns)
             if valid is None:
+                if field_key == "speed_mps":
+                    # An invalid source row breaks the pair even if excluded.
+                    individual = str(raw.get(columns["individual"]) or "").strip()
+                    set_name = "test" if str(raw.get(columns["set"]) or "").strip().lower() == "test" else "train"
+                    track_key = (individual, set_name)
+                    previous_by_track.pop(track_key, None)
+                    turn_window_by_track.pop(track_key, None)
                 continue
             if not in_requested_scope(valid):
                 continue
@@ -332,11 +340,18 @@ def resolve_filter_row_ranges(
             previous = previous_by_track.get(track_key)
             if previous is not None and current[1] < previous[1]:
                 file_order_regressed = True
-            if field_key == "turn_angle_deg":
+            if field_key in {"turn_angle_deg", "speed_mps"}:
                 window = turn_window_by_track.setdefault(track_key, [])
                 if len(window) == 2:
-                    value = _turn_filter_value(window[0], window[1], current)
-                    if _filter_value_matches(value, filter_spec):
+                    if field_key == "speed_mps":
+                        matched = speed_threshold_matches(
+                            _derived_filter_value(window[0], window[1], "speed_mps"),
+                            _derived_filter_value(window[1], current, "speed_mps"),
+                            float(filter_spec["threshold_value"]), filter_spec.get("operator", "gt"))
+                    else:
+                        value = _turn_filter_value(window[0], window[1], current)
+                        matched = _filter_value_matches(value, filter_spec)
+                    if matched:
                         matched_rows.append(window[1][0])
                     window.pop(0)
                 window.append(current)
@@ -350,6 +365,12 @@ def resolve_filter_row_ranges(
 
     if not file_order_regressed:
         return _compress_row_numbers(matched_rows), len(matched_rows)
+
+    if field_key == "speed_mps":
+        return _resolve_speed_threshold_row_ranges(
+            path, filter_spec, annotations=annotations or [], source_artifact=source_artifact,
+            confirmed_fix_keys=confirmed_fix_keys, confirmed_individual_tracks=confirmed_individual_tracks,
+        )
 
     records_by_track: dict[tuple[str, str], list[tuple]] = {}
     with path.open("r", newline="", encoding="utf-8") as handle:
@@ -467,6 +488,28 @@ def csv_stationarity_records(path: Path, filter_spec: dict, *, source_artifact: 
                 "segment": (raw.get(tag_column), fragments.get(track, 0)),
             })
     return records
+
+
+def _resolve_speed_threshold_row_ranges(path, spec, *, annotations, source_artifact,
+                                      confirmed_fix_keys, confirmed_individual_tracks):
+    from .speed_spikes import track_metrics
+    records = csv_stationarity_records(path, spec, source_artifact=source_artifact,
+        confirmed_fix_keys=confirmed_fix_keys, confirmed_individual_tracks=confirmed_individual_tracks)
+    groups = defaultdict(list)
+    for row in records:
+        # Invalid positions and unparseable timestamps break spatial steps.
+        if row.get("invalid"):
+            row = {**row, "lon": float("nan"), "lat": float("nan")}
+        groups[(row["individual"], row["set_name"], row["segment"][1])].append(row)
+    matches = []
+    for records in groups.values():
+        for track, movement in track_metrics(records, annotations):
+            for i, row in enumerate(track):
+                incoming = movement[track[i - 1]["fix_key"]]["speed_mps"] if i else None
+                if speed_threshold_matches(incoming, movement[row["fix_key"]]["speed_mps"],
+                                           float(spec["threshold_value"]), spec.get("operator", "gt")):
+                    matches.append(row["row_index"])
+    return _compress_row_numbers(matches), len(matches)
 
 
 def _resolve_speed_spike_row_ranges(path, spec, *, annotations, source_artifact,
@@ -717,6 +760,7 @@ def normalize_annotation(raw: dict) -> dict:
             "filter": dict(scope.get("filter") or {}) if isinstance(scope.get("filter"), dict) else {},
             **({"stationarity_inputs": list(scope["stationarity_inputs"])} if "stationarity_inputs" in scope else {}),
             **({"stationarity_rerun": dict(scope["stationarity_rerun"])} if "stationarity_rerun" in scope else {}),
+            **({"study_filter": dict(scope["study_filter"])} if isinstance(scope.get("study_filter"), dict) else {}),
             "burst_id": str(scope.get("burst_id") or "").strip(),
             "individual": str(scope.get("individual") or "").strip(),
             "set_name": str(scope.get("set_name") or "").strip(),
@@ -747,6 +791,10 @@ def individual_review_decisions(
         individual = str(scope.get("individual") or "").strip()
         if individual:
             latest[individual] = annotation
+    from .study_filters import pending_review_individuals
+    for individual in pending_review_individuals(annotations):
+        if individual in latest:
+            latest[individual] = {**latest[individual], "needs_check": True, "filter_review_pending": True}
     return latest
 
 

@@ -118,7 +118,9 @@ def track_metrics(records, annotations):
     skipped = stationarity_skips(records, annotations, skip_gps=False)
     tracks = defaultdict(list)
     for i, record in enumerate(records):
-        if i not in skipped and not record.get("invalid"):
+        # Retain invalid positions as barriers, including when also excluded.
+        # Canonical movement metrics leave adjacent spatial features missing.
+        if i not in skipped or record.get("invalid"):
             tracks[(record["individual"], record["set_name"])].append(record)
     for key, track in tracks.items():
         track.sort(key=lambda row: (row["time_ms"], row["row_index"], row["fix_key"]))

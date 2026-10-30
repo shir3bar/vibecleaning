@@ -182,13 +182,16 @@ def score_bursts(feature_rows: list[dict], config: dict | None = None) -> dict:
     normalized_config = _normalize_config(config)
     model_config = normalized_config["model_config"]
     feature_set = normalized_config["feature_set"]
-    burst_rows = [dict(row) for row in feature_rows]
+    skipped_positions = sum(bool(row.get("spatial_summary_unavailable")) for row in feature_rows)
+    burst_rows = [dict(row) for row in feature_rows if not row.get("spatial_summary_unavailable")]
     prepared = prepare_burst_feature_matrix(
         burst_rows,
         feature_set=feature_set,
         standardize=False,
     )
     warnings = []
+    if skipped_positions:
+        warnings.append(f"Spatial summaries unavailable for {skipped_positions} burst(s) containing invalid positions; these bursts were not scored.")
     if prepared["dropped_features"]:
         warnings.append(
             f"Dropped {len(prepared['dropped_features'])} non-usable candidate feature column(s)."
@@ -211,7 +214,8 @@ def score_bursts(feature_rows: list[dict], config: dict | None = None) -> dict:
             "nonfinite_value_handling": "treated_as_missing",
             "feature_exclusions": ["metadata", "feature_set", "nonnumeric", "all_null", "constant"],
         },
-        "input_burst_count": len(burst_rows),
+        "input_burst_count": len(feature_rows),
+        "unscorable_position_burst_count": skipped_positions,
         "scored_burst_count": 0,
         "requested_features": prepared["requested_features"],
         "candidate_model_features": prepared["candidate_model_features"],

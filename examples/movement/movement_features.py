@@ -15,6 +15,23 @@ STEP_FEATURE_FIELDS = (
 WGS84_GEOD = Geod(ellps="WGS84")
 
 
+def speed_threshold_matches(incoming, outgoing, threshold, operator="gt") -> bool:
+    """Match a fix only when both adjacent speeds pass the strict cutoff.
+
+    Each step is still measured once, from its starting fix. This predicate
+    assigns a speed threshold to the central fix and never uses turning angle.
+    """
+    if any(value is None or not isfinite(value) for value in (incoming, outgoing, threshold)):
+        return False
+    if operator == "lt":
+        return incoming < threshold and outgoing < threshold
+    return incoming > threshold and outgoing > threshold
+
+
+def coordinate_is_valid(lon, lat) -> bool:
+    return isfinite(lon) and isfinite(lat) and -180 <= lon <= 180 and -90 <= lat <= 90
+
+
 def burst_movement_summary(time_ms, lon, lat) -> dict:
     """Summarize adjacent retained fixes inside ONE ordered burst.
 
@@ -30,6 +47,17 @@ def burst_movement_summary(time_ms, lon, lat) -> dict:
     if np.any(np.diff(times) < 0) or not (np.isfinite(lon).all() and np.isfinite(lat).all()):
         raise ValueError("Burst coordinates must be finite and timestamps ordered")
     gaps = np.diff(times).astype(float) / 1000.0
+    invalid_count = sum(not coordinate_is_valid(x, y) for x, y in zip(lon, lat))
+    if invalid_count:
+        return {
+            "n_fixes": len(times), "start_time_ms": int(times[0]), "end_time_ms": int(times[-1]),
+            "duration_s": float((times[-1] - times[0]) / 1000.0),
+            **dict.fromkeys(("path_length_m", "net_displacement_m", "straightness", "mean_step_length_m",
+                             "sd_step_length_m", "mean_speed_mps", "median_speed_mps", "max_speed_mps", "sd_speed_mps")),
+            "max_time_gap_s": float(np.max(gaps)) if len(gaps) else None,
+            "invalid_coordinate_count": invalid_count,
+            "spatial_summary_unavailable": "Burst contains invalid positions",
+        }
     distances = np.asarray(WGS84_GEOD.inv(lon[:-1], lat[:-1], lon[1:], lat[1:])[2]) if len(times) > 1 else np.array([])
     distances = distances.astype(float)
     if not np.isfinite(distances).all():
@@ -66,6 +94,8 @@ def _wgs84_inverse(
     calculation used by ``lwgeom::st_geod_azimuth()`` and by ``sf`` when its
     ellipsoidal distance engine is active.
     """
+    if not coordinate_is_valid(lon1, lat1) or not coordinate_is_valid(lon2, lat2):
+        return None, None
     azimuth_degrees, _back_azimuth_degrees, distance_m = WGS84_GEOD.inv(
         lon1,
         lat1,
@@ -209,6 +239,9 @@ def compute_track_movement(
             record = sorted_records[index]
             following = sorted_records[index + 1]
             movement = movement_by_fix_key[record["fix_key"]]
+            if not all(not r.get("invalid") and coordinate_is_valid(r["lon"], r["lat"])
+                       for r in (record, following)):
+                continue
             movement.update(
                 step_movement_metrics(
                     record["time_ms"],
@@ -232,6 +265,9 @@ def compute_track_movement(
                     _reservoir_append(indiv_stats["speed"], speed_mps, indiv_stats["seen_speed"], max_stat_samples)
         for index in range(1, len(sorted_records) - 1):
             center = sorted_records[index]
+            if not all(not r.get("invalid") and coordinate_is_valid(r["lon"], r["lat"])
+                       for r in sorted_records[index - 1:index + 2]):
+                continue
             movement_by_fix_key[center["fix_key"]]["turn_angle_deg"] = (
                 centered_turn_angle_degrees(
                     sorted_records[index - 1],

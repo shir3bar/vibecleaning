@@ -659,6 +659,18 @@ def _finalize_segments(segments_by_id: dict[str, dict]) -> list[dict]:
     return segments
 
 
+def _invalid_position_barrier(raw, columns, row_index):
+    """Keep an unplottable observation in internal step calculations."""
+    individual = str(raw.get(columns["individual"]) or "").strip()
+    time_ms = parse_time_ms(raw.get(columns["time"]))
+    if not individual or time_ms is None:
+        return None
+    set_name = "test" if str(raw.get(columns["set"]) or "").strip().lower() == "test" else "train"
+    return {"row_index": row_index, "fix_key": f"invalid-row:{row_index}",
+            "individual": individual, "set_name": set_name, "time_ms": time_ms,
+            "lon": float("nan"), "lat": float("nan"), "invalid": True}
+
+
 def _valid_movement_row(raw: dict, columns: dict[str, str | None]) -> dict | None:
     individual = str(raw.get(columns["individual"], "")).strip()
     if not individual:
@@ -928,6 +940,7 @@ def _build_movement_overview(
 
     species_by_individual: dict[str, str] = {}
     row_counts: dict[str, int] = {}
+    invalid_overview_metric_records = []
     track_records_by_group: dict[tuple[str, str], list[dict]] = {}
     eligible_track_records_by_group: dict[tuple[str, str], list[dict]] = {}
     review_counts = {"suspected": 0, "confirmed": 0}
@@ -951,6 +964,9 @@ def _build_movement_overview(
         for row_index, raw in enumerate(reader, start=1):
             valid = _valid_movement_row(raw, columns)
             if valid is None:
+                barrier = _invalid_position_barrier(raw, columns, row_index)
+                if barrier:
+                    invalid_overview_metric_records.append(barrier)
                 continue
 
             individual = valid["individual"]
@@ -1052,7 +1068,10 @@ def _build_movement_overview(
     if total_rows == 0 or min_time_ms is None or max_time_ms is None:
         raise ValueError("CSV did not contain any valid movement rows")
 
-    movement_by_fix_key, stat_samples = compute_track_movement(eligible_track_records_by_group)
+    metric_records_by_group = {key: list(records) for key, records in eligible_track_records_by_group.items()}
+    for barrier in invalid_overview_metric_records:
+        metric_records_by_group.setdefault(_track_key(barrier["individual"], barrier["set_name"]), []).append(barrier)
+    movement_by_fix_key, stat_samples = compute_track_movement(metric_records_by_group)
 
     color_fields = list(DERIVED_FIELDS)
     for fieldname in overview_quality_fields:
@@ -1306,12 +1325,16 @@ def _build_movement_fixes(
         burst_gap_mode == "quantile"
         and burst_gap_effective_seconds is None
     )
+    invalid_metric_records = []
 
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         for row_index, raw in enumerate(reader, start=1):
             valid = _valid_movement_row(raw, columns)
             if valid is None:
+                barrier = _invalid_position_barrier(raw, columns, row_index)
+                if barrier and (not individual_filters or barrier["individual"] in individual_filters):
+                    invalid_metric_records.append(barrier)
                 continue
 
             item_individual = valid["individual"]
@@ -1360,7 +1383,7 @@ def _build_movement_fixes(
 
     records_by_group = _group_track_records(records)
     eligible_records = [record for record in records if not record["analytically_excluded"]]
-    eligible_records_by_group = _group_track_records(eligible_records)
+    eligible_records_by_group = _group_track_records([*eligible_records, *invalid_metric_records])
     movement_by_fix_key, _stat_samples = compute_track_movement(eligible_records_by_group)
     if burst_gap_effective_seconds is None:
         burst_gap = resolve_burst_gap_strategy(

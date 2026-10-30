@@ -70,6 +70,15 @@ def main():
             token for item in appended for token in row_tokens_for_scope(item.get("scope") or {})
         })
     summary.update(params.get("stationarity_rerun_summary") or {})
+    snapshot = params.get("study_filter_snapshot")
+    if snapshot:
+        stage = snapshot["stage"]
+        target = outputs.get(f"movement_filter_{stage}.json")
+        if target is None:
+            raise SystemExit("Study filter result output was not declared")
+        saved = {**snapshot, "step_id": step_id, "created_at": created_at, "user": params.get("user", "")}
+        Path(target["path"]).write_text(json.dumps(saved, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+        summary.update(params.get("study_filter_summary") or {})
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 

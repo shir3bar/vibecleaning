@@ -191,17 +191,8 @@ def _r_writer_available() -> bool:
     rscript = shutil.which("Rscript")
     if not rscript:
         return False
-    check = subprocess.run(
-        [
-            rscript,
-            "-e",
-            'quit(status=if (requireNamespace("sf", quietly=TRUE) && requireNamespace("move2", quietly=TRUE)) 0 else 1)',
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return check.returncode == 0
+    # Appending columns to the serialized input needs only base R, including AMT.
+    return True
 
 
 def write_reviewed_rds_r(
@@ -218,11 +209,17 @@ def write_reviewed_rds_r(
         script = """
 args <- commandArgs(trailingOnly=TRUE)
 x <- readRDS(args[[1]])
+original_attributes <- attributes(x)
+# attributes() expands automatic row names; retain their original compact form.
+original_attributes$row.names <- .row_names_info(x, type=0L)
 review <- read.delim(args[[2]], stringsAsFactors=FALSE, check.names=FALSE,
                      colClasses="character",
                      na.strings="<NA>", quote="\\\"")
 stopifnot(nrow(x) == nrow(review))
 for (name in names(review)) x[[name]] <- review[[name]]
+original_attributes$names <- names(x)
+if (!is.null(attr(x, "agr"))) original_attributes$agr <- attr(x, "agr")
+attributes(x) <- original_attributes
 saveRDS(x, args[[3]], compress=TRUE)
 """
         result = subprocess.run(
@@ -233,6 +230,23 @@ saveRDS(x, args[[3]], compress=TRUE)
         )
         if result.returncode:
             raise RuntimeError(result.stderr.strip() or "R reviewed-RDS writer failed")
+
+
+def _compare_attribute_values(left, right) -> None:
+    if isinstance(left, pd.DataFrame) and isinstance(right, pd.DataFrame):
+        pd.testing.assert_frame_equal(left, right)
+    elif isinstance(left, dict) and isinstance(right, dict):
+        if left.keys() != right.keys():
+            raise AssertionError("Attribute keys changed")
+        for key in left:
+            _compare_attribute_values(left[key], right[key])
+    elif isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        if len(left) != len(right):
+            raise AssertionError("Attribute length changed")
+        for a, b in zip(left, right, strict=True):
+            _compare_attribute_values(a, b)
+    else:
+        np.testing.assert_equal(left, right)
 
 
 def _compare_original_columns(source_path: Path, output_path: Path, expected_review: dict | None = None) -> None:
@@ -264,12 +278,14 @@ def _compare_original_columns(source_path: Path, output_path: Path, expected_rev
                 raise ValueError(
                     f"Reviewed RDS changed {name} in {source_path.name}"
                 ) from exc
-    for attr in (
+    for attr in (set(source.attrs) | set(output.attrs) | set((
         "class", "sf_column", "time_column", "track_id_column", "crs_", "geometry_crs",
         "row.names", "track_data", "convergence", "v_max_used",
-    ):
-        if repr(source.attrs.get(attr)) != repr(output.attrs.get(attr)):
-            raise ValueError(f"Reviewed RDS changed {attr} in {source_path.name}")
+    ))) - {"names", "agr"}:
+        try:
+            _compare_attribute_values(source.attrs.get(attr), output.attrs.get(attr))
+        except AssertionError as exc:
+            raise ValueError(f"Reviewed RDS changed {attr} in {source_path.name}") from exc
     if expected_review is not None:
         for name in RDS_REVIEW_COLUMNS:
             # Legacy exports can represent an all-missing review column as
@@ -342,6 +358,7 @@ def export_reviewed_rds_bundle(
     writer: str = "auto",
     progress: Callable[[str, int, int, str], None] | None = None,
     decisions: list[dict] | None = None,
+    metadata_path: Path | None = None,
 ) -> dict:
     def report(stage: str, completed: int, total: int, name: str = "") -> None:
         if progress is not None:
@@ -352,7 +369,7 @@ def export_reviewed_rds_bundle(
         raise ValueError("VIBECLEANING_RDS_WRITER must be auto, r, or python")
     engine = "r" if requested == "r" or (requested == "auto" and _r_writer_available()) else "python"
     if engine == "r" and not _r_writer_available():
-        raise RuntimeError("R writer requested but Rscript with sf and move2 is unavailable")
+        raise RuntimeError("R writer requested but Rscript is unavailable")
     output_dir.mkdir(parents=True, exist_ok=True)
     output_names = [cleaned_rds_name(name) for name, _ in sources]
     if not sources or len(set(name.casefold() for name in output_names)) != len(sources):
@@ -387,6 +404,13 @@ def export_reviewed_rds_bundle(
     if decisions is not None:
         from examples.movement.decision_export import save_decision_export
         manifest["auxiliary_files"] = [save_decision_export(output_dir, decisions)]
+    if metadata_path is not None:
+        destination = output_dir / "metadata.json"
+        shutil.copy2(metadata_path, destination)
+        manifest.setdefault("auxiliary_files", []).append({
+            "output_name": destination.name,
+            "output_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+        })
     atomic_write_json(output_dir / "writer_manifest.json", manifest)
     if cleaned_dir is not None:
         _publish_cleaned_files(output_dir, cleaned_dir, manifest, report)

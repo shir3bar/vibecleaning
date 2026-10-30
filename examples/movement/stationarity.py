@@ -282,7 +282,7 @@ def stationary_periods(records: list[dict], spec: dict, *, endpoint_keys=None) -
             if (
                 gap_ms <= 0 or gap_ms > spec["maximum_gap_s"] * 1000
                 or record.get(boundary_key) != run[-1].get(boundary_key)
-                or distance is None or not isfinite(distance) or distance > spec["radius_m"]
+                or distance is None or not isfinite(distance) or distance > spec["radius_m"] + 1e-8
             ):
                 finish(index)
                 run = []

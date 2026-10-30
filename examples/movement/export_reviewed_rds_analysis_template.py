@@ -26,6 +26,7 @@ def main():
         })
 
     inputs = {item["logical_name"]: item for item in spec.get("input_artifacts", [])}
+    attachments = {item["logical_name"]: item for item in spec.get("input_attachments", [])}
     outputs = {item["logical_name"]: item for item in spec.get("output_artifacts", [])}
     output = outputs.get(OUTPUT_ARTIFACT_NAME)
     if output is None:
@@ -89,6 +90,8 @@ def main():
         writer=os.environ.get("VIBECLEANING_RDS_WRITER", params.get("writer", "auto")),
         progress=progress,
         decisions=params.get("individual_decisions"),
+        metadata_path=Path(attachments["movement_metadata_snapshot.json"]["path"])
+        if "movement_metadata_snapshot.json" in attachments else None,
     )
     summary_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 

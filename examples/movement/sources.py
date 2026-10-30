@@ -21,6 +21,7 @@ from .summary import (
     build_movement_summary,
     list_movement_individuals,
 )
+from .study_metadata import resolve_index_metadata
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ def source_overview(
             overview_fix_limit=options.get("overview_fix_limit", 25_000),
             max_series_points=options.get("max_series_points", 1_500),
         )
+        payload.update(resolve_index_metadata(study_dir, index_path))
         payload["source_bundle_signature"] = bundle.signature
         payload["source_artifacts"] = [
             str(item.get("logical_name") or "") for item in bundle.artifacts
@@ -113,6 +115,7 @@ def source_summary(
     if adapter.bundle_scoped:
         bundle, index_path = ensure_rds_index(study_dir, dataset_id)
         payload = build_rds_overview(index_path, overview_fix_limit=0, max_series_points=250)
+        payload.update(resolve_index_metadata(study_dir, index_path))
         payload["source_bundle_signature"] = bundle.signature
         return payload, bundle.signature
     artifact, path = get_dataset_artifact(study_dir, dataset_id, logical_name)

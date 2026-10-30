@@ -75,6 +75,7 @@ from .analysis_history import (
 )
 from .binary_columns import build_csv_binary_columns
 from .catalog import family_names, get_study_dir, list_families, list_studies
+from .study_metadata import metadata_catalog_entry, metadata_export_attachment, resolve_index_metadata
 from .rds_export import cleaned_rds_name
 from .completion_publication import prepared_publication, recover_publication
 from .decision_export import decision_rows, decision_csv
@@ -233,7 +234,7 @@ def _movement_graph_payload(study_dir: Path, history: dict | None = None) -> dic
         step["label_parameters"]["filter"] = {
             key: spec[key]
             for key in (
-                "kind", "field_key", "field_kind", "operator", "threshold_value",
+                "kind", "field_key", "field_kind", "operator", "threshold_value", "speed_basis",
                 "selected_levels", "step_length_threshold_m", "minimum_abs_turn_angle_deg", "percentile",
                 "metric", "method", "algorithm", "speed_threshold_mps", "cutoff_preset",
                 "lower_speed_mps", "upper_speed_mps", "selected_stages", "distribution", "species_cap", "species_cap_field",
@@ -363,6 +364,7 @@ MOVEMENT_REVIEW_MODULES = (
     "examples.movement.stationarity",
     "examples.movement.speed_spikes",
     "examples.movement.review_annotations",
+    "examples.movement.study_filters",
 )
 MOVEMENT_ANOMALY_MODULES = (
     *MOVEMENT_REVIEW_MODULES,
@@ -439,6 +441,11 @@ RDS_REVIEW_STEP_TEMPLATE_PATH = Path(__file__).with_name("rds_review_step_templa
 RDS_REVIEW_STEP_SCRIPT = build_self_contained_script(
     RDS_REVIEW_STEP_TEMPLATE_PATH,
     MOVEMENT_REVIEW_MODULES,
+)
+STUDY_FILTER_PREVIEW_SCRIPT = build_self_contained_script(
+    Path(__file__).with_name("study_filter_preview_template.py"),
+    (*MOVEMENT_REVIEW_MODULES, "app.filesystem", "app.runtime", "app.metadata", "app.state",
+     "examples.movement.rds_index"),
 )
 
 CONFIRM_ISSUES_TEMPLATE_PATH = Path(__file__).with_name("confirm_issues_step_template.py")
@@ -756,6 +763,8 @@ def _validate_filter_scope(value: object) -> dict:
     field_kind = str(value.get("field_kind") or "").strip().lower()
     if field_kind not in {"numeric", "boolean", "categorical"}:
         raise ValueError("Invalid filter field kind")
+    if field_key == "speed_mps" and field_kind != "numeric":
+        raise ValueError("Speed thresholds require a numeric filter")
     result: dict[str, object] = {
         "field_key": field_key,
         "field_kind": field_kind,
@@ -776,6 +785,8 @@ def _validate_filter_scope(value: object) -> dict:
         if operator not in {"gt", "lt"}:
             raise ValueError("Invalid numeric filter operator")
         result.update({"operator": operator, "threshold_value": threshold})
+        if field_key == "speed_mps":
+            result["speed_basis"] = "both-adjacent"
         if value.get("percentile") is not None:
             result["percentile"] = _validate_filter_percentile(value["percentile"])
         if value.get("cutoff_preset") is not None:
@@ -1917,6 +1928,7 @@ def register_movement_routes(
                 studies.append(
                     {
                         **study,
+                        **metadata_catalog_entry(study_dir),
                         "review_revision": int(review_state.get("revision") or 0),
                         "completed": study_completed(study_dir, review_state),
                         "review": {
@@ -2275,6 +2287,91 @@ def register_movement_routes(
         except ReviewForbiddenError as exc:
             return json_error(str(exc), 404)
         except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.get("/api/apps/movement/family/{family_name}/study/{study_name}/dataset/{dataset_id}/study-filters")
+    async def get_study_filters(family_name: str, study_name: str, dataset_id: str, request: Request, logical_name: str = ""):
+        from .study_filters import StudyFilters
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
+            context = await run_in_threadpool(StudyFilters, study_dir, validate_path_part(dataset_id, label="dataset"),
+                rds=configured_source.bundle_scoped, logical_name=logical_name, cache_root=configured_cache_root)
+            return JSONResponse(await run_in_threadpool(context.status))
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/preview-study-filter")
+    async def preview_study_filter(family_name: str, study_name: str, request: Request, background_tasks: BackgroundTasks):
+        from .study_filters import artifact_name, LABELS
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
+            stage = str(body.get("stage") or "")
+            artifact_name(stage)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            dataset = load_dataset(study_dir, dataset_id)
+            logical = str(body.get("logical_name") or "")
+            names = [a["logical_name"] for a in dataset["artifacts"] if configured_source.accepts(a) or a["logical_name"] == "movement_review_annotations.json" or a["logical_name"].startswith("movement_filter_")]
+            payload = {"user": effective_user(request, body), "title": f"Preview study-wide {LABELS[stage]}",
+                "kind": "python", "script": STUDY_FILTER_PREVIEW_SCRIPT, "dataset_id": dataset_id,
+                "input_artifacts": names, "output_artifacts": ["study_filter_preview.json"],
+                "parameters": {"app": "movement", "action": "preview_study_filter", "stage": stage,
+                               "rds": configured_source.bundle_scoped, "logical_name": logical}}
+            payload = prepare_analysis_payload(request, study_dir, payload)
+            def finalize(result):
+                analysis_id = result["analysis"]["analysis_id"]
+                preview = load_json(project_paths(study_dir)["analyses"] / analysis_id / "outputs" / "study_filter_preview.json")
+                public = {k: v for k, v in preview.items() if k not in {"records", "snapshot"}}
+                public["snapshot"] = {k: v for k, v in preview["snapshot"].items() if k not in {"candidate_scope", "excluded_source_rows"}}
+                public["previous"] = {k: v for k, v in (preview.get("previous") or {}).items() if k not in {"candidate_scope", "excluded_source_rows"}}
+                return {**public, "analysis_id": analysis_id}
+            if body.get("background", True):
+                return enqueue_analysis(background_tasks, family_name, study_name, study_dir, payload, finalize)
+            return JSONResponse(finalize(await run_in_threadpool(create_analysis, study_dir, payload)))
+        except (ReviewForbiddenError, ReviewConflictError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/apply-study-filter")
+    async def apply_study_filter(family_name: str, study_name: str, request: Request):
+        from .study_filters import StudyFilters, step_payload, digest
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            logical = str(body.get("logical_name") or "")
+            body = await ensure_editor_self_review(request, study_dir, body, logical)
+            dataset_id = validate_path_part(body.get("dataset_id"), label="dataset")
+            analysis_id = validate_path_part(body.get("analysis_id"), label="analysis")
+            preview = load_json(project_paths(study_dir)["analyses"] / analysis_id / "outputs" / "study_filter_preview.json")
+            context = await run_in_threadpool(StudyFilters, study_dir, dataset_id, rds=configured_source.bundle_scoped,
+                                             logical_name=logical, cache_root=configured_cache_root)
+            if (preview["dataset_id"] != dataset_id or preview["preview_token"] != body.get("preview_token")
+                or preview["review_signature"] != digest(context.annotations)
+                or preview["snapshot"]["source_signature"] != context.source_signature):
+                raise ValueError("The filter preview is out of date; preview this filter again before applying")
+            dataset = load_dataset(study_dir, dataset_id)
+            names = [a["logical_name"] for a in dataset["artifacts"] if configured_source.accepts(a) or a["logical_name"] == "movement_review_annotations.json"]
+            payload = step_payload(preview, user=effective_user(request, body), script=RDS_REVIEW_STEP_SCRIPT,
+                                   source_artifacts=names, logical_name=logical)
+            payload, preflight, actor = prepare_step_payload(request, study_dir, body, payload, review_effect="annotation_only")
+            result = await run_in_threadpool(create_guarded_step, study_dir, payload, selected_dataset_id=dataset_id,
+                expected_current_dataset_id=str(body.get("expected_current_dataset_id") or dataset_id), preflight=preflight)
+            publish_state_event(family_name, study_name, study_dir, reason="dataset_head_changed", actor=actor)
+            return JSONResponse(result)
+        except EditLockedError as exc:
+            return _edit_locked_response(exc)
+        except EditConflictError as exc:
+            return _edit_conflict_response(exc)
+        except (ReviewForbiddenError, ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+        except (ValueError, ProjectStateError, FileNotFoundError) as exc:
             return json_error(str(exc), 400)
 
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/actions/rerun-stationarity")
@@ -3179,6 +3276,12 @@ def register_movement_routes(
                     "review_id": review["review_id"], "review_round": review.get("review_round", 1),
                     "review_revision": body.get("expected_review_revision"), "individual_decisions": rows,
                     "valid_individual_review_annotation_ids": [a["annotation_id"] for a in valid.values()]}}, actor)
+
+            if configured_source.bundle_scoped:
+                attachments = metadata_export_attachment(study_dir)
+                if attachments:
+                    payload["input_attachments"] = attachments
+                    payload["output_artifacts"].append("metadata.json")
 
             def finalize(export):
                 manifest_entry = next(a for a in export["analysis"]["realized_output_artifacts"]
@@ -4522,6 +4625,7 @@ def register_movement_routes(
                         if isinstance(item, dict)
                     ),
                     target_artifact=logical_name,
+                    metadata=resolve_index_metadata(study_dir, index_path),
                 )
                 fix_row_ranges = rds_report_row_ranges(fix_keys, artifact_offsets)
                 for normalized, raw in zip(
@@ -4699,6 +4803,10 @@ def register_movement_routes(
                     "user": user,
                 },
             }
+            attachments = metadata_export_attachment(study_dir)
+            if attachments:
+                payload["input_attachments"] = attachments
+                payload["output_artifacts"].append("metadata.json")
             payload = prepare_analysis_payload(request, study_dir, payload)
             if body.get("background") is True:
                 return enqueue_analysis(

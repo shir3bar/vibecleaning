@@ -48,7 +48,9 @@ from .stationarity import evaluate_stationarity, validate_stationarity_filter
 
 
 # Include source-owner columns and preserve absent detector results as missing.
-RDS_INDEX_SCHEMA_VERSION = 8
+RDS_INDEX_SCHEMA_VERSION = 9
+# Keep the historical source identity stable when only disposable storage changes.
+RDS_SOURCE_SIGNATURE_VERSION = 8
 RDS_SOURCE_FORMAT = "rds"
 RDS_IMPLICIT_SET = "train"
 # Browser requests can overlap when a reviewer changes filter settings. Keep
@@ -64,7 +66,6 @@ RDS_REQUIRED_COLUMNS = {
     "study_id",
     "timestamp",
     "burst_",
-    "geometry",
 }
 RDS_REVIEW_COLUMNS = (
     "outlier_status",
@@ -232,7 +233,7 @@ def load_rds_bundle(study_dir: Path, dataset_id: str) -> RdsBundle:
         raise ProjectStateError("Selected dataset has no RDS movement artifacts")
     paths = tuple(resolve_artifact_path(study_dir, artifact) for artifact in artifacts)
     digest = hashlib.sha256()
-    digest.update(f"rds-index-schema:{RDS_INDEX_SCHEMA_VERSION}\n".encode())
+    digest.update(f"rds-index-schema:{RDS_SOURCE_SIGNATURE_VERSION}\n".encode())
     for artifact, path in zip(artifacts, paths, strict=True):
         logical_name = str(artifact.get("logical_name") or "")
         digest.update(logical_name.encode("utf-8"))
@@ -289,6 +290,8 @@ def _rds_constructors() -> dict:
     constructors = dict(DEFAULT_CLASS_MAP)
     constructors["integer64"] = _integer64_constructor
     constructors["sf"] = _sf_constructor
+    constructors["track_xyt"] = _sf_constructor
+    constructors["data.frame"] = _sf_constructor
     constructors["sfc_POINT"] = _geometry_constructor
     return constructors
 
@@ -385,16 +388,16 @@ def validate_movement_rds(path: Path, frame: pd.DataFrame) -> dict[str, str | in
     if frame.empty:
         raise ValueError(f"{filename} contains no fixes")
     classes = {_scalar_text(value) for value in np.asarray(frame.attrs.get("class", []))}
-    if not {"sf", "move2"}.issubset(classes):
-        raise ValueError(f"{filename} is not an sf/move2 object")
-    if _attr_string(frame, "sf_column") != "geometry":
-        raise ValueError(f"{filename} does not identify geometry as its sf column")
-    if _attr_string(frame, "time_column") != "t_":
-        raise ValueError(f"{filename} does not identify t_ as its time column")
-    if _attr_string(frame, "track_id_column") != "individual_local_identifier":
-        raise ValueError(
-            f"{filename} does not identify individual_local_identifier as its track column"
-        )
+    is_amt = "track_xyt" in classes and "sf" not in classes
+    if not is_amt:
+        if not {"sf", "move2"}.issubset(classes):
+            raise ValueError(f"{filename} is not an sf/move2 or AMT track_xyt object")
+        if "geometry" not in frame or _attr_string(frame, "sf_column") != "geometry":
+            raise ValueError(f"{filename} does not identify geometry as its sf column")
+        if _attr_string(frame, "time_column") != "t_":
+            raise ValueError(f"{filename} does not identify t_ as its time column")
+        if _attr_string(frame, "track_id_column") != "individual_local_identifier":
+            raise ValueError(f"{filename} does not identify individual_local_identifier as its track column")
     _validate_crs(frame, filename=filename)
 
     study_id = _single_integer(frame["study_id"], label="study_id", filename=filename)
@@ -423,12 +426,10 @@ def validate_movement_rds(path: Path, frame: pd.DataFrame) -> dict[str, str | in
         and np.isfinite(timestamps).all()
     ):
         raise ValueError(f"{filename} contains missing or non-finite coordinates/times")
-    if ((x_values < -180) | (x_values > 180) | (y_values < -90) | (y_values > 90)).any():
-        raise ValueError(f"{filename} contains invalid longitude/latitude values")
     if not np.allclose(t_values, timestamps, rtol=0.0, atol=1e-6):
         raise ValueError(f"{filename} has inconsistent t_ and timestamp values")
 
-    geometry = frame["geometry"].tolist()
+    geometry = frame["geometry"].tolist() if not is_amt else np.column_stack((x_values, y_values))
     for row_number, (lon, lat, point) in enumerate(
         zip(x_values, y_values, geometry, strict=True), start=1
     ):
@@ -493,6 +494,7 @@ def _schema(connection: sqlite3.Connection) -> None:
             time_ms INTEGER NOT NULL,
             lon REAL NOT NULL,
             lat REAL NOT NULL,
+            coordinate_valid INTEGER NOT NULL CHECK (coordinate_valid IN (0, 1)),
             burst_value INTEGER NOT NULL,
             is_outlier INTEGER CHECK (is_outlier IN (0, 1)),
             tag_identifier TEXT NOT NULL,
@@ -658,6 +660,7 @@ def _insert_frame(
                 int(time_ms_values[zero_index]),
                 float(x_values[zero_index]),
                 float(y_values[zero_index]),
+                int(-180 <= x_values[zero_index] <= 180 and -90 <= y_values[zero_index] <= 90),
                 int(burst_values[zero_index]),
                 None if outlier_values[zero_index] is None else int(outlier_values[zero_index]),
                 _scalar_text(tags[zero_index]),
@@ -670,7 +673,7 @@ def _insert_frame(
         )
     insert_columns = [
         "ordinal", "artifact_id", "source_row", "fix_key", "individual_key",
-        "time_ms", "lon", "lat", "burst_value", "is_outlier", "tag_identifier",
+        "time_ms", "lon", "lat", "coordinate_valid", "burst_value", "is_outlier", "tag_identifier",
         "source_outlier_status", "source_outlier_issue_type",
         "source_outlier_comments", "source_outlier_flag_step_ids",
         *optional_columns,
@@ -802,7 +805,7 @@ def build_rds_index(bundle: RdsBundle, output_path: Path) -> None:
 
 def rds_index_path(bundle: RdsBundle, *, cache_root: Path | None = None) -> Path:
     root = resolve_cache_root(cache_root)
-    return root / "movement" / "rds" / f"{bundle.signature}.sqlite"
+    return root / "movement" / "rds" / f"{bundle.signature}.v{RDS_INDEX_SCHEMA_VERSION}.sqlite"
 
 
 def _index_matches(path: Path, signature: str) -> bool:
@@ -884,6 +887,7 @@ def _fix_from_row(row: sqlite3.Row) -> dict:
         "time_ms": int(row["time_ms"]),
         "lon": float(row["lon"]),
         "lat": float(row["lat"]),
+        "coordinate_valid": bool(row["coordinate_valid"]),
         "attributes": attributes,
         "review": _row_review(row),
         "segments": [],
@@ -908,7 +912,8 @@ def _source_bursts(rows: Sequence[sqlite3.Row]) -> list[dict]:
     bursts = []
     for (individual, burst_value), group in grouped.items():
         ordered = sorted(group, key=lambda row: (int(row["time_ms"]), int(row["source_row"])))
-        path = [[float(row["lon"]), float(row["lat"])] for row in ordered]
+        invalid_count = sum(not row["coordinate_valid"] for row in ordered)
+        path = [] if invalid_count else [[float(row["lon"]), float(row["lat"])] for row in ordered]
         step_lengths = [
             geodesic_distance_meters(*path[index - 1], *path[index])
             for index in range(1, len(path))
@@ -928,7 +933,9 @@ def _source_bursts(rows: Sequence[sqlite3.Row]) -> list[dict]:
                 "burst_gap_seconds": 0.0,
                 "fix_keys": [str(row["fix_key"]) for row in ordered],
                 "path": path,
-                "path_length_m": float(sum(step_lengths)),
+                "path_length_m": None if invalid_count else float(sum(step_lengths)),
+                "invalid_coordinate_count": invalid_count,
+                "spatial_summary_unavailable": "Burst contains invalid positions" if invalid_count else None,
                 "median_step_m": float(np.median(step_lengths)) if step_lengths else None,
                 "is_outlier_count": sum(int(row["is_outlier"] or 0) for row in ordered),
             }
@@ -1066,7 +1073,7 @@ def build_rds_fixes(
     eligible_burst_rows = [
         row
         for row, fix in visible_pairs
-        if not fix["analytically_excluded"]
+        if not fix["analytically_excluded"] or not row["coordinate_valid"]
     ]
     return {
         "fixes": returned_fixes,
@@ -1103,8 +1110,11 @@ def build_rds_overview(
         aggregate = connection.execute(
             """
             SELECT COUNT(*) count, MIN(time_ms) min_time, MAX(time_ms) max_time,
-                   MIN(lon) min_lon, MAX(lon) max_lon,
-                   MIN(lat) min_lat, MAX(lat) max_lat
+                   MIN(CASE WHEN coordinate_valid THEN lon END) min_lon,
+                   MAX(CASE WHEN coordinate_valid THEN lon END) max_lon,
+                   MIN(CASE WHEN coordinate_valid THEN lat END) min_lat,
+                   MAX(CASE WHEN coordinate_valid THEN lat END) max_lat,
+                   SUM(1-coordinate_valid) invalid_coordinate_count
             FROM fixes
             """
         ).fetchone()
@@ -1133,7 +1143,7 @@ def build_rds_overview(
             rows = connection.execute(
                 """
                 SELECT time_ms, lon, lat, step_length_m, speed_mps, time_delta_s,
-                       source_outlier_status, is_outlier
+                       source_outlier_status, is_outlier, coordinate_valid
                 FROM fixes WHERE individual_key=? ORDER BY time_ms, source_row
                 """,
                 (int(individual_row["individual_key"]),),
@@ -1148,6 +1158,9 @@ def build_rds_overview(
                 RDS_IMPLICIT_SET: {
                     "times": [int(row["time_ms"]) for row in samples],
                     "positions": [[float(row["lon"]), float(row["lat"])] for row in samples],
+                    "coordinate_valid": [bool(row["coordinate_valid"]) for row in samples],
+                    "break_before": [any(not r["coordinate_valid"] for r in rows[(sample_indexes[j-1] if j else 0):index+1])
+                                     for j, index in enumerate(sample_indexes)],
                 }
             }
             coverage_by_individual[identifier] = {
@@ -1161,6 +1174,7 @@ def build_rds_overview(
             intervals = [float(row["time_delta_s"]) for row in rows if row["time_delta_s"] is not None]
             stats[identifier] = {
                 "row_count": int(individual_row["row_count"]),
+                "invalid_coordinate_count": sum(not row["coordinate_valid"] for row in rows),
                 "median_fix_s": float(np.median(intervals)) if intervals else None,
                 "median_step_m": float(np.median(steps)) if steps else None,
                 "median_speed_mps": float(np.median(speeds)) if speeds else None,
@@ -1179,12 +1193,13 @@ def build_rds_overview(
             FIX_SELECT + " ORDER BY i.identifier, f.time_ms, f.source_row"
         ).fetchall() if not truncated else []
     span = max(
-        float(aggregate["max_lon"] - aggregate["min_lon"]),
-        float(aggregate["max_lat"] - aggregate["min_lat"]),
+        float((aggregate["max_lon"] or 0) - (aggregate["min_lon"] or 0)),
+        float((aggregate["max_lat"] or 0) - (aggregate["min_lat"] or 0)),
     )
     return {
         "source_format": RDS_SOURCE_FORMAT,
         "total_rows": total_rows,
+        "invalid_coordinate_count": int(aggregate["invalid_coordinate_count"] or 0),
         "columns": {
             "individual": "individual_local_identifier",
             "time": "t_",
@@ -1213,8 +1228,8 @@ def build_rds_overview(
         "overview_series_point_limit": int(max_series_points),
         "burst_source": "burst_",
         "initial_view": {
-            "longitude": float((aggregate["min_lon"] + aggregate["max_lon"]) / 2),
-            "latitude": float((aggregate["min_lat"] + aggregate["max_lat"]) / 2),
+            "longitude": float(((aggregate["min_lon"] or 0) + (aggregate["max_lon"] or 0)) / 2),
+            "latitude": float(((aggregate["min_lat"] or 0) + (aggregate["max_lat"] or 0)) / 2),
             "zoom": float(span_to_zoom(span)),
         },
         "min_time_ms": int(aggregate["min_time"]),
@@ -1570,7 +1585,7 @@ def rds_burst_feature_rows(
         review_status = _index_review_status(connection, annotations)
         cursor = connection.execute(
             """
-            SELECT f.ordinal, f.source_row, f.time_ms, f.lon, f.lat,
+            SELECT f.ordinal, f.source_row, f.time_ms, f.lon, f.lat, f.coordinate_valid,
                    f.burst_value, a.logical_name, i.identifier
             FROM fixes f
             JOIN artifacts a ON a.artifact_id=f.artifact_id
@@ -1583,7 +1598,7 @@ def rds_burst_feature_rows(
         group: list[sqlite3.Row] = []
 
         def append_group(rows: list[sqlite3.Row]) -> None:
-            eligible_rows = [row for row in rows if review_status[int(row["ordinal"])] != 2]
+            eligible_rows = [row for row in rows if review_status[int(row["ordinal"])] != 2 or not row["coordinate_valid"]]
             if not eligible_rows:
                 return
             individual = str(eligible_rows[0]["identifier"])
@@ -1688,6 +1703,7 @@ def build_rds_report_inputs(
     individuals: Iterable[str],
     snapshot_individuals: Iterable[str],
     target_artifact: str,
+    metadata: dict | None = None,
 ) -> tuple[bytes, bytes, dict[str, int], list[str]]:
     """Materialize focused CSV/report-sidecar inputs from the disposable index.
 
@@ -1751,6 +1767,10 @@ def build_rds_report_inputs(
             str(row["logical_name"]): {**json.loads(row["report_metadata"]), "study_id": row["study_id"]}
             for row in included
         }
+        for row in included:
+            species = (metadata or {}).get("species_by_individual", {}).get(str(row["identifier"]))
+            if species:
+                metadata_by_artifact[row["logical_name"]]["species"] = species
         next_row = 0
         for row in included:
             artifact_offsets[str(row["logical_name"])] = next_row
@@ -1832,6 +1852,16 @@ def build_rds_report_inputs(
                 row_ranges.append([offset + int(start), offset + int(end)])
         scope["row_ranges"] = row_ranges
         scope["source_rows"] = []
+        if (scope.get("study_filter") or {}).get("added_by_individual"):
+            filter_metadata = dict(scope["study_filter"])
+            remapped = {}
+            for individual, sources in filter_metadata["added_by_individual"].items():
+                ranges = [[artifact_offsets[name] + start, artifact_offsets[name] + end]
+                          for name, original_ranges in sources.items() if name in artifact_offsets
+                          for start, end in original_ranges]
+                if ranges:
+                    remapped[individual] = {target_artifact: ranges}
+            scope["study_filter"] = {**filter_metadata, "added_by_individual": remapped}
         item["scope"] = scope
         item["source_artifact"] = target_artifact
         transformed.append(item)
@@ -1932,7 +1962,7 @@ def resolve_rds_review_scope(
         max_lon = max(float(item[0]) for item in polygon)
         min_lat = min(float(item[1]) for item in polygon)
         max_lat = max(float(item[1]) for item in polygon)
-        clauses = ["f.lat BETWEEN ? AND ?"]
+        clauses = ["f.coordinate_valid = 1", "f.lat BETWEEN ? AND ?"]
         values: list[object] = [min_lat, max_lat]
         if max_lon - min_lon <= 180.0:
             clauses.append("f.lon BETWEEN ? AND ?")
@@ -2003,6 +2033,8 @@ def resolve_rds_review_scope(
             return _resolve_rds_stationarity(index_path, spec, annotations)
         if filter_kind == "gps_spike" and spec.get("metric") == "speed":
             return _resolve_rds_speed_spike(index_path, spec, annotations or [])
+        if filter_kind == "gps_spike" or spec.get("field_key") in {"speed_mps", "step_length_m", "time_delta_s", "turn_angle_deg"}:
+            return _resolve_rds_current_movement(index_path, spec, annotations or [])
         scoped_individuals = [
             str(item) for item in spec.get("individuals") or [] if str(item)
         ]
@@ -2092,6 +2124,38 @@ def resolve_rds_review_scope(
             "source_rows": source_rows,
         }, len(fix_keys)
     raise ValueError("Invalid RDS review scope")
+
+
+def _resolve_rds_current_movement(index_path, spec, annotations):
+    """Apply derived filters to the same retained metrics served to the map."""
+    from .speed_spikes import track_metrics
+    from .review_annotations import _filter_value_matches
+    from .movement_features import speed_threshold_matches
+    if spec.get("kind") != "gps_spike" and spec.get("field_kind") != "numeric":
+        raise ValueError(f"Invalid RDS filter field kind for {spec.get('field_key')}")
+    matches = []
+    if spec.get("set_names") and RDS_IMPLICIT_SET not in spec["set_names"]:
+        return {"kind": "filter", "filter": spec, "source_rows": []}, 0
+    for records in _rds_stationarity_tracks(index_path, spec):
+        for track, movement in track_metrics(records, annotations):
+            for i, row in enumerate(track):
+                values = movement[row["fix_key"]]
+                if spec.get("kind") == "gps_spike":
+                    previous = movement[track[i - 1]["fix_key"]]["step_length_m"] if i else None
+                    step, angle = values["step_length_m"], values["turn_angle_deg"]
+                    matched = (previous is not None and step is not None and angle is not None
+                        and previous > float(spec["step_length_threshold_m"])
+                        and step > float(spec["step_length_threshold_m"])
+                        and abs(angle) >= float(spec["minimum_abs_turn_angle_deg"]))
+                elif spec.get("field_key") == "speed_mps":
+                    incoming = movement[track[i - 1]["fix_key"]]["speed_mps"] if i else None
+                    matched = speed_threshold_matches(incoming, values["speed_mps"],
+                        float(spec["threshold_value"]), spec.get("operator", "gt"))
+                else:
+                    matched = _filter_value_matches(values[spec["field_key"]], spec)
+                if matched:
+                    matches.append(row["fix_key"])
+    return {"kind": "filter", "filter": spec, "source_rows": source_rows_from_fix_keys(matches)}, len(matches)
 
 
 def _resolve_rds_speed_spike(index_path, spec, annotations):
@@ -2216,6 +2280,7 @@ def _stationarity_record(row: sqlite3.Row) -> dict:
         "row_index": int(row["source_row"]), "source_artifact": str(row["logical_name"]),
         "individual": str(row["identifier"]), "set_name": RDS_IMPLICIT_SET,
         "lon": float(row["lon"]), "lat": float(row["lat"]),
+        "invalid": not (-180 <= row["lon"] <= 180 and -90 <= row["lat"] <= 90),
         "burst": row["burst_value"],
         "segment": row["tag_identifier"],
         "source_annotation": source_annotation,
@@ -2426,12 +2491,13 @@ def build_rds_binary_columns(
         artifact_rows=artifact_inverse,
     )
     eligible = review_status != 2
+    coordinate_valid = ((np.abs(positions[:, 0]) <= 180) & (np.abs(positions[:, 1]) <= 90))
     affected_individual_codes = {
         int(individual_codes[index])
         for index in np.flatnonzero(review_status == 2)
     }
     for code in affected_individual_codes:
-        point_indexes = np.flatnonzero((individual_codes == code) & eligible)
+        point_indexes = np.flatnonzero((individual_codes == code) & (eligible | ~coordinate_valid))
         identifier = str(individual_rows[code]["identifier"])
         records = []
         for point_index in point_indexes:
@@ -2461,9 +2527,12 @@ def build_rds_binary_columns(
     line_count = 0
     previous_by_individual: dict[int, int] = {}
     for point_index in range(count):
+        code = int(individual_codes[point_index])
+        if not coordinate_valid[point_index]:
+            previous_by_individual.pop(code, None)
+            continue
         if not eligible[point_index]:
             continue
-        code = int(individual_codes[point_index])
         previous = previous_by_individual.get(code)
         if previous is not None:
             line_sources_array[line_count] = previous
@@ -2541,6 +2610,7 @@ def build_rds_binary_columns(
                 }
     arrays = {
         "positions": positions,
+        "coordinate_valid": coordinate_valid.astype(np.uint8),
         "time_ms": time_ms,
         "individual_codes": individual_codes,
         "artifact_codes": artifact_codes,
