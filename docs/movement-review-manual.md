@@ -60,11 +60,13 @@ For the ordered study-wide Stationarity → Speed → GPS Spike protocol, open
 per filter, and creates its own graph step only when applied. See the
 [study-filter walkthrough and pre-filtering script](STUDY_FILTERS.md).
 
-The version selector shows a short action label. Open the **Version details**
+The version selector lists the newest version first and shows each action label
+with its version slug. Open the **Version details**
 information button for the saved rule, author, and date. The species badge opens
 reference links and, when available online, a credited PhyloPic silhouette. Missing
 images leave the text and links available. **Export** contains reviewed tracks and individual decisions;
 **More** contains reports, ranking, and additional study actions.
+GPS Spike's **Rule & last run** details show the study P99 speed from its saved run.
 
 For a numeric variable, click its histogram or enter a threshold. For a boolean
 or categorical variable, select one or more levels. Matching fixes retain the

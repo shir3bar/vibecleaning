@@ -16,9 +16,9 @@ const fresh = {parameters: params};
 const reloaded = {label_parameters: {...params, filter: params.scope.filter}};
 assert.equal(formatStepLabel(fresh, dataset), 'High speed');
 assert.equal(formatStepLabel(fresh, dataset), formatStepLabel(reloaded, dataset));
-assert.equal(formatDatasetLabel(dataset, dataset.dataset_id, fresh), 'Latest · High speed');
-assert.equal(formatDatasetLabel(dataset, 'another-head', fresh, 4), 'v4 · High speed');
-assert.ok(!formatDatasetLabel(dataset, dataset.dataset_id, fresh).includes('abc123'));
+assert.equal(formatDatasetLabel(dataset, dataset.dataset_id, fresh), 'Latest · High speed · abc123');
+assert.equal(formatDatasetLabel(dataset, 'another-head', fresh, 4), 'v4 · High speed · abc123');
+assert.equal(formatDatasetLabel({dataset_id: 'dataset_root'}, 'another-head'), 'Original data · root');
 assert.equal(formatStepDetails(fresh, dataset), 'suspected: Speed > 12.5 m/s');
 params.scope.filter.operator = 'lt';
 params.scope.filter.threshold_value = 0;
@@ -79,4 +79,16 @@ app.refreshDatasetOptions(dataset.dataset_id);
 assert.match(options[1].textContent, /Filter Stationarity/);
 assert.doesNotMatch(options[1].textContent, /radius|duration|gaps/);
 assert.equal(options[1].title, formatStepDetails(fresh, dataset));
+// Graph timestamps have second precision; descendants must precede ancestors
+// when several versions are created in the same second.
+const root = {dataset_id: 'dataset_root', created_at: dataset.created_at};
+const middle = {dataset_id: 'dataset_middle', parent_dataset_id: root.dataset_id,
+  created_at: dataset.created_at};
+dataset.parent_dataset_id = middle.dataset_id;
+app.allDatasets = [root, middle, dataset];
+options.length = 0;
+app.refreshDatasetOptions(dataset.dataset_id);
+assert.deepEqual(options.map(option => option.value),
+  [dataset.dataset_id, middle.dataset_id, root.dataset_id]);
+assert.ok(options.every(option => option.textContent.includes(option.value.split('_').at(-1))));
 console.log('Step label tests passed');

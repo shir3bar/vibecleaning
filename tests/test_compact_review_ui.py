@@ -1,4 +1,6 @@
 """Compact controls remain accessible without changing review or filter state."""
+import re
+
 import pytest
 
 from test_study_filters import prepared, copied, api_client
@@ -21,9 +23,9 @@ def test_compact_controls_version_species_exports_and_keyboard(prepared, tmp_pat
         page.locator('[data-individual-checkbox]').first.wait_for(state="attached", timeout=30000)
         assert page.locator(".movement-toolbar").bounding_box()["height"] <= 115
         version = page.locator('[data-role="dataset"]')
-        assert version.bounding_box()["width"] <= 215
+        assert version.bounding_box()["width"] <= 305
         label = version.evaluate("el => el.options[el.selectedIndex].text")
-        assert label == "Latest · GPS Spike"
+        assert label == f"Latest · GPS Spike · {h.head.split('_', 1)[1]}"
         assert h.head not in label and "|" not in label
         color = page.locator('[data-role="color-by"]')
         color.select_option("individual")
@@ -66,6 +68,9 @@ def test_compact_controls_version_species_exports_and_keyboard(prepared, tmp_pat
         expect(page.locator('[data-study-filter="speed"] [data-study-filter-rule] p').first).not_to_be_visible()
         page.locator('[data-study-filter="speed"] [data-study-filter-rule] > summary').click()
         expect(page.locator('[data-study-filter="speed"]')).to_contain_text("Q3 + 100")
+        page.locator('[data-study-filter="gps_spike"] [data-study-filter-rule] > summary').click()
+        gps_details = page.locator('[data-study-filter="gps_spike"] [data-study-filter-rule]')
+        expect(gps_details).to_contain_text(re.compile(r"P99 speed [\d,.]+ m/s"))
         assert not calculations
         assert not errors
         browser.close()

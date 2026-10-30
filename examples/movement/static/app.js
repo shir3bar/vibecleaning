@@ -3964,7 +3964,7 @@ class MovementExampleApp {
         .movement-study-field select { width: clamp(170px, 18vw, 270px); }
         .movement-color-field select { width: clamp(160px, 16vw, 230px); }
         .movement-version-field { display: flex; align-items: center; gap: 5px; min-width: 0; }
-        .movement-version-field select { width: clamp(150px, 14vw, 210px); }
+        .movement-version-field select { width: clamp(220px, 22vw, 300px); }
         .movement-toolbar input[type="checkbox"] { width: 16px; height: 16px; min-width: 0; flex: 0 0 16px; margin: 0; padding: 0; accent-color: #63d8b8; }
         .movement-toolbar-menus { display: flex; align-items: center; gap: 6px; margin-left: auto; }
         .movement-popover { position: relative; font-size: 12px; }
@@ -4048,7 +4048,7 @@ class MovementExampleApp {
         @media (max-width: 900px) {
           .movement-toolbar { gap: 8px; padding: 9px 12px; }
           .movement-study-field select { width: 170px; }
-          .movement-version-field select { width: 155px; }
+          .movement-version-field select { width: 220px; }
           .movement-color-field select { width: 170px; }
           .movement-toolbar-menus { margin-left: 0; }
           .movement-review-toolbar { gap: 8px; }
@@ -9805,6 +9805,13 @@ class MovementExampleApp {
       for (const item of chain.reverse()) depths.set(item.dataset_id, ++depth);
       return depths.get(dataset.dataset_id);
     };
+    const headId = this.graph?.current_dataset_id || "";
+    this.datasets.sort((left, right) => {
+      if (left.dataset_id === headId) return -1;
+      if (right.dataset_id === headId) return 1;
+      const byDate = String(right.created_at || "").localeCompare(String(left.created_at || ""));
+      return byDate || versionDepth(right) - versionDepth(left);
+    });
     for (const dataset of this.datasets) {
       const option = document.createElement("option");
       const step = this.stepByOutputDatasetId.get(dataset.dataset_id);
@@ -11329,6 +11336,15 @@ class MovementExampleApp {
       ${(state.result?.stages || []).map((item, index) => {
         const preview = state.previews[item.stage];
         const stats = item.saved?.statistics;
+        const isGpsSpike = item.stage === "gps_spike";
+        const savedThreshold = isGpsSpike ? stats?.p99 ?? stats?.threshold_mps : stats?.threshold_mps;
+        const previewThreshold = isGpsSpike
+          ? preview?.snapshot.statistics.p99 ?? preview?.snapshot.statistics.threshold_mps
+          : preview?.snapshot.statistics.threshold_mps;
+        const previousThreshold = isGpsSpike
+          ? preview?.previous?.statistics?.p99 ?? preview?.previous?.statistics?.threshold_mps
+          : preview?.previous?.statistics?.threshold_mps;
+        const thresholdLabel = isGpsSpike ? "P99 speed" : "cutoff";
         return `<section class="movement-filter-row" data-study-filter="${item.stage}">
           <div class="movement-filter-row-head"><span class="movement-filter-number">${index + 1}</span>
           <span class="movement-filter-name">${escapeHtml(item.label)}</span>
@@ -11337,11 +11353,11 @@ class MovementExampleApp {
           ${item.changed_fix_count ? `<p class="movement-filter-pending-note">${formatCount(item.changed_fix_count)} input fixes changed · ${formatCount(item.changed_individual_count)} ${item.changed_individual_count === 1 ? "individual" : "individuals"}</p>` : ""}
           <details class="movement-filter-rule" data-study-filter-rule data-stage="${item.stage}" ${expandedRules.has(item.stage) ? "open" : ""}>
             <summary>Rule &amp; last run</summary><p>${descriptions[item.stage]}</p>
-            ${item.saved ? `<p>${formatCount(item.saved.effective_count)} candidates${stats?.threshold_mps != null ? ` · cutoff ${cutoff(stats.threshold_mps)} · ${formatCount(stats.sample_count)} study speeds` : ""}${stats?.unavailable_reason ? ` · ${escapeHtml(stats.unavailable_reason)}` : ""}</p>` : ""}
+            ${item.saved ? `<p>${formatCount(item.saved.effective_count)} candidates${savedThreshold != null ? ` · ${thresholdLabel} ${cutoff(savedThreshold)} · ${formatCount(stats.sample_count)} study speeds` : isGpsSpike ? ` · P99 speed ${cutoff(null)}` : ""}${stats?.unavailable_reason ? ` · ${escapeHtml(stats.unavailable_reason)}` : ""}</p>` : isGpsSpike ? "<p>P99 speed not calculated yet.</p>" : ""}
             ${item.pending_upstream.length ? `<p>Uses current saved flags from ${escapeHtml(item.pending_upstream.join(", "))}, which may also need updating.</p>` : ""}
           </details>
           ${preview ? `<div class="movement-filter-preview" role="status"><div class="movement-filter-preview-counts"><span>${formatCount(preview.added_count)} new flags</span><span>${formatCount(preview.removed_count)} obsolete flags</span></div>
-            ${preview.snapshot.statistics.threshold_mps != null ? `<div>Cutoff ${cutoff(preview.previous?.statistics?.threshold_mps)} → <strong>${cutoff(preview.snapshot.statistics.threshold_mps)}</strong></div><div class="movement-subtle">${formatCount(preview.snapshot.statistics.sample_count)} eligible speeds</div>` : ""}
+            ${previewThreshold != null ? `<div>${thresholdLabel} ${cutoff(previousThreshold)} → <strong>${cutoff(previewThreshold)}</strong></div><div class="movement-subtle">${formatCount(preview.snapshot.statistics.sample_count)} eligible speeds</div>` : ""}
             ${item.stage === "speed" && preview.snapshot.statistics.q1 != null ? `<details class="movement-filter-rule"><summary>Calculation details</summary><p>Q1 ${cutoff(preview.snapshot.statistics.q1)} · Q3 ${cutoff(preview.snapshot.statistics.q3)} · IQR ${cutoff(preview.snapshot.statistics.q3 - preview.snapshot.statistics.q1)}</p></details>` : ""}
             ${preview.snapshot.statistics.unavailable_reason ? escapeHtml(preview.snapshot.statistics.unavailable_reason) : ""}
             ${preview.affected_individuals.length ? `<div class="movement-filter-preview-people">${preview.affected_individuals.map(id => `<button type="button" data-study-filter-action="inspect" data-individual="${escapeHtml(id)}">${escapeHtml(id)}${preview.changes_by_individual?.[id] ? ` (+${preview.changes_by_individual[id].added}, −${preview.changes_by_individual[id].removed})` : ""}</button>`).join(" ")}</div>` : ""}
@@ -23460,13 +23476,15 @@ function formatStepDetails(step, dataset) {
 }
 
 function formatDatasetLabel(dataset, currentHeadDatasetId, step = null, depth = null) {
-  if (!dataset.parent_dataset_id) return dataset.dataset_id === currentHeadDatasetId ? "Latest · Original data" : "Original data";
+  const slug = shortId(dataset.dataset_id);
+  if (!dataset.parent_dataset_id) return dataset.dataset_id === currentHeadDatasetId
+    ? `Latest · Original data · ${slug}` : `Original data · ${slug}`;
   let title = formatStepLabel(step, dataset)
     .replace(/^(?:Recalculate|Apply) (Stationarity|Speed|GPS Spike) across study$/, "$1")
     .replace(/^Initial dataset from project inputs$/, "Original data");
   if (title.length > 36) title = `${title.slice(0, 35)}…`;
   const prefix = dataset.dataset_id === currentHeadDatasetId ? "Latest" : depth === null ? "Earlier" : `v${depth}`;
-  return `${prefix} · ${title}`;
+  return `${prefix} · ${title} · ${slug}`;
 }
 
 function shortId(value) {
