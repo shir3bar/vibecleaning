@@ -64,7 +64,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-vibecleaning.ps1 -Profi
 Leave PowerShell open. Open **http://127.0.0.1:8422** in Chrome or Edge on this
 computer and log in. The launcher finds the Python environment each time.
 
-Choose **268904527** for the smaller study or **481458** for Bildstein, then select
+**Reviewing your assigned MoveTraits folder?** Point the app at the annotator
+folder containing `movement_rds`, rather than at `movement_rds` itself. Create
+a login for that data root once, then start the app:
+
+```powershell
+$reviewRoot = "D:\MoveTraits\sofia"
+$env:UV_PROJECT_ENVIRONMENT = "$env:LOCALAPPDATA\Vibecleaning\venvs\development"
+uv run --no-sync python -m app.auth_cli --data-root "$reviewRoot" bootstrap sofia
+powershell -ExecutionPolicy Bypass -File .\scripts\start-vibecleaning.ps1 -Profile Rds -DataRoot "$reviewRoot"
+```
+
+Replace the path and username with your own. If that folder already has a login,
+skip the `bootstrap` command. To run the three study filters locally before
+reviewing, follow the [annotator prefilter instructions](STUDY_FILTERS.md#pre-filter-an-annotators-folder).
+
+For the bundled example data, choose **268904527** for the smaller study or **481458** for Bildstein, then select
 an individual. The first load of the larger study can take several minutes;
 later loads are faster.
 
@@ -72,7 +87,7 @@ later loads are faster.
 folder with `_cleaned.rds` names. The app shows the full folder path when ready.
 
 **Stop:** save your work, then press **Ctrl+C** in PowerShell. **Reopen:** repeat
-step 4. Reviews are saved in `data`; back up that whole folder, including hidden
+step 4. Reviews are saved in the selected data folder; back up that whole folder, including hidden
 folders.
 
 **Update:** stop the app, run `git pull --ff-only` in the app folder, then repeat

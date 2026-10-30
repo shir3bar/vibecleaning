@@ -53,16 +53,38 @@ the collection does not erase these records or invalidate unchanged inputs.
 
 ## Pre-filter an annotator's folder
 
-From the application folder, using its existing environment:
+The input is the annotator's **`movement_rds` folder**, which contains one
+subfolder per study. Run these commands from the application folder. Use the
+same local Python environment as the app launcher; the prefilter does not need
+the app server to be running.
+
+Mac/Linux:
 
 ```sh
-uv run --locked python scripts/prefilter_movement_rds.py "/path/to/annotator/movement_rds" --user annotator
+uv sync --locked --no-dev
+uv run --no-sync python scripts/prefilter_movement_rds.py "/path/to/sofia/movement_rds" --user sofia --report "/path/to/sofia/prefilter_report.json"
 ```
 
-The same command works in PowerShell with a quoted Windows folder path. It runs
-the three filters in order and creates three separate steps per study, leaving
-RDS files and metadata unchanged. No running app or R installation is required.
-Process studies sequentially; close active editing sessions before running it.
+Windows PowerShell (Git checkout):
+
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = "$env:LOCALAPPDATA\Vibecleaning\venvs\development"
+uv sync --locked --no-dev
+uv run --no-sync python .\scripts\prefilter_movement_rds.py "D:\MoveTraits\sofia\movement_rds" --user sofia --report "D:\MoveTraits\sofia\prefilter_report.json"
+```
+
+Replace the paths and username for the assigned annotator. The report is saved
+outside `movement_rds`; progress also prints one line per applied filter and
+study. The command runs the three filters in order and creates three separate
+steps per study, leaving RDS files and metadata unchanged. No R installation is
+required. Process studies sequentially; close active editing sessions before
+running it.
+
+To review the prefiltered studies, start the RDS app with the **annotator folder
+that contains `movement_rds`** as its data root, for example
+`--data-root "/path/to/sofia"` on Mac/Linux or `-DataRoot "D:\MoveTraits\sofia"`
+on Windows. Create the login against that same data root once. See the
+[Mac](START_HERE_MAC.md) or [Windows](START_HERE_WINDOWS.md) startup guide.
 
 - `--dry-run` reports planned work without initializing review histories.
 - `--resume` resumes missing stages; skipping existing runs is also the default.

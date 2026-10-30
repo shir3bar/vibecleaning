@@ -10,6 +10,8 @@ automatically when the RDS bundle changes or the cache is deleted.
 [Study metadata and AMT review](../../docs/STUDY_METADATA.md) describes optional
 per-study `metadata.json`, species and deployment details, invalid-position
 review, and exports that preserve the input's native R class.
+[Study prefiltering](../../docs/STUDY_FILTERS.md#pre-filter-an-annotators-folder)
+explains how to run the ordered filters on each annotator's local `movement_rds` folder.
 
 ## Install and run
 
