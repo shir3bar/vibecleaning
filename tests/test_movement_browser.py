@@ -948,7 +948,7 @@ def test_flagged_queue_order_changes_only_when_reviewer_requests_it(tmp_path):
         browser.close()
 
 
-def test_review_decision_queue_order_keeps_unreviewed_first_until_button_refresh(tmp_path):
+def test_review_decision_queue_order_toggles_and_keeps_position_during_review(tmp_path):
     import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "queue_decision_order"
     study_dir.mkdir(parents=True)
@@ -998,8 +998,17 @@ def test_review_decision_queue_order_keeps_unreviewed_first_until_button_refresh
         assert order() == decision_order
 
         decision_order_button.click()
+        assert order_control.input_value() == "dataset"
+        assert "is-active" not in (decision_order_button.get_attribute("class") or "")
+        assert order() == source_order
+        decision_order_button.click()
         assert order() == [individual for individual in source_order if individual not in {"alpha", "beta"}] + ["beta", "alpha"]
-        order_control.select_option("dataset")
+        decision_order_button.click()
+        order_control.select_option("flagged_asc")
+        decision_order_button.click()
+        assert order_control.input_value() == ""
+        decision_order_button.click()
+        assert order_control.input_value() == "flagged_asc"
         assert "is-active" not in (decision_order_button.get_attribute("class") or "")
         browser.close()
 

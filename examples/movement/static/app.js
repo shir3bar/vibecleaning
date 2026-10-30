@@ -781,6 +781,7 @@ class MovementExampleApp {
     this.individualReviewQueue = {
       mode: "browse",
       orderMode: ["flagged", "flagged_asc", "decision"].includes(this.uiState.individualQueueOrder) ? this.uiState.individualQueueOrder : "dataset",
+      orderBeforeDecision: String(this.uiState.individualQueuePreviousOrder || "dataset"),
       sortOrderSnapshot: null,
       filterMode: "all",
       pageIndex: Math.max(0, Number(this.uiState.individualQueuePage) || 0),
@@ -907,6 +908,7 @@ class MovementExampleApp {
         individualQueueListHeightPx: null,
         individualViewMode: "browse",
         individualQueueOrder: "dataset",
+        individualQueuePreviousOrder: "dataset",
         individualQueueRankingMethod: "isolation_forest",
         individualQueuePage: 0,
         trackPlayerWindowSize: DEFAULT_TRACK_PLAYER_WINDOW_SIZE,
@@ -946,6 +948,7 @@ class MovementExampleApp {
       individualQueueListHeightPx: this.individualQueueListHeightPx,
       individualViewMode: this.individualReviewQueue?.mode || "browse",
       individualQueueOrder: this.individualReviewQueue?.orderMode || "dataset",
+      individualQueuePreviousOrder: this.individualReviewQueue?.orderBeforeDecision || "dataset",
       individualQueueRankingMethod: this.individualReviewQueue?.rankingMethod
         || this.getRankingMethod(),
       individualQueuePage: this.individualReviewQueue?.pageIndex || 0,
@@ -4371,7 +4374,7 @@ class MovementExampleApp {
                       <button type="button" data-queue-nav="previous-individual">Previous</button>
                       <button type="button" data-queue-nav="next-individual">Next</button>
                       <button type="button" data-queue-nav="next-page">Next 25</button>
-                      <button type="button" data-role="individual-queue-review-order" title="Unreviewed first, then Fix & Keep, Remove, OK. Click again to refresh the order.">Unreviewed first</button>
+                      <button type="button" data-role="individual-queue-review-order" title="Unreviewed first, then Fix & Keep, Remove, OK. Click again to restore the previous order.">Unreviewed first</button>
                     </div>
                     <div class="movement-queue-map-controls">
                       <button type="button" data-queue-scope="solo">Only current</button>
@@ -5076,7 +5079,13 @@ class MovementExampleApp {
       void this.changeIndividualQueueOrder(this.refs.individualQueueOrder.value);
     });
     this.refs.individualQueueReviewOrder.addEventListener("click", () => {
-      void this.changeIndividualQueueOrder("decision");
+      const queue = this.individualReviewQueue;
+      if (queue.orderMode === "decision") {
+        void this.changeIndividualQueueOrder(queue.orderBeforeDecision || "dataset");
+      } else {
+        queue.orderBeforeDecision = queue.orderMode === "ranking" ? queue.rankingMethod : queue.orderMode;
+        void this.changeIndividualQueueOrder("decision");
+      }
     });
     this.refs.individualQueuePriorOkLast.addEventListener("change", () => {
       this.individualReviewQueue.priorOkLast = this.refs.individualQueuePriorOkLast.checked;
@@ -9365,6 +9374,7 @@ class MovementExampleApp {
         : null,
       queue: {
         orderMode: queue.orderMode,
+        orderBeforeDecision: queue.orderBeforeDecision,
         pageIndex: queue.pageIndex,
         groupIndex: queue.groupIndex,
         activeIndividual: queue.activeIndividual,
@@ -9394,6 +9404,7 @@ class MovementExampleApp {
     const queueState = preserved.queue || {};
     const queue = this.individualReviewQueue;
     queue.orderMode = ["ranking", "flagged", "flagged_asc", "decision"].includes(queueState.orderMode) ? queueState.orderMode : "dataset";
+    queue.orderBeforeDecision = String(queueState.orderBeforeDecision || queue.orderBeforeDecision || "dataset");
     queue.pageIndex = Math.max(0, Number(queueState.pageIndex) || 0);
     queue.groupIndex = Math.max(0, Number(queueState.groupIndex) || 0);
     queue.activeIndividual = String(queueState.activeIndividual || "");
@@ -11186,6 +11197,10 @@ class MovementExampleApp {
   async changeIndividualQueueOrder(orderValue) {
     const rankingMethods = new Set(this.rankingMethodOptions().map(([value]) => value));
     const requestedMethod = rankingMethods.has(orderValue) ? orderValue : "";
+    if (orderValue !== "decision") {
+      this.individualReviewQueue.orderBeforeDecision = requestedMethod
+        || (["flagged", "flagged_asc"].includes(orderValue) ? orderValue : "dataset");
+    }
     if (!requestedMethod) {
       this.individualReviewQueue.orderMode = ["flagged", "flagged_asc", "decision"].includes(orderValue) ? orderValue : "dataset";
       this.individualReviewQueue.sortOrderSnapshot = null;
@@ -11259,7 +11274,7 @@ class MovementExampleApp {
     }
     target.classList.remove("error");
     if (this.individualReviewQueue.orderMode === "decision") {
-      target.textContent = "Unreviewed first, then Fix & Keep, Remove, OK. Click Unreviewed first again to update the order.";
+      target.textContent = "Unreviewed first, then Fix & Keep, Remove, OK. Click Unreviewed first again to return to the previous order.";
       return;
     }
     if (["flagged", "flagged_asc"].includes(this.individualReviewQueue.orderMode)) {
