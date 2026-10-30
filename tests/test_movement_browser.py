@@ -948,6 +948,56 @@ def test_flagged_queue_order_changes_only_when_reviewer_requests_it(tmp_path):
         browser.close()
 
 
+def test_review_decision_queue_order_keeps_unreviewed_first_until_reselected(tmp_path):
+    import playwright.sync_api as playwright_api
+    study_dir = tmp_path / "data" / "movement_clean" / "queue_decision_order"
+    study_dir.mkdir(parents=True)
+    (study_dir / "movement.csv").write_text(CSV_QUEUE_TRANSITION_FIXTURE, encoding="utf-8")
+    app = create_app(
+        data_root=tmp_path / "data", static_root=STATIC_ROOT,
+        index_path=INDEX_PATH, auth_manager=_auth_manager(),
+    )
+    register_movement_routes(app, data_root=tmp_path / "data")
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
+        _login_and_wait(page, base_url, "queue_decision_order")
+        page.locator('[data-individual-checkbox="alpha"]').wait_for(
+            state="attached", timeout=20_000
+        )
+        page.locator('[data-role="individual-view-queue"]').click()
+        save = page.locator('[data-role="individual-queue-save"]')
+        order_control = page.locator('[data-role="individual-queue-order"]')
+        order = lambda: page.locator("[data-queue-individual]").evaluate_all(
+            "cards => cards.map(card => card.dataset.queueIndividual)"
+        )
+
+        page.locator('[data-queue-individual="alpha"] [data-review-decision="ok"]').click()
+        save.click()
+        page.locator('[data-queue-individual="beta"].queue-active').wait_for(state="attached", timeout=20_000)
+        source_order = order()
+        decision_order = [individual for individual in source_order if individual != "alpha"] + ["alpha"]
+
+        order_control.select_option("decision")
+        assert order() == decision_order
+        page.locator('[data-queue-individual="beta"] [data-review-decision="fix_keep"]').click()
+        save.click()
+        page.wait_for_function(
+            """() => {
+              const state = document.querySelector('[data-queue-individual="beta"] .movement-review-state')?.textContent || '';
+              return state.includes('Fix & Keep') && !state.includes('unsaved');
+            }""",
+            timeout=20_000,
+        )
+        assert order() == decision_order
+
+        order_control.select_option("dataset")
+        order_control.select_option("decision")
+        assert order() == [individual for individual in source_order if individual not in {"alpha", "beta"}] + ["beta", "alpha"]
+        browser.close()
+
+
 def test_queue_decision_retains_exact_blocks_across_review_step(tmp_path):
     import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "queue_transition"

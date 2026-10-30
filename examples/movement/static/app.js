@@ -780,8 +780,8 @@ class MovementExampleApp {
     };
     this.individualReviewQueue = {
       mode: "browse",
-      orderMode: ["flagged", "flagged_asc"].includes(this.uiState.individualQueueOrder) ? this.uiState.individualQueueOrder : "dataset",
-      flaggedOrderSnapshot: null,
+      orderMode: ["flagged", "flagged_asc", "decision"].includes(this.uiState.individualQueueOrder) ? this.uiState.individualQueueOrder : "dataset",
+      sortOrderSnapshot: null,
       filterMode: "all",
       pageIndex: Math.max(0, Number(this.uiState.individualQueuePage) || 0),
       groupIndex: 0,
@@ -1015,9 +1015,10 @@ class MovementExampleApp {
     }
     const selectedValue = this.individualReviewQueue?.orderMode === "ranking"
       ? String(this.individualReviewQueue.rankingMethod || this.getRankingMethod())
-      : ["flagged", "flagged_asc"].includes(this.individualReviewQueue?.orderMode) ? this.individualReviewQueue.orderMode : "dataset";
+      : ["flagged", "flagged_asc", "decision"].includes(this.individualReviewQueue?.orderMode) ? this.individualReviewQueue.orderMode : "dataset";
     this.refs.individualQueueOrder.innerHTML = [
       ["dataset", "Dataset source"],
+      ["decision", "Review decision — unreviewed first"],
       ["flagged", "Flagged fixes — most first"],
       ["flagged_asc", "Flagged fixes — fewest first"],
       ...this.rankingMethodOptions(),
@@ -9386,7 +9387,7 @@ class MovementExampleApp {
     }
     const queueState = preserved.queue || {};
     const queue = this.individualReviewQueue;
-    queue.orderMode = ["ranking", "flagged", "flagged_asc"].includes(queueState.orderMode) ? queueState.orderMode : "dataset";
+    queue.orderMode = ["ranking", "flagged", "flagged_asc", "decision"].includes(queueState.orderMode) ? queueState.orderMode : "dataset";
     queue.pageIndex = Math.max(0, Number(queueState.pageIndex) || 0);
     queue.groupIndex = Math.max(0, Number(queueState.groupIndex) || 0);
     queue.activeIndividual = String(queueState.activeIndividual || "");
@@ -9402,7 +9403,7 @@ class MovementExampleApp {
     queue.rankingMethod = String(
       queueState.rankingMethod || this.getRankingMethod(),
     );
-    if (["flagged", "flagged_asc"].includes(queue.orderMode)) this.repositionIndividualQueueAroundActive();
+    if (["flagged", "flagged_asc", "decision"].includes(queue.orderMode)) this.repositionIndividualQueueAroundActive();
   }
 
   initializeDatasetView(viewContext = null) {
@@ -10264,6 +10265,12 @@ class MovementExampleApp {
     );
   }
 
+  reviewDecisionQueueRank(individual) {
+    const state = this.getSavedIndividualReviewState(individual);
+    if (!state.reviewed || !state.reviewDecision) return 0;
+    return {fix_keep: 1, remove: 2, ok: 3}[state.reviewDecision] ?? 4;
+  }
+
   getIndividualQueueOrder() {
     const individuals = this.data?.individuals || [];
     const visibleIndividuals = individuals.filter(individual => {
@@ -10277,19 +10284,23 @@ class MovementExampleApp {
     });
     const datasetIndex = new Map(this.data?.individuals?.map((individual, index) => [individual, index]) || []);
     const queue = this.individualReviewQueue;
-    if (["flagged", "flagged_asc"].includes(queue.orderMode)) {
+    if (["flagged", "flagged_asc", "decision"].includes(queue.orderMode)) {
       const key = `${this.currentFamily}\u0000${this.currentStudy}\u0000${this.currentArtifact}`;
       // Review edits update counts, but only changing Review order takes a new snapshot.
-      if (queue.flaggedOrderSnapshot?.key !== key || queue.flaggedOrderSnapshot?.mode !== queue.orderMode) {
+      if (queue.sortOrderSnapshot?.key !== key || queue.sortOrderSnapshot?.mode !== queue.orderMode) {
         const order = [...individuals].sort((left, right) => {
+          if (queue.orderMode === "decision") {
+            return this.reviewDecisionQueueRank(left) - this.reviewDecisionQueueRank(right)
+              || datasetIndex.get(left) - datasetIndex.get(right);
+          }
           const difference = (Number(this.data.stats[right]?.suspectedCount) || 0)
             - (Number(this.data.stats[left]?.suspectedCount) || 0);
           return (queue.orderMode === "flagged_asc" ? -difference : difference)
             || datasetIndex.get(left) - datasetIndex.get(right);
         });
-        queue.flaggedOrderSnapshot = {key, mode: queue.orderMode, order};
+        queue.sortOrderSnapshot = {key, mode: queue.orderMode, order};
       }
-      const orderIndex = new Map(queue.flaggedOrderSnapshot.order.map((individual, index) => [individual, index]));
+      const orderIndex = new Map(queue.sortOrderSnapshot.order.map((individual, index) => [individual, index]));
       return [...visibleIndividuals].sort((left, right) => (
         (orderIndex.get(left) ?? Number.MAX_SAFE_INTEGER)
         - (orderIndex.get(right) ?? Number.MAX_SAFE_INTEGER)
@@ -11182,8 +11193,8 @@ class MovementExampleApp {
     const rankingMethods = new Set(this.rankingMethodOptions().map(([value]) => value));
     const requestedMethod = rankingMethods.has(orderValue) ? orderValue : "";
     if (!requestedMethod) {
-      this.individualReviewQueue.orderMode = ["flagged", "flagged_asc"].includes(orderValue) ? orderValue : "dataset";
-      this.individualReviewQueue.flaggedOrderSnapshot = null;
+      this.individualReviewQueue.orderMode = ["flagged", "flagged_asc", "decision"].includes(orderValue) ? orderValue : "dataset";
+      this.individualReviewQueue.sortOrderSnapshot = null;
       this.individualReviewQueue.appliedRankingAnalysisId = "";
       this.individualReviewQueue.pendingRankingAnalysisId = "";
     } else {
@@ -11253,6 +11264,10 @@ class MovementExampleApp {
       return;
     }
     target.classList.remove("error");
+    if (this.individualReviewQueue.orderMode === "decision") {
+      target.textContent = "Unreviewed first, then Fix & Keep, Remove, OK. Order stays fixed until you change Review order.";
+      return;
+    }
     if (["flagged", "flagged_asc"].includes(this.individualReviewQueue.orderMode)) {
       target.textContent = `${this.individualReviewQueue.orderMode === "flagged_asc" ? "Fewest" : "Most"} flagged fixes first. Counts update after review; order stays fixed until you change Review order.`;
       return;
