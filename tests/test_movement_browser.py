@@ -897,6 +897,57 @@ def test_roi_drawing_uses_queue_and_browse_scopes(tmp_path):
         browser.close()
 
 
+def test_flagged_queue_order_changes_only_when_reviewer_requests_it(tmp_path):
+    import playwright.sync_api as playwright_api
+    study_dir = tmp_path / "data" / "movement_clean" / "queue_order"
+    study_dir.mkdir(parents=True)
+    (study_dir / "movement.csv").write_text(
+        "eventid,individual,timestamp,longitude,latitude,set,outlier_status,outlier_issue_type\n"
+        "a1,alpha,2024-01-01T00:00:00Z,-70,40,train,suspected,test\n"
+        "a2,alpha,2024-01-01T01:00:00Z,-70.1,40.1,train,suspected,test\n"
+        "b1,beta,2024-01-01T00:00:00Z,-71,41,train,suspected,test\n"
+        "b2,beta,2024-01-01T01:00:00Z,-71.1,41.1,train,,\n"
+        "c1,gamma,2024-01-01T00:00:00Z,-72,42,train,,\n"
+        "c2,gamma,2024-01-01T01:00:00Z,-72.1,42.1,train,,\n",
+        encoding="utf-8",
+    )
+    app = create_app(
+        data_root=tmp_path / "data", static_root=STATIC_ROOT,
+        index_path=INDEX_PATH, auth_manager=_auth_manager(),
+    )
+    register_movement_routes(app, data_root=tmp_path / "data")
+
+    with _serve(app) as base_url, playwright_api.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = _new_page(browser, viewport={"width": 1440, "height": 900})
+        _login_and_wait(page, base_url, "queue_order")
+        page.locator('[data-individual-checkbox="alpha"]').wait_for(
+            state="attached", timeout=20_000
+        )
+        page.locator('[data-role="individual-view-queue"]').click()
+        order_control = page.locator('[data-role="individual-queue-order"]')
+        order = lambda: page.locator("[data-queue-individual]").evaluate_all(
+            "cards => cards.map(card => card.dataset.queueIndividual)"
+        )
+
+        order_control.select_option("flagged")
+        assert order() == ["alpha", "beta", "gamma"]
+        page.locator(
+            '[data-queue-individual="alpha"] button[data-queue-issue-action="unflag"]'
+        ).click()
+        page.wait_for_function(
+            """() => document.querySelector('[data-queue-individual="alpha"] .movement-queue-card-meta')?.textContent.includes('0 flagged')""",
+            timeout=20_000,
+        )
+        assert order() == ["alpha", "beta", "gamma"]
+
+        order_control.select_option("flagged_asc")
+        assert order() == ["alpha", "gamma", "beta"]
+        order_control.select_option("flagged")
+        assert order() == ["beta", "alpha", "gamma"]
+        browser.close()
+
+
 def test_queue_decision_retains_exact_blocks_across_review_step(tmp_path):
     import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "queue_transition"
