@@ -143,7 +143,7 @@ def test_queue_group_resolves_exact_individual_and_preserves_overlap(reviewed_st
 
 @pytest.mark.browser
 def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tmp_path):
-    from test_movement_browser import _serve, _open_browser, _new_page, _wait_for_layer, _open_binary_fix_popup, STATIC_ROOT, INDEX_PATH
+    from test_movement_browser import _serve, _open_browser, _new_page, _open_toolbar_menu, _wait_for_layer, _open_binary_fix_popup, STATIC_ROOT, INDEX_PATH
     from app.auth import AuthManager
     from app.web import create_app
     import playwright.sync_api as playwright_api
@@ -223,6 +223,7 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         assert destination.locator('button[data-issue-type="Stationarity"]').count() == 3
         before_navigation = page.locator('[data-role="dataset"]').input_value()
         before_navigation_requests = len(track_requests)
+        _open_toolbar_menu(page, "layers-menu")
         page.locator('[data-role="show-flagged"]').uncheck()
         page.evaluate('window.__testFittedBounds = null')
         destination.locator('[data-queue-flag-jump="fixes:0:4"]').click()
@@ -254,6 +255,7 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         show_flagged = page.locator('[data-role="show-flagged"]')
         assert show_flagged.is_checked()
         assert page.locator('[data-role="hide-suspected"], [data-role="show-confirmed"]').count() == 0
+        _open_toolbar_menu(page, "layers-menu")
         show_flagged.uncheck()
         page.wait_for_function("""() => !(window.__testMapLayers || []).some(layer =>
           layer.id.startsWith('movement-binary-suspected-') || layer.id === 'movement-suspected-outline')
@@ -287,6 +289,7 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         }""")
         # Switching issue types shows the exact new group, including overlaps.
         stationary_highlight = active.locator(f'{stationary}[data-queue-issue-action="highlight"]')
+        _open_toolbar_menu(page, "layers-menu")
         show_flagged.uncheck()
         page.wait_for_function("""() => !window.__testMapLayers.some(layer =>
           layer.id === 'movement-queue-issue-highlight')""")
@@ -304,6 +307,7 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         }""", arg=first_stationary_row)
         # Hiding a highlighted group and clicking it again must reveal it,
         # rather than toggle the active group off or leave the checkbox off.
+        _open_toolbar_menu(page, "layers-menu")
         show_flagged.uncheck()
         stationary_highlight.click()
         assert show_flagged.is_checked()
@@ -406,6 +410,7 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
         # changing the saved decisions, playback position or retained map data.
         page.wait_for_function("""() => window.__testMapLayers.some(layer =>
           layer.id.startsWith('movement-binary-confirmed-') || layer.id === 'movement-confirmed-exclusions')""")
+        _open_toolbar_menu(page, "layers-menu")
         show_flagged.uncheck()
         page.wait_for_function("""() => !window.__testMapLayers.some(layer =>
           layer.id.startsWith('movement-binary-confirmed-')
@@ -415,6 +420,7 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
           || layer.id === 'movement-queue-issue-highlight')""")
         assert "1 flagged" in active.locator('.movement-queue-card-meta').inner_text()
         assert "5 confirmed" in active.locator('.movement-queue-card-meta').inner_text()
+        _open_toolbar_menu(page, "layers-menu")
         show_flagged.check()
         page.wait_for_function("""() => window.__testMapLayers.some(layer =>
           layer.id.startsWith('movement-binary-confirmed-') || layer.id === 'movement-confirmed-exclusions')""")
@@ -445,7 +451,11 @@ def test_queue_buttons_resolve_groups_without_point_selection(reviewed_study, tm
             active.locator('[data-queue-table]').click()
             rows = page.locator('[data-role="table-wrap"] tr[data-fix-key]')
             rows.first.wait_for(state="visible")
-            statuses = rows.evaluate_all("rows => rows.map(row => row.cells[3].textContent)")
+            statuses = rows.evaluate_all("""rows => {
+              const headers = [...rows[0].closest('table').tHead.rows[0].cells];
+              const column = headers.findIndex(cell => cell.textContent.trim() === 'Status');
+              return rows.map(row => row.cells[column].textContent);
+            }""")
             assert statuses.count("confirmed") == 5, statuses
             assert "suspected" not in statuses
         assert not errors, errors
