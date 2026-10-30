@@ -1,11 +1,15 @@
 # RDS Movement
 
 This thin application wrapper reuses the movement review backend and frontend
-with per-individual move2/sf RDS inputs grouped into one project per study.
+with per-individual AMT track_xyt or move2/sf RDS inputs grouped into one project per study.
 It treats `burst_` as authoritative, exposes `is_outlier` for color and ranking,
 and keeps review state in schema-v6 lineage sidecars. The SQLite files under
 the configured local cache root are disposable fix-level indexes and rebuild
 automatically when the RDS bundle changes or the cache is deleted.
+
+[Study metadata and AMT review](../../docs/STUDY_METADATA.md) describes optional
+per-study `metadata.json`, species and deployment details, invalid-position
+review, and exports that preserve the input's native R class.
 
 ## Install and run
 

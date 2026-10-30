@@ -12,13 +12,25 @@ is loaded, how bursts are defined, and how reviewed data is exported.
    selecting one first shows its overview track and then replaces it with exact
    points and tracks when they are ready.
 3. Use **All individuals** only when the complete study is needed on the map.
-4. Use **Show track lines**, **Points**, **Bursts**, and the individual checkboxes
+4. Open **Layers** for **Show track lines**, **Points**, **Bursts**, and the basemap.
+   Use these controls and the individual checkboxes
    to change the map view. Turning off track lines also hides their line highlights
    and preview paths; points, point highlights, the player marker, and other
    overlays stay as they were. These preferences do not create dataset versions.
 
 RDS studies use the source `burst_` values as authoritative bursts. CSV studies
 use the configured movement burst definition.
+
+When a study includes metadata, species names appear in navigation and individual
+cards. Expand **Individual metadata** for biological details and the separate
+deployment records. Species links open external name searches. Source deployment
+dates and sampling statistics can differ from the supplied review track.
+
+An individual's **invalid positions** button opens its table filtered to those
+rows, including original longitude and latitude. Invalid positions remain
+reviewable and exportable, with no map or player location. Paths break at these
+positions. See [Study metadata and native AMT review](STUDY_METADATA.md) for the
+file format and export behavior.
 
 ## 2. Choose a color variable
 
@@ -28,7 +40,10 @@ the help marker beside the active variable for its definition.
 - **Individual ID** assigns each individual a categorical track color.
 - **Step length** is the WGS84 geodesic distance from a fix to the following fix.
 - **Speed** is that step length divided by the positive time interval to the
-  following fix.
+  following fix. Applying a Speed threshold requires both incoming and outgoing
+  speeds to exceed it. Turning angle does not affect this filter. Track endpoints
+  and other fixes with a missing adjacent speed cannot match. **Reverse** requires
+  both speeds below the cutoff. Preset quantiles count each eligible step once.
 - **Time delta** is the number of seconds from a fix to the following fix.
 - **Turn angle** is the signed change in WGS84 geodesic bearing at the middle of
   the preceding, current, and following fixes.
@@ -39,6 +54,17 @@ the help marker beside the active variable for its definition.
   It is source data, not Scrub Data review state.
 
 ## 3. Filter and inspect possible outliers
+
+For the ordered study-wide Stationarity → Speed → GPS Spike protocol, open
+**Filters** in the toolbar. Recalculation is optional and user initiated,
+per filter, and creates its own graph step only when applied. See the
+[study-filter walkthrough and pre-filtering script](STUDY_FILTERS.md).
+
+The version selector shows a short action label. Open the **Version details**
+information button for the saved rule, author, and date. The species badge opens
+reference links and, when available online, a credited PhyloPic silhouette. Missing
+images leave the text and links available. **Export** contains reviewed tracks and individual decisions;
+**More** contains reports, ranking, and additional study actions.
 
 For a numeric variable, click its histogram or enter a threshold. For a boolean
 or categorical variable, select one or more levels. Matching fixes retain the
