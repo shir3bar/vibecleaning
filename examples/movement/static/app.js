@@ -1018,11 +1018,11 @@ class MovementExampleApp {
       : ["flagged", "flagged_asc", "decision"].includes(this.individualReviewQueue?.orderMode) ? this.individualReviewQueue.orderMode : "dataset";
     this.refs.individualQueueOrder.innerHTML = [
       ["dataset", "Dataset source"],
-      ["decision", "Review decision — unreviewed first"],
+      ["decision", "Review decision"],
       ["flagged", "Flagged fixes — most first"],
       ["flagged_asc", "Flagged fixes — fewest first"],
       ...this.rankingMethodOptions(),
-    ].map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
+    ].map(([value, label]) => `<option value="${value}"${value === "decision" ? " disabled" : ""}>${label}</option>`).join("");
     this.refs.individualQueueOrder.value = selectedValue;
     if (!this.refs.individualQueueOrder.value) {
       this.refs.individualQueueOrder.value = "dataset";
@@ -3117,7 +3117,8 @@ class MovementExampleApp {
           cursor: pointer;
         }
         .movement-individual-view-tabs button.is-active,
-        .movement-queue-map-controls button.is-active {
+        .movement-queue-map-controls button.is-active,
+        .movement-queue-nav button.is-active {
           border-color: rgba(67, 206, 162, 0.46);
           background: rgba(67, 206, 162, 0.2);
           color: #d8fff3;
@@ -4365,11 +4366,10 @@ class MovementExampleApp {
                     <div class="movement-queue-ranking-state" data-role="individual-queue-ranking-state"></div>
                     <div class="movement-queue-nav">
                       <button type="button" data-queue-nav="previous-page">Previous 25</button>
-                      <button type="button" data-queue-nav="previous-group">Previous 5</button>
                       <button type="button" data-queue-nav="previous-individual">Previous</button>
                       <button type="button" data-queue-nav="next-individual">Next</button>
-                      <button type="button" data-queue-nav="next-group">Next 5</button>
                       <button type="button" data-queue-nav="next-page">Next 25</button>
+                      <button type="button" data-role="individual-queue-review-order" title="Unreviewed first, then Fix & Keep, Remove, OK. Click again to refresh the order.">Unreviewed first</button>
                     </div>
                     <div class="movement-queue-map-controls">
                       <button type="button" data-queue-scope="solo">Only current</button>
@@ -4787,6 +4787,7 @@ class MovementExampleApp {
       individualViewQueue: this.mountEl.querySelector('[data-role="individual-view-queue"]'),
       individualQueueControls: this.mountEl.querySelector('[data-role="individual-queue-controls"]'),
       individualQueueOrder: this.mountEl.querySelector('[data-role="individual-queue-order"]'),
+      individualQueueReviewOrder: this.mountEl.querySelector('[data-role="individual-queue-review-order"]'),
       individualQueuePriorOkLastControl: this.mountEl.querySelector('[data-role="individual-queue-prior-ok-last-control"]'),
       individualQueuePriorOkLast: this.mountEl.querySelector('[data-role="individual-queue-prior-ok-last"]'),
       individualQueueFilter: this.mountEl.querySelector('[data-role="individual-queue-filter"]'),
@@ -5071,6 +5072,9 @@ class MovementExampleApp {
     });
     this.refs.individualQueueOrder.addEventListener("change", () => {
       void this.changeIndividualQueueOrder(this.refs.individualQueueOrder.value);
+    });
+    this.refs.individualQueueReviewOrder.addEventListener("click", () => {
+      void this.changeIndividualQueueOrder("decision");
     });
     this.refs.individualQueuePriorOkLast.addEventListener("change", () => {
       this.individualReviewQueue.priorOkLast = this.refs.individualQueuePriorOkLast.checked;
@@ -10286,7 +10290,7 @@ class MovementExampleApp {
     const queue = this.individualReviewQueue;
     if (["flagged", "flagged_asc", "decision"].includes(queue.orderMode)) {
       const key = `${this.currentFamily}\u0000${this.currentStudy}\u0000${this.currentArtifact}`;
-      // Review edits update counts, but only changing Review order takes a new snapshot.
+      // Review edits update counts, but explicit order actions take a new snapshot.
       if (queue.sortOrderSnapshot?.key !== key || queue.sortOrderSnapshot?.mode !== queue.orderMode) {
         const order = [...individuals].sort((left, right) => {
           if (queue.orderMode === "decision") {
@@ -10898,18 +10902,6 @@ class MovementExampleApp {
       this.saveUiState();
       return;
     }
-    if (action === "previous-group" || action === "next-group") {
-      const direction = action === "next-group" ? 1 : -1;
-      const nextGroupIndex = clamp(
-        this.individualReviewQueue.groupIndex + direction,
-        0,
-        position.groupCount - 1,
-      );
-      const target = position.page[nextGroupIndex * INDIVIDUAL_QUEUE_GROUP_SIZE]
-        || position.page[0];
-      await this.focusIndividualQueueItem(target);
-      return;
-    }
     const direction = action === "next-individual" ? 1 : -1;
     const pageIndex = position.page.indexOf(this.individualReviewQueue.activeIndividual);
     const nextPageIndex = clamp(pageIndex + direction, 0, Math.max(0, position.page.length - 1));
@@ -11265,7 +11257,7 @@ class MovementExampleApp {
     }
     target.classList.remove("error");
     if (this.individualReviewQueue.orderMode === "decision") {
-      target.textContent = "Unreviewed first, then Fix & Keep, Remove, OK. Order stays fixed until you change Review order.";
+      target.textContent = "Unreviewed first, then Fix & Keep, Remove, OK. Click Unreviewed first again to update the order.";
       return;
     }
     if (["flagged", "flagged_asc"].includes(this.individualReviewQueue.orderMode)) {
@@ -12040,6 +12032,8 @@ class MovementExampleApp {
     );
     const rankingLabel = this.rankingMethodLabel(queue.rankingMethod);
     this.syncIndividualQueueRankingOptions();
+    this.refs.individualQueueReviewOrder.classList.toggle("is-active", queue.orderMode === "decision");
+    this.refs.individualQueueReviewOrder.disabled = queue.saving || !position.ordered.length;
     this.refs.individualHead.textContent = (
       `Individual review queue (${formatCount(position.ordered.length)})`
     );
@@ -12059,8 +12053,6 @@ class MovementExampleApp {
     const navDisabled = {
       "previous-page": queue.pageIndex <= 0,
       "next-page": queue.pageIndex >= position.pageCount - 1,
-      "previous-group": queue.groupIndex <= 0,
-      "next-group": queue.groupIndex >= position.groupCount - 1,
       "previous-individual": activePageIndex <= 0,
       "next-individual": activePageIndex < 0 || activePageIndex >= position.page.length - 1,
     };

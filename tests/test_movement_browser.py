@@ -948,7 +948,7 @@ def test_flagged_queue_order_changes_only_when_reviewer_requests_it(tmp_path):
         browser.close()
 
 
-def test_review_decision_queue_order_keeps_unreviewed_first_until_reselected(tmp_path):
+def test_review_decision_queue_order_keeps_unreviewed_first_until_button_refresh(tmp_path):
     import playwright.sync_api as playwright_api
     study_dir = tmp_path / "data" / "movement_clean" / "queue_decision_order"
     study_dir.mkdir(parents=True)
@@ -969,6 +969,7 @@ def test_review_decision_queue_order_keeps_unreviewed_first_until_reselected(tmp
         page.locator('[data-role="individual-view-queue"]').click()
         save = page.locator('[data-role="individual-queue-save"]')
         order_control = page.locator('[data-role="individual-queue-order"]')
+        decision_order_button = page.locator('[data-role="individual-queue-review-order"]')
         order = lambda: page.locator("[data-queue-individual]").evaluate_all(
             "cards => cards.map(card => card.dataset.queueIndividual)"
         )
@@ -979,7 +980,10 @@ def test_review_decision_queue_order_keeps_unreviewed_first_until_reselected(tmp
         source_order = order()
         decision_order = [individual for individual in source_order if individual != "alpha"] + ["alpha"]
 
-        order_control.select_option("decision")
+        decision_order_button.click()
+        assert order_control.input_value() == "decision"
+        assert "is-active" in (decision_order_button.get_attribute("class") or "")
+        assert page.locator('[data-queue-nav="previous-group"], [data-queue-nav="next-group"]').count() == 0
         assert order() == decision_order
         page.locator('[data-queue-individual="beta"] [data-review-decision="fix_keep"]').click()
         save.click()
@@ -992,8 +996,7 @@ def test_review_decision_queue_order_keeps_unreviewed_first_until_reselected(tmp
         )
         assert order() == decision_order
 
-        order_control.select_option("dataset")
-        order_control.select_option("decision")
+        decision_order_button.click()
         assert order() == [individual for individual in source_order if individual not in {"alpha", "beta"}] + ["beta", "alpha"]
         browser.close()
 
