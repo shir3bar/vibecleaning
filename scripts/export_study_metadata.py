@@ -22,11 +22,14 @@ from examples.movement.study_metadata import METADATA_UNITS, SOURCE_NAME
 
 def study_folders(collection: Path) -> list[Path]:
     """Accept a full collection, one annotator root, or movement_rds itself."""
-    roots = set(collection.glob("*/movement_rds"))
-    if (collection / "movement_rds").is_dir():
-        roots.add(collection / "movement_rds")
     if collection.name == "movement_rds" and collection.is_dir():
-        roots.add(collection)
+        roots = [collection]
+    elif (collection / "movement_rds").is_dir():
+        # An annotator's data root can also contain unrelated projects with
+        # their own movement_rds directories. Prefer the app's direct family.
+        roots = [collection / "movement_rds"]
+    else:
+        roots = sorted(collection.glob("*/movement_rds"))
     studies = sorted(study for root in roots if root.is_dir()
                      for study in root.iterdir()
                      if study.is_dir() and not study.name.startswith(".") and any(study.glob("*.rds")))

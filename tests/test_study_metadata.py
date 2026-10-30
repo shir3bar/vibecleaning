@@ -235,8 +235,11 @@ def test_exporter_preserves_deployments_units_ids_and_missing_values(tmp_path, m
     annotator_root = tmp_path / "single-annotator"
     local_study = annotator_root / "movement_rds" / STUDY
     local_study.mkdir(parents=True); (local_study / FILENAME).write_bytes(b"track")
+    unrelated = annotator_root / "movebenchmini_rds" / "movement_rds" / "other_study"
+    unrelated.mkdir(parents=True); (unrelated / "1005_100501.rds").write_bytes(b"unrelated")
     assert export_metadata(source, annotator_root) == result
     assert (local_study / "metadata.json").is_file()
+    assert not (unrelated / "metadata.json").exists()
     assert export_metadata(source, annotator_root / "movement_rds") == result
     with pytest.raises(ValueError, match="No study folders containing RDS tracks"):
         export_metadata(source, tmp_path / "empty")

@@ -35,16 +35,17 @@ before writing any sidecar. Repeating the command preserves identical files.
 Use `--replace` explicitly to replace different existing metadata.
 
 For a **single annotator's local app data folder** (`./data/movement_rds/<study>`),
-use `./data` as the second argument:
+give the exact `movement_rds` folder as the second argument:
 
 ```sh
-uv run --no-sync python scripts/export_study_metadata.py "/path/to/metadata.rds" "./data"
+uv run --no-sync python scripts/export_study_metadata.py "/path/to/metadata.rds" "./data/movement_rds"
 ```
 
 The master `metadata.rds` must be copied or accessible separately. The
-prefiltering command does not create metadata sidecars. You can also pass
-`./data/movement_rds` directly as the second argument. A folder with no study
-subfolders containing RDS tracks now produces an error rather than zero output.
+prefiltering command does not create metadata sidecars. Passing `./data` also
+works: its direct `movement_rds` folder takes priority over unrelated nested
+projects such as `./data/movebenchmini_rds/movement_rds`. A folder with no study
+subfolders containing RDS tracks produces an error rather than zero output.
 
 The version-1 JSON has `study_id`, `source` (master filename and SHA-256),
 `units`, and `individuals`, keyed by decimal individual ID. Each individual
