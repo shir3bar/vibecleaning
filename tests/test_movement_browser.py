@@ -768,6 +768,7 @@ def test_queue_track_player_uses_fix_index_timeline_and_ignores_sets(tmp_path):
         ) is False
 
         request_count = len(binary_requests)
+        _open_toolbar_menu(page, "layers-menu")
         page.locator('[data-role="show-train"]').uncheck()
         assert canvas.get_attribute("data-count") == "25"
         assert slider.get_attribute("max") == "24"
@@ -1343,6 +1344,21 @@ def test_second_round_prior_ok_order_toggle_does_not_touch_map(tmp_path):
             'movement-track-player-position'
           )
         )""")
+        # The preview-to-binary handoff renders across two animation frames.
+        # Capture the map only after its final layer set has settled.
+        page.wait_for_function("""() => {
+          const ids = window.__movementDiagnostics.renderedLayerIds;
+          if (ids.some(id => id.startsWith('movement-overview-preview-'))
+              || !ids.some(id => id.startsWith('movement-binary-paths-individual-'))
+              || !ids.includes('movement-track-player-position')) return false;
+          const key = JSON.stringify(ids);
+          if (window.__stableQueueLayersKey !== key) {
+            window.__stableQueueLayersKey = key;
+            window.__stableQueueLayersSince = performance.now();
+            return false;
+          }
+          return performance.now() - window.__stableQueueLayersSince >= 250;
+        }""")
         before = page.evaluate("""() => ({
           canvas: document.querySelector('[data-role=map] canvas'),
           map: document.querySelector('[data-role=map]'),
