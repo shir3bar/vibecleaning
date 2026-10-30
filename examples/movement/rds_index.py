@@ -1288,6 +1288,12 @@ def _index_review_status(
     )
 
 
+def count_rds_suspected_fixes(index_path: Path, annotations: list[dict] | None = None) -> int:
+    """Count distinct fixes with an effective suspected review status."""
+    with closing(_connect(index_path)) as connection:
+        return int(np.count_nonzero(_index_review_status(connection, annotations) == 1))
+
+
 def _contiguous_value_ranges(values: np.ndarray, target: int) -> list[list[int]]:
     indexes = np.flatnonzero(values == target)
     if not len(indexes):

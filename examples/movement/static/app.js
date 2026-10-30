@@ -751,6 +751,7 @@ class MovementExampleApp {
     this.editorReleaseDatasetId = "";
     this.adminDashboardRefreshTimer = null;
     this.adminDashboardRefreshInFlight = false;
+    this.adminDashboardPayload = null;
     this.focusedRankingBurst = null;
     this.tableSelection = {
       anchorFixKey: "",
@@ -3754,7 +3755,18 @@ class MovementExampleApp {
           min-width: 0;
         }
         .movement-admin-dashboard-card {
-          width: min(1080px, 100%);
+          width: min(1180px, 100%);
+        }
+        .movement-admin-dashboard-order {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          color: #9bb0c6;
+          font-size: 12px;
+        }
+        .movement-admin-dashboard-order select {
+          min-width: 160px;
+          padding: 6px 8px;
         }
         .movement-admin-dashboard-table {
           width: 100%;
@@ -4629,6 +4641,13 @@ class MovementExampleApp {
           <div class="movement-modal-head">
             <h3>Review dashboard</h3>
             <div class="movement-admin-dashboard-actions">
+              <label class="movement-admin-dashboard-order">Order
+                <select data-role="admin-dashboard-order" aria-label="Order studies">
+                  <option value="study">Study name</option>
+                  <option value="suspected-desc">Most suspected fixes</option>
+                  <option value="suspected-asc">Fewest suspected fixes</option>
+                </select>
+              </label>
               <button type="button" data-role="admin-dashboard-refresh">Refresh</button>
               <button type="button" data-role="admin-dashboard-close">Close</button>
             </div>
@@ -4818,6 +4837,7 @@ class MovementExampleApp {
       adminDashboardModal: this.mountEl.querySelector('[data-role="admin-dashboard-modal"]'),
       adminDashboardClose: this.mountEl.querySelector('[data-role="admin-dashboard-close"]'),
       adminDashboardRefresh: this.mountEl.querySelector('[data-role="admin-dashboard-refresh"]'),
+      adminDashboardOrder: this.mountEl.querySelector('[data-role="admin-dashboard-order"]'),
       adminDashboardStatus: this.mountEl.querySelector('[data-role="admin-dashboard-status"]'),
       adminDashboardContent: this.mountEl.querySelector('[data-role="admin-dashboard-content"]'),
       issueTitle: this.mountEl.querySelector('[data-role="issue-title"]'),
@@ -5020,6 +5040,9 @@ class MovementExampleApp {
     this.refs.adminDashboardClose?.addEventListener("click", () => this.closeAdminDashboard());
     this.refs.adminDashboardRefresh?.addEventListener("click", () => {
       void this.refreshAdminDashboard({ showLoading: true });
+    });
+    this.refs.adminDashboardOrder?.addEventListener("change", () => {
+      if (this.adminDashboardPayload) this.renderAdminDashboard(this.adminDashboardPayload);
     });
     this.refs.adminDashboardModal?.addEventListener("click", event => {
       if (event.target === this.refs.adminDashboardModal) this.closeAdminDashboard();
@@ -8730,6 +8753,7 @@ class MovementExampleApp {
         "/api/apps/movement/admin/review-summary",
         { cache: "no-store" },
       );
+      this.adminDashboardPayload = payload;
       this.renderAdminDashboard(payload);
       await this.refreshExpandedAdminDashboardDetails();
       this.refs.adminDashboardStatus.textContent = (
@@ -8757,6 +8781,8 @@ class MovementExampleApp {
       fix_keep: formatCount(counts.fix_keep || 0),
       remove: formatCount(counts.remove || 0),
       needs_check: formatCount(counts.needs_check || 0),
+      suspected_fixes: Number.isFinite(item.suspected_fix_count)
+        ? formatCount(item.suspected_fix_count) : "—",
     };
     for (const [field, value] of Object.entries(values)) {
       const cell = row.querySelector(`[data-admin-field="${field}"]`);
@@ -8767,21 +8793,37 @@ class MovementExampleApp {
   }
 
   renderAdminDashboard(payload) {
-    const studies = Array.isArray(payload?.studies) ? payload.studies : [];
+    const studies = Array.isArray(payload?.studies) ? [...payload.studies] : [];
     if (!studies.length) {
       this.refs.adminDashboardContent.innerHTML = '<div class="movement-empty">No movement studies are available.</div>';
       return;
     }
     const studyKey = item => `${String(item.family || "")}\u0000${String(item.study || "")}`;
+    const order = this.refs.adminDashboardOrder?.value || "study";
+    studies.sort((left, right) => {
+      if (order.startsWith("suspected-")) {
+        const leftCount = Number(left.suspected_fix_count);
+        const rightCount = Number(right.suspected_fix_count);
+        const leftKnown = left.suspected_fix_count != null && Number.isFinite(leftCount);
+        const rightKnown = right.suspected_fix_count != null && Number.isFinite(rightCount);
+        if (leftKnown !== rightKnown) return leftKnown ? -1 : 1;
+        if (leftKnown && leftCount !== rightCount) {
+          return order === "suspected-desc" ? rightCount - leftCount : leftCount - rightCount;
+        }
+      }
+      return studyKey(left).localeCompare(studyKey(right));
+    });
     const existingRows = [...this.refs.adminDashboardContent.querySelectorAll("tr[data-admin-study-row]")];
-    const existingKeys = existingRows.map(row => (
-      `${String(row.dataset.family || "")}\u0000${String(row.dataset.study || "")}`
-    ));
-    const nextKeys = studies.map(studyKey);
-    if (arraysEqual(existingKeys, nextKeys)) {
+    const existingPairs = new Map(existingRows.map(row => {
+      const detailRow = row.nextElementSibling;
+      return [`${String(row.dataset.family || "")}\u0000${String(row.dataset.study || "")}`,
+        {row, detailRow: detailRow?.matches?.("tr[data-admin-detail-row]") ? detailRow : null}];
+    }));
+    if (existingPairs.size === studies.length && studies.every(item => existingPairs.get(studyKey(item))?.detailRow)) {
+      const tbody = this.refs.adminDashboardContent.querySelector("tbody");
       for (let index = 0; index < studies.length; index += 1) {
-        const row = existingRows[index];
-        const detailRow = row.nextElementSibling;
+        const {row, detailRow} = existingPairs.get(studyKey(studies[index]));
+        tbody.append(row, detailRow);
         const previousIdentity = `${row.dataset.reviewId || ""}\u0000${row.dataset.currentDatasetId || ""}`;
         this.updateAdminDashboardRow(row, studies[index]);
         const nextIdentity = `${row.dataset.reviewId || ""}\u0000${row.dataset.currentDatasetId || ""}`;
@@ -8795,7 +8837,8 @@ class MovementExampleApp {
       <table class="movement-admin-dashboard-table">
         <thead><tr>
           <th>Study</th><th>Review</th><th>Reviewer</th><th>Progress</th>
-          <th>OK</th><th>Fix &amp; Keep</th><th>Remove</th><th>Needs check</th><th>Actions</th>
+          <th>OK</th><th>Fix &amp; Keep</th><th>Remove</th><th>Needs check</th>
+          <th title="Distinct fixes currently marked suspected, including prefilter flags">Suspected fixes</th><th>Actions</th>
         </tr></thead>
         <tbody>
           ${studies.map(item => {
@@ -8812,13 +8855,14 @@ class MovementExampleApp {
                 <td data-admin-field="fix_keep">${escapeHtml(formatCount(counts.fix_keep || 0))}</td>
                 <td data-admin-field="remove">${escapeHtml(formatCount(counts.remove || 0))}</td>
                 <td data-admin-field="needs_check">${escapeHtml(formatCount(counts.needs_check || 0))}</td>
+                <td data-admin-field="suspected_fixes">${Number.isFinite(item.suspected_fix_count) ? escapeHtml(formatCount(item.suspected_fix_count)) : "—"}</td>
                 <td><div class="movement-admin-dashboard-actions">
                   <button type="button" data-admin-action="expand">Individuals</button>
                   <button type="button" data-admin-action="open">Open study</button>
                 </div></td>
               </tr>
               <tr data-admin-detail-row data-family="${escapeHtml(item.family || "")}" data-study="${escapeHtml(item.study || "")}" hidden>
-                <td colspan="9"><div class="movement-admin-individuals">Loading...</div></td>
+                <td colspan="10"><div class="movement-admin-individuals">Loading...</div></td>
               </tr>
             `;
           }).join("")}

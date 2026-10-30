@@ -647,6 +647,30 @@ def test_first_editor_review_action_automatically_assigns_that_editor(tmp_path):
     assert active_review(final_state)["review_id"] == review["review_id"]
 
 
+def test_dashboard_counts_embedded_csv_suspicions_before_assignment(tmp_path):
+    data_root = tmp_path / "data"
+    study = data_root / "movement_raw" / "study_one"
+    study.mkdir(parents=True)
+    (study / "movement.csv").write_text(
+        "eventid,individual,timestamp,longitude,latitude,outlier_status\n"
+        "a1,alpha,2024-01-01T00:00:00Z,-70,40,suspected\n"
+        "a2,alpha,2024-01-01T00:01:00Z,-70,40,\n"
+    )
+    app = create_app(
+        data_root=data_root,
+        static_root=Path(__file__).resolve().parents[1] / "examples" / "movement" / "static",
+        auth_manager=AuthManager.for_testing(username="editor", password="test-password-long", role="editor"),
+    )
+    register_movement_routes(app, data_root=data_root, allowed_families={"movement_raw"})
+    client = TestClient(app)
+    assert client.post("/api/auth/login", json={"username": "editor", "password": "test-password-long"}).status_code == 200
+    response = client.get("/api/apps/movement/admin/review-summary")
+    assert response.status_code == 200, response.text
+    row = response.json()["studies"][0]
+    assert row["review"] is None
+    assert row["suspected_fix_count"] == 1
+
+
 def test_movement_routes_hide_unassigned_studies_and_persist_session_actor(tmp_path):
     data_root = tmp_path / "data"
     study = data_root / "movement_raw" / "study_one"

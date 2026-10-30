@@ -2,6 +2,7 @@ import base64
 import binascii
 import asyncio
 from collections.abc import Callable
+from functools import lru_cache
 import json
 from math import isfinite
 from pathlib import Path
@@ -113,6 +114,7 @@ from .rds_index import (
     build_rds_report_inputs,
     build_rds_binary_columns,
     build_rds_review_projection,
+    count_rds_suspected_fixes,
     ensure_rds_index,
     rds_burst_feature_rows,
     rds_report_row_ranges,
@@ -1328,6 +1330,28 @@ def register_movement_routes(
         dataset_id = str(load_project_state(study_dir)["current_dataset_id"])
         return _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
 
+    @lru_cache(maxsize=1024)
+    def suspected_fix_count(study_dir: Path, dataset_id: str) -> int:
+        # Review changes create new immutable dataset IDs, so refreshes reuse the
+        # count until the study head changes. This also includes prefilter flags
+        # before a reviewer has been assigned.
+        annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+        if configured_source.bundle_scoped:
+            _, index_path = ensure_configured_rds_index(study_dir, dataset_id)
+            return count_rds_suspected_fixes(index_path, annotations)
+        dataset = load_dataset(study_dir, dataset_id)
+        total = 0
+        for artifact in dataset.get("artifacts", []):
+            if not configured_artifact_filter(artifact):
+                continue
+            name = str(artifact["logical_name"])
+            _, path = get_dataset_artifact(study_dir, dataset_id, name)
+            projection = build_review_projection(
+                path, annotations, source_artifact=name, individuals=[],
+            )
+            total += int(projection["review_counts"]["suspected"])
+        return total
+
     def admin_review_summary(
         family_name: str,
         study_name: str,
@@ -1347,11 +1371,13 @@ def register_movement_routes(
                 None,
             )
         current_dataset_id = str(load_project_state(study_dir)["current_dataset_id"])
+        current_suspected_fixes = suspected_fix_count(study_dir, current_dataset_id)
         if review is None:
             return {
                 "family": family_name,
                 "study": study_name,
                 "current_dataset_id": current_dataset_id,
+                "suspected_fix_count": current_suspected_fixes,
                 "review": None,
                 "counts": {
                     "required": 0,
@@ -1398,6 +1424,7 @@ def register_movement_routes(
             "family": family_name,
             "study": study_name,
             "current_dataset_id": current_dataset_id,
+            "suspected_fix_count": current_suspected_fixes,
             "review": {
                 "review_id": str(review.get("review_id") or ""),
                 "review_round": int(review.get("review_round") or 1),
@@ -2973,7 +3000,7 @@ def register_movement_routes(
             if family and study:
                 family_name = require_configured_family(family)
                 studies = [
-                    admin_review_summary(
+                    await run_in_threadpool(admin_review_summary,
                         family_name,
                         study,
                         include_individuals=include_individuals,
@@ -2991,7 +3018,7 @@ def register_movement_routes(
                     family_name = str(family_item["name"])
                     for study_item in list_studies(data_root, family_name):
                         studies.append(
-                            admin_review_summary(
+                            await run_in_threadpool(admin_review_summary,
                                 family_name,
                                 str(study_item["name"]),
                                 include_individuals=False,

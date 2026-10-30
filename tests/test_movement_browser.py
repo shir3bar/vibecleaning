@@ -1414,6 +1414,7 @@ def test_admin_dashboard_refreshes_active_review_without_rebuilding_rows(tmp_pat
                 "family": "movement_clean",
                 "study": "dashboard_live",
                 "current_dataset_id": "dataset_one",
+                "suspected_fix_count": 3,
                 "review": {
                     "review_id": "review_live",
                     "status": "active",
@@ -1423,6 +1424,12 @@ def test_admin_dashboard_refreshes_active_review_without_rebuilding_rows(tmp_pat
                     "required": 3, "reviewed": 0, "undecided": 3,
                     "ok": 0, "fix_keep": 0, "remove": 0, "needs_check": 0,
                 },
+            }, {
+                "family": "movement_clean", "study": "another_study",
+                "current_dataset_id": "dataset_one", "suspected_fix_count": 1,
+                "review": None,
+                "counts": {"required": 0, "reviewed": 0, "undecided": 0,
+                           "ok": 0, "fix_keep": 0, "remove": 0, "needs_check": 0},
             }],
         },
         {
@@ -1430,6 +1437,7 @@ def test_admin_dashboard_refreshes_active_review_without_rebuilding_rows(tmp_pat
                 "family": "movement_clean",
                 "study": "dashboard_live",
                 "current_dataset_id": "dataset_two",
+                "suspected_fix_count": 0,
                 "review": {
                     "review_id": "review_live",
                     "status": "active",
@@ -1439,6 +1447,12 @@ def test_admin_dashboard_refreshes_active_review_without_rebuilding_rows(tmp_pat
                     "required": 3, "reviewed": 1, "undecided": 2,
                     "ok": 1, "fix_keep": 0, "remove": 0, "needs_check": 0,
                 },
+            }, {
+                "family": "movement_clean", "study": "another_study",
+                "current_dataset_id": "dataset_one", "suspected_fix_count": 4,
+                "review": None,
+                "counts": {"required": 0, "reviewed": 0, "undecided": 0,
+                           "ok": 0, "fix_keep": 0, "remove": 0, "needs_check": 0},
             }],
         },
     ]
@@ -1456,23 +1470,30 @@ def test_admin_dashboard_refreshes_active_review_without_rebuilding_rows(tmp_pat
         page.route("**/api/apps/movement/admin/review-summary", dashboard_route)
         _login_and_wait(page, base_url, "dashboard_live")
         page.locator('[data-role="admin-dashboard"]').click()
-        progress = page.locator('[data-admin-field="progress"]')
+        row = page.locator('tr[data-admin-study-row][data-study="dashboard_live"]')
+        progress = row.locator('[data-admin-field="progress"]')
         progress.wait_for(state="visible", timeout=20_000)
         assert progress.text_content() == "0/3"
+        assert row.locator('[data-admin-field="suspected_fixes"]').text_content() == "3"
         page.evaluate("""() => {
-          window.__adminDashboardRow = document.querySelector('tr[data-admin-study-row]');
+          window.__adminDashboardRow = document.querySelector('tr[data-admin-study-row][data-study="dashboard_live"]');
         }""")
+
+        page.locator('[data-role="admin-dashboard-order"]').select_option("suspected-desc")
+        assert page.locator('tr[data-admin-study-row]').first.get_attribute("data-study") == "dashboard_live"
 
         page.locator('[data-role="admin-dashboard-refresh"]').click()
         page.wait_for_function(
-            """() => document.querySelector('[data-admin-field="progress"]')?.textContent === '1/3'""",
+            """() => document.querySelector('tr[data-study="dashboard_live"] [data-admin-field="progress"]')?.textContent === '1/3'""",
             timeout=20_000,
         )
-        assert page.locator('[data-admin-field="review"]').text_content() == "active"
-        assert page.locator('[data-admin-field="ok"]').text_content() == "1"
+        assert row.locator('[data-admin-field="review"]').text_content() == "active"
+        assert row.locator('[data-admin-field="ok"]').text_content() == "1"
+        assert row.locator('[data-admin-field="suspected_fixes"]').text_content() == "0"
+        assert page.locator('tr[data-admin-study-row]').first.get_attribute("data-study") == "another_study"
         assert page.locator('[data-admin-field="undecided"]').count() == 0
         assert page.evaluate("""() => (
-          window.__adminDashboardRow === document.querySelector('tr[data-admin-study-row]')
+          window.__adminDashboardRow === document.querySelector('tr[data-admin-study-row][data-study="dashboard_live"]')
         )""")
         assert request_count >= 2
         browser.close()

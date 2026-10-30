@@ -197,6 +197,25 @@ def api_client(h, tmp_path):
     return client, app
 
 
+def test_dashboard_counts_effective_suspected_fixes_without_assignment(prepared, tmp_path):
+    h = copied(prepared, tmp_path)
+    client, _ = api_client(h, tmp_path)
+    params = {"family": "movement_rds", "study": "910001"}
+
+    response = client.get("/api/apps/movement/admin/review-summary", params=params)
+    assert response.status_code == 200, response.text
+    before = response.json()["studies"][0]
+    assert before["review"] is None
+    assert before["suspected_fix_count"] > 0
+
+    h.unflag("stationarity")
+    response = client.get("/api/apps/movement/admin/review-summary", params=params)
+    assert response.status_code == 200, response.text
+    after = response.json()["studies"][0]
+    assert after["current_dataset_id"] == h.head
+    assert 0 < after["suspected_fix_count"] < before["suspected_fix_count"]
+
+
 def test_api_preview_apply_no_automatic_cascade_and_stale_token(prepared, tmp_path):
     from test_movement_issue_groups import post_review
     h = copied(prepared, tmp_path)
