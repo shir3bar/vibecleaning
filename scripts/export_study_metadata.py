@@ -20,7 +20,23 @@ from examples.movement.rds_index import _rds_constructors, _sf_constructor
 from examples.movement.study_metadata import METADATA_UNITS, SOURCE_NAME
 
 
+def study_folders(collection: Path) -> list[Path]:
+    """Accept a full collection, one annotator root, or movement_rds itself."""
+    roots = set(collection.glob("*/movement_rds"))
+    if (collection / "movement_rds").is_dir():
+        roots.add(collection / "movement_rds")
+    if collection.name == "movement_rds" and collection.is_dir():
+        roots.add(collection)
+    studies = sorted(study for root in roots if root.is_dir()
+                     for study in root.iterdir()
+                     if study.is_dir() and not study.name.startswith(".") and any(study.glob("*.rds")))
+    if not studies:
+        raise ValueError(f"No study folders containing RDS tracks found under {collection}")
+    return studies
+
+
 def export_metadata(master: Path, collection: Path, *, replace: bool = False) -> dict:
+    studies = study_folders(collection)
     constructors = _rds_constructors()
     constructors["data.frame"] = _sf_constructor
     with warnings.catch_warnings():
@@ -45,39 +61,38 @@ def export_metadata(master: Path, collection: Path, *, replace: bool = False) ->
         by_file[row["fileName"]].append(row)
     source = {"file_name": master.name, "sha256": hashlib.sha256(master.read_bytes()).hexdigest()}
     outputs, track_count, row_count = [], 0, 0
-    for family in sorted(collection.glob("*/movement_rds")):
-        for study in sorted(p for p in family.iterdir() if p.is_dir() and not p.name.startswith(".")):
-            individuals = {}
-            for track in sorted(study.glob("*.rds")):
-                match = SOURCE_NAME.fullmatch(track.name)
-                if not match or match[1] != study.name:
-                    raise ValueError(f"Invalid source filename: {track}")
-                rows = by_file.get(track.name)
-                if not rows:
-                    raise ValueError(f"No metadata for {track}")
-                study_id, individual_id = match.groups()
-                if any(r["MBid"] != study_id or r["individual_id"] != individual_id for r in rows):
-                    raise ValueError(f"Metadata IDs disagree with {track}")
-                def shared(key):
-                    values = {r.get(key) for r in rows if r.get(key) is not None}
-                    if key == "species" and len(values) > 1:
-                        raise ValueError(f"Conflicting species for {track}")
-                    return next(iter(values)) if len(values) == 1 else None
-                individuals[individual_id] = {
-                    "individual_id": individual_id, "source_file": track.name,
-                    "individual_local_identifier": shared("individual_local_identifier"),
-                    "species": shared("species"), "sex": shared("sex"), "deployments": rows,
-                }
-                track_count += 1
-                row_count += len(rows)
-            if individuals:
-                payload = {"schema_version": 1, "study_id": study.name, "source": source,
-                           "units": METADATA_UNITS, "individuals": individuals}
-                contents = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-                target = study / "metadata.json"
-                if target.exists() and target.read_text(encoding="utf-8") != contents and not replace:
-                    raise ValueError(f"Different metadata already exists: {target}; use --replace explicitly")
-                outputs.append((target, contents))
+    for study in studies:
+        individuals = {}
+        for track in sorted(study.glob("*.rds")):
+            match = SOURCE_NAME.fullmatch(track.name)
+            if not match or match[1] != study.name:
+                raise ValueError(f"Invalid source filename: {track}")
+            rows = by_file.get(track.name)
+            if not rows:
+                raise ValueError(f"No metadata for {track}")
+            study_id, individual_id = match.groups()
+            if any(r["MBid"] != study_id or r["individual_id"] != individual_id for r in rows):
+                raise ValueError(f"Metadata IDs disagree with {track}")
+            def shared(key):
+                values = {r.get(key) for r in rows if r.get(key) is not None}
+                if key == "species" and len(values) > 1:
+                    raise ValueError(f"Conflicting species for {track}")
+                return next(iter(values)) if len(values) == 1 else None
+            individuals[individual_id] = {
+                "individual_id": individual_id, "source_file": track.name,
+                "individual_local_identifier": shared("individual_local_identifier"),
+                "species": shared("species"), "sex": shared("sex"), "deployments": rows,
+            }
+            track_count += 1
+            row_count += len(rows)
+        if individuals:
+            payload = {"schema_version": 1, "study_id": study.name, "source": source,
+                       "units": METADATA_UNITS, "individuals": individuals}
+            contents = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+            target = study / "metadata.json"
+            if target.exists() and target.read_text(encoding="utf-8") != contents and not replace:
+                raise ValueError(f"Different metadata already exists: {target}; use --replace explicitly")
+            outputs.append((target, contents))
     # Validate the complete collection before publishing any sidecar.
     for target, contents in outputs:
         if target.exists() and target.read_text(encoding="utf-8") == contents:

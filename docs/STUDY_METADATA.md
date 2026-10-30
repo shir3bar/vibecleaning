@@ -34,6 +34,18 @@ track has matching study/individual IDs and a filename in the master table
 before writing any sidecar. Repeating the command preserves identical files.
 Use `--replace` explicitly to replace different existing metadata.
 
+For a **single annotator's local app data folder** (`./data/movement_rds/<study>`),
+use `./data` as the second argument:
+
+```sh
+uv run --no-sync python scripts/export_study_metadata.py "/path/to/metadata.rds" "./data"
+```
+
+The master `metadata.rds` must be copied or accessible separately. The
+prefiltering command does not create metadata sidecars. You can also pass
+`./data/movement_rds` directly as the second argument. A folder with no study
+subfolders containing RDS tracks now produces an error rather than zero output.
+
 The version-1 JSON has `study_id`, `source` (master filename and SHA-256),
 `units`, and `individuals`, keyed by decimal individual ID. Each individual
 contains `individual_id`, `source_file`, `individual_local_identifier`,

@@ -232,6 +232,14 @@ def test_exporter_preserves_deployments_units_ids_and_missing_values(tmp_path, m
     assert record["deployments"][0]["tracking_start_date"] == "2013-07-15T00:20:00Z"
     assert record["deployments"][0]["excluded"] == "yes_duplicated"
     assert export_metadata(source, tmp_path / "collection") == result
+    annotator_root = tmp_path / "single-annotator"
+    local_study = annotator_root / "movement_rds" / STUDY
+    local_study.mkdir(parents=True); (local_study / FILENAME).write_bytes(b"track")
+    assert export_metadata(source, annotator_root) == result
+    assert (local_study / "metadata.json").is_file()
+    assert export_metadata(source, annotator_root / "movement_rds") == result
+    with pytest.raises(ValueError, match="No study folders containing RDS tracks"):
+        export_metadata(source, tmp_path / "empty")
 
 
 def client_for(study, tmp_path):
