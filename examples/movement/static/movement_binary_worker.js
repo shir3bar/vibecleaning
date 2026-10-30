@@ -1,3 +1,5 @@
+importScripts("movement_speed_filter.js");
+const {matches: speedThresholdMatches, inboundSpeed: inboundSpeedAt} = globalThis.MovementSpeedFilter;
 const movements = new Map();
 const GPS_SPIKE_FIELD_KEY = "gps_spike_speed_turn";
 const MOVE2_OUTBOUND_FIELDS = new Set([
@@ -129,16 +131,6 @@ function colorAt(movement, index, spec) {
   return spec.categoryColors?.[level] || categoricalColor(level);
 }
 
-function inboundSpeedAt(movement, index) {
-  if (index <= 0) return Number.NaN;
-  const arrays = movement.arrays;
-  let previous = index - 1;
-  const sameTrack = i => Number(arrays.individual_codes[i]) === Number(arrays.individual_codes[index])
-    && (!arrays.set_codes || Number(arrays.set_codes[i]) === Number(arrays.set_codes[index]));
-  while (previous >= 0 && sameTrack(previous) && Number(arrays.review_status[previous]) === 2) previous -= 1;
-  return previous >= 0 && sameTrack(previous) ? Number(arrays.speed_mps?.[previous]) : Number.NaN;
-}
-
 function buildAttributes(movement, spec) {
   const arrays = movement.arrays;
   const rowCount = Number(movement.header.row_count) || 0;
@@ -162,7 +154,7 @@ function buildAttributes(movement, spec) {
     const individual = String(
       movement.header.individuals?.[Number(arrays.individual_codes[index])] || "",
     );
-    const hidden = hiddenBursts.has(burstIdAt(movement, index, individual));
+    const hidden = hiddenBursts.has(burstIdAt(movement, index, individual)) || arrays.coordinate_valid?.[index] === 0;
     const status = Number(arrays.review_status[index]);
     pointFilter[index] = !hidden && status !== 2 ? 1 : 0;
     pointFilterWithoutSuspected[index] = !hidden && status === 0 ? 1 : 0;
@@ -186,8 +178,10 @@ function buildAttributes(movement, spec) {
         const inboundSpeed = inboundSpeedAt(movement, index);
         const validTurn = field.key !== GPS_SPIKE_FIELD_KEY
           || (Number.isFinite(turn) && Math.abs(turn) >= Number(spec.gpsSpikeTurnAngleDeg));
-        const validInboundSpeed = field.key !== GPS_SPIKE_FIELD_KEY
-          || (Number.isFinite(inboundSpeed) && inboundSpeed > Number(threshold.value));
+        const validInboundSpeed = field.key === "speed_mps"
+          ? speedThresholdMatches(inboundSpeed, number, Number(threshold.value), threshold.reverse === true)
+          : field.key !== GPS_SPIKE_FIELD_KEY
+            || (Number.isFinite(inboundSpeed) && inboundSpeed > Number(threshold.value));
         const matches = threshold.reverse ? number < Number(threshold.value) : number > Number(threshold.value);
         thresholdFilter[index] = Number.isFinite(number) && validTurn && validInboundSpeed && matches ? 1 : 0;
       }

@@ -1,7 +1,7 @@
 import pytest
 
 from test_review_readiness_browser import make_app
-from test_movement_browser import _serve, _open_browser, _new_page, _login_and_wait
+from test_movement_browser import _serve, _open_browser, _new_page, _login_and_wait, _open_toolbar_menu
 
 pytestmark = pytest.mark.browser
 
@@ -67,6 +67,7 @@ def test_bulk_removal_dialog_covers_unselected_individuals(tmp_path, source_form
         _login_and_wait(page, url, 'readiness')
         page.locator('[data-individual-checkbox]').first.wait_for(state='attached')
         page.locator('[data-role="select-none"]').click()
+        _open_toolbar_menu(page, "more-menu")
         page.locator('[data-role="remove-study"]').click()
         modal = page.locator('[data-role="remove-study-modal"]')
         pw.expect(modal).to_be_visible()
@@ -135,7 +136,9 @@ def test_track_lines_hide_during_progressive_loading_preserving_points_and_playe
         page.locator('[data-individual-checkbox]').first.wait_for(state='attached')
         lines = page.locator('[data-role="show-track-lines"]')
         pw.expect(lines).to_be_checked()
+        _open_toolbar_menu(page, "layers-menu")
         lines.uncheck()
+        page.keyboard.press("Escape")
         page.locator(f'[data-individual-checkbox="{individuals[0]}"]').check()
         page.wait_for_function('window.__movementDiagnostics.renderedLayerIds.some(id => id.startsWith("movement-overview-preview-"))')
         assert not page.evaluate('window.__movementDiagnostics.visibleLayerIds.some(id => id.includes("preview-") || id.includes("paths-"))')
@@ -143,9 +146,12 @@ def test_track_lines_hide_during_progressive_loading_preserving_points_and_playe
         before = page.evaluate('window.__movementDiagnostics.visibleLayerIds')
         assert any('suspected' in layer for layer in before)
         assert not any('paths-' in layer or 'burst-casing' in layer or 'flagged-fix-steps' in layer for layer in before)
+        _open_toolbar_menu(page, "layers-menu")
         lines.check()
         page.wait_for_function('window.__movementDiagnostics.visibleLayerIds.some(id => id.startsWith("movement-binary-paths-"))')
+        _open_toolbar_menu(page, "layers-menu")
         lines.uncheck()
+        page.keyboard.press("Escape")
         assert set(before) == set(page.evaluate('window.__movementDiagnostics.visibleLayerIds'))
         page.locator('[data-role="individual-view-queue"]').click()
         page.wait_for_function('window.__movementDiagnostics.visibleLayerIds.includes("movement-track-player-position")')

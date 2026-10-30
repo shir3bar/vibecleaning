@@ -219,6 +219,10 @@ def _new_page(browser, **kwargs):
             route.fulfill(content_type="image/png", body=TRANSPARENT_TILE)
 
     page.route(BASEMAP_REQUEST, basemap_response)
+    # Species decoration is optional. Tests opt into provider fixtures explicitly.
+    page.route("https://api.phylopic.org/**", lambda route: route.fulfill(
+        json={"totalItems": 0}, headers={"Access-Control-Allow-Origin": "*"},
+    ))
     # Pytest includes these logs with failures, including startup timeouts.
     page.on("pageerror", lambda error: LOGGER.error("Browser JavaScript: %s", error))
     page.on("console", lambda message: LOGGER.error("Browser console: %s", message.text)
@@ -230,6 +234,12 @@ def _new_page(browser, **kwargs):
         "Browser HTTP %s: %s", response.status, response.url
     ) if response.status >= 400 else None)
     return page
+
+
+def _open_toolbar_menu(page, role):
+    menu = page.locator(f'[data-role="{role}"]')
+    if not menu.evaluate("element => element.open"):
+        menu.locator(":scope > summary").click()
 
 
 def _login_and_wait(page, base_url: str, study_name: str) -> None:
@@ -843,6 +853,7 @@ def test_roi_drawing_uses_queue_and_browse_scopes(tmp_path):
             state="visible", timeout=20_000
         )
         page.locator('[data-role="track-player-hide"]').click()
+        _open_toolbar_menu(page, "more-menu")
         page.locator('[data-role="roi-draw"]').click()
         roi_panel = page.locator('[data-role="roi-panel"]')
         roi_panel.wait_for(state="visible", timeout=20_000)
@@ -877,6 +888,7 @@ def test_roi_drawing_uses_queue_and_browse_scopes(tmp_path):
         assert page.evaluate(
             "() => window.__movementDiagnosticsSnapshot().roiVertexCount"
         ) == 0
+        _open_toolbar_menu(page, "more-menu")
         page.locator('[data-role="roi-draw"]').click()
         roi_panel.wait_for(state="visible", timeout=20_000)
         assert roi_scope.input_value() == "whole_study"
@@ -1599,6 +1611,7 @@ def test_rds_export_shows_live_progress_and_completion(tmp_path, monkeypatch, fa
             _login_and_wait(page, base_url, "268904527")
             button = page.locator('[data-role="export-reviewed-csv"]')
             playwright_api.expect(button).to_be_enabled(timeout=30_000)
+            _open_toolbar_menu(page, "export-menu")
             with page.expect_response(lambda response: response.url.endswith("/actions/export-reviewed-rds")) as started:
                 button.click()
             assert started.value.status == 202
@@ -1831,6 +1844,7 @@ def test_rds_progressive_loading_keeps_preview_until_exact(tmp_path, record_prop
 
             page.evaluate("window.__suspiciousMapNode = document.querySelector('[data-role=map]')")
             show_flagged = page.locator('[data-role="show-flagged"]')
+            _open_toolbar_menu(page, "layers-menu")
             show_flagged.uncheck()
             page.wait_for_function(
                 "() => !window.__movementDiagnostics.renderedLayerIds.some(id => id.includes('movement-binary-suspected'))"

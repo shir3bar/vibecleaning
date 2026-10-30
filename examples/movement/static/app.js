@@ -1,3 +1,6 @@
+import "/static/movement_speed_filter.js";
+const {matches: speedThresholdMatches, inboundSpeed: binaryInboundSpeed} = globalThis.MovementSpeedFilter;
+
 const MOVEMENT_APP_MODE_VALUE = document
   .querySelector('meta[name="vibecleaning-movement-mode"]')
   ?.getAttribute("content");
@@ -1593,7 +1596,7 @@ class MovementExampleApp {
       }
     }
     if (MOVEMENT_APP_CONFIG.rdsSource) {
-      this.refs.exportReviewedCsv.textContent = "Export reviewed RDS ZIP";
+      this.refs.exportReviewedCsv.textContent = "Reviewed tracks (.rds ZIP)";
       this.refs.burstCount.hidden = true;
       this.refs.burstCount.classList.add("movement-profile-hidden");
     }
@@ -1652,7 +1655,12 @@ class MovementExampleApp {
         .movement-output-links {
           grid-row: 5;
         }
+        .movement-metadata-details a { color: #7cd2ff; }
+        .movement-metadata-details { margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.12); font-size: 12px; line-height: 1.6; }
+        .movement-metadata-details summary { cursor: pointer; }
+        .movement-metadata-details section { margin-top: 8px; }
         .movement-main {
+          isolation: isolate;
           grid-row: 6;
         }
         .movement-root .movement-profile-hidden,
@@ -3949,16 +3957,115 @@ class MovementExampleApp {
         .movement-links a {
           color: #9df6dc;
         }
-        @media (max-width: 1080px) {
+        /* Keep the map prominent; secondary controls live in small drawers. */
+        .movement-toolbar { position: relative; z-index: 16; gap: 8px 12px; padding: 10px 16px 8px; }
+        .movement-toolbar label { min-width: 0; white-space: nowrap; }
+        .movement-toolbar select { min-width: 0; padding: 7px 9px; border-radius: 7px; }
+        .movement-study-field select { width: clamp(170px, 18vw, 270px); }
+        .movement-color-field select { width: clamp(160px, 16vw, 230px); }
+        .movement-version-field { display: flex; align-items: center; gap: 5px; min-width: 0; }
+        .movement-version-field select { width: clamp(150px, 14vw, 210px); }
+        .movement-toolbar input[type="checkbox"] { width: 16px; height: 16px; min-width: 0; flex: 0 0 16px; margin: 0; padding: 0; accent-color: #63d8b8; }
+        .movement-toolbar-menus { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+        .movement-popover { position: relative; font-size: 12px; }
+        .movement-popover > summary { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 32px; padding: 6px 10px; border: 1px solid rgba(148,163,184,.19); border-radius: 7px; background: rgba(255,255,255,.035); color: #d4dfec; cursor: pointer; list-style: none; white-space: nowrap; user-select: none; }
+        .movement-popover > summary::-webkit-details-marker { display: none; }
+        .movement-popover > summary::after { content: ""; width: 5px; height: 5px; margin-left: 2px; border-right: 1px solid #9bb0c6; border-bottom: 1px solid #9bb0c6; transform: rotate(45deg) translateY(-2px); }
+        .movement-popover[open] > summary { border-color: rgba(99,216,184,.5); background: rgba(99,216,184,.08); color: #defaf1; }
+        .movement-popover > summary:hover { background: rgba(255,255,255,.075); }
+        .movement-popover > summary:focus-visible, .movement-root button:focus-visible { outline: 2px solid #63d8b8; outline-offset: 3px; }
+        .movement-popover-panel { position: absolute; top: calc(100% + 9px); right: 0; z-index: 30; width: 260px; max-width: calc(100vw - 32px); max-height: min(70vh, 680px); overflow: auto; padding: 14px; border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: #101b28; box-shadow: 0 16px 45px rgba(0,0,0,.5); color: #c5d3e3; line-height: 1.5; white-space: normal; }
+        .movement-menu-heading { margin: 0 0 9px; font-size: 11px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; color: #8ca1b8; }
+        .movement-layers-panel { display: grid; gap: 12px; }
+        .movement-layers-panel > label { display: flex; justify-content: flex-start; gap: 10px; color: #d4dfec; }
+        .movement-layers-panel .movement-basemap-field { display: grid; margin-top: 3px; padding-top: 12px; border-top: 1px solid rgba(148,163,184,.13); }
+        .movement-basemap-field select { width: 100%; }
+        .movement-action-menu { display: grid; gap: 4px; width: 250px; }
+        .movement-action-menu label, .movement-action-menu .movement-candidate-query-control { display: grid; min-width: 0; white-space: normal; }
+        .movement-action-menu select { min-width: 0; width: 100%; }
+        .movement-action-menu .movement-candidate-query-meta { min-width: 0; max-width: 100%; }
+        .movement-toolbar .movement-action-menu button { width: 100%; padding: 8px 9px; text-align: left; font-size: 12px; border-radius: 6px; background: transparent; }
+        .movement-toolbar .movement-action-menu button:hover:enabled { background: rgba(99,216,184,.09); }
+        .movement-menu-divider { height: 1px; margin: 6px 0; background: rgba(148,163,184,.13); }
+        .movement-popover > .movement-icon-summary { width: 28px; min-height: 28px; padding: 0; border-radius: 50%; color: #92a4bd; font-family: Georgia, serif; font-weight: 700; }
+        .movement-icon-summary::after { display: none; }
+        .movement-version-popover .movement-popover-panel { left: 0; right: auto; width: 320px; }
+        .movement-version-details-title { color: #e4edf7; font-weight: 600; margin-bottom: 6px; }
+        .movement-version-details-meta { margin-top: 8px; font-size: 11px; color: #8ca1b8; }
+        .movement-review-toolbar { display: flex; flex-wrap: wrap; flex-basis: 100%; align-items: center; gap: 8px 12px; padding-top: 8px; border-top: 1px solid rgba(148,163,184,.1); }
+        .movement-selection-actions, .movement-fix-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+        .movement-selection-actions { padding-right: 12px; border-right: 1px solid rgba(148,163,184,.16); }
+        .movement-review-toolbar button { padding: 5px 8px; min-height: 28px; border-radius: 6px; font-size: 11px; }
+        .movement-status { min-height: 28px; padding: 5px 16px; font-size: 11px; }
+        [data-role="status"] { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+        .movement-status.error [data-role="status"] { white-space: normal; }
+        .movement-status [data-role="status"].error { white-space: normal; color: #ffb3c2; }
+        [data-role="study-metadata"] { margin-left: auto; min-width: 0; }
+        .movement-species-popover > summary { padding: 4px 9px; min-height: 28px; border-color: rgba(99,216,184,.17); background: rgba(99,216,184,.04); color: #b9dfd1; }
+        .movement-species-popover > summary em { max-width: 210px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+        .movement-species-popover .movement-popover-panel { width: 320px; }
+        .movement-species-entry + .movement-species-entry { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(148,163,184,.13); }
+        .movement-species-text > em { display: block; margin-bottom: 7px; color: #e0ede7; }
+        .movement-species-entry.has-species-portrait { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 7px 12px; align-items: center; }
+        .movement-species-silhouette { display: block; width: 64px; height: 64px; padding: 5px; object-fit: contain; border-radius: 9px; background: #deebe5; }
+        .movement-species-credit { grid-column: 1 / -1; font-size: 10px; line-height: 1.4; color: #8fa3b9; overflow-wrap: anywhere; }
+        .movement-species-credit a { color: #a6b9cb; text-decoration: none; }
+        .movement-species-credit a:hover { text-decoration: underline; }
+        .movement-species-reference-links { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+        .movement-species-reference-links a { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid rgba(148,163,184,.18); border-radius: 6px; color: #b8dccc; text-decoration: none; font-size: 11px; }
+        .movement-species-reference-links a:hover { border-color: #63d8b8; color: #e4fff4; }
+        .movement-species-reference-links a span { opacity: .6; }
+        .movement-metadata-warning { color: #ecc98e; font-size: 12px; }
+        .movement-filter-drawer { width: 510px; padding: 0; }
+        .movement-filter-drawer-head { padding: 16px 18px 12px; border-bottom: 1px solid rgba(148,163,184,.13); }
+        .movement-filter-drawer-head strong { color: #e0eaf5; font-size: 14px; }
+        .movement-filter-drawer-head p { margin-top: 4px; font-size: 12px; color: #8fa3b9; }
+        .movement-filter-optional { margin-left: 8px; font-size: 10px; color: #a1b2c5; font-weight: 400; }
+        .movement-filter-badge { display: inline-grid; place-items: center; min-width: 17px; padding: 0 4px; height: 17px; border-radius: 9px; background: rgba(238,186,102,.15); color: #f2cd91; font-size: 10px; }
+        .movement-filter-row { padding: 14px 18px; border-bottom: 1px solid rgba(148,163,184,.11); }
+        .movement-filter-row:last-child { border-bottom: 0; }
+        .movement-filter-row-head { display: flex; align-items: center; gap: 10px; }
+        .movement-filter-number { color: #647d96; font-size: 11px; }
+        .movement-filter-name { flex: 1; color: #e0eaf5; font-size: 13px; font-weight: 600; }
+        .movement-filter-state { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; color: #95acb5; white-space: nowrap; }
+        .movement-filter-state::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: #628d7f; }
+        .movement-filter-state.is-outdated { color: #e5bf80; }
+        .movement-filter-state.is-outdated::before { background: #d9a454; }
+        .movement-filter-state.is-not-run::before { background: #647d96; }
+        .movement-toolbar .movement-filter-row button { margin: 0; min-height: 28px; padding: 5px 9px; border-radius: 6px; font-size: 11px; background: rgba(148,163,184,.09); }
+        .movement-filter-rule { margin: 8px 0 0 18px; font-size: 11px; color: #8fa3b9; }
+        .movement-filter-rule > summary { width: max-content; cursor: pointer; list-style: none; }
+        .movement-filter-rule > summary::after { content: " +"; color: #607991; }
+        .movement-filter-rule[open] > summary::after { content: " −"; }
+        .movement-filter-rule p { margin-top: 7px; }
+        .movement-filter-pending-note { margin: 7px 0 0 18px; font-size: 11px; color: #b5a284; }
+        .movement-filter-preview { margin-top: 12px; padding: 11px 12px; border: 1px solid rgba(99,216,184,.2); border-radius: 8px; background: rgba(99,216,184,.035); font-size: 12px; }
+        .movement-filter-preview-counts { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 7px; color: #c7dfd6; }
+        .movement-filter-preview-actions { display: flex; gap: 5px; margin-top: 10px; }
+        .movement-toolbar .movement-filter-preview-actions button:first-child { background: rgba(99,216,184,.16); color: #c3f3e2; }
+        .movement-filter-preview-people { margin-top: 7px; }
+        .movement-filter-activity { padding: 10px 18px; font-size: 11px; color: #a5bcd2; }
+        @media (max-width: 900px) {
+          .movement-toolbar { gap: 8px; padding: 9px 12px; }
+          .movement-study-field select { width: 170px; }
+          .movement-version-field select { width: 155px; }
+          .movement-color-field select { width: 170px; }
+          .movement-toolbar-menus { margin-left: 0; }
+          .movement-review-toolbar { gap: 8px; }
+          [data-role="study-metadata"] { margin-left: 0; }
+          .movement-popover-panel { max-width: calc(100vw - 24px); }
+        }
+        @media (max-width: 900px) {
           .movement-root:not(.is-slim) .movement-main {
             grid-template-columns: 1fr;
-            grid-template-rows: minmax(320px, 1fr) minmax(320px, 1fr);
+            grid-template-rows: minmax(280px, 1fr) minmax(380px, 1fr);
+            overflow-y: auto;
           }
           .movement-root:not(.is-slim) .movement-side-resize {
             display: none;
           }
           .movement-root:not(.is-slim) .movement-side {
-            grid-template-rows: auto minmax(320px, 1fr) auto;
+            grid-template-rows: auto auto minmax(0, 1fr) auto;
           }
         }
         @media (max-width: 560px) {
@@ -3989,17 +4096,28 @@ class MovementExampleApp {
       <div class="movement-root">
         <div class="movement-toolbar">
           <label data-role="family-control">Family <select data-role="family"></select></label>
-          <label>Study <select data-role="study"></select></label>
-          <label>Version <select data-role="dataset"></select></label>
+          <label class="movement-study-field">Study <select data-role="study"></select></label>
+          <div class="movement-version-field">
+            <label>Version <select data-role="dataset"></select></label>
+            <details class="movement-popover movement-version-popover" data-role="version-menu">
+              <summary class="movement-icon-summary" aria-label="Version details" title="Version details">i</summary>
+              <div class="movement-popover-panel" data-role="version-details">Select a version to see its details.</div>
+            </details>
+          </div>
           <label data-role="artifact-control">Artifact <select data-role="artifact"></select></label>
-          <label>Basemap <select data-role="basemap"></select></label>
-          <label>Color by <select data-role="color-by"></select></label>
+          <label class="movement-color-field">Color by <select data-role="color-by"></select></label>
+          <div class="movement-toolbar-menus">
+          <details class="movement-popover" data-role="layers-menu">
+            <summary>Layers</summary>
+            <div class="movement-popover-panel movement-layers-panel">
+          <div class="movement-menu-heading">Map display</div>
           <label class="movement-toggle" data-role="show-train-control"><input type="checkbox" data-role="show-train"> Train</label>
           <label class="movement-toggle" data-role="show-test-control"><input type="checkbox" data-role="show-test"> Test</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-track-lines"> Show track lines</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-points"> Points</label>
           <label class="movement-toggle"><input type="checkbox" data-role="show-bursts"> Bursts</label>
           <label class="movement-toggle" title="Show suspicious fixes and confirmed exclusions on the map. This only changes visibility; saved review decisions stay unchanged."><input type="checkbox" data-role="show-flagged"> Show flagged fixes</label>
+          <label class="movement-basemap-field">Basemap <select data-role="basemap"></select></label>
           <label data-role="burst-definition-control">Burst definition
             <select data-role="burst-gap-mode">
               <option value="quantile">Gap quantile</option>
@@ -4013,10 +4131,22 @@ class MovementExampleApp {
             <input type="number" min="1" step="300" data-role="burst-gap-seconds">
           </label>
           <span class="movement-burst-count" data-role="burst-count">No bursts loaded</span>
-          <button type="button" data-role="select-all">All individuals</button>
-          <button type="button" data-role="select-none">No individuals</button>
-          <button type="button" data-role="select-suspicious">Select all suspicious</button>
-          <button type="button" data-role="clear-fixes">Clear checked fixes</button>
+          </div></details>
+          <div data-role="study-filters" hidden></div>
+          <details class="movement-popover" data-role="export-menu">
+            <summary>Export</summary>
+            <div class="movement-popover-panel movement-action-menu">
+              <div class="movement-menu-heading">Download</div>
+              <button type="button" data-role="export-reviewed-csv">Reviewed tracks (.csv)</button>
+              <button type="button" data-role="export-individual-decisions">Individual decisions (.csv)</button>
+            </div>
+          </details>
+          <details class="movement-popover" data-role="more-menu">
+            <summary>More</summary>
+            <div class="movement-popover-panel movement-action-menu">
+          <div class="movement-menu-heading">Explore</div>
+          <button type="button" data-role="reset-view">Reset view</button>
+          <button type="button" data-role="roi-draw">Draw ROI</button>
           <div class="movement-candidate-query-control" data-role="candidate-query-control">
             <label>Candidate query <select data-role="candidate-query-select"></select></label>
             <label>Scope
@@ -4032,11 +4162,6 @@ class MovementExampleApp {
           </div>
           <button type="button" data-role="check-candidates">Check filter matches</button>
           <button type="button" data-role="clear-candidates">Clear candidates</button>
-          <button type="button" data-role="reset-view">Reset view</button>
-          <button type="button" data-role="roi-draw">Draw ROI</button>
-          <button type="button" class="movement-emphasis" data-role="mark-suspected">Flag checked fixes</button>
-          <button type="button" class="movement-emphasis" data-role="mark-confirmed">Mark confirmed</button>
-          <button type="button" data-role="dismiss-suspected">Unflag suspicious</button>
           <label data-role="anomaly-feature-set-control">Ranking features
             <select data-role="anomaly-feature-set">
               <option value="movement_only">Movement only</option>
@@ -4045,10 +4170,25 @@ class MovementExampleApp {
           <button type="button" data-role="run-anomaly-ranking">Rank bursts</button>
           <button type="button" data-role="run-burst-feature-space">Feature space</button>
           <button type="button" data-role="generate-report">Generate report</button>
-          <button type="button" data-role="export-reviewed-csv">Export reviewed CSV</button>
-          <button type="button" data-role="export-individual-decisions">Export individual decisions</button>
+          <div class="movement-menu-divider"></div>
           <button type="button" data-role="remove-study">Remove entire study</button>
+          </div></details>
+          </div>
+          <div class="movement-review-toolbar">
+            <div class="movement-selection-actions" aria-label="Individual selection">
+              <button type="button" data-role="select-all">All individuals</button>
+              <button type="button" data-role="select-none">None</button>
+              <button type="button" data-role="select-suspicious">Select all suspicious</button>
+            </div>
+            <div class="movement-fix-actions" aria-label="Review actions">
+              <button type="button" class="movement-emphasis" data-role="mark-suspected">Flag checked fixes</button>
+              <button type="button" data-role="mark-confirmed">Mark confirmed</button>
+              <button type="button" data-role="dismiss-suspected">Unflag suspicious</button>
+              <button type="button" data-role="clear-fixes">Clear checked fixes</button>
           <button type="button" data-role="undo">Undo</button>
+            </div>
+            <div data-role="study-metadata" hidden></div>
+          </div>
         </div>
         <div class="movement-release-notice" data-role="release-notice" hidden>
           The editor has finished making changes.
@@ -4247,6 +4387,7 @@ class MovementExampleApp {
                         <option value="auto_bursts">Automatic bursts</option>
                       </select>
                     </label>
+                    <label><input type="checkbox" data-role="table-invalid-only"> Invalid positions only</label>
                     <label>Search
                       <input type="search" data-role="table-filter" placeholder="Individual, issue, fix key">
                     </label>
@@ -4639,6 +4780,9 @@ class MovementExampleApp {
       burstFeatureSpace: this.mountEl.querySelector('[data-role="burst-feature-space"]'),
       tableMode: this.mountEl.querySelector('[data-role="table-mode"]'),
       tableFilter: this.mountEl.querySelector('[data-role="table-filter"]'),
+      tableInvalidOnly: this.mountEl.querySelector('[data-role="table-invalid-only"]'),
+      studyMetadata: this.mountEl.querySelector('[data-role="study-metadata"]'),
+      studyFilters: this.mountEl.querySelector('[data-role="study-filters"]'),
       tableSort: this.mountEl.querySelector('[data-role="table-sort"]'),
       tableSortDirection: this.mountEl.querySelector('[data-role="table-sort-direction"]'),
       tableMeta: this.mountEl.querySelector('[data-role="table-meta"]'),
@@ -4821,6 +4965,46 @@ class MovementExampleApp {
   }
 
   bindEvents() {
+    this.mountEl.addEventListener("toggle", event => {
+      if (event.target.matches?.(".movement-popover[open]")) this.positionPopover(event.target);
+      if (event.target.matches?.('[data-role="species-menu"][open]')) {
+        const menu = event.target;
+        // Decoration is optional, including the module itself. Never delay review.
+        void import("/static/species_portraits.js").then(({enhanceSpeciesMenu}) => {
+          if (menu.isConnected && menu.open) enhanceSpeciesMenu(menu, () => this.positionPopover(menu));
+        }).catch(() => {});
+      }
+    }, true);
+    window.addEventListener("resize", () => {
+      this.mountEl.querySelectorAll(".movement-popover[open]").forEach(menu => this.positionPopover(menu));
+    });
+    document.addEventListener("click", event => {
+      for (const menu of this.mountEl.querySelectorAll(".movement-popover[open]")) {
+        if (!menu.contains(event.target)) menu.open = false;
+      }
+      const summary = event.target.closest(".movement-popover > summary");
+      if (summary && this.mountEl.contains(summary)) {
+        event.preventDefault();
+        summary.parentElement.open = !summary.parentElement.open;
+        this.positionPopover(summary.parentElement);
+      }
+      const action = event.target.closest('[data-role="export-menu"] button, [data-role="more-menu"] button');
+      if (action && !action.disabled) action.closest("details").open = false;
+    }, true);
+    document.addEventListener("keydown", event => {
+      if (event.key !== "Escape") return;
+      const menus = [...this.mountEl.querySelectorAll(".movement-popover[open]")];
+      if (!menus.length) return;
+      const active = menus.find(menu => menu.contains(document.activeElement)) || menus.at(-1);
+      menus.forEach(menu => { menu.open = false; });
+      active.querySelector(":scope > summary")?.focus();
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    });
+    this.refs.studyFilters?.addEventListener("click", event => {
+      const button = event.target.closest("button[data-study-filter-action]");
+      if (button) void this.runStudyFilter(button.dataset.stage, button.dataset.studyFilterAction, button.dataset.individual);
+    });
     window.addEventListener("resize", this.handleWindowResize);
     document.addEventListener("visibilitychange", this.handleDocumentVisibilityChange);
     this.refs.assignReview?.addEventListener("click", () => void this.assignCurrentReview());
@@ -4961,6 +5145,11 @@ class MovementExampleApp {
       const commentButton = event.target.closest("button[data-queue-comment]");
       if (commentButton) {
         this.toggleIndividualQueueComment(commentButton.dataset.individual || "");
+        return;
+      }
+      const invalidButton = event.target.closest("button[data-invalid-individual]");
+      if (invalidButton) {
+        void this.openInvalidPositionTable(invalidButton.dataset.invalidIndividual);
         return;
       }
       const tableButton = event.target.closest("button[data-queue-table]");
@@ -5404,6 +5593,7 @@ class MovementExampleApp {
       this.saveUiState();
       this.renderTableSheet();
     });
+    this.refs.tableInvalidOnly.addEventListener("change", () => this.renderTableSheet());
     this.refs.tableFilter.addEventListener("input", () => {
       this.saveUiState();
       this.renderTableSheet();
@@ -8391,6 +8581,7 @@ class MovementExampleApp {
 
   setStatus(message, isError = false) {
     this.refs.status.textContent = message;
+    this.refs.status.title = message;
     this.refs.status.classList.toggle("error", isError);
   }
 
@@ -9378,7 +9569,11 @@ class MovementExampleApp {
     for (const study of [...(this.studies || [])].sort((a, b) => Number(Boolean(a.completed)) - Number(Boolean(b.completed)))) {
       const reviewerName = study.review?.reviewer?.display_name || "";
       const label = study.completed ? "Completed" : reviewerName ? `active review: ${reviewerName}` : "unassigned/history";
-      this.refs.study.add(new Option(`${study.name} · ${label}`, study.name));
+      const names = study.species || [];
+      const species = names.length === 1 ? names[0] : names.length ? `${names.length} species` : "";
+      const option = new Option([study.name, species, study.completed ? "Completed" : ""].filter(Boolean).join(" · "), study.name);
+      option.title = [study.name, species, label].filter(Boolean).join(" · ");
+      this.refs.study.add(option);
     }
     this.refs.study.value = selected;
   }
@@ -9596,6 +9791,20 @@ class MovementExampleApp {
   refreshDatasetOptions(preferredDatasetId = this.currentDatasetId) {
     this.datasets = [...this.allDatasets];
     this.refs.dataset.innerHTML = "";
+    const byId = new Map(this.allDatasets.map(item => [item.dataset_id, item]));
+    const depths = new Map();
+    const versionDepth = dataset => {
+      const chain = [], visited = new Set();
+      let ancestor = dataset;
+      while (ancestor && !depths.has(ancestor.dataset_id) && !visited.has(ancestor.dataset_id)) {
+        visited.add(ancestor.dataset_id);
+        chain.push(ancestor);
+        ancestor = byId.get(ancestor.parent_dataset_id);
+      }
+      let depth = ancestor ? depths.get(ancestor.dataset_id) ?? -1 : -1;
+      for (const item of chain.reverse()) depths.set(item.dataset_id, ++depth);
+      return depths.get(dataset.dataset_id);
+    };
     for (const dataset of this.datasets) {
       const option = document.createElement("option");
       const step = this.stepByOutputDatasetId.get(dataset.dataset_id);
@@ -9604,6 +9813,7 @@ class MovementExampleApp {
         dataset,
         this.graph?.current_dataset_id || "",
         step,
+        versionDepth(dataset),
       );
       option.title = formatStepDetails(step, dataset);
       this.refs.dataset.appendChild(option);
@@ -9619,6 +9829,23 @@ class MovementExampleApp {
     this.currentDatasetId = nextDatasetId;
     this.refs.dataset.value = nextDatasetId;
     this.refs.dataset.disabled = false;
+    this.renderVersionDetails();
+  }
+
+  renderVersionDetails() {
+    const panel = this.mountEl?.querySelector('[data-role="version-details"]');
+    if (!panel) return;
+    const dataset = this.allDatasets.find(item => item.dataset_id === this.currentDatasetId);
+    if (!dataset) { panel.textContent = "Select a version to see its details."; return; }
+    const step = this.stepByOutputDatasetId.get(dataset.dataset_id);
+    const title = formatStepLabel(step, dataset);
+    const details = formatStepDetails(step, dataset);
+    const author = step?.actor?.display_name || step?.user || dataset.user || "";
+    panel.innerHTML = `<div class="movement-menu-heading">Saved version</div>
+      <div class="movement-version-details-title">${escapeHtml(title)}</div>
+      ${details !== title ? `<p>${escapeHtml(details)}</p>` : ""}
+      <div class="movement-version-details-meta">${escapeHtml(formatDateTime(dataset.created_at))}${author ? ` · ${escapeHtml(author)}` : ""}</div>`;
+    this.refs.dataset.title = details;
   }
 
   async loadDataset(viewContext = this.captureDatasetViewContext()) {
@@ -11039,7 +11266,175 @@ class MovementExampleApp {
     );
   }
 
+  individualMetadataHtml(individual) {
+    const count = this.data?.stats?.[individual]?.invalidCoordinateCount || 0;
+    return (count ? `<button type="button" data-invalid-individual="${escapeHtml(individual)}">${formatCount(count)} invalid position${count === 1 ? "" : "s"}</button>` : "")
+      + individualMetadataDetailsHtml(this.data?.metadataByIndividual?.[individual]);
+  }
+
+  async openInvalidPositionTable(individual) {
+    if (!individual || !this.data) return;
+    if (this.individualReviewQueue.mode === "queue") {
+      await this.viewIndividualQueueTable(individual);
+      if (this.queueActiveIndividual() !== individual) return;
+    } else {
+      this.data.selectedIndividuals = new Set([individual]);
+      this.data.selectedFixKeys = this.filterSelectedFixKeysForIndividuals(this.data.selectedFixKeys, [individual]);
+      this.syncIndividualSelectionUi();
+      this.saveUiState();
+      this.refs.tableFilter.value = individual;
+      this.setSideSheet("table");
+    }
+    await this.loadDetailForCurrentSelection({ requireObjects: true });
+    this.refs.tableMode.value = "fixes";
+    this.refs.tableInvalidOnly.checked = true;
+    this.renderTableSheet();
+  }
+
+  studyFilterKey() {
+    return JSON.stringify([this.currentFamily, this.currentStudy, this.currentDatasetId, this.currentArtifact]);
+  }
+
+  renderStudyFilters() {
+    const panel = this.refs.studyFilters;
+    if (!panel) return;
+    panel.hidden = !this.data || !this.currentDatasetId;
+    if (panel.hidden) return;
+    const key = this.studyFilterKey();
+    if (this.studyFilterState?.key !== key) {
+      const state = {key, open: this.studyFilterState?.open || false, loading: true, previews: {}};
+      this.studyFilterState = state;
+      const params = new URLSearchParams({logical_name: this.currentArtifact});
+      void this.fetchJSON(`/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}/dataset/${encodeURIComponent(this.currentDatasetId)}/study-filters?${params}`)
+        .then(result => { if (this.studyFilterState === state) state.result = result; })
+        .catch(error => { if (this.studyFilterState === state) state.error = error.message; })
+        .finally(() => { if (this.studyFilterState === state) { state.loading = false; this.renderStudyFilters(); } });
+    }
+    const state = this.studyFilterState;
+    state.open = panel.querySelector("details")?.open ?? state.open;
+    const outdated = (state.result?.stages || []).filter(s => s.status === "outdated").length;
+    const descriptions = {stationarity: "100 m · strictly over 12 h · any first/last three eligible fixes · maximum gap 72 h",
+      speed: "Both incoming and outgoing speeds > study Q3 + 100 × IQR",
+      gps_spike: "Both adjacent speeds > study P99 and |turn| >166°; flags the central fix"};
+    const cutoff = value => Number.isFinite(value)
+      ? `${value.toLocaleString(undefined, {maximumSignificantDigits: 8})} m/s` : "not available";
+    const expandedRules = new Set([...panel.querySelectorAll("[data-study-filter-rule][open]")].map(el => el.dataset.stage));
+    const button = (stage, action, label, accessibleLabel = label) => `<button type="button" data-stage="${stage}" data-study-filter-action="${action}" aria-label="${escapeHtml(accessibleLabel)}" ${state.busy || (action === "apply" && !this.canPersistEdits()) ? "disabled" : ""}>${label}</button>`;
+    panel.innerHTML = `<details class="movement-popover" ${state.open ? "open" : ""} data-study-filter-panel><summary title="Study-wide filters. Recalculation is optional.">Filters${outdated ? `<span class="movement-filter-badge" aria-label="${outdated} out of date">${outdated}</span>` : ""}</summary>
+      <div class="movement-popover-panel movement-filter-drawer" aria-label="Study filters" aria-busy="${Boolean(state.busy)}">
+      <div class="movement-filter-drawer-head"><strong>Study filters</strong><span class="movement-filter-optional">Optional</span>
+        <p>Run one filter across the study when you choose.</p></div>
+      ${state.loading ? '<div class="movement-filter-activity" role="status">Checking saved filters…</div>' : ""}
+      ${state.error ? `<div class="movement-filter-activity" role="alert">${escapeHtml(state.error)} ${button("", "retry", "Retry")}</div>` : ""}
+      ${(state.result?.stages || []).map((item, index) => {
+        const preview = state.previews[item.stage];
+        const stats = item.saved?.statistics;
+        return `<section class="movement-filter-row" data-study-filter="${item.stage}">
+          <div class="movement-filter-row-head"><span class="movement-filter-number">${index + 1}</span>
+          <span class="movement-filter-name">${escapeHtml(item.label)}</span>
+          <span class="movement-filter-state is-${item.status === "not_run" ? "not-run" : item.status}">${item.status === "outdated" ? "Out of date" : item.status === "current" ? "Up to date" : "Not run"}</span>
+          ${preview ? "" : button(item.stage, "preview", item.saved ? "Recalculate" : "Preview", `${item.saved ? "Recalculate" : "Preview"} ${item.label}`)}</div>
+          ${item.changed_fix_count ? `<p class="movement-filter-pending-note">${formatCount(item.changed_fix_count)} input fixes changed · ${formatCount(item.changed_individual_count)} ${item.changed_individual_count === 1 ? "individual" : "individuals"}</p>` : ""}
+          <details class="movement-filter-rule" data-study-filter-rule data-stage="${item.stage}" ${expandedRules.has(item.stage) ? "open" : ""}>
+            <summary>Rule &amp; last run</summary><p>${descriptions[item.stage]}</p>
+            ${item.saved ? `<p>${formatCount(item.saved.effective_count)} candidates${stats?.threshold_mps != null ? ` · cutoff ${cutoff(stats.threshold_mps)} · ${formatCount(stats.sample_count)} study speeds` : ""}${stats?.unavailable_reason ? ` · ${escapeHtml(stats.unavailable_reason)}` : ""}</p>` : ""}
+            ${item.pending_upstream.length ? `<p>Uses current saved flags from ${escapeHtml(item.pending_upstream.join(", "))}, which may also need updating.</p>` : ""}
+          </details>
+          ${preview ? `<div class="movement-filter-preview" role="status"><div class="movement-filter-preview-counts"><span>${formatCount(preview.added_count)} new flags</span><span>${formatCount(preview.removed_count)} obsolete flags</span></div>
+            ${preview.snapshot.statistics.threshold_mps != null ? `<div>Cutoff ${cutoff(preview.previous?.statistics?.threshold_mps)} → <strong>${cutoff(preview.snapshot.statistics.threshold_mps)}</strong></div><div class="movement-subtle">${formatCount(preview.snapshot.statistics.sample_count)} eligible speeds</div>` : ""}
+            ${item.stage === "speed" && preview.snapshot.statistics.q1 != null ? `<details class="movement-filter-rule"><summary>Calculation details</summary><p>Q1 ${cutoff(preview.snapshot.statistics.q1)} · Q3 ${cutoff(preview.snapshot.statistics.q3)} · IQR ${cutoff(preview.snapshot.statistics.q3 - preview.snapshot.statistics.q1)}</p></details>` : ""}
+            ${preview.snapshot.statistics.unavailable_reason ? escapeHtml(preview.snapshot.statistics.unavailable_reason) : ""}
+            ${preview.affected_individuals.length ? `<div class="movement-filter-preview-people">${preview.affected_individuals.map(id => `<button type="button" data-study-filter-action="inspect" data-individual="${escapeHtml(id)}">${escapeHtml(id)}${preview.changes_by_individual?.[id] ? ` (+${preview.changes_by_individual[id].added}, −${preview.changes_by_individual[id].removed})` : ""}</button>`).join(" ")}</div>` : ""}
+            ${preview.reviewed_difference_count ? `<p class="movement-subtle">${formatCount(preview.reviewed_difference_count)} reviewed fixes differ. Your decisions are retained.</p>` : ""}
+            <div class="movement-filter-preview-actions">${button(item.stage, "apply", "Apply changes", `Apply ${item.label} as new graph step`)} ${button(item.stage, "cancel", "Cancel")}</div></div>` : ""}
+        </section>`;
+      }).join("")}
+      ${state.busy ? '<div class="movement-filter-activity" role="status">Calculating across the study…</div>' : ""}
+      </div>
+    </details>`;
+    this.positionPopover(panel.querySelector(":scope > details"));
+  }
+
+  async runStudyFilter(stage, action, individual) {
+    const state = this.studyFilterState;
+    if (!state || state.key !== this.studyFilterKey() || state.busy) return;
+    state.open = true;
+    if (action === "inspect") {
+      this.refs.studyFilters.querySelector("details").open = false;
+      state.open = false;
+      await this.setIndividualViewMode("queue");
+      await this.focusIndividualQueueItem(individual, {zoom: true});
+      return;
+    }
+    if (action === "retry") { this.studyFilterState = null; this.renderStudyFilters(); return; }
+    if (action === "cancel") { delete state.previews[stage]; this.renderStudyFilters(); return; }
+    if (action === "apply" && this.rejectLockedEdit()) return;
+    const base = `/api/apps/movement/family/${encodeURIComponent(this.currentFamily)}/study/${encodeURIComponent(this.currentStudy)}`;
+    const datasetId = this.currentDatasetId;
+    state.busy = true; state.error = "";
+    this.renderStudyFilters();
+    try {
+      if (action === "preview") {
+        let result = await this.requestJSON(`${base}/actions/preview-study-filter`, {method: "POST", body: JSON.stringify({
+          stage, dataset_id: datasetId, logical_name: this.currentArtifact, user: this.getUser() || "reviewer", background: true})});
+        while (result.job_id) {
+          const job = await this.fetchJSON(`${base}/analysis-jobs/${encodeURIComponent(result.job_id)}`, {cache: "no-store"});
+          if (this.studyFilterState !== state || state.key !== this.studyFilterKey()) return;
+          if (job.status === "failed") throw new Error(job.error || "Filter calculation failed");
+          if (job.status === "completed") { result = job.result; break; }
+          await new Promise(resolve => window.setTimeout(resolve, 500));
+        }
+        if (this.studyFilterState === state) state.previews[stage] = result;
+      } else if (action === "apply") {
+        const preview = state.previews[stage];
+        if (!preview) return;
+        const result = await this.requestJSON(`${base}/actions/apply-study-filter`, {method: "POST", body: JSON.stringify({
+          dataset_id: datasetId, logical_name: this.currentArtifact, analysis_id: preview.analysis_id,
+          preview_token: preview.preview_token, expected_current_dataset_id: this.expectedCurrentDatasetId(),
+          expected_review_revision: this.expectedReviewRevision(), user: this.getUser() || "reviewer"})});
+        await this.loadStudyAtDataset(result.dataset.dataset_id, {preserveAnnotationContext: true, result});
+        this.setStatus(`Updated ${preview.label} across the study in a new graph step. Other filters were not recalculated.`);
+      }
+    } catch (error) {
+      state.error = error.message;
+      await this.handleEditRequestError(error);
+    } finally {
+      state.busy = false;
+      this.renderStudyFilters();
+    }
+  }
+
+  positionPopover(menu) {
+    const panel = menu?.querySelector(":scope > .movement-popover-panel");
+    if (!panel || !menu.open) return;
+    panel.style.transform = "";
+    const bounds = panel.getBoundingClientRect();
+    panel.style.maxHeight = `${Math.max(80, Math.min(window.innerHeight * .7, 680, window.innerHeight - bounds.top - 12))}px`;
+    const shift = bounds.left < 12 ? 12 - bounds.left : bounds.right > window.innerWidth - 12 ? window.innerWidth - 12 - bounds.right : 0;
+    if (shift) panel.style.transform = `translateX(${shift}px)`;
+  }
+
+  renderStudyMetadata() {
+    this.renderStudyFilters();
+    const el = this.refs.studyMetadata;
+    if (!el) return;
+    const species = this.data?.studyMetadata?.species || [];
+    const warnings = this.data?.metadataWarnings || [];
+    el.hidden = !species.length && !warnings.length;
+    const signature = JSON.stringify([this.currentStudy, species, warnings]);
+    if (el.dataset.signature === signature) return;
+    el.dataset.signature = signature;
+    const label = species.length === 1 ? `<em>${escapeHtml(species[0])}</em>` : species.length ? `${species.length} species` : "Metadata";
+    el.innerHTML = `<details class="movement-popover movement-species-popover" data-role="species-menu">
+      <summary title="Species and reference links">${label}${warnings.length ? '<span class="movement-filter-badge" aria-label="Metadata warning">!</span>' : ""}</summary>
+      <div class="movement-popover-panel"><div class="movement-menu-heading">Species references</div>
+      ${species.map(name => `<div class="movement-species-entry" data-species="${escapeHtml(name)}"><div class="movement-species-text"><em>${escapeHtml(name)}</em>${speciesLinksHtml(name)}</div></div>`).join("")}
+      ${warnings.map(warning => `<div class="movement-metadata-warning" role="status">${escapeHtml(warning)}</div>`).join("")}
+      </div></details>`;
+  }
+
   renderIndividuals() {
+    this.renderStudyMetadata();
     this.refs.sideSheetIndividuals.classList.toggle(
       "queue-mode",
       this.individualReviewQueue.mode === "queue",
@@ -11098,7 +11493,7 @@ class MovementExampleApp {
       const priorReview = this.getIndividualReviewState(individual).priorDecision || null;
       const priorDecision = String(priorReview?.review_decision || "");
       card.className = `movement-card interactive${unresolvedCount ? " has-unresolved-issues" : ""}`;
-      card.style.opacity = isSelected ? "1" : "0.34";
+      card.style.opacity = isSelected ? "1" : this.data.metadataByIndividual?.[individual] ? "0.72" : "0.34";
 
       const header = document.createElement("div");
       header.className = "movement-row";
@@ -11127,6 +11522,13 @@ class MovementExampleApp {
       total.textContent = formatCount(stats.rowCount);
       header.append(left, total);
       card.appendChild(header);
+      const metadata = document.createElement("div");
+      metadata.innerHTML = this.individualMetadataHtml(individual);
+      metadata.querySelector("details")?.addEventListener("toggle", event => {
+        card.style.opacity = event.target.open || this.data?.selectedIndividuals?.has(individual)
+          ? "1" : "0.72";
+      });
+      card.appendChild(metadata);
 
       const statsRow = document.createElement("div");
       statsRow.className = "movement-stats";
@@ -11181,7 +11583,8 @@ class MovementExampleApp {
       }
       card.appendChild(track);
 
-      card.addEventListener("click", () => {
+      card.addEventListener("click", event => {
+        if (event.target.closest("button, details, a")) return;
         this.toggleIndividual(individual, !this.data?.selectedIndividuals?.has(individual));
       });
       this.refs.individuals.appendChild(card);
@@ -11202,7 +11605,8 @@ class MovementExampleApp {
         continue;
       }
       const selected = this.data.selectedIndividuals.has(individual);
-      card.style.opacity = selected ? "1" : "0.34";
+      card.style.opacity = selected || card.querySelector("[data-individual-metadata]")?.open
+        ? "1" : this.data.metadataByIndividual?.[individual] ? "0.72" : "0.34";
       card.toggleAttribute("aria-busy", loading.has(individual));
       card.dataset.exactError = failed.has(individual) ? "true" : "false";
       const exactLoad = card.querySelector(".movement-exact-load");
@@ -11649,6 +12053,7 @@ class MovementExampleApp {
           • ${escapeHtml(formatCount(stats.suspectedCount))} flagged
           • ${escapeHtml(formatCount(stats.confirmedCount))} confirmed
         </div>
+        ${this.individualMetadataHtml(individual)}
         ${unresolvedCount ? `<div class="movement-fix-note"><strong>Unresolved issues:</strong> ${escapeHtml(formatCount(unresolvedCount))}${origins.length ? ` • ${escapeHtml(origins.join(", "))}` : ""}</div>` : ""}
         ${isActive ? `
           ${this.queueIssueGroupsHtml(individual)}
@@ -11692,10 +12097,12 @@ class MovementExampleApp {
         ` : ""}
       `;
       if (card.__movementQueueMarkup !== cardMarkup) {
+        const metadataOpen = card.querySelector("[data-individual-metadata]")?.open;
         const burstsOpen = card.querySelector("[data-queue-bursts]")?.open;
         const flagJumpsOpen = card.querySelector("[data-queue-flag-jumps]")?.open;
         const flagListScroll = card.querySelector("[data-queue-flag-list]")?.scrollTop || 0;
         card.innerHTML = cardMarkup;
+        if (metadataOpen) card.querySelector("[data-individual-metadata]").open = true;
         if (burstsOpen) {
           const bursts = card.querySelector("[data-queue-bursts]");
           if (bursts) bursts.open = true;
@@ -11711,7 +12118,7 @@ class MovementExampleApp {
       if (isNewCard) {
         card.addEventListener("click", event => {
           if (
-            event.target.closest("button, input, label, select, textarea, [data-queue-burst-controls]")
+            event.target.closest("button, input, label, select, textarea, a, details, [data-queue-burst-controls]")
             || individual === this.individualReviewQueue.activeIndividual
           ) {
             return;
@@ -12081,7 +12488,7 @@ class MovementExampleApp {
 
   getFilteredTableFixRows() {
     const filterText = String(this.refs.tableFilter.value || "").trim().toLowerCase();
-    const rows = this.getVisibleDetailFixes();
+    const rows = this.getVisibleDetailFixes().filter(fix => !this.refs.tableInvalidOnly?.checked || !isPlottablePosition(fix.position));
     const filtered = filterText
       ? rows.filter(fix => {
         const segmentText = (fix.segments || []).map(segment => (
@@ -12583,7 +12990,9 @@ class MovementExampleApp {
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(burst.startTimeMs))}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(burst.endTimeMs))}</td>
                 <td class="movement-table-cell-actions">
-                  <button type="button" data-action="zoom-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}">Zoom</button>
+                  ${burst.spatialSummaryUnavailable
+                    ? escapeHtml(`${burst.spatialSummaryUnavailable} (${burst.invalidCoordinateCount})`)
+                    : `<button type="button" data-action="zoom-auto-burst" data-burst-id="${escapeHtml(burst.burstId)}">Zoom</button>`}
                 </td>
               </tr>
             `).join("")}
@@ -12648,6 +13057,7 @@ class MovementExampleApp {
             <th>Individual</th>
             ${MOVEMENT_APP_CONFIG.rdsSource ? "" : "<th>Track</th>"}
             <th>Timestamp</th>
+            <th>Longitude</th><th>Latitude</th>
             <th>Status</th>
             <th>Segment</th>
             <th>Issue</th>
@@ -12674,7 +13084,9 @@ class MovementExampleApp {
                 <td>${escapeHtml(fix.individual)}</td>
                 ${MOVEMENT_APP_CONFIG.rdsSource ? "" : `<td>${escapeHtml(fix.setName)}</td>`}
                 <td class="movement-table-cell-mono">${escapeHtml(formatTimestamp(fix.timeMs))}</td>
-                <td>${escapeHtml(fix.review?.status || "unreviewed")}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(String(fix.position[0]))}</td>
+                <td class="movement-table-cell-mono">${escapeHtml(String(fix.position[1]))}</td>
+                <td>${isPlottablePosition(fix.position) ? "" : "Invalid position · "}${escapeHtml(fix.review?.status || "unreviewed")}</td>
                 <td>${escapeHtml(segmentLabel || "—")}</td>
                 <td>${escapeHtml(issueType)}</td>
                 <td class="movement-table-cell-mono">${escapeHtml(formatMaybeNumber(fix.attributes?.step_length_m, "m"))}</td>
@@ -12686,7 +13098,7 @@ class MovementExampleApp {
           }).join("")}
           ${renderedTable.hasMore ? `
             <tr class="movement-table-more-row">
-              <td colspan="${MOVEMENT_APP_CONFIG.rdsSource ? "10" : "11"}" class="movement-table-more-cell">Scroll to load more rows.</td>
+              <td colspan="${MOVEMENT_APP_CONFIG.rdsSource ? "12" : "13"}" class="movement-table-more-cell">Scroll to load more rows.</td>
             </tr>
           ` : ""}
         </tbody>
@@ -12967,10 +13379,8 @@ class MovementExampleApp {
     const code = (binary?.header?.individuals || []).indexOf(individual);
     const [start, end] = binary?.individualRanges?.get(code) || [0, 0];
     const count = Math.max(0, Number(end) - Number(start));
-    const sequence = new Uint32Array(count);
-    for (let offset = 0; offset < count; offset += 1) {
-      sequence[offset] = Number(start) + offset;
-    }
+    const sequence = Uint32Array.from(Array.from({length: count}, (_, offset) => Number(start) + offset)
+      .filter(index => binary.arrays.coordinate_valid?.[index] !== 0));
     const arrays = binary?.arrays || {};
     sequence.sort((left, right) => (
       Number(arrays.time_ms?.[left]) - Number(arrays.time_ms?.[right])
@@ -13081,11 +13491,13 @@ class MovementExampleApp {
           Number(binary.arrays.positions?.[positionOffset + 1]),
         ],
         reviewStatus: Number(binary.arrays.review_status?.[binaryIndex]) || 0,
+        breakBefore: sequenceIndex > 0 && Array.from(binary.arrays.coordinate_valid?.subarray(
+          Number(sequence[sequenceIndex - 1]) + 1, binaryIndex) || []).some(value => value === 0),
         color: this.binaryColorForIndex(binary, binaryIndex, field),
       });
     }
     return fixes.filter(fix => (
-      Number.isFinite(fix.position[0]) && Number.isFinite(fix.position[1])
+      isPlottablePosition(fix.position)
     ));
   }
 
@@ -13317,6 +13729,7 @@ class MovementExampleApp {
 
     const projected = projectTrackPlayerFixes(fixes, width, height);
     for (let index = 1; index < projected.points.length; index += 1) {
+      if (fixes[index].breakBefore) continue;
       const previous = projected.points[index - 1];
       const point = projected.points[index];
       const age = index / Math.max(1, projected.points.length - 1);
@@ -13396,14 +13809,18 @@ class MovementExampleApp {
         if (!series || !Array.isArray(series.positions) || series.positions.length < 2) {
           continue;
         }
-        tracks.push({
-          individual,
-          setName,
-          path: series.positions,
-          color: this.individualReviewQueue.mode === "queue"
-            ? [...CONTEXT_GRAY_LINE]
-            : splitColor(this.data.individualPalette[individual], setName, 150),
+        let path = [];
+        const flush = () => {
+          if (path.length > 1) tracks.push({individual, setName, path,
+            color: this.individualReviewQueue.mode === "queue" ? [...CONTEXT_GRAY_LINE]
+              : splitColor(this.data.individualPalette[individual], setName, 150)});
+          path = [];
+        };
+        series.positions.forEach((position, index) => {
+          if (series.breakBefore?.[index] || !isPlottablePosition(position)) flush();
+          if (isPlottablePosition(position)) path.push(position);
         });
+        flush();
       }
     }
     return tracks;
@@ -13734,7 +14151,7 @@ class MovementExampleApp {
         binary.header.individuals?.[Number(arrays.individual_codes[index])] || "",
       );
       const burstId = this.binaryBurstIdAt(binary, index, individual);
-      const hidden = this.hiddenBurstIds.has(burstId);
+      const hidden = this.hiddenBurstIds.has(burstId) || arrays.coordinate_valid?.[index] === 0;
       const status = Number(arrays.review_status[index]);
       pointFilter[index] = !hidden && status !== 2 ? 1 : 0;
       pointFilterWithoutSuspected[index] = !hidden && status === 0 ? 1 : 0;
@@ -13761,11 +14178,10 @@ class MovementExampleApp {
               Number.isFinite(Number(arrays.turn_angle_deg?.[index]))
               && Math.abs(Number(arrays.turn_angle_deg[index])) >= this.gpsSpikeTurnAngleDeg
             );
-          const validGpsInboundSpeed = field.key !== GPS_SPIKE_COLOR_FIELD_KEY
-            || (
-              Number.isFinite(inboundSpeed)
-              && inboundSpeed > thresholdValue
-            );
+          const validGpsInboundSpeed = field.key === "speed_mps"
+            ? speedThresholdMatches(inboundSpeed, value, thresholdValue, this.thresholdState.reverse === true)
+            : field.key !== GPS_SPIKE_COLOR_FIELD_KEY
+              || (Number.isFinite(inboundSpeed) && inboundSpeed > thresholdValue);
           const matches = this.thresholdState.reverse === true
             ? value < thresholdValue
             : value > thresholdValue;
@@ -14346,6 +14762,7 @@ class MovementExampleApp {
       for (const fix of this.data.confirmedPointFixes || []) {
         if (
           fix.review?.status !== "confirmed"
+          || !isPlottablePosition(fix.position)
           || !visibleIndividuals.has(fix.individual)
           || !visibleSetNames.has(fix.setName)
         ) {
@@ -14401,6 +14818,7 @@ class MovementExampleApp {
     const visibleTableSelection = this.getVisibleTableSelectionFixes();
     const visibleTableSelectionKeys = new Set(visibleTableSelection.map(fix => fix.fixKey));
     const tableSelectedPointData = visibleTableSelection
+      .filter(fix => isPlottablePosition(fix.position))
       .filter(fix => !hideSuspected || fix.review?.status !== "suspected")
       .filter((fix, index, fixes) => index === 0 || index === fixes.length - 1)
       .map(fix => ({
@@ -14422,7 +14840,7 @@ class MovementExampleApp {
     }
     const focusedRankingBurstFixes = this.getFocusedRankingBurstFixes()
       .filter(fix => !hideSuspected || fix.review?.status !== "suspected");
-    const focusedRankingBurstPoints = focusedRankingBurstFixes.map(fix => ({
+    const focusedRankingBurstPoints = focusedRankingBurstFixes.filter(fix => isPlottablePosition(fix.position)).map(fix => ({
       fixKey: fix.fixKey,
       position: fix.position,
     }));
@@ -14443,6 +14861,7 @@ class MovementExampleApp {
         if (
           fix.review?.status !== "suspected"
           || this.data.binaryBlocks?.has(fix.individual)
+          || !isPlottablePosition(fix.position)
           || !visibleIndividuals.has(fix.individual)
           || !visibleSetNames.has(fix.setName)
           || hiddenBurstFixKeys.has(fix.fixKey)
@@ -14465,6 +14884,7 @@ class MovementExampleApp {
       const visibleFix = fixKey => {
         const fix = this.data.fixByKey.get(fixKey);
         return fix
+          && isPlottablePosition(fix.position)
           && !fix.analyticallyExcluded
           && fix.review?.status !== "confirmed"
           && (!hideSuspected || fix.review?.status !== "suspected")
@@ -14573,7 +14993,7 @@ class MovementExampleApp {
       layers.push(
         new deck.PathLayer({
           id: "movement-burst-casing",
-          data: visibleAutoBurstPaths,
+          data: plottablePathItems(visibleAutoBurstPaths),
           dataComparator: sameArrayItems,
           getPath: item => item.path,
           getColor: item => this.burstCasingColor(item, focusedBurstId),
@@ -14589,7 +15009,7 @@ class MovementExampleApp {
       layers.push(
         new deck.PathLayer({
           id: "movement-bursts",
-          data: visibleAutoBurstPaths,
+          data: plottablePathItems(visibleAutoBurstPaths),
           dataComparator: sameArrayItems,
           getPath: item => item.path,
           getColor: item => this.temporalSliderEngaged
@@ -14611,7 +15031,7 @@ class MovementExampleApp {
       layers.push(
         new deck.PathLayer({
           id: "movement-manual-flag-target-outline",
-          data: manualFlagOutlinePaths,
+          data: plottablePathItems(manualFlagOutlinePaths),
           dataComparator: sameArrayItems,
           getPath: item => item.path,
           getColor: [255, 204, 40, 210],
@@ -14626,7 +15046,7 @@ class MovementExampleApp {
       layers.push(
         new deck.PathLayer({
           id: "movement-table-selection-path",
-          data: [{ path: tableSelectionPath }],
+          data: splitPlottablePath(tableSelectionPath).map(path => ({path})),
           getPath: item => item.path,
           getColor: [255, 204, 40, 210],
           getWidth: 9,
@@ -14646,7 +15066,7 @@ class MovementExampleApp {
       layers.push(
         new deck.PathLayer({
           id: "movement-flagged-fix-steps",
-          data: visibleFlaggedSteps,
+          data: plottablePathItems(visibleFlaggedSteps),
           dataComparator: sameArrayItems,
           getPath: item => item.path,
           getColor: item => item.status === "confirmed"
@@ -14665,7 +15085,7 @@ class MovementExampleApp {
       layers.push(
         new deck.PathLayer({
           id: "movement-segment-outline",
-          data: visibleSegments,
+          data: plottablePathItems(visibleSegments),
           getPath: segment => segment.path,
           getColor: segment => this.queueMapColor(
             segment.status === "confirmed"
@@ -14681,7 +15101,7 @@ class MovementExampleApp {
       layers.push(
         new deck.PathLayer({
           id: "movement-segments",
-          data: visibleSegments,
+          data: plottablePathItems(visibleSegments),
           getPath: segment => segment.path,
           getColor: segment => this.queueMapColor(
             segment.status === "confirmed"
@@ -14917,8 +15337,7 @@ class MovementExampleApp {
       : null;
     if (
       trackPlayerCurrent
-      && Number.isFinite(trackPlayerCurrent.position[0])
-      && Number.isFinite(trackPlayerCurrent.position[1])
+      && isPlottablePosition(trackPlayerCurrent.position)
     ) {
       layers.push(new deck.ScatterplotLayer({
         id: "movement-track-player-position",
@@ -15843,6 +16262,7 @@ class MovementExampleApp {
     return {
       field_key: field.key,
       field_kind: field.kind,
+      ...(field.key === "speed_mps" ? {speed_basis: "both-adjacent"} : {}),
       operator: this.thresholdState.reverse === true ? "lt" : "gt",
       threshold_value: typeof this.thresholdState.value === "number"
         ? this.thresholdState.value
@@ -15888,6 +16308,10 @@ class MovementExampleApp {
     const number = finiteOrNull(value);
     const threshold = finiteOrNull(this.thresholdState.value);
     if (number === null || threshold === null) return false;
+    if (field.key === "speed_mps") {
+      return speedThresholdMatches(movementInboundSpeed(this.data, fix), number, threshold,
+        this.thresholdState.reverse === true);
+    }
     if (field.key === GPS_SPIKE_COLOR_FIELD_KEY) {
       const inboundSpeed = movementInboundSpeed(this.data, fix);
       const turnAngle = finiteOrNull(fix.attributes?.turn_angle_deg);
@@ -16124,7 +16548,9 @@ class MovementExampleApp {
     const thresholdValue = rawThreshold;
     if (thresholdValue !== null) {
       eligibleRefs.forEach((ref, position) => {
-        const matches = reverse
+        const matches = field.key === "speed_mps"
+          ? speedThresholdMatches(ref.inboundSpeed, numericValues[position], thresholdValue, reverse)
+          : reverse
           ? numericValues[position] < thresholdValue
           : (
             numericValues[position] > thresholdValue
@@ -16318,7 +16744,7 @@ class MovementExampleApp {
       .map(fix => ({
         fix,
         value: finiteOrNull(movementColorFieldValue(fix, field)),
-        inboundSpeed: gpsSpikeMode
+        inboundSpeed: gpsSpikeMode || field.key === "speed_mps"
           ? finiteOrNull(movementInboundSpeed(this.data, fix))
           : null,
         turnAngle: finiteOrNull(fix.attributes?.turn_angle_deg),
@@ -16371,7 +16797,9 @@ class MovementExampleApp {
     const matchItems = activeThresholdValue === null
       ? []
       : numericFixes.filter(item => (
-        reverse
+        field.key === "speed_mps"
+          ? speedThresholdMatches(item.inboundSpeed, item.value, activeThresholdValue, reverse)
+          : reverse
           ? item.value < activeThresholdValue
           : (
             item.value > activeThresholdValue
@@ -16519,7 +16947,8 @@ class MovementExampleApp {
           || arraysEqual(this.getSelectedIndividuals(), [...this.getIndividualQueueMapIndividuals()].sort((a, b) => a.localeCompare(b))))) {
       this.scheduleStationarityPreview();
     }
-    if (!this.data || this.individualReviewQueue.mode === "queue") {
+    if (!this.data || this.individualReviewQueue.mode === "queue"
+        || this.getCurrentColorField()?.key === INDIVIDUAL_COLOR_FIELD_KEY) {
       pane.innerHTML = "";
       pane.classList.add("hidden");
       return;
@@ -16559,7 +16988,7 @@ class MovementExampleApp {
     const histogramInputMax = finiteOrNull(context?.histogramInputMax);
     const gpsSpikeMode = context?.gpsSpikeMode === true;
     const selectedIndividualCount = this.getSelectedIndividuals().length;
-    const thresholdScopeHelp = `Applies to visible individuals (${formatCount(selectedIndividualCount)}). Flagging applies the filter across all track sets for those individuals.`;
+    const thresholdScopeHelp = `Applies to visible individuals (${formatCount(selectedIndividualCount)}). Flagging applies the filter across all track sets for those individuals.${field?.key === "speed_mps" ? " Both incoming and outgoing speeds must pass the threshold. The histogram and colors show outgoing step speeds." : ""}`;
     const percentileHelp = quantiles
       ? `Percentiles use all ${formatCount(quantiles.count)} ${gpsSpikeMode ? "eligible outbound speeds" : "finite values"} across the selected individuals and all track sets${gpsSpikeMode ? ", before filtering by turn angle" : ""}. Confirmed exclusions are skipped.`
       : "Loading all selected tracks to calculate exact percentiles…";
@@ -16666,7 +17095,7 @@ class MovementExampleApp {
         <div class="movement-threshold-title">${escapeHtml(field.label)}${movementColorFieldHelp(field, thresholdScopeHelp)}</div>
         ${gpsSpikeControl}
         ${percentileControl}
-        <label class="movement-threshold-range-label"><span>Threshold${gpsSpikeMode ? " (m/s)" : ""} &gt;</span>
+        <label class="movement-threshold-range-label"><span>${field.key === "speed_mps" ? "Both speeds (m/s)" : `Threshold${gpsSpikeMode ? " (m/s)" : ""}`} &gt;</span>
           <input class="movement-threshold-inline-input" type="number" step="any" data-action="set-threshold-value"
             value="${Number.isFinite(this.thresholdState.value) ? escapeHtml(String(this.thresholdState.value)) : ""}" placeholder="value">
         </label>
@@ -16700,7 +17129,7 @@ class MovementExampleApp {
       const subtitle = gpsSpikeMode
         ? `${formatCount(numericCount)} sharp-turn fixes in the visible scope`
         : `${formatCount(numericCount)} visible fixes`;
-      const thresholdPrompt = gpsSpikeMode ? "Threshold (m/s)" : "Threshold";
+      const thresholdPrompt = field.key === "speed_mps" ? "Both speeds (m/s)" : gpsSpikeMode ? "Threshold (m/s)" : "Threshold";
       const thresholdHelp = `Click the histogram or type a ${reverse ? "lower-tail" : "upper-tail"} threshold to preview matching fixes.`;
       const selectionNote = thresholdValue === null
         ? "No threshold set"
@@ -18934,7 +19363,7 @@ class MovementExampleApp {
       : fixes.map(fix => fix.position);
     const path = suppliedPath
       .map(position => [Number(position?.[0]), Number(position?.[1])])
-      .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]));
+      .filter(position => isPlottablePosition(position));
     return {
       burstId,
       burstIdx: Math.max(0, Number(burst?.burstIdx ?? burst?.burst_idx) || 0),
@@ -20361,7 +20790,8 @@ class MovementExampleApp {
     ) {
       return `both speeds > ${this.thresholdState.value} m/s and |turn| >= ${this.gpsSpikeTurnAngleDeg}°`;
     }
-    return getIssueThresholdFromState(field, this.thresholdState);
+    const description = getIssueThresholdFromState(field, this.thresholdState);
+    return field?.key === "speed_mps" && description ? `both speeds ${description} m/s` : description;
   }
 
   async submitIssueAction() {
@@ -20482,7 +20912,7 @@ class MovementExampleApp {
       if (filter?.percentile?.probability) {
         const thresholdDescription = filter.kind === "gps_spike"
           ? `both speeds > ${filter.speed_threshold_mps} m/s and |turn| >= ${filter.minimum_abs_turn_angle_deg}°`
-          : `${filter.operator === "lt" ? "<" : ">"} ${filter.threshold_value}`;
+          : `${filter.field_key === "speed_mps" ? "both speeds " : ""}${filter.operator === "lt" ? "<" : ">"} ${filter.threshold_value}${filter.field_key === "speed_mps" ? " m/s" : ""}`;
         body.issue_threshold = `${thresholdDescription}; ${Math.round(filter.percentile.probability * 100)}th percentile`;
       }
       if (filter?.cutoff_preset) body.issue_threshold += "; Q3 + 100 × IQR";
@@ -21565,6 +21995,57 @@ class MovementExampleApp {
   }
 }
 
+function isPlottablePosition(position) {
+  return Number.isFinite(position?.[0]) && Number.isFinite(position?.[1])
+    && Math.abs(position[0]) <= 180 && Math.abs(position[1]) <= 90;
+}
+
+function splitPlottablePath(positions) {
+  const paths = [];
+  let current = [];
+  for (const position of positions || []) {
+    if (isPlottablePosition(position)) current.push(position);
+    else { if (current.length > 1) paths.push(current); current = []; }
+  }
+  if (current.length > 1) paths.push(current);
+  return paths;
+}
+
+function plottablePathItems(items) {
+  if (items.every(item => (item.path || []).every(isPlottablePosition))) return items;
+  return items.flatMap(item => splitPlottablePath(item.path).map(path => ({...item, path})));
+}
+
+function speciesLinksHtml(name) {
+  if (!name) return "";
+  const query = encodeURIComponent(name);
+  return '<span class="movement-species-reference-links">' + [["Wikipedia", `https://en.wikipedia.org/w/index.php?search=${query}`],
+    ["EOL", `https://eol.org/search?q=${query}`],
+    ["GBIF", `https://www.gbif.org/taxon/search?q=${query}`]]
+    .map(([label, url]) => `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${label}<span aria-hidden="true">↗</span></a>`).join("") + '</span>';
+}
+
+function individualMetadataDetailsHtml(record) {
+  if (!record) return "";
+  const deployments = record.deployments || [];
+  const fields = [["tag_local_identifier", "Tag"], ["animal_mass", "Mass (g)"],
+    ["animal_life_stage", "Life stage"], ["manipulation_type", "Manipulation"]];
+  const shared = new Map(fields.map(([key]) => [key, [...new Set(deployments.map(row => row[key] ?? null))]]));
+  const line = (label, value) => value === null || value === undefined || value === "" ? ""
+    : `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(String(value))}</div>`;
+  const sex = {m: "Male", f: "Female", u: "Unknown"}[record.sex] || record.sex;
+  return `<details class="movement-metadata-details" data-individual-metadata><summary>Individual metadata (${deployments.length} deployment${deployments.length === 1 ? "" : "s"})</summary>
+    ${speciesLinksHtml(record.species)}${line("Sex", sex)}
+    ${fields.map(([key, label]) => shared.get(key).length === 1 ? line(label, shared.get(key)[0]) : "").join("")}
+    ${deployments.map(row => `<section><strong>Deployment ${escapeHtml(String(row.deployment_id || "Not recorded"))}</strong>
+      ${fields.map(([key, label]) => shared.get(key).length > 1 ? line(label, row[key]) : "").join("")}
+      <div class="movement-subtle">Source metadata (UTC)</div>
+      ${line("Start", row.tracking_start_date)}${line("End", row.tracking_end_date)}
+      ${line("Duration (days)", row.tracking_duration_days)}${line("Original GPS fixes", row.GPSpts_total)}
+      ${line("Original median interval (min)", row.median_timelag_mins)}${line("Original minimum interval (min)", row.min_timelag_mins)}
+    </section>`).join("")}</details>`;
+}
+
 function buildDatasetFromSummary(summary, preferredColorBy) {
   const individuals = collectSummaryIndividuals(summary);
   if (!individuals.length) {
@@ -21587,6 +22068,7 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     Object.entries(sets || {}).forEach(([setName, series]) => {
       seriesByIndividual[individual][setName] = {
         times: Array.isArray(series?.times) ? series.times.map(value => Number(value) || 0) : [],
+        breakBefore: series?.break_before || [],
         positions: Array.isArray(series?.positions)
           ? series.positions.map(position => [Number(position?.[0]) || 0, Number(position?.[1]) || 0])
           : [],
@@ -21607,6 +22089,7 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
   Object.entries(summary.stats || {}).forEach(([individual, item]) => {
     stats[individual] = {
       rowCount: Number(item?.row_count) || 0,
+      invalidCoordinateCount: Number(item?.invalid_coordinate_count) || 0,
       medianFixS: finiteOrNull(item?.median_fix_s),
       medianStepM: finiteOrNull(item?.median_step_m),
       medianSpeedMps: finiteOrNull(item?.median_speed_mps),
@@ -21682,6 +22165,9 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     totalRows,
     individuals,
     speciesByIndividual: summary.species_by_individual || {},
+    metadataByIndividual: summary.metadata_by_individual || {},
+    studyMetadata: summary.study_metadata || {},
+    metadataWarnings: summary.metadata_warnings || [],
     seriesByIndividual,
     coverageByIndividual,
     stats,
@@ -21967,8 +22453,7 @@ function parseMovementSegments(items) {
     fixKeys: Array.isArray(item?.fix_keys) ? item.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
     path: Array.isArray(item?.path)
       ? item.path
-        .map(position => [Number(position?.[0]) || 0, Number(position?.[1]) || 0])
-        .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]))
+        .map(position => [Number(position?.[0]), Number(position?.[1])])
       : [],
   })).filter(item => item.segmentId) : [];
 }
@@ -21986,12 +22471,13 @@ function parseMovementAutoBursts(items) {
     fixCount: Number(item?.fix_count) || 0,
     burstGapSeconds: Number(item?.burst_gap_seconds) || DEFAULT_BURST_GAP_SECONDS,
     pathLengthM: finiteOrNull(item?.path_length_m),
+    spatialSummaryUnavailable: String(item?.spatial_summary_unavailable || ""),
+    invalidCoordinateCount: Number(item?.invalid_coordinate_count) || 0,
     medianStepM: finiteOrNull(item?.median_step_m),
     fixKeys: Array.isArray(item?.fix_keys) ? item.fix_keys.map(value => String(value || "")).filter(Boolean) : [],
     path: Array.isArray(item?.path)
       ? item.path
-        .map(position => [Number(position?.[0]) || 0, Number(position?.[1]) || 0])
-        .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]))
+        .map(position => [Number(position?.[0]), Number(position?.[1])])
       : [],
   })).filter(item => item.burstId) : [];
 }
@@ -22055,7 +22541,7 @@ function buildBurstPreviewGeometry(
 ) {
   const validPositions = positions => (Array.isArray(positions) ? positions : [])
     .map(position => [Number(position?.[0]), Number(position?.[1])])
-    .filter(position => Number.isFinite(position[0]) && Number.isFinite(position[1]));
+    .filter(position => isPlottablePosition(position));
   const selected = validPositions(selectedPositions);
   if (!selected.length) {
     return null;
@@ -22531,7 +23017,7 @@ function movementColorFieldDescription(field) {
   const descriptions = {
     [INDIVIDUAL_COLOR_FIELD_KEY]: "Assigns each individual its own categorical track color.",
     step_length_m: "WGS84 geodesic distance from this fix to the following fix, attached to the segment's starting fix.",
-    speed_mps: "Step length divided by the positive time interval to the following fix, attached to the segment's starting fix.",
+    speed_mps: "Colors show outgoing speed: step length divided by the positive time interval to the next fix. A Speed filter match requires both incoming and outgoing speeds to pass the threshold.",
     time_delta_s: "Elapsed seconds from this fix to the following fix, attached to the segment's starting fix.",
     turn_angle_deg: "Signed change in WGS84 geodesic bearing at this fix, using the preceding and following fixes.",
     [GPS_SPIKE_COLOR_FIELD_KEY]: `Colors outbound speed (m/s). A filter match requires both adjacent speeds above the speed threshold and |turn angle| at least ${DEFAULT_GPS_SPIKE_TURN_ANGLE_DEG}° unless changed.`,
@@ -22600,17 +23086,8 @@ function movementColorFieldValue(fix, field) {
   return fix.attributes?.[attributeKey];
 }
 
-function binaryInboundSpeed(binary, index) {
-  if (!binary?.arrays || index <= 0) return null;
-  const arrays = binary.arrays;
-  let previous = index - 1;
-  const sameTrack = i => Number(arrays.individual_codes[i]) === Number(arrays.individual_codes[index])
-    && (!arrays.set_codes || Number(arrays.set_codes[i]) === Number(arrays.set_codes[index]));
-  while (previous >= 0 && sameTrack(previous) && Number(arrays.review_status[previous]) === 2) previous -= 1;
-  return previous >= 0 && sameTrack(previous) ? finiteOrNull(arrays.speed_mps?.[previous]) : null;
-}
-
 function movementInboundSpeed(data, fix) {
+  if (fix?.binaryBlock && Number.isInteger(fix.binaryIndex)) return binaryInboundSpeed(fix.binaryBlock, fix.binaryIndex);
   const position = data?.eligibleTrackPositionByFixKey?.get(fix?.fixKey);
   if (!position || position.index <= 0) return null;
   const previous = data.eligibleFixesByTrack?.get(position.trackKey)?.[position.index - 1];
@@ -22982,16 +23459,14 @@ function formatStepDetails(step, dataset) {
   return step?.title || dataset.note || (dataset.parent_dataset_id ? "Review step" : "Original input");
 }
 
-function formatDatasetLabel(dataset, currentHeadDatasetId, step = null) {
-  const parts = [
-    shortId(dataset.dataset_id),
-    formatStepLabel(step, dataset),
-    formatDateTime(dataset.created_at),
-  ];
-  if (dataset.dataset_id === currentHeadDatasetId) {
-    parts.unshift("head");
-  }
-  return parts.join(" | ");
+function formatDatasetLabel(dataset, currentHeadDatasetId, step = null, depth = null) {
+  if (!dataset.parent_dataset_id) return dataset.dataset_id === currentHeadDatasetId ? "Latest · Original data" : "Original data";
+  let title = formatStepLabel(step, dataset)
+    .replace(/^(?:Recalculate|Apply) (Stationarity|Speed|GPS Spike) across study$/, "$1")
+    .replace(/^Initial dataset from project inputs$/, "Original data");
+  if (title.length > 36) title = `${title.slice(0, 35)}…`;
+  const prefix = dataset.dataset_id === currentHeadDatasetId ? "Latest" : depth === null ? "Earlier" : `v${depth}`;
+  return `${prefix} · ${title}`;
 }
 
 function shortId(value) {
@@ -23683,7 +24158,7 @@ function buildReportSnapshotLayers(snapshotWindow) {
   const anchorSet = new Set(snapshotWindow.anchorFixKeys || []);
   const secondarySet = new Set(snapshotWindow.secondaryFixKeys || []);
   const orderedFixes = (snapshotWindow.windowFixes || []).filter(fix => (
-    Number.isFinite(fix?.position?.[0]) && Number.isFinite(fix?.position?.[1])
+    isPlottablePosition(fix?.position)
   ));
   const contextPoints = [];
   const secondarySuspiciousPoints = [];
@@ -23721,7 +24196,7 @@ function buildReportSnapshotLayers(snapshotWindow) {
   return [
     new deck.PathLayer({
       id: `report-snapshot-path-${snapshotWindow.snapshotKey}`,
-      data: [{ path: orderedFixes.map(fix => fix.position) }],
+      data: splitPlottablePath((snapshotWindow.windowFixes || []).map(fix => fix.position)).map(path => ({path})),
       getPath: item => item.path,
       getColor: [26, 52, 74, 190],
       getWidth: 3,
@@ -23783,7 +24258,7 @@ function buildReportSnapshotLayers(snapshotWindow) {
 
 function buildWindowBounds(windowFixes, { tight = false } = {}) {
   const validFixes = (Array.isArray(windowFixes) ? windowFixes : []).filter(fix => (
-    Number.isFinite(fix?.position?.[0]) && Number.isFinite(fix?.position?.[1])
+    isPlottablePosition(fix?.position)
   ));
   if (!validFixes.length) {
     return null;
