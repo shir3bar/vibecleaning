@@ -47,7 +47,10 @@ and do not remove data or create review decisions.
 
 Species appear in study navigation, the study header, and individual cards.
 The header and expandable individual metadata include external scientific-name
-search links. These links require a network only when opened.
+search links. The species dropdown also links directly to the Movebank study
+using its numeric study ID, even when species metadata is unavailable. Movebank
+may require the reviewer to log in or have permission to view the study. These
+links require a network only when opened.
 
 Opening the species dropdown also tries to load a small PhyloPic silhouette for
 each visible species. Lookups require an exact scientific-name match and an image

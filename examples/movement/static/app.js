@@ -4004,6 +4004,7 @@ class MovementExampleApp {
         .movement-species-popover > summary { padding: 4px 9px; min-height: 28px; border-color: rgba(99,216,184,.17); background: rgba(99,216,184,.04); color: #b9dfd1; }
         .movement-species-popover > summary em { max-width: 210px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
         .movement-species-popover .movement-popover-panel { width: 320px; }
+        .movement-movebank-link { display: inline-block; margin-bottom: 12px; color: #7cd2ff; font-size: 12px; }
         .movement-species-entry + .movement-species-entry { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(148,163,184,.13); }
         .movement-species-text > em { display: block; margin-bottom: 7px; color: #e0ede7; }
         .movement-species-entry.has-species-portrait { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 7px 12px; align-items: center; }
@@ -11436,14 +11437,20 @@ class MovementExampleApp {
     if (!el) return;
     const species = this.data?.studyMetadata?.species || [];
     const warnings = this.data?.metadataWarnings || [];
-    el.hidden = !species.length && !warnings.length;
-    const signature = JSON.stringify([this.currentStudy, species, warnings]);
+    const studyId = String(this.data?.studyMetadata?.study_id || this.currentStudy || "");
+    const movebankUrl = /^\d+$/.test(studyId)
+      ? `https://www.movebank.org/cms/webapp?gwt_fragment=page%3Dstudies%2Cpath%3Dstudy${encodeURIComponent(studyId)}`
+      : "";
+    el.hidden = !species.length && !warnings.length && !movebankUrl;
+    const signature = JSON.stringify([this.currentStudy, studyId, species, warnings]);
     if (el.dataset.signature === signature) return;
     el.dataset.signature = signature;
-    const label = species.length === 1 ? `<em>${escapeHtml(species[0])}</em>` : species.length ? `${species.length} species` : "Metadata";
+    const label = species.length === 1 ? `<em>${escapeHtml(species[0])}</em>` : species.length ? `${species.length} species` : movebankUrl ? `Study ${escapeHtml(studyId)}` : "Metadata";
     el.innerHTML = `<details class="movement-popover movement-species-popover" data-role="species-menu">
-      <summary title="Species and reference links">${label}${warnings.length ? '<span class="movement-filter-badge" aria-label="Metadata warning">!</span>' : ""}</summary>
-      <div class="movement-popover-panel"><div class="movement-menu-heading">Species references</div>
+      <summary title="Study and species links">${label}${warnings.length ? '<span class="movement-filter-badge" aria-label="Metadata warning">!</span>' : ""}</summary>
+      <div class="movement-popover-panel">
+      ${movebankUrl ? `<div class="movement-menu-heading">Movebank study</div><a class="movement-movebank-link" href="${movebankUrl}" target="_blank" rel="noopener noreferrer">Open study ${escapeHtml(studyId)} on Movebank<span aria-hidden="true">↗</span></a>` : ""}
+      ${species.length ? '<div class="movement-menu-heading">Species references</div>' : ""}
       ${species.map(name => `<div class="movement-species-entry" data-species="${escapeHtml(name)}"><div class="movement-species-text"><em>${escapeHtml(name)}</em>${speciesLinksHtml(name)}</div></div>`).join("")}
       ${warnings.map(warning => `<div class="movement-metadata-warning" role="status">${escapeHtml(warning)}</div>`).join("")}
       </div></details>`;

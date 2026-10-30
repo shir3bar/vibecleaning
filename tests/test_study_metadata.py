@@ -319,7 +319,7 @@ def test_metadata_and_invalid_position_navigation_in_browser(amt_study, tmp_path
         expect(option).to_contain_text("Uria lomvia", timeout=60000)
         page.locator('[data-role="study"]').select_option(STUDY)
         expect(page.locator('[data-role="study-metadata"]')).to_contain_text("Uria lomvia", timeout=60000)
-        expect(page.locator('[data-role="study-metadata"] a')).to_have_count(3)
+        expect(page.locator('[data-role="study-metadata"] a')).to_have_count(4)
         # Follow the generated links as a reviewer would. Stub external pages so
         # this regression checks query preservation without depending on uptime.
         def species_search(route):
@@ -328,6 +328,9 @@ def test_metadata_and_invalid_position_navigation_in_browser(amt_study, tmp_path
         page.context.route("https://www.gbif.org/taxon/search?*", species_search)
         page.context.route("https://eol.org/search?*", species_search)
         page.locator('[data-role="species-menu"] > summary').click()
+        assert page.get_by_role("link", name=f"Open study {STUDY} on Movebank").get_attribute("href") == (
+            f"https://www.movebank.org/cms/webapp?gwt_fragment=page%3Dstudies%2Cpath%3Dstudy{STUDY}"
+        )
         for label in ("GBIF", "EOL"):
             with page.expect_popup() as opened:
                 page.locator('[data-role="study-metadata"]').get_by_role("link", name=label, exact=True).click()

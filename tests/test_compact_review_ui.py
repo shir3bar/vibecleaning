@@ -59,7 +59,9 @@ def test_compact_controls_version_species_exports_and_keyboard(prepared, tmp_pat
         assert not page.locator('[data-role="export-menu"]').evaluate("el => el.open")
 
         _open_toolbar_menu(page, "species-menu")
-        expect(page.locator('[data-role="species-menu"] a:visible')).to_have_count(3)
+        expect(page.locator('[data-role="species-menu"] a:visible')).to_have_count(4)
+        movebank = page.get_by_role("link", name="Open study 910001 on Movebank")
+        assert movebank.get_attribute("href") == "https://www.movebank.org/cms/webapp?gwt_fragment=page%3Dstudies%2Cpath%3Dstudy910001"
         assert "q=Vulpes%20vulpes" in page.get_by_role("link", name="GBIF", exact=True).get_attribute("href")
         page.locator('[data-study-filter-panel] > summary').click()
         assert not page.locator('[data-role="species-menu"]').evaluate("el => el.open")
