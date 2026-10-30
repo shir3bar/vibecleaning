@@ -1013,18 +1013,20 @@ class MovementExampleApp {
     if (!this.refs?.individualQueueOrder) {
       return;
     }
+    const decisionActive = this.individualReviewQueue?.orderMode === "decision";
     const selectedValue = this.individualReviewQueue?.orderMode === "ranking"
       ? String(this.individualReviewQueue.rankingMethod || this.getRankingMethod())
-      : ["flagged", "flagged_asc", "decision"].includes(this.individualReviewQueue?.orderMode) ? this.individualReviewQueue.orderMode : "dataset";
-    this.refs.individualQueueOrder.innerHTML = [
+      : decisionActive ? ""
+        : ["flagged", "flagged_asc"].includes(this.individualReviewQueue?.orderMode) ? this.individualReviewQueue.orderMode : "dataset";
+    this.refs.individualQueueOrder.innerHTML = (decisionActive
+      ? '<option value="" disabled>Choose another order</option>' : "") + [
       ["dataset", "Dataset source"],
-      ["decision", "Review decision"],
       ["flagged", "Flagged fixes — most first"],
       ["flagged_asc", "Flagged fixes — fewest first"],
       ...this.rankingMethodOptions(),
-    ].map(([value, label]) => `<option value="${value}"${value === "decision" ? " disabled" : ""}>${label}</option>`).join("");
+    ].map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
     this.refs.individualQueueOrder.value = selectedValue;
-    if (!this.refs.individualQueueOrder.value) {
+    if (selectedValue && !this.refs.individualQueueOrder.value) {
       this.refs.individualQueueOrder.value = "dataset";
     }
   }

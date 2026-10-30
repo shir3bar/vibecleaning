@@ -981,7 +981,8 @@ def test_review_decision_queue_order_keeps_unreviewed_first_until_button_refresh
         decision_order = [individual for individual in source_order if individual != "alpha"] + ["alpha"]
 
         decision_order_button.click()
-        assert order_control.input_value() == "decision"
+        assert order_control.input_value() == ""
+        assert order_control.locator('option[value="decision"]').count() == 0
         assert "is-active" in (decision_order_button.get_attribute("class") or "")
         assert page.locator('[data-queue-nav="previous-group"], [data-queue-nav="next-group"]').count() == 0
         assert order() == decision_order
@@ -998,6 +999,8 @@ def test_review_decision_queue_order_keeps_unreviewed_first_until_button_refresh
 
         decision_order_button.click()
         assert order() == [individual for individual in source_order if individual not in {"alpha", "beta"}] + ["beta", "alpha"]
+        order_control.select_option("dataset")
+        assert "is-active" not in (decision_order_button.get_attribute("class") or "")
         browser.close()
 
 
