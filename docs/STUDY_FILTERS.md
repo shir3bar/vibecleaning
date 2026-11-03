@@ -62,7 +62,7 @@ Mac/Linux:
 
 ```sh
 uv sync --locked --no-dev
-uv run --no-sync python scripts/prefilter_movement_rds.py "/path/to/sofia/movement_rds" --user sofia --report "/path/to/sofia/prefilter_report.json"
+uv run --no-sync python scripts/prefilter_movement_rds.py "./data/movement_rds" --user YOUR_USERNAME --report "./data/prefilter_report.json"
 ```
 
 Windows PowerShell (Git checkout):
@@ -70,7 +70,7 @@ Windows PowerShell (Git checkout):
 ```powershell
 $env:UV_PROJECT_ENVIRONMENT = "$env:LOCALAPPDATA\Vibecleaning\venvs\development"
 uv sync --locked --no-dev
-uv run --no-sync python .\scripts\prefilter_movement_rds.py "D:\MoveTraits\sofia\movement_rds" --user sofia --report "D:\MoveTraits\sofia\prefilter_report.json"
+uv run --no-sync python .\scripts\prefilter_movement_rds.py ".\data\movement_rds" --user sofia --report ".\data\prefilter_report.json"
 ```
 
 Replace the paths and username for the assigned annotator. The report is saved
