@@ -9,8 +9,10 @@ import struct
 import sys
 
 from fastapi.testclient import TestClient
+import numpy as np
 import pandas as pd
 import pytest
+import rdata
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -33,6 +35,7 @@ from examples.movement.rds_index import (
 )
 from examples.movement.summary import build_movement_fixes
 from examples.rds_movement.app import create_rds_movement_app
+from scripts.generate_filter_pipeline_demo import DemoCrs, amt_constructor, crs_constructor
 
 
 SAMPLE_ROOT = REPO_ROOT / "data" / "movement_rds"
@@ -105,6 +108,67 @@ def _binary_header(content: bytes) -> dict:
     assert content[:4] == b"VCM1"
     length = struct.unpack("<I", content[4:8])[0]
     return json.loads(content[8 : 8 + length])
+
+
+def test_rds_individual_identifier_keeps_internal_spacing_across_requests(tmp_path):
+    individual = "2300 / HH930 /  Agatha"
+    study_dir = tmp_path / "data" / "movement_rds" / "1410035327"
+    study_dir.mkdir(parents=True)
+    frame = pd.DataFrame({
+        "x_": [6.0, 6.01, 6.02], "y_": [52.0] * 3,
+        "t_": [1704067200.0, 1704070800.0, 1704074400.0],
+        "timestamp": [1704067200.0, 1704070800.0, 1704074400.0],
+        "study_id": np.full(3, 1410035327, dtype=np.int32),
+        "individual_id": np.full(3, 1419503442, dtype=np.int32),
+        "individual_local_identifier": pd.Categorical([individual] * 3),
+        "tag_local_identifier": pd.Categorical(["HH930"] * 3),
+        "burst_": np.ones(3, dtype=np.int32),
+    })
+    rdata.write_rds(
+        study_dir / "1410035327_1419503442.rds", frame,
+        constructor_dict={**rdata.conversion.to_r.DEFAULT_CLASS_MAP,
+                          pd.DataFrame: amt_constructor, DemoCrs: crs_constructor},
+    )
+    app = create_rds_movement_app(
+        data_root=tmp_path / "data", cache_root=tmp_path / "cache",
+        static_root=MOVEMENT_STATIC_ROOT, index_path=MOVEMENT_INDEX,
+        auth_manager=AuthManager.for_testing(
+            username="rds-reviewer", password="test-password-long", role="editor",
+        ),
+    )
+    with TestClient(app) as client:
+        assert client.post("/api/auth/login", json={
+            "username": "rds-reviewer", "password": "test-password-long",
+        }).status_code == 200
+        base = "/api/apps/movement/family/movement_rds/study/1410035327"
+        loaded = client.get(f"{base}/load").json()
+        dataset_id, logical_name = loaded["dataset_id"], loaded["logical_name"]
+        overview = client.get(f"{base}/dataset/{dataset_id}/overview", params={
+            "logical_name": logical_name,
+        }).json()
+        assert overview["individuals"] == [individual]
+
+        binary = client.get(f"{base}/dataset/{dataset_id}/fixes-binary", params={
+            "logical_name": logical_name, "individuals": individual,
+        })
+        assert binary.status_code == 200, binary.text
+        assert _binary_header(binary.content)["loaded_individuals"] == [individual]
+        fixes = client.get(f"{base}/dataset/{dataset_id}/fixes", params={
+            "logical_name": logical_name, "individuals": individual,
+        })
+        assert fixes.status_code == 200, fixes.text
+        assert {fix["individual"] for fix in fixes.json()["fixes"]} == {individual}
+
+        saved = client.post(f"{base}/actions/review-individual", json={
+            "dataset_id": dataset_id,
+            "expected_current_dataset_id": dataset_id,
+            "expected_review_revision": loaded["edit_profile"]["review_revision"],
+            "logical_name": logical_name,
+            "source_bundle_signature": overview["source_bundle_signature"],
+            "decision": {"individual": individual, "review_decision": "ok",
+                         "needs_check": False, "comment": ""},
+        })
+        assert saved.status_code == 200, saved.text
 
 
 def _create_saved_rds_source_ranking(

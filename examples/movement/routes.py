@@ -1070,7 +1070,9 @@ def _validate_output_mode(value: object) -> str:
 def _normalize_individual_name(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("Invalid individual")
-    normalized = " ".join(value.strip().split())
+    # Source identifiers are exact keys. Collapsing internal whitespace breaks
+    # RDS tracks whose supplied local identifier contains repeated spaces.
+    normalized = value.strip()
     if not normalized or any(ord(char) < 32 for char in normalized):
         raise ValueError("Invalid individual")
     return normalized
