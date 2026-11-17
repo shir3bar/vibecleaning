@@ -12,6 +12,14 @@ DECISION_FIELDS = (
 )
 
 
+def technical_exception_rows(rows):
+    return [
+        {"individual": row["individual"], "reason": row["comment"]}
+        for row in rows
+        if row.get("review_decision") == "technical_exception"
+    ]
+
+
 def decision_rows(study, dataset_id, individuals, decisions, review=None, needs_checks=()):
     review = review or {}
     rows = []

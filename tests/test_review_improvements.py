@@ -128,6 +128,101 @@ def remove_all(client, base, loaded):
 
 
 @pytest.mark.parametrize('source_format', ['csv', 'rds'])
+def test_readiness_reports_load_failure_and_exports_technical_exception(tmp_path, source_format):
+    from app.reviews import load_review_state
+    from app.state import project_paths
+    client, study, base, loaded = review_client(tmp_path, source_format)
+    reviewer = client.get('/api/apps/movement/reviewers').json()['reviewers'][0]
+    assigned = client.post(base + '/review/assign', json={
+        'reviewer_user_id': reviewer['user_id'],
+        'logical_name': loaded['logical_name'],
+        'expected_current_dataset_id': loaded['dataset_id'],
+        'expected_review_revision': loaded['edit_profile']['review_revision'],
+    })
+    assert assigned.status_code == 200, assigned.text
+    loaded['dataset_id'] = assigned.json()['current_dataset_id']
+    individuals = [row['individual'] for row in downloaded_decisions(client, base, loaded['dataset_id'])]
+    first, second = individuals
+    original = {path.name: path.read_bytes() for path in study.glob('*.' + source_format)}
+    failure = {'individual': first, 'message': 'Exact map fixes failed to load'}
+    body = decision_body(client, base, loaded, first)
+    readiness = client.post(base + '/review/readiness', json={
+        'expected_current_dataset_id': body['expected_current_dataset_id'],
+        'expected_review_revision': body['expected_review_revision'],
+        'client_failures': [failure],
+    })
+    assert readiness.status_code == 200, readiness.text
+    report = readiness.json()
+    assert report['coverage']['remaining_count'] == 2
+    assert report['source_issues'] == []
+    assert report['load_issues'][0]['individual'] == first
+    assert report['load_issues'][0]['acknowledged'] is False
+    assert report['can_complete'] is False
+
+    bad = client.post(base + '/actions/review-individual', json={
+        **body, 'decision': {**body['decision'], 'review_decision': 'technical_exception',
+                             'comment': ''},
+    })
+    assert bad.status_code == 400
+    saved = client.post(base + '/actions/review-individual', json={
+        **body, 'decision': {**body['decision'], 'review_decision': 'technical_exception',
+                             'comment': 'Map request fails on this device; source file is readable.'},
+    })
+    assert saved.status_code == 200, saved.text
+    loaded['dataset_id'] = saved.json()['dataset']['dataset_id']
+    saved = client.post(base + '/actions/review-individual', json=decision_body(
+        client, base, loaded, second, review_decision='ok',
+    ))
+    assert saved.status_code == 200, saved.text
+    loaded['dataset_id'] = saved.json()['dataset']['dataset_id']
+    current = decision_body(client, base, loaded, first)
+    ready = client.post(base + '/review/readiness', json={
+        'expected_current_dataset_id': current['expected_current_dataset_id'],
+        'expected_review_revision': current['expected_review_revision'],
+        'client_failures': [failure],
+    })
+    assert ready.status_code == 200, ready.text
+    report = ready.json()
+    assert report['coverage']['remaining_count'] == 0
+    assert report['coverage']['technical_exception_count'] == 1
+    assert report['load_issues'][0]['acknowledged'] is True
+    assert report['can_complete'] is True
+    assert report['technical_exceptions'][0]['individual'] == first
+    rows = downloaded_decisions(client, base, loaded['dataset_id'])
+    assert next(row for row in rows if row['individual'] == first)['review_decision'] == 'technical_exception'
+
+    completed = client.post(base + '/review/complete', json=current)
+    assert completed.status_code == 200, completed.text
+    assert completed.json()['review']['status'] == 'completed'
+    output = project_paths(study)['meta'] / 'cleaned_files'
+    manifest = json.loads((output / 'writer_manifest.json').read_text())
+    assert manifest['technical_exceptions'] == [{
+        'individual': first,
+        'reason': 'Map request fails on this device; source file is readable.',
+    }]
+    assert {path.name: path.read_bytes() for path in study.glob('*.' + source_format)} == original
+    assert load_review_state(study)['reviews'][-1]['status'] == 'completed'
+
+
+def test_readiness_names_missing_source_and_completion_stays_active(tmp_path):
+    from app.reviews import active_review, load_review_state
+    client, study, base, loaded = review_client(tmp_path, 'rds')
+    body = remove_all(client, base, loaded)
+    missing = next(study.glob('*.rds'))
+    missing.unlink()
+    readiness = client.post(base + '/review/readiness', json={
+        'expected_current_dataset_id': body['expected_current_dataset_id'],
+        'expected_review_revision': body['expected_review_revision'],
+    })
+    assert readiness.status_code == 200, readiness.text
+    assert any(issue['file'] == missing.name for issue in readiness.json()['source_issues'])
+    completed = client.post(base + '/review/complete', json=body)
+    assert completed.status_code == 400
+    assert missing.name in completed.text
+    assert active_review(load_review_state(study)) is not None
+
+
+@pytest.mark.parametrize('source_format', ['csv', 'rds'])
 @pytest.mark.parametrize('background', [False, True])
 def test_completion_exports_full_inputs_and_decisions_idempotently(tmp_path, source_format, background):
     import hashlib

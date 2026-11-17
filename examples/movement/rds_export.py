@@ -402,8 +402,9 @@ def export_reviewed_rds_bundle(
         "files": manifest_files,
     }
     if decisions is not None:
-        from examples.movement.decision_export import save_decision_export
+        from examples.movement.decision_export import save_decision_export, technical_exception_rows
         manifest["auxiliary_files"] = [save_decision_export(output_dir, decisions)]
+        manifest["technical_exceptions"] = technical_exception_rows(decisions)
     if metadata_path is not None:
         destination = output_dir / "metadata.json"
         shutil.copy2(metadata_path, destination)

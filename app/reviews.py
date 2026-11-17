@@ -24,7 +24,7 @@ REVIEW_STATE_SCHEMA_VERSION = 1
 VALID_REVIEW_EFFECTS = frozenset(
     {"annotation_only", "preserves_individual_scope", "changes_individual_scope"}
 )
-VALID_REVIEW_DECISIONS = frozenset({"ok", "fix_keep", "remove"})
+VALID_REVIEW_DECISIONS = frozenset({"ok", "fix_keep", "remove", "technical_exception"})
 
 
 class ReviewStateError(ProjectStateError):
@@ -486,7 +486,7 @@ def finish_editor_control(
 def normalize_review_decision(value: object) -> str:
     decision = str(value or "").strip().lower()
     if decision not in VALID_REVIEW_DECISIONS:
-        raise ReviewStateError("Review decision must be ok, fix_keep, or remove")
+        raise ReviewStateError("Review decision must be ok, fix_keep, remove, or technical_exception")
     return decision
 
 
@@ -582,13 +582,20 @@ def review_coverage(
         for individual in required
         if individual in latest and latest[individual].get("needs_check") is True
     ]
+    technical_exceptions = [
+        individual for individual in required
+        if individual in latest and latest[individual].get("review_decision") == "technical_exception"
+    ]
     return {
         "required_count": len(required),
+        "required_individuals": required,
         "reviewed_count": len(required) - len(remaining),
         "remaining_count": len(remaining),
         "remaining_individuals": remaining,
         "needs_check_count": len(needs_check),
         "needs_check_individuals": needs_check,
+        "technical_exception_count": len(technical_exceptions),
+        "technical_exception_individuals": technical_exceptions,
         "complete_allowed": not remaining,
     }
 

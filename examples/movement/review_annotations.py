@@ -711,7 +711,7 @@ def normalize_annotation(raw: dict) -> dict:
             )
         )
     raw_decision = str(raw.get("review_decision") or "").strip().lower()
-    if raw_decision not in {"ok", "fix_keep", "remove"}:
+    if raw_decision not in {"ok", "fix_keep", "remove", "technical_exception"}:
         raw_decision = ""
     reviewed = (raw.get("reviewed") is True or _flag_is_true(raw.get("reviewed"))) and bool(raw_decision)
     try:

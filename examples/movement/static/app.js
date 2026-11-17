@@ -752,6 +752,10 @@ class MovementExampleApp {
     this.adminDashboardRefreshTimer = null;
     this.adminDashboardRefreshInFlight = false;
     this.adminDashboardPayload = null;
+    this.reviewReadiness = null;
+    this.reviewReadinessLoading = false;
+    this.reviewReadinessCanSaveDrafts = false;
+    this.reviewLoadFailures = new Map();
     this.focusedRankingBurst = null;
     this.tableSelection = {
       anchorFixKey: "",
@@ -3762,6 +3766,22 @@ class MovementExampleApp {
         .movement-modal-body label.movement-inline-check input {
           min-width: 0;
         }
+        .movement-readiness-card { width: min(720px, 100%); }
+        .movement-readiness-list { display: grid; gap: 8px; max-height: 280px; overflow: auto; }
+        .movement-readiness-row {
+          display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+          padding: 9px; border: 1px solid rgba(255,255,255,.1); border-radius: 9px;
+        }
+        .movement-readiness-row span { flex: 1 1 250px; overflow-wrap: anywhere; }
+        .movement-readiness-row small { display: block; color: #9bb0c6; }
+        .movement-readiness-row button, .movement-readiness-actions button {
+          cursor: pointer; padding: 6px 9px; border: 1px solid rgba(255,255,255,.18);
+          border-radius: 7px; background: rgba(15,23,42,.9); color: #e8eef7;
+        }
+        .movement-readiness-section { display: grid; gap: 7px; }
+        .movement-readiness-section h4 { margin: 0; font-size: 13px; }
+        .movement-readiness-summary { color: #cbd5e1; font-size: 13px; }
+        .movement-readiness-status.error { color: #fecaca; }
         .movement-admin-dashboard-card {
           width: min(1180px, 100%);
         }
@@ -4456,6 +4476,22 @@ class MovementExampleApp {
         </div>
       </div>
 
+      <div class="movement-modal hidden" data-role="review-readiness-modal">
+        <div class="movement-modal-card movement-readiness-card">
+          <div class="movement-modal-head">
+            <h3>Study readiness</h3>
+            <button type="button" data-role="review-readiness-close">Close</button>
+          </div>
+          <div class="movement-modal-body">
+            <div data-role="review-readiness-content" aria-live="polite">Checking study…</div>
+            <div class="movement-readiness-status" data-role="review-readiness-status" role="status"></div>
+          </div>
+          <div class="movement-modal-foot movement-readiness-actions">
+            <button type="button" data-role="review-readiness-refresh">Check again</button>
+            <button type="button" data-role="review-readiness-submit" disabled>Complete and save files</button>
+          </div>
+        </div>
+      </div>
       <div class="movement-modal hidden" data-role="remove-study-modal">
         <div class="movement-modal-card">
           <div class="movement-modal-head"><h3>Remove entire study</h3><button type="button" data-role="remove-study-close">Close</button></div>
@@ -4754,6 +4790,10 @@ class MovementExampleApp {
       exportIndividualDecisions: this.mountEl.querySelector('[data-role="export-individual-decisions"]'),
       removeStudy: this.mountEl.querySelector('[data-role="remove-study"]'),
       removeStudyModal: this.mountEl.querySelector('[data-role="remove-study-modal"]'),
+      reviewReadinessModal: this.mountEl.querySelector('[data-role="review-readiness-modal"]'),
+      reviewReadinessContent: this.mountEl.querySelector('[data-role="review-readiness-content"]'),
+      reviewReadinessStatus: this.mountEl.querySelector('[data-role="review-readiness-status"]'),
+      reviewReadinessSubmit: this.mountEl.querySelector('[data-role="review-readiness-submit"]'),
       exportProgress: this.mountEl.querySelector('[data-role="export-progress"]'),
       fixesProgress: this.mountEl.querySelector('[data-role="fixes-progress"]'),
       fixesProgressText: this.mountEl.querySelector('[data-role="fixes-progress-text"]'),
@@ -5037,7 +5077,13 @@ class MovementExampleApp {
     window.addEventListener("resize", this.handleWindowResize);
     document.addEventListener("visibilitychange", this.handleDocumentVisibilityChange);
     this.refs.assignReview?.addEventListener("click", () => void this.assignCurrentReview());
-    this.refs.completeReview?.addEventListener("click", () => void this.completeCurrentReview());
+    this.refs.completeReview?.addEventListener("click", () => void this.openReviewReadiness());
+    this.refs.reviewReadinessModal.querySelector('[data-role="review-readiness-close"]').addEventListener("click", () => {
+      if (!this.completingReview) this.refs.reviewReadinessModal.classList.add("hidden");
+    });
+    this.refs.reviewReadinessModal.querySelector('[data-role="review-readiness-refresh"]').addEventListener("click", () => void this.openReviewReadiness());
+    this.refs.reviewReadinessSubmit.addEventListener("click", () => void this.completeCurrentReview());
+    this.refs.reviewReadinessContent.addEventListener("click", event => void this.handleReviewReadinessClick(event));
     this.refs.cancelReview?.addEventListener("click", () => void this.cancelCurrentReview());
     this.refs.editorControlStart?.addEventListener("click", () => void this.startCurrentEditorControl());
     this.refs.editorControlFinish?.addEventListener("click", () => void this.finishCurrentEditorControl());
@@ -8679,7 +8725,8 @@ class MovementExampleApp {
         const needsCheck = Number(coverage.needs_check_count || 0);
         const priorNeedsCheck = Number(coverage.prior_needs_check_count || 0);
         this.refs.reviewProgress.textContent = (
-          `${coverage.reviewed_count || 0}/${coverage.required_count || 0} reviewed`
+          `${coverage.reviewed_count || 0}/${coverage.required_count || 0} covered`
+          + (coverage.technical_exception_count ? ` · ${coverage.technical_exception_count} technical exceptions` : "")
           + (needsCheck ? ` · ${needsCheck} needs check` : "")
           + (priorNeedsCheck ? ` · ${priorNeedsCheck} carried forward` : "")
         );
@@ -8699,16 +8746,12 @@ class MovementExampleApp {
         || actor.role === "editor"
         || review.reviewer_user_id === actor.user_id
       ));
-      const drafts = [...(this.individualReviewQueue?.stagedDecisions?.values() || [])];
-      const validDrafts = drafts.length > 0 && drafts.every(d => d.review_decision && !this.individualRemovalError(d));
-      this.refs.completeReview.disabled = Boolean(this.completingReview)
-        || !(capabilities.can_complete || (capabilities.can_review && validDrafts))
-        || drafts.some(d => !d.review_decision || this.individualRemovalError(d));
+      this.refs.completeReview.disabled = Boolean(
+        this.completingReview || this.reviewReadinessLoading || this.individualReviewQueue?.saving,
+      );
       this.refs.completeReview.textContent = this.completingReview ? "Saving review…"
         : this.completionFailed ? "Retry completion" : "Complete review";
-      this.refs.completeReview.title = capabilities.can_complete
-        ? "Complete this study-level review"
-        : `${coverage?.remaining_count || 0} individual(s) still require a decision`;
+      this.refs.completeReview.title = "Check study readiness and save reviewed files";
     }
     if (this.refs.cancelReview) {
       this.refs.cancelReview.hidden = !(actor.role === "editor" && review);
@@ -8797,6 +8840,7 @@ class MovementExampleApp {
       ok: formatCount(counts.ok || 0),
       fix_keep: formatCount(counts.fix_keep || 0),
       remove: formatCount(counts.remove || 0),
+      technical_exception: formatCount(counts.technical_exception || 0),
       needs_check: formatCount(counts.needs_check || 0),
       suspected_fixes: Number.isFinite(item.suspected_fix_count)
         ? formatCount(item.suspected_fix_count) : "—",
@@ -8854,7 +8898,7 @@ class MovementExampleApp {
       <table class="movement-admin-dashboard-table">
         <thead><tr>
           <th>Study</th><th>Review</th><th>Reviewer</th><th>Progress</th>
-          <th>OK</th><th>Fix &amp; Keep</th><th>Remove</th><th>Needs check</th>
+          <th>OK</th><th>Fix &amp; Keep</th><th>Remove</th><th>Technical</th><th>Needs check</th>
           <th title="Distinct fixes currently marked suspected, including prefilter flags">Suspected fixes</th><th>Actions</th>
         </tr></thead>
         <tbody>
@@ -8871,6 +8915,7 @@ class MovementExampleApp {
                 <td data-admin-field="ok">${escapeHtml(formatCount(counts.ok || 0))}</td>
                 <td data-admin-field="fix_keep">${escapeHtml(formatCount(counts.fix_keep || 0))}</td>
                 <td data-admin-field="remove">${escapeHtml(formatCount(counts.remove || 0))}</td>
+                <td data-admin-field="technical_exception">${escapeHtml(formatCount(counts.technical_exception || 0))}</td>
                 <td data-admin-field="needs_check">${escapeHtml(formatCount(counts.needs_check || 0))}</td>
                 <td data-admin-field="suspected_fixes">${Number.isFinite(item.suspected_fix_count) ? escapeHtml(formatCount(item.suspected_fix_count)) : "—"}</td>
                 <td><div class="movement-admin-dashboard-actions">
@@ -8879,7 +8924,7 @@ class MovementExampleApp {
                 </div></td>
               </tr>
               <tr data-admin-detail-row data-family="${escapeHtml(item.family || "")}" data-study="${escapeHtml(item.study || "")}" hidden>
-                <td colspan="10"><div class="movement-admin-individuals">Loading...</div></td>
+                <td colspan="11"><div class="movement-admin-individuals">Loading...</div></td>
               </tr>
             `;
           }).join("")}
@@ -9007,7 +9052,177 @@ class MovementExampleApp {
     }
   }
 
+  reviewReadinessFailures() {
+    const prefix = `${this.currentFamily}/${this.currentStudy}/`;
+    return [...this.reviewLoadFailures.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, message]) => ({individual: key.slice(prefix.length), message}));
+  }
+
+  async openReviewReadiness() {
+    if (!this.currentStudy || !this.editLockProfile?.review || this.reviewReadinessLoading) return;
+    this.refs.reviewReadinessModal.classList.remove("hidden");
+    this.refs.reviewReadinessContent.textContent = "Checking source files and review coverage…";
+    this.refs.reviewReadinessStatus.textContent = "";
+    this.refs.reviewReadinessStatus.classList.remove("error");
+    this.refs.reviewReadinessSubmit.disabled = true;
+    this.reviewReadiness = null;
+    this.reviewReadinessCanSaveDrafts = false;
+    this.reviewReadinessLoading = true;
+    const family = this.currentFamily;
+    const study = this.currentStudy;
+    const datasetId = this.expectedCurrentDatasetId();
+    try {
+      const result = await this.requestJSON(this.reviewActionUrl("review/readiness"), {
+        method: "POST",
+        body: JSON.stringify(this.reviewMutationBody({
+          client_failures: this.reviewReadinessFailures(),
+        })),
+      });
+      if (family !== this.currentFamily || study !== this.currentStudy
+          || datasetId !== this.expectedCurrentDatasetId()) return;
+      this.reviewReadiness = result;
+      this.renderReviewReadiness();
+    } catch (error) {
+      this.refs.reviewReadinessContent.textContent = "The study check could not finish.";
+      this.refs.reviewReadinessStatus.textContent = error.message;
+      this.refs.reviewReadinessStatus.classList.add("error");
+    } finally {
+      this.reviewReadinessLoading = false;
+      this.renderReviewControls();
+    }
+  }
+
+  renderReviewReadiness() {
+    const result = this.reviewReadiness;
+    if (!result) return;
+    const coverage = result.coverage || {};
+    const unreviewed = coverage.remaining_individuals || [];
+    const sourceIssues = result.source_issues || [];
+    const loadIssues = result.load_issues || [];
+    const exceptions = result.technical_exceptions || [];
+    const unsaved = [...this.individualReviewQueue.stagedDecisions.keys()]
+      .filter(individual => this.individualReviewDraftDiffers(individual));
+    const validDrafts = unsaved.every(individual => {
+      const draft = this.individualReviewQueue.stagedDecisions.get(individual);
+      return Boolean(draft?.review_decision) && !this.individualRemovalError(draft);
+    });
+    const draftCoverage = unreviewed.every(individual => unsaved.includes(individual));
+    const sourceReady = !sourceIssues.length && loadIssues.every(issue => issue.acknowledged);
+    this.reviewReadinessCanSaveDrafts = sourceReady && validDrafts && draftCoverage
+      && Boolean(unsaved.length);
+    const row = (individual, file, message, actions = "") => `
+      <div class="movement-readiness-row">
+        <span><strong>${escapeHtml(individual || file || "Study")}</strong>
+          ${file && individual ? `<small>${escapeHtml(file)}</small>` : ""}
+          ${message ? `<small>${escapeHtml(message)}</small>` : ""}</span>
+        ${actions}
+      </div>`;
+    const openButton = individual => individual && this.data?.individuals.includes(individual)
+      ? `<button type="button" data-readiness-open="${escapeHtml(individual)}">Open</button>` : "";
+    const section = (title, rows) => rows.length
+      ? `<section class="movement-readiness-section"><h4>${title}</h4>
+           <div class="movement-readiness-list">${rows.join("")}</div></section>` : "";
+    const sourceRows = sourceIssues.map(issue => row(
+      issue.individual, issue.file, issue.message, openButton(issue.individual),
+    ));
+    const loadRows = loadIssues.map(issue => row(
+      issue.individual, issue.file, issue.message,
+      `<button type="button" data-readiness-retry="${escapeHtml(issue.individual)}">Retry</button>`
+      + (!issue.acknowledged && issue.can_exception
+        ? `<button type="button" data-readiness-exception="${escapeHtml(issue.individual)}">Record technical exception</button>`
+        : `<small>${issue.acknowledged ? "Exception recorded" : ""}</small>`),
+    ));
+    const unreviewedRows = unreviewed.map(individual => row(
+      individual, "", "No saved decision", openButton(individual),
+    ));
+    const exceptionRows = exceptions.map(item => row(item.individual, item.file, item.reason));
+    this.refs.reviewReadinessContent.innerHTML = `
+      <div class="movement-readiness-section">
+        <div class="movement-readiness-summary">
+          ${formatCount(coverage.reviewed_count || 0)} of ${formatCount(coverage.required_count || 0)} individuals covered
+          ${exceptions.length ? ` · ${formatCount(exceptions.length)} technical exception(s)` : ""}
+          ${coverage.needs_check_count ? ` · ${formatCount(coverage.needs_check_count)} need another check` : ""}
+        </div>
+        ${unsaved.length ? `<div class="movement-readiness-summary">${this.reviewReadinessCanSaveDrafts ? "Final save will include" : "Save or correct"} ${formatCount(unsaved.length)} pending decision(s)${this.reviewReadinessCanSaveDrafts ? "" : " in the queue before completing"}.</div>` : ""}
+        ${result.can_complete && !unsaved.length
+          ? `<div class="movement-readiness-summary">Ready to save reviewed files. The source files stay unchanged.</div>`
+          : ""}
+      </div>
+      ${section("Source or export blockers", sourceRows)}
+      ${section("Fixes could not be loaded", loadRows)}
+      ${section("Individuals still needing a decision", unreviewedRows)}
+      ${section("Recorded technical exceptions", exceptionRows)}
+    `;
+    const actor = this.editLockProfile?.actor || window.vibecleaningActor || {};
+    const mayComplete = this.editLockProfile?.capabilities?.can_review
+      || this.editLockProfile?.capabilities?.can_complete || actor.role === "editor";
+    this.refs.reviewReadinessSubmit.disabled = !(result.can_complete && !unsaved.length
+      || this.reviewReadinessCanSaveDrafts) || !mayComplete || this.completingReview;
+    this.refs.reviewReadinessSubmit.textContent = unsaved.length && this.reviewReadinessCanSaveDrafts
+      ? "Save decisions and complete" : "Complete and save files";
+  }
+
+  async handleReviewReadinessClick(event) {
+    const retry = event.target.closest("[data-readiness-retry]");
+    const open = event.target.closest("[data-readiness-open]");
+    const exception = event.target.closest("[data-readiness-exception]");
+    const individual = retry?.dataset.readinessRetry
+      || open?.dataset.readinessOpen || exception?.dataset.readinessException;
+    if (!individual) return;
+    if (exception) {
+      const reason = window.prompt(
+        `Why could ${individual} not be reviewed? This will be saved with the individual decisions.`,
+        "",
+      );
+      if (reason === null) return;
+      if (!reason.trim()) {
+        this.refs.reviewReadinessStatus.textContent = "Enter a reason for the technical exception.";
+        this.refs.reviewReadinessStatus.classList.add("error");
+        return;
+      }
+      try {
+        const result = await this.requestJSON(this.reviewActionUrl("actions/review-individual"), {
+          method: "POST",
+          body: JSON.stringify({
+            ...this.reviewMutationBody(),
+            dataset_id: this.currentDatasetId,
+            logical_name: this.currentArtifact,
+            source_bundle_signature: this.data?.sourceSignature || "",
+            decision: {
+              individual, review_decision: "technical_exception",
+              needs_check: false, comment: reason.trim(),
+            },
+          }),
+        });
+        await this.loadStudyAtDataset(result.dataset.dataset_id, {
+          preserveAnnotationContext: true, result,
+        });
+        await this.openReviewReadiness();
+      } catch (error) {
+        await this.handleEditRequestError(error);
+        this.refs.reviewReadinessStatus.textContent = error.message;
+        this.refs.reviewReadinessStatus.classList.add("error");
+      }
+      return;
+    }
+    this.refs.reviewReadinessModal.classList.add("hidden");
+    if (retry) {
+      this.reviewLoadFailures.delete(`${this.currentFamily}/${this.currentStudy}/${individual}`);
+      this.data?.detailFailedIndividuals?.delete(individual);
+      this.data?.detailFailureMessages?.delete(individual);
+    }
+    await this.setIndividualViewMode("queue");
+    await this.focusIndividualQueueItem(individual);
+    if (retry) await this.loadDetailForCurrentSelection();
+  }
+
   async completeCurrentReview() {
+    if (!(this.reviewReadiness?.can_complete || this.reviewReadinessCanSaveDrafts)
+        || this.reviewReadiness.dataset_id !== this.expectedCurrentDatasetId()) {
+      await this.openReviewReadiness();
+      return;
+    }
     const coverage = this.editLockProfile?.coverage || {};
     const needsCheck = Number(coverage.needs_check_count || 0);
     const actor = this.editLockProfile?.actor || window.vibecleaningActor || {};
@@ -9036,12 +9251,17 @@ class MovementExampleApp {
       this.completingReview = true;
       this.completionFailed = false;
       this.renderReviewControls();
-      // Saving may advance the dataset. Each decision uses the freshly loaded
-      // head and review revision, then completion pins the final version.
-      for (const individual of [...this.individualReviewQueue.stagedDecisions.keys()]) {
-        if (this.individualReviewDraftDiffers(individual)
-          && !(await this.saveActiveIndividualReviewDecision({advance: false, individual}))) {
+      const unsaved = [...this.individualReviewQueue.stagedDecisions.keys()]
+        .filter(individual => this.individualReviewDraftDiffers(individual));
+      for (const individual of unsaved) {
+        if (!(await this.saveActiveIndividualReviewDecision({advance: false, individual}))) {
           throw new Error("Save a valid decision and removal reason for every pending individual.");
+        }
+      }
+      if (unsaved.length) {
+        await this.openReviewReadiness();
+        if (!this.reviewReadiness?.can_complete) {
+          throw new Error("The study check changed after saving pending decisions. Review the issues shown here.");
         }
       }
       const study = this.currentStudy;
@@ -9052,7 +9272,9 @@ class MovementExampleApp {
       this.renderRdsExportProgress({}, study, Date.now());
       let result = await this.requestJSON(`${baseUrl}/review/complete`, {
         method: "POST",
-        body: JSON.stringify(this.reviewMutationBody({ reason, background: true })),
+        body: JSON.stringify(this.reviewMutationBody({
+          reason, background: true, client_failures: this.reviewReadinessFailures(),
+        })),
       });
       if (result.job_id) result = await this.waitForRdsExportJob(result.job_id, baseUrl, study, Date.now());
       this.refs.exportProgressText.textContent = `${study}: Review completed. Annotated files and individual_decisions.csv saved to scrubdata/cleaned_files/.`;
@@ -9061,6 +9283,7 @@ class MovementExampleApp {
       if (family === this.currentFamily && study === this.currentStudy) {
         await this.loadStudy({ preferredDatasetId: this.expectedCurrentDatasetId(), viewContext: this.captureDatasetViewContext() });
       }
+      this.refs.reviewReadinessModal.classList.add("hidden");
       this.setStatus(`Review completed for ${study}. Cleaned files and individual decisions saved.`);
     } catch (error) {
       this.completionFailed = true;
@@ -9068,6 +9291,8 @@ class MovementExampleApp {
       this.refs.exportProgressText.textContent = `Completion failed: ${error.message}`;
       this.refs.exportProgress.classList.add("error");
       this.refs.exportProgressBar.hidden = true;
+      this.refs.reviewReadinessStatus.textContent = `Completion failed: ${error.message}`;
+      this.refs.reviewReadinessStatus.classList.add("error");
       this.setStatus(`Could not complete review: ${error.message}. Use Retry completion after refreshing or resolving the error.`, true);
     } finally {
       this.completingReview = false;
@@ -10285,7 +10510,7 @@ class MovementExampleApp {
   reviewDecisionQueueRank(individual) {
     const state = this.getSavedIndividualReviewState(individual);
     if (!state.reviewed || !state.reviewDecision) return 0;
-    return {fix_keep: 1, remove: 2, ok: 3}[state.reviewDecision] ?? 4;
+    return {fix_keep: 1, remove: 2, technical_exception: 3, ok: 4}[state.reviewDecision] ?? 5;
   }
 
   getIndividualQueueOrder() {
@@ -11142,6 +11367,7 @@ class MovementExampleApp {
     }
     queue.saving = true;
     this.renderIndividuals();
+    this.renderReviewControls();
     const position = this.getIndividualQueuePosition();
     const currentIndex = position.page.indexOf(individual);
     const nextIndividual = position.page[currentIndex + 1] || "";
@@ -11191,6 +11417,7 @@ class MovementExampleApp {
     } finally {
       queue.saving = false;
       this.renderIndividuals();
+      this.renderReviewControls();
     }
   }
 
@@ -17911,6 +18138,7 @@ class MovementExampleApp {
       this.data.detailLoadingIndividuals = [...unresolvedBinaryIndividuals];
       for (const individual of missingBinaryIndividuals) {
         this.data.detailFailedIndividuals.delete(individual);
+        this.data.detailFailureMessages.delete(individual);
       }
       this.syncIndividualSelectionUi(unresolvedBinaryIndividuals);
       this.updateActionButtons();
@@ -17953,6 +18181,8 @@ class MovementExampleApp {
           }
           for (const individual of requestedBinaryIndividuals) {
             this.data.detailFailedIndividuals.add(individual);
+            this.data.detailFailureMessages.set(individual, String(error.message || "Map fixes could not be loaded"));
+            this.reviewLoadFailures.set(`${this.currentFamily}/${this.currentStudy}/${individual}`, String(error.message || "Map fixes could not be loaded"));
           }
           this.data.detailLoadingIndividuals = this.getSelectedIndividuals().filter(
             individual => this.data.binaryPendingIndividuals.has(individual),
@@ -17974,6 +18204,8 @@ class MovementExampleApp {
         this.data.detailLoadingIndividuals = stillMissing;
         for (const individual of requestedBinaryIndividuals) {
           this.data.detailFailedIndividuals.delete(individual);
+          this.data.detailFailureMessages.delete(individual);
+          this.reviewLoadFailures.delete(`${this.currentFamily}/${this.currentStudy}/${individual}`);
         }
         this.data.detailState = stillMissing.length ? "loading" : "map_loaded";
         this.data.detailIndividuals = [...currentSelection];
@@ -21105,7 +21337,10 @@ class MovementExampleApp {
         throw new Error(`Could not read export progress: ${error.message}. The export may still be running.`);
       }
       if (job.status === "completed") return job.result || {};
-      if (job.status === "failed") throw new Error(job.error || "RDS export failed");
+      if (job.status === "failed") {
+        const file = String(job.progress?.logical_name || "");
+        throw new Error(`${file ? `${file}: ` : ""}${job.error || "RDS export failed"}`);
+      }
       this.renderRdsExportProgress(job, study, startedAt);
       await new Promise(resolve => window.setTimeout(resolve, ANALYSIS_JOB_POLL_INTERVAL_MS));
     }
@@ -22299,6 +22534,7 @@ function buildDatasetFromSummary(summary, preferredColorBy) {
     binaryBlocks: new Map(),
     binaryPendingIndividuals: new Map(),
     detailFailedIndividuals: new Set(),
+    detailFailureMessages: new Map(),
     binaryMapReady: false,
     reviewProjection: null,
     reviewIssueAnnotations: [],
@@ -23436,6 +23672,7 @@ function isMovementTrackLineLayer(id) {
 function reviewDecisionLabel(value, removalReason = "") {
   if (value === "ok") return "OK";
   if (value === "fix_keep") return "Fix & Keep";
+  if (value === "technical_exception") return "Technical exception";
   if (value === "remove") {
     const reason = {redeployment: "Redeployment", short_track: "Short track", confined: "Confined", other: "Other", nest: "Nest"}[removalReason];
     return reason ? `Remove · ${reason}` : "Remove";
@@ -23445,7 +23682,7 @@ function reviewDecisionLabel(value, removalReason = "") {
 
 function reviewDecisionClass(value, needsCheck = false) {
   if (value === "remove") return "remove";
-  if (value === "fix_keep") return "issues";
+  if (value === "fix_keep" || value === "technical_exception") return "issues";
   if (needsCheck) return "needs-check";
   return "ok";
 }

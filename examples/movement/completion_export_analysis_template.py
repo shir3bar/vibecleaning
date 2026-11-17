@@ -8,7 +8,7 @@ from pathlib import Path
 def main():
     from app.filesystem import atomic_write_json
     from app.state import now_iso
-    from examples.movement.decision_export import save_decision_export
+    from examples.movement.decision_export import save_decision_export, technical_exception_rows
     from examples.movement.review_annotations import export_reviewed_csv
 
     spec_path = Path(os.environ["SCRUBDATA_SPEC_PATH"])
@@ -41,6 +41,7 @@ def main():
         "actor": spec["analysis"].get("actor"), "exported_at": now_iso(),
         "review_id": params["review_id"], "review_round": params["review_round"],
         "review_revision": params["review_revision"], "files": files,
+        "technical_exceptions": technical_exception_rows(params["individual_decisions"]),
         "auxiliary_files": [save_decision_export(output_dir, params["individual_decisions"])]}
     atomic_write_json(output_dir / "writer_manifest.json", manifest)
     atomic_write_json(Path(os.environ["SCRUBDATA_SUMMARY_PATH"]), {

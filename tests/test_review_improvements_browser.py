@@ -1,4 +1,5 @@
 import pytest
+from urllib.parse import parse_qs, urlsplit
 
 from test_review_readiness_browser import make_app
 from test_movement_browser import _serve, _open_browser, _new_page, _login_and_wait, _open_toolbar_menu
@@ -103,11 +104,17 @@ def test_completion_saves_pending_decision_and_groups_completed_studies(tmp_path
         first = active.get_attribute('data-queue-individual')
         active.locator('[data-review-decision="ok"]').click()
         page.locator('[data-role="individual-queue-save"]').click()
+        pw.expect(page.locator('[data-role="status"]')).to_contain_text(
+            'Saved the individual review decision', timeout=20000)
         pw.expect(active).not_to_have_attribute('data-queue-individual', first)
         active.locator('[data-review-decision="ok"]').click()
         complete = page.locator('[data-role="complete-review"]')
         pw.expect(complete).to_be_enabled()
         complete.click()
+        readiness = page.locator('[data-role="review-readiness-modal"]')
+        pw.expect(readiness).to_be_visible()
+        pw.expect(readiness).to_contain_text('Final save will include 1 pending decision')
+        readiness.locator('[data-role="review-readiness-submit"]').click()
         pw.expect(page.locator('[data-role="export-progress-text"]')).to_contain_text('Review completed', timeout=30000)
         selection = page.locator('[data-role="study"]')
         pw.expect(selection).to_have_value('readiness')
@@ -116,6 +123,64 @@ def test_completion_saves_pending_decision_and_groups_completed_studies(tmp_path
         page.reload(wait_until='domcontentloaded')
         page.locator('[data-role="study"] option[value="readiness"]').wait_for(state='attached')
         pw.expect(selection.locator('option').last).to_have_text('readiness · Completed')
+        assert not errors
+        browser.close()
+
+
+def test_readiness_dialog_surfaces_failed_track_and_records_exception(tmp_path):
+    import json
+    import playwright.sync_api as pw
+    app, study = make_app(tmp_path, 'rds')
+    target = flag_first_individual(app, 'rds')[0]
+    with _serve(app) as url, pw.sync_playwright() as playwright:
+        browser = _open_browser(playwright)
+        page = _new_page(browser)
+        page.on('dialog', lambda dialog: dialog.accept('Exact map request repeatedly failed during review'))
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        def fail_target_binary(route):
+            selected = parse_qs(urlsplit(route.request.url).query).get('individuals', [])
+            if selected == [target]:
+                route.fulfill(status=503, content_type='application/json',
+                              body='{"error":"Synthetic exact map failure"}')
+            else:
+                route.continue_()
+        page.route('**/fixes-binary?**', fail_target_binary)
+        _login_and_wait(page, url, 'readiness')
+        page.locator('[data-individual-checkbox]').first.wait_for(state='attached')
+        page.locator('[data-role="individual-view-queue"]').click()
+        pw.expect(page.locator('[data-queue-individual]')).to_have_count(2, timeout=20000)
+        active = page.locator('[data-queue-individual].queue-active')
+        pw.expect(active).to_have_attribute('data-queue-individual', target)
+        pw.expect(page.locator('[data-role="status"]')).to_contain_text(
+            'Could not load exact map fixes', timeout=20000)
+
+        page.locator('[data-role="complete-review"]').click()
+        modal = page.locator('[data-role="review-readiness-modal"]')
+        pw.expect(modal).to_be_visible()
+        pw.expect(modal).to_contain_text('Synthetic exact map failure')
+        pw.expect(modal).to_contain_text('Individuals still needing a decision')
+        pw.expect(modal.locator('[data-role="review-readiness-submit"]')).to_be_disabled()
+
+        with page.expect_response(lambda response: response.url.endswith('/actions/review-individual')) as saved:
+            modal.locator('[data-readiness-exception]').click()
+        assert saved.value.status == 200, saved.value.text()
+        pw.expect(modal).to_contain_text('Exception recorded', timeout=20000)
+        pw.expect(modal).to_contain_text('Exact map request repeatedly failed during review')
+        modal.locator('[data-readiness-open]').first.click()
+        active = page.locator('[data-queue-individual].queue-active')
+        pw.expect(active).not_to_have_attribute('data-queue-individual', target)
+        active.locator('[data-review-decision="ok"]').click()
+        page.locator('[data-role="individual-queue-save"]').click()
+        pw.expect(page.locator('[data-role="status"]')).to_contain_text(
+            'Saved the individual review decision', timeout=20000)
+        page.locator('[data-role="complete-review"]').click()
+        pw.expect(modal.locator('[data-role="review-readiness-submit"]')).to_be_enabled()
+        modal.locator('[data-role="review-readiness-submit"]').click()
+        pw.expect(page.locator('[data-role="export-progress-text"]')).to_contain_text(
+            'Review completed', timeout=30000)
+        manifest = json.loads((study / 'scrubdata/cleaned_files/writer_manifest.json').read_text())
+        assert manifest['technical_exceptions'][0]['individual'] == target
         assert not errors
         browser.close()
 

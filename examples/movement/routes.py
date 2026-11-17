@@ -6,8 +6,10 @@ from functools import lru_cache
 import json
 from math import isfinite
 from pathlib import Path
+import sqlite3
 from threading import Lock
 from time import monotonic
+from contextlib import closing
 
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -122,6 +124,8 @@ from .rds_index import (
     resolve_rds_review_scope,
     source_outlier_ranking,
     source_rows_from_fix_keys,
+    read_movement_rds,
+    validate_movement_rds,
 )
 
 
@@ -202,7 +206,8 @@ def _queue_review_step_label(action: str, parameters: dict) -> str | None:
         return f"{group['individual']} · {verb} {issue}"
     decision = parameters.get("decision") or {}
     if action == "review_individual" and decision.get("individual"):
-        label = {"ok": "OK", "fix_keep": "Fix & Keep", "remove": "Remove"}.get(
+        label = {"ok": "OK", "fix_keep": "Fix & Keep", "remove": "Remove",
+                 "technical_exception": "Technical exception"}.get(
             decision.get("review_decision"), "Review")
         if decision.get("needs_check"):
             label += " · Needs check"
@@ -618,9 +623,9 @@ def _validate_individual_review_decision(value: object) -> dict:
         raise ValueError("Review one individual")
     individual = _normalize_individual_name(value.get("individual"))
     review_decision = str(value.get("review_decision") or "").strip().lower()
-    if review_decision not in {"ok", "fix_keep", "remove"}:
+    if review_decision not in {"ok", "fix_keep", "remove", "technical_exception"}:
         raise ValueError(
-            "Individual review decision must be ok, fix_keep, or remove"
+            "Individual review decision must be ok, fix_keep, remove, or technical_exception"
         )
     needs_check = value.get("needs_check")
     if not isinstance(needs_check, bool):
@@ -628,6 +633,11 @@ def _validate_individual_review_decision(value: object) -> dict:
     comment = str(value.get("comment") or "").strip()
     if len(comment) > 1200:
         raise ValueError("Review comment must be at most 1200 characters")
+    if review_decision == "technical_exception":
+        if not comment:
+            raise ValueError("Describe why this individual could not be reviewed")
+        if needs_check:
+            raise ValueError("Technical exceptions cannot also be marked Needs check")
     removal_reason = str(value.get("removal_reason") or "").strip().lower()
     if review_decision == "remove":
         if removal_reason not in {"redeployment", "short_track", "confined", "other", "nest"}:
@@ -1388,6 +1398,7 @@ def register_movement_routes(
                     "ok": 0,
                     "fix_keep": 0,
                     "remove": 0,
+                    "technical_exception": 0,
                     "needs_check": 0,
                 },
                 **({"individuals": []} if include_individuals else {}),
@@ -1414,11 +1425,12 @@ def register_movement_routes(
             "ok": 0,
             "fix_keep": 0,
             "remove": 0,
+            "technical_exception": 0,
             "needs_check": 0,
         }
         for annotation in valid.values():
             decision = str(annotation.get("review_decision") or "")
-            if decision in {"ok", "fix_keep", "remove"}:
+            if decision in {"ok", "fix_keep", "remove", "technical_exception"}:
                 decision_counts[decision] += 1
             if annotation.get("needs_check") is True:
                 decision_counts["needs_check"] += 1
@@ -3261,6 +3273,134 @@ def register_movement_routes(
         except (ValueError, ProjectStateError) as exc:
             return json_error(str(exc), 400)
 
+    def review_readiness(study_dir: Path, dataset_id: str, review_revision: object,
+                         client_failures: object = None) -> dict:
+        state = load_review_state(study_dir)
+        current = str(load_project_state(study_dir)["current_dataset_id"])
+        try:
+            review_revision = int(review_revision)
+        except (TypeError, ValueError) as exc:
+            raise ReviewConflictError("Review state changed; reload before completing") from exc
+        if dataset_id != current or review_revision != state.get("revision"):
+            raise ReviewConflictError("Review state changed; reload before completing")
+        review = active_review(state)
+        if review is None:
+            raise ReviewStateError("The study has no active review")
+        annotations = _load_dataset_review_annotations(study_dir, dataset_id=dataset_id)
+        coverage = review_coverage(study_dir, review, annotations, current_dataset_id=dataset_id)
+        valid = valid_review_decisions(study_dir, review, annotations, current_dataset_id=dataset_id)
+        dataset = load_dataset(study_dir, dataset_id)
+        sources = [item for item in dataset.get("artifacts") or [] if configured_artifact_filter(item)]
+        source_issues: list[dict] = []
+        indexed: dict[str, str] = {}
+        if not sources:
+            source_issues.append({"individual": "", "file": "", "message": "No reviewable source files", "kind": "source"})
+        elif configured_source.bundle_scoped:
+            try:
+                _bundle, index_path = ensure_configured_rds_index(study_dir, dataset_id)
+                with closing(sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)) as connection:
+                    indexed = {
+                        str(identifier): str(logical_name)
+                        for identifier, logical_name, row_count in connection.execute(
+                            "SELECT i.identifier, a.logical_name, i.row_count "
+                            "FROM individuals i JOIN artifacts a ON a.artifact_id=i.artifact_id"
+                        )
+                        if row_count > 0
+                    }
+                for individual, filename in indexed.items():
+                    if _normalize_individual_name(individual) != individual:
+                        source_issues.append({
+                            "individual": individual, "file": filename,
+                            "message": "The app changes this source identifier before loading it",
+                            "kind": "identifier",
+                        })
+            except (OSError, ValueError, ProjectStateError, sqlite3.Error) as exc:
+                # A failed bundle index can hide the offending file.
+                for artifact in sources:
+                    filename = str(artifact["logical_name"])
+                    try:
+                        _item, path = get_dataset_artifact(study_dir, dataset_id, filename)
+                        validate_movement_rds(Path(filename), read_movement_rds(path))
+                    except (OSError, ValueError, ProjectStateError) as source_exc:
+                        source_issues.append({
+                            "individual": "", "file": filename,
+                            "message": str(source_exc), "kind": "source",
+                        })
+                if not source_issues:
+                    source_issues.append({
+                        "individual": "", "file": "",
+                        "message": f"Could not index the study: {exc}", "kind": "source",
+                    })
+        else:
+            for artifact in sources:
+                filename = str(artifact["logical_name"])
+                try:
+                    for individual in source_individuals(configured_source, study_dir, dataset_id, filename):
+                        indexed[individual] = filename
+                except (OSError, ValueError, ProjectStateError) as exc:
+                    source_issues.append({
+                        "individual": "", "file": filename,
+                        "message": str(exc), "kind": "source",
+                    })
+        if not source_issues:
+            for individual in coverage["required_individuals"]:
+                if individual not in indexed:
+                    source_issues.append({
+                        "individual": individual, "file": "",
+                        "message": "No matching source track is available", "kind": "source",
+                    })
+        if client_failures is None:
+            client_failures = []
+        if not isinstance(client_failures, list) or len(client_failures) > 500:
+            raise ValueError("Invalid individual load failures")
+        load_issues = []
+        for failure in client_failures:
+            if not isinstance(failure, dict):
+                raise ValueError("Invalid individual load failure")
+            individual = _normalize_individual_name(failure.get("individual"))
+            if individual not in indexed:
+                continue
+            message = str(failure.get("message") or "Map fixes could not be loaded").strip()[:300]
+            load_issues.append({
+                "individual": individual, "file": indexed[individual],
+                "message": message, "kind": "load", "can_exception": True,
+                "acknowledged": valid.get(individual, {}).get("review_decision") == "technical_exception",
+            })
+        return {
+            "dataset_id": dataset_id,
+            "review_revision": review_revision,
+            "coverage": coverage,
+            "source_issues": source_issues,
+            "load_issues": load_issues,
+            "technical_exceptions": [
+                {"individual": individual, "reason": annotation.get("comment") or "",
+                 "file": indexed.get(individual, "")}
+                for individual, annotation in sorted(valid.items())
+                if annotation.get("review_decision") == "technical_exception"
+            ],
+            "can_complete": coverage["complete_allowed"] and not source_issues
+                and not any(not issue["acknowledged"] for issue in load_issues),
+        }
+
+    @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/review/readiness")
+    async def post_movement_review_readiness(family_name: str, study_name: str, request: Request):
+        body = await parse_json_body(request)
+        if body is None:
+            return json_error("Invalid JSON body", 400)
+        try:
+            study_dir = configured_study_dir(family_name, study_name)
+            require_read(request, study_dir)
+            result = await run_in_threadpool(
+                review_readiness, study_dir,
+                str(body.get("expected_current_dataset_id") or ""),
+                body.get("expected_review_revision"), body.get("client_failures"),
+            )
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        except (ReviewConflictError, ReviewLockedError, ReviewStateError) as exc:
+            return _review_error_response(exc)
+        except (ValueError, ProjectStateError) as exc:
+            return json_error(str(exc), 400)
+
     @app.post("/api/apps/movement/family/{family_name}/study/{study_name}/review/complete")
     async def post_movement_complete_review(
         family_name: str, study_name: str, request: Request, background_tasks: BackgroundTasks,
@@ -3286,6 +3426,23 @@ def register_movement_routes(
             checked = await run_in_threadpool(complete_review, study_dir, **completion_args, validate_only=True)
             if checked.get("already_completed"):
                 return JSONResponse(checked)
+            readiness = await run_in_threadpool(
+                review_readiness, study_dir, dataset_id, body.get("expected_review_revision"),
+                body.get("client_failures"),
+            )
+            if readiness["source_issues"]:
+                first = readiness["source_issues"][0]
+                raise ValueError(
+                    f"Source check failed for {first['file'] or first['individual'] or study_name}: {first['message']}"
+                )
+            unresolved_load = next(
+                (issue for issue in readiness["load_issues"] if not issue["acknowledged"]), None,
+            )
+            if unresolved_load:
+                raise ValueError(
+                    f"Exact fixes could not be loaded for {unresolved_load['individual']} "
+                    f"in {unresolved_load['file']}: {unresolved_load['message']}"
+                )
             review = checked["review"]
             rows = await run_in_threadpool(individual_decision_snapshot, study_dir, dataset_id, review)
             valid = valid_review_decisions(study_dir, review, annotations, current_dataset_id=dataset_id)
